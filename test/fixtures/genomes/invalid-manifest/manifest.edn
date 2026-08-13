@@ -1,0 +1,13 @@
+{:genome/format 1
+ :agent/id :main
+ :agent/entry :graph/main
+ :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+ :modules {:topology "/etc/secret.edn"
+           :models "models.edn"
+           :memory "memory.edn"
+           :evolution "evolution.edn"}
+ :capabilities/requested #{:model/call}
+ :evolution {:max-risk :behavioral
+             :mutable #{:parameters :prompts :skills :programs}}
+ :metadata {:name "invalid-fixture"
+            :description "absolute module path must fail schema validation"}}
