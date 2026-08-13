@@ -1,0 +1,13 @@
+{:paths ["src"]
+ :deps {org.clojure/clojure {:mvn/version "1.12.5"}
+        metosin/malli {:mvn/version "0.20.1"}
+        integrant/integrant {:mvn/version "1.0.1"}
+        org.babashka/sci {:mvn/version "0.15.58"}
+        rewrite-clj/rewrite-clj {:mvn/version "1.2.55"}
+        org.xerial/sqlite-jdbc {:mvn/version "3.49.1.0"}
+        org.clojure/java.jdbc {:mvn/version "0.7.12"}}
+ :aliases
+ {:test {:extra-paths ["test"]
+         :extra-deps {io.github.cognitect-labs/test-runner
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts ["-m" "cognitect.test-runner"]}}}

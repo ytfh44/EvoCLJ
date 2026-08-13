@@ -1,0 +1,10 @@
+.cpcache/
+.target/
+target/
+.lsp/
+.clj-kondo/
+.superpowers/
+.pi/
+*.log
+.nrepl-port
+.DS_Store
