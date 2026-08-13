@@ -13,8 +13,14 @@
 
   Rules (Step 2): arbitrary graph cycles are rejected; only explicit
   :loop nodes may iterate. A cycle in the :next graph that contains no
-  :loop node throws :topology/cycle. :loop runtime semantics arrive in
-  Task 6.4, so here only its shape is validated (:next required).
+  :loop node throws :topology/cycle. The :loop node's normative shape
+  (Task 6.4) is validated here: :body (the node id iterated — must be
+  a declared node, :reason :dangling-body), :until (a keyword program
+  id), a positive integer :max-iterations (:reason
+  :invalid-max-iterations), and :next (the exit node). The :body edge
+  is the sanctioned iteration edge; the body node's :next back to the
+  :loop closes the iteration at runtime under the :max-iterations
+  cap.
 
   Properties:
 
@@ -30,10 +36,11 @@
     silent data loss at a boundary).
 
   Error types: :topology/invalid (malformed shapes, unknown node type,
-  missing entry node, dangling :next, duplicate node ids, missing
-  required node keys, invalid :limits — distinguished by :reason) and
-  :topology/cycle (a raw cycle without a :loop node, with the sorted
-  cycle node ids in :nodes)."
+  missing entry node, dangling :next, dangling :body, duplicate node
+  ids, missing required node keys, invalid :limits, invalid
+  :max-iterations — distinguished by :reason) and :topology/cycle (a
+  raw cycle without a :loop node, with the sorted cycle node ids in
+  :nodes)."
   (:require [evoclj.kernel.error :as err]))
 
 (def supported-node-types
@@ -41,20 +48,22 @@
   #{:llm :sci :tool :route :loop :emit :memory/read :memory/write})
 
 (def ^:private required-keys
-  "Per-type keys a node must declare. :loop semantics are Task 6.4; here
-  only its shape is validated."
+  "Per-type keys a node must declare. :loop carries its normative Task
+  6.4 shape: :body (the iterated node id), :until (the done? program
+  id), a positive integer :max-iterations (checked in validate-node!),
+  and :next (the exit node)."
   {:llm #{:model}
    :sci #{:program}
    :tool #{:tool}
    :route #{:next}
-   :loop #{:next}
+   :loop #{:next :body :until :max-iterations}
    :emit #{}
    :memory/read #{:memory}
    :memory/write #{:memory}})
 
 (def ^:private attribute-keys
   "Keys whose value must be a keyword when present."
-  [:model :program :tool :memory :next])
+  [:model :program :tool :memory :next :body :until])
 
 (def ^:private canonical-compare
   "Total order over canonical EDN scalar keys. Uses compare when the
@@ -153,19 +162,33 @@
         (throw (err/error :topology/invalid
                           "node missing required key"
                           {:reason :missing-required-key :node-id id
-                           :node/type t :key k}))))))
+                           :node/type t :key k}))))
+    (when (and (= :loop t)
+               (not (pos-int? (:max-iterations node))))
+      (throw (err/error :topology/invalid
+                        "a :loop node must carry a positive integer :max-iterations"
+                        {:reason :invalid-max-iterations :node-id id
+                         :value (err/sanitize (:max-iterations node))})))))
 
 ;; --- edge validation -------------------------------------------------------
 
 (defn- check-nexts!
-  "Reject any :next edge that points to an undeclared node id."
+  "Reject any :next edge that points to an undeclared node id, and any
+  :loop node whose :body points to an undeclared node id (Task 6.4:
+  the :body edge is the sanctioned iteration edge, so a dangling
+  :body must fail at compile time, never mid-task)."
   [entries node-ids]
   (doseq [[id node] entries]
     (when-let [nxt (:next node)]
       (when-not (contains? node-ids nxt)
         (throw (err/error :topology/invalid
                           "node :next points to an undeclared node"
-                          {:reason :dangling-next :node-id id :next nxt}))))))
+                          {:reason :dangling-next :node-id id :next nxt}))))
+    (when-let [body (:body node)]
+      (when-not (contains? node-ids body)
+        (throw (err/error :topology/invalid
+                          "a :loop node :body points to an undeclared node"
+                          {:reason :dangling-body :node-id id :body body}))))))
 
 (defn- check-entry!
   [entry node-ids]
@@ -266,7 +289,8 @@
   :invalid-graph-id, :invalid-entry, :invalid-limits, :invalid-nodes,
   :invalid-node-entry, :invalid-node-id, :invalid-node,
   :unknown-node-type, :invalid-attribute, :missing-required-key,
-  :dangling-next, :missing-entry, :duplicate-node-id) or
+  :dangling-next, :dangling-body, :invalid-max-iterations,
+  :missing-entry, :duplicate-node-id) or
   :topology/cycle (a raw cycle with no :loop node; :nodes holds the
   sorted cycle ids)."
   [topology]

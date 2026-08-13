@@ -80,6 +80,23 @@
   artifact (:output-ref — failures are evidence, not discarded
   traces).
 
+  LOOPS (Task 6.4): a :loop node's iteration counter travels in the
+  scheduler's per-session runtime-state as :loop-state, a map of loop
+  node id -> iteration count — SESSION-LOCAL DATA, never a SCI global
+  var (Global Constraint 23). The scheduler builds :loop-state fresh
+  for every run-session! and threads it through the visit loop; each
+  time a :loop node's handler chooses to iterate (its :continue
+  transition's :next leads to the node's :body) the scheduler
+  increments that loop node's counter before the next visit, so two
+  sessions on ONE phenotype can never see each other's counters. The
+  loop handler's :max-iterations cap returns a :failed transition
+  typed :loop/max-iterations-exceeded; the scheduler recognizes that
+  error type and routes it to the SAME :budget-exhausted outcome as
+  the step budget (:session/budget-exhausted event recording the
+  {:max-iterations N} limit and the accumulated outputs as a CAS
+  artifact) — the typed budget outcome chosen for Task 6.4, so an
+  unbounded predicate is a budget outcome, not a session failure.
+
   FAILURE (Step 4): an unhandled node failure — a handler :failed
   transition, or ANY exception thrown while resolving, stepping, or
   processing the node's intents — fails the session: the serializable
@@ -429,7 +446,8 @@
                                 :payload task-input}
                    outputs []
                    steps 0
-                   last-event started]
+                   last-event started
+                   loop-state {}]
               (if (and max-steps (>= steps max-steps))
                 (budget-exhaust! executor pin (:event/id last-event)
                                  outputs limits steps)
@@ -451,7 +469,8 @@
                                          :phenotype/id (:phenotype/id pin)
                                          :node/id node-id
                                          :outputs outputs
-                                         :sci-runtime (:sci-runtime (:phenotype executor))}
+                                         :sci-runtime (:sci-runtime (:phenotype executor))
+                                         :loop-state loop-state}
                           stepped (try
                                     {:transition
                                      (node/validate-transition!
@@ -467,9 +486,22 @@
                         (let [transition (:transition stepped)]
                           (case (:transition/status transition)
                             :failed
-                            (fail-session! executor pin (:event/id started-event)
-                                           node-id (inc steps)
-                                           (:error transition) outputs)
+                            (if (= :loop/max-iterations-exceeded
+                                   (:error/type (:error transition)))
+                              ;; Task 6.4 typed budget outcome: a :loop
+                              ;; node whose iteration count reached
+                              ;; :max-iterations is a budget outcome,
+                              ;; routed to the same :budget-exhausted
+                              ;; session state as the step budget
+                              (budget-exhaust! executor pin
+                                                (:event/id started-event)
+                                                outputs
+                                                {:max-iterations
+                                                 (:max-iterations node)}
+                                                (inc steps))
+                              (fail-session! executor pin (:event/id started-event)
+                                             node-id (inc steps)
+                                             (:error transition) outputs))
 
                             :complete
                             (let [out-ref (outputs-ref executor (:outputs transition))
@@ -523,13 +555,26 @@
                                                       (err/error-data t) outputs)}))]
                               (if-let [failed-outcome (:failed-outcome dispatch-result)]
                                 failed-outcome
-                                (let [{:keys [last-event outputs]} dispatch-result]
+                                (let [{:keys [last-event outputs]} dispatch-result
+                                      ;; Task 6.4: the loop counter travels in
+                                      ;; runtime-state. Each time a :loop node
+                                      ;; chooses to iterate (its :continue
+                                      ;; transition's :next leads to its :body)
+                                      ;; the scheduler increments that loop
+                                      ;; node's counter for the next visit.
+                                      loop-state
+                                      (if (and (= :loop (:node/type node))
+                                               (= (:body node)
+                                                  (first (:next transition))))
+                                        (update loop-state node-id (fnil inc 0))
+                                        loop-state)]
                                   (if-let [nxt (first (:next transition))]
                                     (recur nxt
                                            {:event/id (:event/id last-event)
                                             :event/type (:event/type last-event)
                                             :payload (peek outputs)}
-                                           outputs (inc steps) last-event)
+                                           outputs (inc steps) last-event
+                                           loop-state)
                                     (fail-session! executor pin (:event/id last-event)
                                                    node-id (inc steps)
                                                    {:error/type :scheduler/dangling-run

@@ -142,21 +142,31 @@
     (is (= [:node/a] (:nodes (ex-data e))))))
 
 (deftest explicit-loop-node-cycle-is-allowed
-  (testing "self-loop through a :loop node compiles"
+  (testing "a self-cycle through a :loop node compiles"
     (let [c (topology/compile-topology
              {:graph/id :graph/main
               :entry :node/b
-              :nodes {:node/b {:node/type :loop :next :node/b}}})]
+              :nodes {:node/b {:node/type :loop
+                               :body :node/body
+                               :until :program/done?
+                               :max-iterations 8
+                               :next :node/b}
+                      :node/body {:node/type :emit}}})]
       (is (map? c))
       (is (= [:node/b] (get-in c [:adjacency :node/b])))))
-  (testing "a cycle that passes through a :loop node compiles"
+  (testing "a :next cycle that passes through a :loop node compiles"
     (let [c (topology/compile-topology
              {:graph/id :graph/main
               :entry :node/a
               :nodes {:node/a {:node/type :sci
                                :program :program/route
                                :next :node/b}
-                      :node/b {:node/type :loop :next :node/a}}})]
+                      :node/b {:node/type :loop
+                               :body :node/body
+                               :until :program/done?
+                               :max-iterations 8
+                               :next :node/a}
+                      :node/body {:node/type :emit}}})]
       (is (= [:node/b] (get-in c [:adjacency :node/a])))
       (is (= [:node/a] (get-in c [:adjacency :node/b]))))))
 

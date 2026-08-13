@@ -15,10 +15,11 @@
   intents, and the :emit node is terminal — it completes with the
   accumulated outputs. One shared Malli schema
   (evoclj.runtime.node/TransitionSchema) validates EVERY handler
-  result (Step 3), and the registry resolves the three implemented
-  types while throwing explicit :node/not-implemented-yet typed errors
-  for :llm, :route, :loop, and :memory/* so the compiler's accepted
-  types and the runtime's executable types stay consistent (Step 4)."
+  result (Step 3), and the registry resolves the four implemented
+  types (:emit, :sci, :tool, :loop) while throwing explicit
+  :node/not-implemented-yet typed errors for :llm, :route, and
+  :memory/* so the compiler's accepted types and the runtime's
+  executable types stay consistent (Step 4)."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
             [evoclj.compiler.topology :as topology]
@@ -295,14 +296,14 @@
 ;; ============================================================================
 
 (deftest registry-resolves-known-types-to-handler-constructors
-  (doseq [t [:emit :sci :tool]]
+  (doseq [t [:emit :sci :tool :loop]]
     (let [ctor (node/handler-for t)]
       (is (fn? ctor) (str t))
       (is (satisfies? node/NodeHandler (ctor)) (str t)))))
 
 (deftest registry-throws-typed-errors-for-unimplemented-and-unknown-types
   (testing "every accepted-but-unimplemented v0 type throws :node/not-implemented-yet"
-    (doseq [t [:llm :route :loop :memory/read :memory/write]]
+    (doseq [t [:llm :route :memory/read :memory/write]]
       (let [e (try (node/handler-for t) nil (catch clojure.lang.ExceptionInfo e e))]
         (is (= :node/not-implemented-yet (:error/type (ex-data e))) (str t))
         (is (= t (:node/type (ex-data e))) (str t)))))

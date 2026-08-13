@@ -57,11 +57,21 @@
                                        ;   with them)
      :sci-runtime {...}                ; the phenotype's isolated SCI
                                        ;   runtime map (required for
-                                       ;   :sci nodes only)
+                                       ;   :sci and :loop nodes only)
      :budget {:wall-ms 1000}           ; OPTIONAL default intent budget
                                        ;   (default-budget when absent)
      :limits {...}                     ; OPTIONAL SCI limits for :sci
                                        ;   invocations
+     :loop-state {node-id n}           ; OPTIONAL per-session loop
+                                       ;   counters (Task 6.4): a map
+                                       ;   of :loop node id -> iteration
+                                       ;   count, threaded by the
+                                       ;   scheduler in its visit loop;
+                                       ;   the :loop handler reads its
+                                       ;   count here — LOOP STATE IS
+                                       ;   SESSION-LOCAL DATA, never a
+                                       ;   SCI global var (Global
+                                       ;   Constraint 23)
      ...}                              ; other keys (e.g. :providers)
                                        ;   pass through untouched —
                                        ;   handlers never read them
@@ -79,8 +89,8 @@
   REGISTRY: node-type keyword -> trusted handler constructor. The v0
   node type set mirrors
   evoclj.compiler.topology/supported-node-types exactly; :emit, :sci,
-  and :tool resolve to their constructors here, while :llm, :route,
-  :loop, and :memory/* throw the explicit :node/not-implemented-yet
+  :tool, and :loop resolve to their constructors here, while :llm,
+  :route, and :memory/* throw the explicit :node/not-implemented-yet
   typed error so the compiler's accepted types and the runtime's
   executable types stay consistent (unknown types throw
   :node/unknown-type). handler-for resolves a constructor; the
@@ -270,12 +280,13 @@
   evoclj.compiler.topology/required-keys for the implemented types."
   {:sci #{:program}
    :tool #{:tool}
+   :loop #{:body :until :max-iterations}
    :emit #{}})
 
 (def ^:private handler-attribute-keys
   "Node keys whose value must be a keyword when present (mirrors the
   compiler's attribute rule)."
-  [:program :tool :next])
+  [:program :tool :next :body :until])
 
 (defn validate-node!
   "Validate the compiled node map for `expected-type` (the handler's
@@ -330,35 +341,37 @@
 ;; their constructors. Clojure's loader returns an in-progress
 ;; namespace immediately, so no load-order cycle occurs.
 (require '[evoclj.runtime.nodes.emit :as emit])
+(require '[evoclj.runtime.nodes.loop :as loop])
 (require '[evoclj.runtime.nodes.sci :as sci])
 (require '[evoclj.runtime.nodes.tool :as tool])
 
 (def node-handler-registry
   "The trusted registry: v0 node type keyword -> handler constructor
-  (a 0-ary fn returning a NodeHandler). :emit, :sci, and :tool are
-  implemented; every other v0 type throws :node/not-implemented-yet
-  from handler-for until its task lands (:loop is Task 6.4)."
+  (a 0-ary fn returning a NodeHandler). :emit, :sci, :tool, and :loop
+  are implemented; every other v0 type throws
+  :node/not-implemented-yet from handler-for until its task lands
+  (:loop landed in Task 6.4)."
   {:emit emit/emit-handler
    :sci sci/sci-handler
-   :tool tool/tool-handler})
+   :tool tool/tool-handler
+   :loop loop/loop-handler})
 
 (def known-unimplemented-types
   "The v0 node types the compiler accepts but the runtime cannot
-  execute yet: :llm, :route, :loop, and the :memory/* nodes.
+  execute yet: :llm, :route, and the :memory/* nodes.
   handler-for throws :node/not-implemented-yet for them so the
   compiler's accepted types and the runtime's executable types stay
   consistent."
-  #{:llm :route :loop :memory/read :memory/write})
+  #{:llm :route :memory/read :memory/write})
 
 (defn handler-for
   "Resolve the trusted handler constructor for `node-type` (a v0 node
   type keyword).
 
-  - :emit / :sci / :tool -> the constructor fn (call it with no args
-    to build the handler: ((handler-for :sci))).
-  - any other v0 type (:llm, :route, :loop, :memory/read,
-    :memory/write) -> throws :node/not-implemented-yet with the
-    :node/type.
+  - :emit / :sci / :tool / :loop -> the constructor fn (call it with
+    no args to build the handler: ((handler-for :sci))).
+  - any other v0 type (:llm, :route, :memory/read, :memory/write)
+    -> throws :node/not-implemented-yet with the :node/type.
   - anything else -> throws :node/unknown-type.
 
   The scheduler steps a node with
