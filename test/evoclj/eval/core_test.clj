@@ -542,9 +542,12 @@
       (is (= 1 (count (sqlite/query (:sqlite store)
                                     ["SELECT id FROM generations"])))
           "evaluation never inserts or updates a generation row"))
-    (testing "no promotion namespace or API exists, by construction"
-      (is (not-any? #(str/starts-with? (str (ns-name %)) "evoclj.promotion")
-                    (all-ns)))
+    (testing "no promotion API in evoclj.eval.core, by construction"
+      ;; M9 created the evoclj.promotion.* namespaces (Task 9.1), so the M8
+      ;; 'no promotion namespace is loaded anywhere' (all-ns) guard is
+      ;; obsolete; the durable guarantees below still hold: this namespace
+      ;; exposes no promotion/current/activation API and requires no
+      ;; promotion alias, and CURRENT is untouched (asserted above).
       (is (not-any? #(re-find #"(?i)promot|current|activ" (name (key %)))
                     (ns-publics 'evoclj.eval.core)))
       (is (not-any? #(re-find #"(?i)promotion|current" (str %))

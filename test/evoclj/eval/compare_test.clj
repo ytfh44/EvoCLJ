@@ -213,9 +213,9 @@
 ;; --- Step 5: no Promotion coupling ------------------------------------------------
 
 (deftest comparison-namespace-never-calls-promotion
-  (testing "no evoclj.promotion.* namespace is loaded anywhere"
-    (is (not-any? #(str/starts-with? (str (ns-name %)) "evoclj.promotion")
-                  (all-ns))))
+  ;; M9 created the evoclj.promotion.* namespaces (Task 9.1), so the M8
+  ;; 'no promotion namespace is loaded anywhere' (all-ns) guard is obsolete;
+  ;; the durable guarantee is that THIS namespace never couples to promotion.
   (testing "evoclj.eval.compare requires no evoclj.promotion.* alias"
     (is (not-any? #(str/starts-with? (str (ns-name %)) "evoclj.promotion")
                   (vals (ns-aliases 'evoclj.eval.compare))))))
