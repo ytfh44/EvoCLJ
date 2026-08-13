@@ -1,0 +1,144 @@
+(ns evoclj.capability.lease
+  "Lease semantics for the v0 CapabilityLease (Task 4.2).
+
+  A CapabilityLease is a bounded HOST-OWNED grant: the kernel issues a
+  plain immutable map binding ONE subject, ONE resource grant, an
+  :actions set, and an instant window; the model never sees a lease as
+  a name — only the kernel's broker (Milestone 4) reads it. The three
+  pure decision functions are the whole semantics:
+
+    (valid-at? lease instant)          ; window check
+    (subject-matches? lease subject)   ; EXACT phenotype-id match
+    (resource-covers? lease normalized-resource action) ; resource + action
+
+  Every decision input is schema-checked before any judgment is made;
+  a malformed lease, subject, resource, or action throws
+  :capability/schema-invalid rather than silently granting or denying
+  (a capability is a bounded host-owned grant, so garbage never
+  authorizes and never hides a caller bug).
+
+  Subject matching is EXACT on the phenotype id: a lease for P1 must
+  never authorize P2, even when both phenotypes share the same Genome
+  (Global Constraint 9 — a visible action never grants resource
+  authority, and neither does a sibling phenotype).
+
+  Resource coverage matches a CANONICAL resource plus an action:
+  tool resources match by exact canonical id; filesystem resources
+  match by containment of CANONICAL RESOLVED PATHS. Matching never
+  happens on user-supplied strings: canonicalize-path resolves \".\"
+  and \"..\" segments first, so a lease rooted at \"/work\" covers
+  \"/work/a/../secret\" only because it resolves to \"/work/secret\"
+  (inside the root), and a traversal escaping to \"/etc\" is never
+  covered. The pure path canonicalization lives here so coverage is
+  always decided on canonical forms; provider-side normalization of
+  user-facing requests (kinds, ids, paths, Windows drive/backslash
+  forms) is Task 4.3 (evoclj.provider). Unknown resource kinds fail
+  closed: nothing is covered."
+  (:require [clojure.string :as str]
+            [evoclj.capability.schema :as schema]
+            [evoclj.kernel.error :as err]
+            [malli.core :as m]))
+
+;; --- pure path canonicalization --------------------------------------------
+
+(defn canonicalize-path
+  "Resolve a path string to its canonical form by dropping empty and
+  \".\" segments and popping \"..\" segments. Operates on
+  \"/\"-separated paths (the canonical form used by the v0 filesystem
+  resource): \"/work/a/../secret\" -> \"/work/secret\". A \"..\" that
+  would climb above an absolute root is clamped to the root, so
+  \"/work/../../etc\" -> \"/etc\" and never escapes the filesystem
+  root. Returns nil for non-string input, so matching fails closed.
+  Windows drive/backslash canonicalization is provider-side
+  normalization (Task 4.3); this helper is the pure segment-level
+  canonical form coverage is decided on."
+  [s]
+  (when (string? s)
+    (let [absolute? (.startsWith s "/")
+          segments (->> (str/split s #"/")
+                        (remove #{"" "."})
+                        (reduce (fn [acc seg]
+                                  (if (= seg "..")
+                                    (if (seq acc) (pop acc) acc)
+                                    (conj acc seg)))
+                                []))]
+      (str (when absolute? "/") (str/join "/" segments)))))
+
+(defn- path-inside?
+  "True when the canonical path p lies inside the canonical root r:
+  p equals r, or p is r plus one or more segments. The segment boundary
+  matters — root \"/work\" covers \"/work/secret\" but never
+  \"/workspace/x\". Root \"/\" covers every absolute path."
+  [root path]
+  (let [r (canonicalize-path root)
+        p (canonicalize-path path)]
+    (and r p
+         (or (= r "/") (= r p)
+             (.startsWith p (str r "/"))))))
+
+;; --- shared input gate ------------------------------------------------------
+
+(defn- validate-input!
+  "Schema-check a lease and, when given, an additional decision input;
+  throw :capability/schema-invalid on any failure. Every predicate
+  gates its inputs here so no judgment is ever made on malformed data."
+  [lease & [input-schema input]]
+  (schema/validate-lease lease)
+  (when (and input-schema (not (m/validate input-schema input)))
+    (throw (err/error :capability/schema-invalid
+                      "invalid capability lease decision input"
+                      {:value (err/sanitize input)}))))
+
+;; --- the three decision functions -------------------------------------------
+
+(defn valid-at?
+  "True when `instant` falls inside the lease's window:
+  :issued-at INCLUSIVE, :expires-at EXCLUSIVE — a lease is valid AT
+  :issued-at, dead AT :expires-at, and dead before :issued-at. The
+  lease and the instant must be schema-valid or
+  :capability/schema-invalid is thrown."
+  [lease instant]
+  (validate-input! lease)
+  (when-not (inst? instant)
+    (throw (err/error :capability/schema-invalid
+                      "lease instant must be an #inst value"
+                      {:value (err/sanitize instant)})))
+  (and (not (.before ^java.util.Date instant ^java.util.Date (:issued-at lease)))
+       (.before ^java.util.Date instant ^java.util.Date (:expires-at lease))))
+
+(defn subject-matches?
+  "True when the requesting `subject` ({:phenotype/id ...}) is EXACTLY
+  the lease's subject. Any other phenotype id — including a sibling
+  from the same Genome — is not authorized. A malformed lease or
+  subject throws :capability/schema-invalid."
+  [lease subject]
+  (validate-input! lease schema/SubjectSchema subject)
+  (= (get-in lease [:subject :phenotype/id])
+     (get-in subject [:phenotype/id])))
+
+(defn resource-covers?
+  "True when the lease's :resource grant covers the canonical
+  `normalized-resource` for `action`: the action must be in the
+  lease's :actions set AND the resource must match by kind. Tool
+  resources match by exact canonical id ({:kind :tool :id ...});
+  filesystem resources match by containment of canonical resolved
+  paths ({:kind :filesystem :path ...}). Any other kind, a kind
+  mismatch, a missing id/path, or a missing action fails closed. A
+  malformed lease, resource, or action throws
+  :capability/schema-invalid."
+  [lease normalized-resource action]
+  (validate-input! lease)
+  (when-not (and (map? normalized-resource) (keyword? action))
+    (throw (err/error :capability/schema-invalid
+                      "resource must be a map and action a keyword"
+                      {:value (err/sanitize normalized-resource)
+                       :action (err/sanitize action)})))
+  (let [granted (:resource lease)
+        kind (:kind granted)]
+    (and (contains? (:actions lease) action)
+         (= kind (:kind normalized-resource))
+         (case kind
+           :tool (and (keyword? (:id granted))
+                      (= (:id granted) (:id normalized-resource)))
+           :filesystem (path-inside? (:path granted) (:path normalized-resource))
+           false))))
