@@ -1,0 +1,143 @@
+{;; EvoCLJ host configuration (Task 10.1).
+ ;;
+ ;; The keys ARE the Integrant component keys; #ig/ref entries wire
+ ;; component-to-component dependencies and are resolved by
+ ;; evoclj.kernel.system/init (integrant.core/init).
+ ;;
+ ;; The four stable lifecycle keys (:store/sqlite, :store/cas,
+ ;; :provider/registry, :capability/broker) follow the constructor
+ ;; shapes of evoclj.runtime.system (Task 6.1 Step 4) — that
+ ;; namespace owns their init-key / halt-key! methods. The four
+ ;; Milestone 9 keys (:runtime/executor, :evolution/system,
+ ;; :eval/system, :promotion/system) are owned by
+ ;; evoclj.kernel.system.
+ ;;
+ ;; Relative paths resolve against THIS file's directory; absolute
+ ;; paths pass through. Every scalar path can also be overridden by an
+ ;; EVOCLJ_* environment variable (see
+ ;; evoclj.kernel.system/load-config):
+ ;;
+ ;;   EVOCLJ_DB_PATH            -> :store/sqlite
+ ;;   EVOCLJ_CAS_ROOT           -> :store/cas :root
+ ;;   EVOCLJ_GENOME_ROOT        -> :evolution/system :genome-root
+ ;;   EVOCLJ_CANDIDATES_DIR     -> :evolution/system :candidates-dir
+
+ :store/sqlite
+ "db/evoclj.db"
+
+ :store/cas
+ {:root "cas"
+  :verify false}
+
+ ;; The kernel-owned provider registry (Global Constraint 19): the
+ ;; :providers catalog names concrete adapters by :provider/type; the
+ ;; host constructs and registers them at startup (fail-closed).
+ :provider/registry
+ {:providers [{:provider/type :fixture/echo}
+              {:provider/type :fixture/non-idempotent}]}
+
+ :capability/broker
+ {:registry #ig/ref :provider/registry
+  ;; no leases are granted by default; the CLI (Task 10.2) grants
+  ;; per-session capability leases before any session runs
+  :leases []}
+
+ ;; The scheduler host: stores + broker + run-session!. Per-session
+ ;; executor maps are built from a compiled Phenotype at run time —
+ ;; the Phenotype is never an Integrant component (Global Constraints
+ ;; 22, 23).
+ :runtime/executor
+ {:scheduler {:max-steps 1000}
+  :store {:sqlite #ig/ref :store/sqlite
+          :cas #ig/ref :store/cas}
+  :dispatch #ig/ref :capability/broker}
+
+ :evolution/system
+ {:store {:sqlite #ig/ref :store/sqlite
+          :cas #ig/ref :store/cas}
+  ;; the Task 2.1 Resolution provider catalog (plain data)
+  :provider-catalog
+  {:reasoning/high {:provider :fixture
+                    :provider-model "fixture-model-v1"
+                    :adapter-version "1"}
+   :reasoning/low {:provider :fixture
+                   :provider-model "fixture-model-low"
+                   :adapter-version "1"}
+   :fast {:provider :fixture
+          :provider-model "fixture-model-fast"
+          :adapter-version "1"}}
+  ;; the immutable seed Genome bundle at the repo root
+  :genome-root "../genomes/seed"
+  :candidates-dir "work/candidates"
+  ;; the deterministic pattern Diagnostician (Task 7.2)
+  :diagnostician {:task/success-threshold 1.0
+                  :max-hypotheses 3
+                  :confidence-band :medium}
+  ;; no Mutator adapter ships in v0: nothing is proposed until a host
+  ;; registers one (YAGNI, Global Constraint 24)
+  :mutator :none
+  :budget-profile {:max-candidates 3}
+  :programs-registry []}
+
+ :eval/system
+ {:store {:sqlite #ig/ref :store/sqlite
+          :cas #ig/ref :store/cas}
+  :provider/catalog
+  {:reasoning/high {:provider :fixture
+                    :provider-model "fixture-model-v1"
+                    :adapter-version "1"}
+   :reasoning/low {:provider :fixture
+                   :provider-model "fixture-model-low"
+                   :adapter-version "1"}
+   :fast {:provider :fixture
+          :provider-model "fixture-model-fast"
+          :adapter-version "1"}}
+  :kernel/abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+  ;; the Task 8.1 normative default profile, as plain data
+  :profiles {"default-v1"
+             {:eval/profile-id :default-v1
+              :evolution-set {:source :evals/evolution}
+              :selection-set {:source :evals/selection
+                              :visibility :kernel-only}
+              :audit-set {:source :evals/audit
+                          :visibility :operator-only}
+              :repetitions 1
+              :promotion {:strategy :paired-comparison
+                          :min-delta 0.05
+                          :max-cost-regression 1.10
+                          :max-complexity-regression 1.25}}}
+  ;; bundle roots per generation; the seed IS generation-1
+  :genome/roots {"generation-1" "../genomes/seed"}
+  ;; the three physically separated eval dataset roots (Global
+  ;; Constraint 11 — the selection set is kernel-only)
+  :dataset/roots {:evals/evolution "../evals/evolution"
+                  :evals/selection "../evals/selection"
+                  :evals/audit "../evals/audit"}
+  ;; no hidden cases or fixture fns ship in v0; hosts inject them
+  :selection/cases {}
+  :selection/fixtures {}
+  :replay/cases {}
+  :replay/fixtures {}}
+
+ :promotion/system
+ {:store {:sqlite #ig/ref :store/sqlite
+          :cas #ig/ref :store/cas}
+  ;; :derive — the host compiles the seed Genome at init to pin the
+  ;; current generation's Resolution id (no fake ids in the config).
+  ;; The derivation reads :genome-root/:genome-loader and
+  ;; :provider-catalog from THIS subtree.
+  :resolution/id :derive
+  :genome-root "../genomes/seed"
+  :provider-catalog
+  {:reasoning/high {:provider :fixture
+                    :provider-model "fixture-model-v1"
+                    :adapter-version "1"}
+   :reasoning/low {:provider :fixture
+                   :provider-model "fixture-model-low"
+                   :adapter-version "1"}
+   :fast {:provider :fixture
+          :provider-model "fixture-model-fast"
+          :adapter-version "1"}}
+  ;; :derive — a fresh host operator session uuid; the Task 10.2 CLI
+  ;; overrides it with the real operator session for actual promotions
+  :event/session-id :derive}}
