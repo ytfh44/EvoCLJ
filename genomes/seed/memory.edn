@@ -1,0 +1,7 @@
+;; Seed Genome episodic-memory configuration (Task 6.6).
+;;
+;; Episodic memory writes stay distinct from procedural Genome changes
+;; (Global Constraint 10). The seed declares no memory namespace: v0
+;; memory intents have no provider, and the seed's task does not read
+;; or write episodic memory.
+{:memory {}}

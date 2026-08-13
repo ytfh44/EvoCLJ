@@ -1,0 +1,10 @@
+;; Seed Genome evolution policy (Task 6.6).
+;;
+;; The evolution module consumed by the Milestone 7+ evolution
+;; subsystem. :max-risk :behavioral bounds the mutation risk class the
+;; seed generation may evolve under (R1 :behavioral is the ceiling —
+;; parameter-level mutations are the only safer class). Kept
+;; schema-valid against the v1 EvolutionPolicySchema shape
+;; (evoclj.genome.schema) even though no evolution code exists yet.
+{:evolution {:max-risk :behavioral
+             :mutable #{:parameters :prompts :skills :programs}}}

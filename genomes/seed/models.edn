@@ -1,0 +1,10 @@
+;; Seed Genome model configuration (Task 6.6).
+;;
+;; :planner is the seed model slot; it declares the :reasoning/high
+;; alias, which Resolution (Task 2.1, evoclj.compiler.resolution)
+;; resolves against the host-provided provider catalog to the concrete
+;; :fixture / "fixture-model-v1" entry. The seed's executable graph has
+;; no :llm node in v0 (the runtime registry does not implement it), but
+;; the slot stays declared for the later milestones that wire real
+;; model providers.
+{:models {:planner {:alias :reasoning/high}}}

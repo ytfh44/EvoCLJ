@@ -1,0 +1,33 @@
+;; Seed Genome topology (Task 6.6).
+;;
+;; Executable chain (the M2 fixture's :llm planner is replaced by the
+;; :sci router as the ENTRY — the v0 runtime registry implements no
+;; :llm handler, so the entry must be an executable node):
+;;
+;;     :node/router (:sci, :program/route) → :node/tool → :node/emit
+;;
+;; The route program (programs/route.clj) is the seed's decision-maker:
+;; for {:op :echo :text "abc"} it EMITS the typed :intent/tool-call for
+;; :fixture/echo, which the Task 6.3 scheduler dispatches through the
+;; kernel-owned broker — that is the session's ONE authorized tool call
+;; and ONE provider result. The :tool node then exercises the :tool
+;; handler path against :fixture/non-idempotent, a REGISTERED provider
+;; OUTSIDE the host's granted lease, so the broker scope-denies it
+;; (:intent/denied) — demonstrating Global Constraint 9 (a visible tool
+;; never grants resource authority) inside the same run. The :emit node
+;; completes the session with the accumulated outputs.
+;;
+;; The graph is acyclic (compile-topology rejects raw cycles; only
+;; explicit :loop nodes may iterate), so it compiles with the step
+;; budget :limits {:max-steps 64}.
+{:graph/id :graph/seed
+ :entry :node/router
+ :nodes
+ {:node/router {:node/type :sci
+                :program :program/route
+                :next :node/tool}
+  :node/tool   {:node/type :tool
+                :tool :fixture/non-idempotent
+                :next :node/emit}
+  :node/emit   {:node/type :emit}}
+ :limits {:max-steps 64}}

@@ -1,0 +1,29 @@
+;; Seed Genome manifest — EvoCLJ v1 (Task 6.6, Milestone 6 exit fixture).
+;;
+;; The v1 manifest is a CLOSED map validated by evoclj.genome.schema at
+;; the trust boundary: the four declared modules below are the only
+;; files the loader may trust, the ABI pins the kernel/genome/intent/
+;; tool interface versions, and the evolution policy bounds the risk
+;; class a later milestone may mutate at (:behavioral is the ceiling
+;; for the seed generation).
+;;
+;; :capabilities/requested is a DECLARATION ONLY (Global Constraint 9):
+;; whether :model/call or :tool/call is actually granted is decided
+;; later by the kernel-owned capability broker against the host-issued
+;; leases, never by this file. The seed's executable flow grants a
+;; :fixture/echo lease; its :tool node's :fixture/non-idempotent
+;; request is scope-denied (visible-but-ungranted tools never grant
+;; resource authority).
+{:genome/format 1
+ :agent/id :seed
+ :agent/entry :graph/seed
+ :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+ :modules {:topology "topology.edn"
+           :models "models.edn"
+           :memory "memory.edn"
+           :evolution "evolution.edn"}
+ :capabilities/requested #{:model/call :tool/call}
+ :evolution {:max-risk :behavioral
+             :mutable #{:parameters :prompts :skills :programs}}
+ :metadata {:name "evoclj-seed"
+            :description "EvoCLJ seed Genome — deterministic end-to-end fixture task (Milestone 6)"}}
