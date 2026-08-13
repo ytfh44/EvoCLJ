@@ -1,1 +1,17 @@
-{:graph/id :graph/main}
+;; Seed Genome topology (Task 2.2).
+;;
+;; A single forward chain executed from :entry: the :llm planner
+;; proposes, the :sci router runs the route program, and the :emit node
+;; finishes. Arbitrary raw cycles are rejected at compile time; only
+;; explicit :loop nodes may iterate (runtime semantics land in Task
+;; 6.4), so the seed graph is deliberately acyclic.
+{:graph/id :graph/main
+ :entry :node/planner
+ :nodes
+ {:node/planner {:node/type :llm
+                 :model :planner
+                 :next :node/router}
+  :node/router  {:node/type :sci
+                 :program :program/route}
+  :node/finish  {:node/type :emit}}
+ :limits {:max-steps 64}}
