@@ -290,14 +290,26 @@
     (testing "nil and plain maps are accepted"
       (is (= :resolving (:state (session/transition-session! db sid :created :resolving nil)))))))
 
-(deftest routing-is-validated-but-not-persisted
-  ;; Deviation (documented in evoclj.store.session): the Task 5.1
-  ;; sessions schema defines no routing column and Task 5.4 may not
-  ;; touch migrations, so :routing is validated on input and reported
-  ;; as nil by get-session. Persistence is a schema concern for a later
-  ;; task; :state is the persisted transition signal.
+(deftest routing-is-persisted-with-the-allocation-version
+  ;; Task 9.3 (additive migration 003-routing.sql): the :routing map
+  ;; {:deployment-version ... :bucket ...} that decided the session's
+  ;; generation is written at insert and read back by get-session, so
+  ;; routing can be audited later. (Task 5.4 validated but did not
+  ;; persist :routing — the schema had no columns and migrations were
+  ;; out of scope; 003-routing.sql closed that gap.)
   (let [db (fresh-db)
         _ (seed-generation! db)
-        s (session/create-session! db (session-request {:routing {:deployment-version "v1" :bucket 7}}))]
-    (is (nil? (:routing s)))
-    (is (= :created (:state s)))))
+        s (session/create-session! db (session-request
+                                       {:routing {:deployment-version "v1" :bucket 7}}))
+        sid (:session/id s)]
+    (testing "the routing decision round-trips through the store"
+      (is (= {:deployment-version "v1" :bucket 7} (:routing s)))
+      (is (= (:routing s) (:routing (session/get-session db sid)))))
+    (testing "the routing decision survives every state transition"
+      (session/transition-session! db sid :created :resolving {})
+      (session/transition-session! db sid :resolving :running {})
+      (is (= {:deployment-version "v1" :bucket 7}
+             (:routing (session/get-session db sid)))))
+    (testing "sessions created without routing keep a nil :routing"
+      (let [s2 (session/create-session! db (session-request))]
+        (is (nil? (:routing s2)))))))

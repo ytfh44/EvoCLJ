@@ -195,14 +195,19 @@
 
 (deftest fresh-database-applies-all-migrations
   (let [db (sqlite/spec (temp-db-path))]
-    (is (= {:status :applied :version 1} (migrate/migrate! db)))
-    (is (= 1 (migrate/current-version db)))
+    (is (= {:status :applied :version 2} (migrate/migrate! db)))
+    (is (= 2 (migrate/current-version db)))
     (testing "all 15 normative tables exist"
       (is (every? (table-names db) expected-tables)))
     (testing "schema version and applied migrations are recorded in meta"
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
-      (is (= "1" (meta-value db "schema_version")))
-      (is (= "001-init.sql" (meta-value db "applied_migrations"))))))
+      (is (= "2" (meta-value db "schema_version")))
+      (is (= "001-init.sql 003-routing.sql" (meta-value db "applied_migrations"))))
+    (testing "003-routing.sql added the session routing audit columns"
+      (let [cols (set (map :name (sqlite/query db
+                                               ["PRAGMA table_info(sessions)"])))]
+        (is (contains? cols "routing_deployment_version"))
+        (is (contains? cols "routing_bucket"))))))
 
 ;; ============================================================================
 ;; Step 2 — applying again is a safe no-op
@@ -211,10 +216,10 @@
 (deftest second-apply-is-a-safe-noop
   (let [db (fresh-db)
         tables-before (table-names db)]
-    (is (= {:status :noop :version 1} (migrate/migrate! db)))
+    (is (= {:status :noop :version 2} (migrate/migrate! db)))
     (testing "no duplicate/schema damage"
       (is (= tables-before (table-names db)))
-      (is (= "1" (meta-value db "schema_version")))
+      (is (= "2" (meta-value db "schema_version")))
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
       ;; the migrated schema still works
       (insert-generation! db g1 {})
@@ -357,3 +362,43 @@
       (is (some? e))
       (is (= :store/schema-mismatch (:error/type (ex-data e))))
       (is (= :missing-migration-record (:reason (ex-data e)))))))
+
+;; ============================================================================
+;; Task 9.3 — an existing version-1 database upgrades additively
+;; ============================================================================
+
+(deftest version-1-database-upgrades-additively
+  ;; Simulate a pre-Task-9.3 database: migrate a fresh db, then rewind
+  ;; the 003-routing.sql effects (index + columns) and the meta records
+  ;; back to version 1. The runner must then apply ONLY the pending
+  ;; migration and bring the version forward to 2.
+  (let [db (sqlite/spec (temp-db-path))
+        _ (migrate/migrate! db)
+        _ (sqlite/exec! db ["DROP INDEX sessions_routing_idx"])
+        _ (sqlite/exec! db ["ALTER TABLE sessions DROP COLUMN routing_deployment_version"])
+        _ (sqlite/exec! db ["ALTER TABLE sessions DROP COLUMN routing_bucket"])
+        _ (sqlite/exec! db ["UPDATE meta SET value = '1' WHERE key = 'schema_version'"])
+        _ (sqlite/exec! db ["UPDATE meta SET value = '001-init.sql'
+                            WHERE key = 'applied_migrations'"])
+        _ (sqlite/exec! db ["INSERT INTO generations (id, genome_id, resolution_id,
+                                                      state, current, created_at)
+                             VALUES ('g1', 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                                     'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                                     'active', 0, '2025-01-01T00:00:00Z')"])
+        _ (sqlite/exec! db ["INSERT INTO sessions (id, generation_id, genome_id,
+                                                   resolution_id, phenotype_id,
+                                                   state, created_at)
+                             VALUES ('old-session', 'g1', 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                                     'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                                     'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                                     'created', '2025-01-01T00:00:00Z')"])
+        result (migrate/migrate! db)]
+    (testing "only the pending migration runs; the version moves to 2"
+      (is (= {:status :applied :version 2} result)))
+    (testing "the old session row survives untouched with NULL routing columns"
+      (let [row (first (sqlite/query db ["SELECT routing_deployment_version, routing_bucket
+                                          FROM sessions WHERE id = 'old-session'"]))]
+        (is (nil? (:routing_deployment_version row)))
+        (is (nil? (:routing_bucket row)))))
+    (testing "a third apply is a verified no-op"
+      (is (= {:status :noop :version 2} (migrate/migrate! db))))))

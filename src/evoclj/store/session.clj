@@ -29,17 +29,17 @@
   :phenotype/id, :state, :created-at, :routing. Pinned identity fields
   are immutable after insert.
 
-  Known deviation: the Task 5.1 sessions schema defines no data or
-  routing column, and Task 5.4 may not touch migrations, so the
-  transition `data` argument and the optional :routing input are
-  validated at the module boundary (Global Constraint 22) but NOT
-  persisted; get-session reports :routing as nil. Terminal-state
-  classification is therefore driven by :state, which IS persisted.
-  Persisting data/routing is a schema change for a later task. The
-  Database Invariant 2 guarantee is enforced at the application layer
-  (the only write path is the state CAS) because the schema committed
-  in Task 5.1 has no sessions trigger and migrations are out of scope
-  here."
+  Known deviation: the Task 5.1 sessions schema defines no data
+  column, so the transition `data` argument is validated at the module
+  boundary (Global Constraint 22) but NOT persisted. The :routing
+  input IS persisted (Task 9.3, additive migration 003-routing.sql):
+  the allocation version and bucket that decided the session's
+  generation are written at insert and never touched again, so routing
+  can be audited later. Terminal-state classification is driven by
+  :state, which is persisted. The Database Invariant 2 guarantee is
+  enforced at the application layer (the only write path is the state
+  CAS) because the schema committed in Task 5.1 has no sessions
+  trigger and migrations were out of scope there."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [malli.core :as m]
@@ -173,7 +173,9 @@
    :phenotype/id (:phenotype_id row)
    :state (keyword (:state row))
    :created-at (Date/from (Instant/parse (:created_at row)))
-   :routing nil})
+   :routing (when (some? (:routing_deployment_version row))
+              {:deployment-version (:routing_deployment_version row)
+               :bucket (:routing_bucket row)})})
 
 (defn- set-busy-timeout!
   "Set SQLite's busy_timeout on the open connection carried by `db`.
@@ -205,12 +207,15 @@
   Typed errors: :store/session-invalid (contract violation, including
   unknown keys — the trust boundary is a closed map),
   :store/generation-not-found (no generation row with that id). The
-  optional :routing input is validated but not persisted (see the
-  namespace docstring)."
+  optional :routing input {:deployment-version string? :bucket int?}
+  is the Task 9.3 routing decision (evoclj.promotion.canary) and is
+  persisted into the sessions routing columns (003-routing.sql) so the
+  decision can be audited later."
   [store request]
   (validate-create-request request)
   (let [sid (UUID/randomUUID)
-        ts (canonical-timestamp (:created-at request))]
+        ts (canonical-timestamp (:created-at request))
+        routing (:routing request)]
     (sqlite/with-db [conn store]
       (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?"
                                          (:generation/id request)]))
@@ -224,6 +229,8 @@
                      :resolution_id (:resolution/id request)
                      :phenotype_id (:phenotype/id request)
                      :state (name :created)
+                     :routing_deployment_version (:deployment-version routing)
+                     :routing_bucket (:bucket routing)
                      :created_at ts}))
     (get-session store sid)))
 

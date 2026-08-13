@@ -20,7 +20,7 @@
 
 (def latest-version
   "The schema version this codebase knows how to migrate to."
-  1)
+  2)
 
 (def ^:private version-key "schema_version")
 (def ^:private applied-key "applied_migrations")
@@ -163,17 +163,25 @@
 
 (defn- run-migration!
   "Execute a migration file's statements on the open connection and
-  record its file name in the meta table's applied-migrations set."
+  ACCUMULATE its file name into the meta table's applied-migrations set
+  (the set is stored space-joined in one meta row, so each migration
+  appends its name instead of overwriting the record of earlier ones)."
   [conn file-name sql]
   (doseq [stmt (split-statements sql)]
     (jdbc/execute! conn [stmt]))
-  (jdbc/execute! conn
-                 ["INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)"
-                  applied-key file-name]))
+  (let [applied (-> (jdbc/query conn ["SELECT value FROM meta WHERE key = ?" applied-key])
+                    first
+                    :value)
+        updated (if (seq applied)
+                  (str/join " " (distinct (conj (str/split applied #"\s+") file-name)))
+                  file-name)]
+    (jdbc/execute! conn
+                   ["INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)"
+                    applied-key updated])))
 
-(defn- apply-pending!
-  "Apply every migration file on the classpath inside one transaction
-  and record the schema version. Returns :applied."
+(defn- apply-files!
+  "Execute `files` (migration file names) inside one transaction and
+  record the schema version. Returns :applied."
   [db files]
   (jdbc/with-db-transaction [conn (sqlite/spec db)]
     (sqlite/enable-foreign-keys! conn)
@@ -200,7 +208,7 @@
     (cond
       ;; A blank database: no tables, no version record.
       (and (zero? version) (not (table-exists? db "generations")))
-      {:status (apply-pending! db files) :version latest-version}
+      {:status (apply-files! db files) :version latest-version}
 
       ;; Tables exist but there is no version record: someone created
       ;; schema by hand. Never guess — fail cleanly.
@@ -222,6 +230,22 @@
                      (str "unrecorded on classpath: "
                           (str/join " " missing))))
         {:status :noop :version latest-version})
+
+      ;; A known older version: apply ONLY the pending migrations (an
+      ;; additive upgrade, e.g. a version-1 database gaining
+      ;; 003-routing.sql), then record the new version. Pending is empty
+      ;; when the files already ran but the version record lags — the
+      ;; record is simply brought forward.
+      (< version latest-version)
+      (let [applied (applied-migrations db)
+            pending (remove applied files)]
+        (when (seq pending)
+          (apply-files! db pending))
+        (sqlite/with-db [conn db]
+          (jdbc/execute! conn
+                         ["INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)"
+                          version-key (str latest-version)]))
+        {:status (if (seq pending) :applied :noop) :version latest-version})
 
       ;; Anything else: the database is ahead of, or unknown to, this
       ;; codebase. Fail cleanly rather than half-apply.
