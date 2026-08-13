@@ -1,1 +1,6 @@
-{:models {}}
+;; Seed Genome model configuration.
+;;
+;; :planner is the seed model slot; it declares the :reasoning/high
+;; alias, which Resolution (Task 2.1) resolves against the provider
+;; catalog to the concrete :fixture / "fixture-model-v1" entry.
+{:models {:planner {:alias :reasoning/high}}}

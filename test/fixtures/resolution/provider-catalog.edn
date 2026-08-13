@@ -1,0 +1,17 @@
+;; Provider catalog fixture for Resolution (Task 2.1).
+;;
+;; Maps model aliases to concrete provider/provider-model/adapter-version
+;; entries. The :fixture provider with "fixture-model-v1" is the
+;; deterministic stand-in used by the seed Genome and by later tasks;
+;; no real provider credentials ever appear here. Resolution output must
+;; remain pure data (Global Constraint 22), so any secret-looking key in
+;; resolved data is rejected by evoclj.compiler.resolution.
+{:reasoning/high {:provider :fixture
+                  :provider-model "fixture-model-v1"
+                  :adapter-version "1"}
+ :reasoning/low {:provider :fixture
+                 :provider-model "fixture-model-low"
+                 :adapter-version "1"}
+ :fast {:provider :fixture
+        :provider-model "fixture-model-fast"
+        :adapter-version "1"}}
