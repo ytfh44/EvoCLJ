@@ -1,0 +1,23 @@
+;; Task 9.7 fixture — G1 Genome manifest (test/fixtures/evolution-e2e/route-a).
+;;
+;; A closed-map manifest validated by evoclj.genome.schema at the
+;; trust boundary. The evolution policy bounds the risk class the
+;; Milestone 7+ evolution subsystem may mutate at (:behavioral is the
+;; ceiling) and DECLARES the mutable asset classes: :programs is
+;; mutable, so the deterministic Mutator's :replace-form op on
+;; programs/route.clj passes the mutable-class gate. :capabilities/
+;; :requested is a DECLARATION ONLY (Global Constraint 9) — actual
+;; grants come from the host-issued capability leases.
+{:genome/format 1
+ :agent/id :e2e-route-a
+ :agent/entry :graph/e2e
+ :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+ :modules {:topology "topology.edn"
+           :models "models.edn"
+           :memory "memory.edn"
+           :evolution "evolution.edn"}
+ :capabilities/requested #{:tool/call}
+ :evolution {:max-risk :behavioral
+             :mutable #{:parameters :prompts :skills :programs}}
+ :metadata {:name "e2e-route-a"
+            :description "Task 9.7 G1 — A-for-everything router fixture"}}

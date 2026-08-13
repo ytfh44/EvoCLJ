@@ -1,0 +1,8 @@
+{:case/id :sel/a
+ :task-input {:op :echo-a :text "hi"}
+ :expected-output [{:action {:intent/type :intent/tool-call
+                             :payload {:tool/id :fixture/echo
+                                       :args {:text "hi"}}}}
+                   {:text "hi"}]
+ :tools #{:fixture/echo}
+ :critical? true}

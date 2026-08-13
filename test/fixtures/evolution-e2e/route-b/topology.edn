@@ -1,0 +1,9 @@
+;; Task 9.7 fixture — reference G2 topology (test/fixtures/evolution-e2e/route-b).
+{:graph/id :graph/e2e
+ :entry :node/router
+ :nodes
+ {:node/router {:node/type :sci
+                :program :program/route
+                :next :node/emit}
+  :node/emit   {:node/type :emit}}
+ :limits {:max-steps 64}}

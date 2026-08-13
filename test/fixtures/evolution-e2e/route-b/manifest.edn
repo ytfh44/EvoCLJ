@@ -1,0 +1,21 @@
+;; Task 9.7 fixture — reference G2 Genome manifest
+;; (test/fixtures/evolution-e2e/route-b).
+;;
+;; The REFERENCE successor the deterministic mutation must reproduce:
+;; identical structure to G1 (route-a) except programs/route.clj now
+;; serves class-B requests with tool B. The bundle exists so the test
+;; can assert the mutated candidate's decision table equals route-b's
+;; and so the route-program-contracts test has a live reference.
+{:genome/format 1
+ :agent/id :e2e-route-b
+ :agent/entry :graph/e2e
+ :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+ :modules {:topology "topology.edn"
+           :models "models.edn"
+           :memory "memory.edn"
+           :evolution "evolution.edn"}
+ :capabilities/requested #{:tool/call}
+ :evolution {:max-risk :behavioral
+             :mutable #{:parameters :prompts :skills :programs}}
+ :metadata {:name "e2e-route-b"
+            :description "Task 9.7 reference G2 — B-aware router fixture"}}
