@@ -8,14 +8,22 @@
   handle), pins the selection set to kernel-only visibility and the
   audit set to operator-only visibility, declares how many times each
   selection case is repeated, and names the promotion strategy the
-  profile is evaluated under:
+  profile is evaluated under. The :promotion map MAY additionally
+  carry the Task 8.5 comparison thresholds — :min-delta (minimum
+  utility improvement) and :max-cost-regression (maximum allowed
+  candidate/parent cost ratio) — plus an OPTIONAL
+  :max-complexity-regression guard. When a profile omits them,
+  evoclj.eval.compare falls back to default-promotion-thresholds:
 
       {:eval/profile-id :default-v1
        :evolution-set   {:source ...}                       ; evidence
        :selection-set   {:source ... :visibility :kernel-only}   ; evaluator
        :audit-set       {:source ... :visibility :operator-only} ; operator
        :repetitions     1
-       :promotion       {:strategy ...}}
+       :promotion       {:strategy :paired-comparison
+                         :min-delta 0.05
+                         :max-cost-regression 1.10
+                         :max-complexity-regression 1.25}}
 
   THE ISOLATION CONTRACT (Global Constraints 11, 12, 23): the profile
   carries SOURCE KEYWORDS ONLY — it never carries a dataset loader, a
@@ -62,7 +70,24 @@
                 [:visibility [:= :operator-only]]]]
    [:repetitions pos-int?]
    [:promotion [:map {:closed true}
-                [:strategy keyword?]]]])
+                [:strategy keyword?]
+                [:min-delta {:optional true} number?]
+                [:max-cost-regression {:optional true} number?]
+                [:max-complexity-regression {:optional true} number?]]]])
+
+;; --- canonical promotion thresholds (Task 8.5) ---------------------------------
+
+(def default-promotion-thresholds
+  "The canonical Task 8.5 comparison thresholds used when a profile
+  does not declare its own (the schema keeps them optional so every
+  Task 8.1 profile stays valid): :min-delta is the minimum utility
+  improvement a candidate must show, :max-cost-regression is the
+  maximum candidate/parent cost ratio allowed, and
+  :max-complexity-regression is the OPTIONAL complexity guard — a
+  profile that omits it treats complexity as informational."
+  {:min-delta 0.05
+   :max-cost-regression 1.10
+   :max-complexity-regression 1.25})
 
 ;; --- the default profile -----------------------------------------------------
 
@@ -73,13 +98,18 @@
   evals/evolution, evals/selection, evals/audit. Selection cases run
   once per paired comparison; promotion is a paired comparison of
   parent vs. candidate on the same case set and environment fixture
-  (Global Constraint 13)."
+  (Global Constraint 13). The profile carries the Task 8.5 comparison
+  thresholds explicitly (Task 8.5 requires the profile to carry
+  them)."
   {:eval/profile-id :default-v1
    :evolution-set {:source :evals/evolution}
    :selection-set {:source :evals/selection :visibility :kernel-only}
    :audit-set {:source :evals/audit :visibility :operator-only}
    :repetitions 1
-   :promotion {:strategy :paired-comparison}})
+   :promotion {:strategy :paired-comparison
+               :min-delta 0.05
+               :max-cost-regression 1.10
+               :max-complexity-regression 1.25}})
 
 ;; --- boundary validation -----------------------------------------------------
 
