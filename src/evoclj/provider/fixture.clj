@@ -104,9 +104,20 @@
 (defn echo-provider
   "Build the pure :fixture/echo provider used by the seed Genome.
 
-  Optional opts: :secret — constructor-private config (closed over,
-  never exposed in describe / normalize-request / execute-request!
-  output), mirroring how a real adapter closes over its API key.
+  Optional opts:
+
+  - :secret — constructor-private config (closed over, never exposed
+    in describe / normalize-request / execute-request! output),
+    mirroring how a real adapter closes over its API key.
+  - :execution-count — an atom bumped once per execute-request! call,
+    so tests can assert when the provider REALLY ran: a denied request
+    must never bump it (Task 4.5 Step 2).
+  - :fail-count — a non-negative integer: the first N execute-request!
+    calls throw a TRANSIENT provider error (:provider/transient-error)
+    before succeeding, letting tests simulate a flaky upstream (Task
+    4.5 Step 3). The descriptor still declares :retry {:safe? true}
+    because the echo effect is pure and idempotent, so the dispatcher
+    MAY retry it.
 
   normalize-request validates the args ({:text \"hello\"}) against the
   input-schema and returns the canonical resource descriptor
@@ -114,22 +125,92 @@
    :args {...}}. execute-request! returns {:text ...}, the value the
   broker validates against :output-schema."
   ([] (echo-provider {}))
-  ([{:keys [secret]}]
+  ([{:keys [secret execution-count fail-count]}]
    (when (and (some? secret) (not (string? secret)))
      (throw (err/error :provider/config-invalid
                        "provider secret must be a string"
                        {:value (err/sanitize secret)})))
-   (reify proto/Provider
-     (describe [_] echo-descriptor)
-     (normalize-request [_ intent]
-       (let [args (intent-args intent)]
-         (validate-args! echo-descriptor args)
-         {:tool/id :fixture/echo
-          :resource {:kind :tool :id :fixture/echo}
-          :args args}))
-     (execute-request! [_ authorized-request]
-       (expect-normalized! authorized-request :args)
-       {:text (get-in authorized-request [:args :text])}))))
+   (when (and (some? fail-count)
+              (not (and (int? fail-count) (not (neg? fail-count)))))
+     (throw (err/error :provider/config-invalid
+                       "provider fail-count must be a non-negative integer"
+                       {:value (err/sanitize fail-count)})))
+   (let [count (or execution-count (atom 0))]
+     (reify proto/Provider
+       (describe [_] echo-descriptor)
+       (normalize-request [_ intent]
+         (let [args (intent-args intent)]
+           (validate-args! echo-descriptor args)
+           {:tool/id :fixture/echo
+            :resource {:kind :tool :id :fixture/echo}
+            :args args}))
+       (execute-request! [_ authorized-request]
+         (expect-normalized! authorized-request :args)
+         (let [n (swap! count inc)]
+           (when (and fail-count (<= n fail-count))
+             (throw (err/error :provider/transient-error
+                               "transient fixture failure"
+                               {:attempt n})))
+           {:text (get-in authorized-request [:args :text])}))))))
+
+;; --- :fixture/non-idempotent --------------------------------------------
+
+(def ^:private non-idempotent-descriptor
+  ;; Deliberately NO :retry block: automatic retries are allowed only
+  ;; when a provider declares :retry {:safe? true} (Task 4.5), so the
+  ;; dispatcher must NEVER auto-retry this provider, even when it
+  ;; reports a transient failure.
+  {:tool/id :fixture/non-idempotent
+   :effect :pure
+   :input-schema [:map [:text :string]]
+   :output-schema [:map [:text :string]]
+   :required-action :invoke})
+
+(defn non-idempotent-provider
+  "Build the :fixture/non-idempotent provider (Task 4.5 Step 3).
+
+  The descriptor deliberately carries NO :retry block, so the
+  dispatcher must never retry this provider, even when it reports a
+  transient failure (:provider/transient-error): a non-idempotent
+  action must not be blindly retried (Transaction Boundaries
+  protocol).
+
+  Optional opts: :secret (constructor-private, closed over),
+  :execution-count (atom bumped once per execute-request! call), and
+  :fail-count (the first N execute-request! calls throw a transient
+  error before succeeding — simulating an upstream that would have
+  recovered had it been retried).
+
+  normalize-request and execute-request! mirror :fixture/echo's shape
+  under the distinct tool id :fixture/non-idempotent."
+  ([] (non-idempotent-provider {}))
+  ([{:keys [secret execution-count fail-count]}]
+   (when (and (some? secret) (not (string? secret)))
+     (throw (err/error :provider/config-invalid
+                       "provider secret must be a string"
+                       {:value (err/sanitize secret)})))
+   (when (and (some? fail-count)
+              (not (and (int? fail-count) (not (neg? fail-count)))))
+     (throw (err/error :provider/config-invalid
+                       "provider fail-count must be a non-negative integer"
+                       {:value (err/sanitize fail-count)})))
+   (let [count (or execution-count (atom 0))]
+     (reify proto/Provider
+       (describe [_] non-idempotent-descriptor)
+       (normalize-request [_ intent]
+         (let [args (intent-args intent)]
+           (validate-args! non-idempotent-descriptor args)
+           {:tool/id :fixture/non-idempotent
+            :resource {:kind :tool :id :fixture/non-idempotent}
+            :args args}))
+       (execute-request! [_ authorized-request]
+         (expect-normalized! authorized-request :args)
+         (let [n (swap! count inc)]
+           (when (and fail-count (<= n fail-count))
+             (throw (err/error :provider/transient-error
+                               "transient fixture failure"
+                               {:attempt n})))
+           {:text (get-in authorized-request [:args :text])}))))))
 
 ;; --- :fixture/path-resolve -------------------------------------------------
 
