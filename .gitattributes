@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.edn text eol=lf
+*.clj text eol=lf
+*.cljc text eol=lf
+*.md text eol=lf
