@@ -125,10 +125,17 @@
     (testing ":genome/root is preserved as the java.nio.file.Path anchor"
       (is (instance? java.nio.file.Path (:genome/root g)))
       (is (= (str (fixture-root "minimal-valid")) (str (:genome/root g)))))
-    (testing "all five bundle files load with :edn kind"
-      (is (= #{"manifest.edn" "topology.edn" "models.edn" "memory.edn" "evolution.edn"}
+    (testing "the five declared modules plus the route program load with inferred kinds"
+      ;; Task 2.3 adds the evolvable route program (programs/route.clj) to
+      ;; the bundle; it is :clj source, not an :edn module.
+      (is (= #{"manifest.edn" "topology.edn" "models.edn" "memory.edn" "evolution.edn"
+               "programs/route.clj"}
              (set (keys (:files g)))))
-      (is (every? #(= :edn (:kind %)) (vals (:files g)))))
+      (is (every? #(= :edn (:kind %))
+                  (vals (select-keys (:files g)
+                                     ["manifest.edn" "topology.edn" "models.edn"
+                                      "memory.edn" "evolution.edn"]))))
+      (is (= :clj (get-in g [:files "programs/route.clj" :kind]))))
     (testing "declared file digests match their on-disk logical content"
       (doseq [f ["manifest.edn" "topology.edn" "models.edn" "memory.edn" "evolution.edn"]]
         (is (= (hash/text-digest
