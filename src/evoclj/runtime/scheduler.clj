@@ -1,0 +1,539 @@
+(ns evoclj.runtime.scheduler
+  "Task 6.3 — deterministic single-session scheduler and step budget.
+
+  run-session! executes ONE session against the phenotype topology the
+  executor carries, in strict FIFO (v0 has no concurrency):
+
+    (run-session! executor session-id task-input)
+    ;; => {:status :completed | :failed | :budget-exhausted
+    ;;     :session/id <uuid>
+    ;;     :output-ref <sha256 or nil>
+    ;;     :error/artifact-ref <sha256 or nil>   ; :failed only
+    ;;     :episode/id nil                        ; Task 6.5 materializes
+    ;;                                            ;   episodes
+    ;;     :event/count n}
+
+  THE EXECUTOR MAP (normative for Task 6.x, designed here):
+
+    {:phenotype <Phenotype from evoclj.runtime.phenotype/instantiate>
+     :stores {:sqlite <migrated db>   ; the OPENED sqlite store
+              :cas <CAS root>}        ; the OPENED content-addressed store
+     :dispatch <broker context from evoclj.intent.dispatch/make-broker-context>}
+
+  The test constructs it directly; Integrant assembly is Task 10.1.
+  The scheduler opens nothing and closes nothing: the stores and the
+  broker context belong to the host and arrive open.
+
+  SESSION PINNING (Global Constraint 2 — never assume, always read):
+  run-session! reads the session from the store and verifies its
+  pinned :genome/id, :resolution/id, and :phenotype/id agree with the
+  executor's compiled genome (evoclj.compiler.core returns
+  :compiled/genome-id, :compiled/resolution-id,
+  :compiled/phenotype-id) before touching anything. A disagreement is
+  :scheduler/pin-mismatch — the scheduler refuses to run a session
+  against the wrong phenotype (the session's pinned identity is the
+  store's contract, not the executor's claim).
+
+  SESSION STATE MACHINE: the store's normative machine (Task 5.4) is
+  authoritative. The task text abbreviates the scheduler's transitions
+  as :created → :running → :completed | :failed | :budget-exhausted;
+  the store has no :created → :running edge and no :running →
+  :completed edge (Task 5.4: :created → :resolving → :running ↔
+  :waiting → :completed), so run-session! walks :created → :resolving
+  → :running, then :running → :failed | :budget-exhausted directly, or
+  :running → :waiting → :completed for a successful run (two
+  compare-and-set hops). Only sessions in :created are accepted;
+  anything else is :scheduler/session-invalid :reason :not-created.
+
+  CAUSAL ANCHORING: every session's causal chain opens with a
+  :session/created root event appended by the host at creation time
+  (evoclj.store.event/root-event-types — the scheduler never fabricates
+  a root). run-session! requires that the FIRST stored event is
+  :session/created and chains :session/started to it; every subsequent
+  event chains to the event appended immediately before it, so the log
+  is a single linear causal chain (each event's :cause/event-id is the
+  previous event's :event/id) and every step's events are persisted
+  BEFORE the scheduler advances to the next node (Task 6.3 Step 3).
+
+  EXECUTION (Task 6.3 Steps 1-4): starting at the topology's :entry,
+  each visit builds the per-session runtime-state contract of
+  evoclj.runtime.node, steps the node's handler, and persists:
+
+    :node/started → :node/completed (with the step's :outputs as a
+    CAS artifact) → for each emitted intent, the intent effect
+    transaction: :intent/proposed → (evoclj.intent.dispatch!) →
+    :intent/authorized → :provider/call-started →
+    :provider/call-completed (value as a CAS artifact) on success,
+    :intent/denied for a broker denial (no provider event — the
+    provider never ran), or :intent/failed for any other dispatch
+    failure. Every provider result is fed back into the session's
+    accumulated :outputs (Task 6.3: dispatch and feed results back);
+    the next node's input payload is the most recently accumulated
+    output (the entry node receives the task-input). A denied or
+    failed intent is a node-level outcome — the session continues.
+
+  BUDGET (Step 2): the topology's :limits {:max-steps N} bounds node
+  visits. When the visit count reaches N the run halts BEFORE the
+  (N+1)-th node is stepped, transitions the session to
+  :budget-exhausted, and persists :session/budget-exhausted carrying
+  the limit, the steps consumed, and the accumulated outputs as a CAS
+  artifact (:output-ref — failures are evidence, not discarded
+  traces).
+
+  FAILURE (Step 4): an unhandled node failure — a handler :failed
+  transition, or ANY exception thrown while resolving, stepping, or
+  processing the node's intents — fails the session: the serializable
+  error payload is stored as a CAS artifact, :node/failed is appended
+  (its :payload-ref is the artifact), the session transitions to
+  :failed, and :session/failed is appended carrying the artifact ref
+  in its metadata (:error/artifact-ref). Scheduler-level run failures
+  (a :continue transition with no successor, a :next pointing at an
+  undeclared node) fail the session the same way with a :scheduler/*
+  error data map. Errors in the STORE or the BROKER CONTEXT
+  themselves (host infrastructure failures) propagate as typed
+  ExceptionInfo; recovery of a session left mid-run is Task 5.5's job.
+
+  Error contract (Global Constraint 22 — plain serializable data):
+  :scheduler/executor-invalid (:reason distinguishes :not-a-map,
+  :phenotype-missing, :phenotype-id-invalid, :compiled-missing,
+  :topology-missing, :entry-missing, :nodes-missing, :stores-invalid,
+  :sqlite-missing, :cas-missing, :dispatch-invalid),
+  :scheduler/session-invalid (:reason :not-found, :not-created,
+  :missing-root-event), :scheduler/pin-mismatch (:reason :genome,
+  :resolution, :phenotype), and :scheduler/task-input-invalid
+  (:reason :not-edn-safe — nothing non-EDN crosses this boundary)."
+  (:require [evoclj.genome.types :as types]
+            [evoclj.intent.dispatch :as dispatch]
+            [evoclj.kernel.error :as err]
+            [evoclj.runtime.node :as node]
+            [evoclj.sci.boundary :as boundary]
+            [evoclj.store.cas :as cas]
+            [evoclj.store.event :as event]
+            [evoclj.store.session :as session])
+  (:import (java.nio.charset StandardCharsets)))
+
+;; --- executor trust boundary ------------------------------------------------
+
+(defn- executor-error
+  "A :scheduler/executor-invalid ExceptionInfo carrying the
+  distinguishing :reason and the sanitized offending value."
+  [reason message value]
+  (err/error :scheduler/executor-invalid message
+             {:reason reason :value (err/sanitize value)}))
+
+(defn- validate-executor!
+  "Validate the executor trust boundary: a map wiring a live phenotype
+  (canonical :phenotype/id, a :compiled genome carrying a compiled
+  :topology), the opened :stores (:sqlite + :cas), and a :dispatch
+  broker context. Every failure throws :scheduler/executor-invalid
+  with a distinguishing :reason (host-side bug; garbage never runs)."
+  [executor]
+  (when-not (map? executor)
+    (throw (executor-error :not-a-map "executor must be a map" executor)))
+  (let [phenotype (:phenotype executor)]
+    (when-not (map? phenotype)
+      (throw (executor-error :phenotype-missing
+                             "executor must carry a :phenotype map"
+                             phenotype)))
+    (when-not (types/artifact-id? (:phenotype/id phenotype))
+      (throw (executor-error :phenotype-id-invalid
+                             "executor phenotype must carry a canonical :phenotype/id"
+                             (:phenotype/id phenotype))))
+    (when-not (map? (:compiled phenotype))
+      (throw (executor-error :compiled-missing
+                             "executor phenotype must carry a :compiled genome"
+                             (:compiled phenotype))))
+    (let [topology (:topology (:compiled phenotype))]
+      (when-not (map? topology)
+        (throw (executor-error :topology-missing
+                               "compiled genome must carry a compiled :topology"
+                               topology)))
+      (when-not (keyword? (:entry topology))
+        (throw (executor-error :entry-missing
+                               "compiled topology must declare a keyword :entry"
+                               (:entry topology))))
+      (when-not (map? (:nodes topology))
+        (throw (executor-error :nodes-missing
+                               "compiled topology must carry a :nodes map"
+                               (:nodes topology))))))
+  (let [stores (:stores executor)]
+    (when-not (map? stores)
+      (throw (executor-error :stores-invalid
+                             "executor must carry a :stores map"
+                             stores)))
+    (when-not (contains? stores :sqlite)
+      (throw (executor-error :sqlite-missing
+                             "executor :stores must carry the :sqlite handle"
+                             stores)))
+    (when-not (contains? stores :cas)
+      (throw (executor-error :cas-missing
+                             "executor :stores must carry the :cas handle"
+                             stores))))
+  (when-not (map? (:dispatch executor))
+    (throw (executor-error :dispatch-invalid
+                           "executor must carry a :dispatch broker context"
+                           (:dispatch executor))))
+  executor)
+
+;; --- artifact persistence (Global Constraint 21) -----------------------------
+
+(defn- put-payload!
+  "Store an EDN payload by content hash under the executor's CAS and
+  return its canonical artifact id."
+  [executor value]
+  (:artifact/id
+   (cas/put-bytes! (:cas (:stores executor))
+                   (.getBytes (pr-str value) StandardCharsets/UTF_8)
+                   {})))
+
+(defn- payload-ref
+  "A CAS artifact id for `value`, or nil when value is empty (nothing
+  to persist — empty payloads are not materialized)."
+  [executor value]
+  (when (seq value)
+    (put-payload! executor value)))
+
+(defn- outputs-ref
+  "A CAS artifact id for the accumulated session :outputs (nil when
+  empty)."
+  [executor outputs]
+  (payload-ref executor outputs))
+
+;; --- the append-only causal log ---------------------------------------------
+
+(defn- append-event!
+  "Append one event to the session's append-only log, chained to
+  `cause-event-id`, with the session's pinned identity (read from the
+  store — never assumed) on every row (Global Constraint 20). Returns
+  the persisted event."
+  [executor pin cause-event-id type payload-ref metadata]
+  (event/append-event!
+   (:sqlite (:stores executor))
+   {:session/id (:session/id pin)
+    :generation/id (:generation/id pin)
+    :phenotype/id (:phenotype/id pin)
+    :event/type type
+    :cause/event-id cause-event-id
+    :payload-ref payload-ref
+    :metadata metadata}))
+
+(defn- event-count
+  "The number of events appended to the session's log so far, minus
+  its pre-existing :session/created root — i.e., the count appended by
+  this run-session! call."
+  [executor pin]
+  (max 0 (dec (count (event/events-for-session (:sqlite (:stores executor))
+                                               (:session/id pin))))))
+
+;; --- the intent effect transaction (Transaction Boundaries) ------------------
+
+(defn- dispatch-intent!
+  "Persist one validated intent's effect protocol through the broker
+  and feed the result back.
+
+  The scheduler persists :intent/proposed (chained to the
+  :node/completed that proposed it), then calls
+  evoclj.intent.dispatch! ONCE (the v0 broker is a single call; its
+  internal normalize/authorize/execute steps cannot be interleaved
+  with persistence), then persists the observable outcome:
+
+  - success    :intent/authorized → :provider/call-started (with the
+                idempotency key when the intent carries one) →
+                :provider/call-completed (result value as a CAS
+                artifact); the result is fed back into :outputs.
+  - denied     :intent/denied with the broker's :reason — NO provider
+                events (a denied intent never reaches a provider).
+  - other      :intent/failed with the dispatch error record as a CAS
+                artifact (:payload-ref).
+
+  A denied or failed intent is a node-level outcome: the session
+  continues. Returns {:last-event <the final event appended>
+  :outputs <the updated accumulated outputs>}."
+  [executor pin cause intent outputs]
+  (let [proposed (append-event! executor pin cause :intent/proposed nil
+                                {:intent/id (:intent/id intent)
+                                 :intent/type (:intent/type intent)
+                                 :node/id (:node/id intent)})
+        result (dispatch/dispatch! (:dispatch executor) intent)]
+    (if (= :ok (:result/status result))
+      (let [authorization (:authorization result)
+            tool-id (get-in intent [:payload :tool/id])
+            authorized (append-event!
+                        executor pin (:event/id proposed) :intent/authorized nil
+                        {:intent/id (:intent/id intent)
+                         :intent/type (:intent/type intent)
+                         :authorization {:decision (:decision authorization)
+                                         :lease-id (:lease-id authorization)}})
+            started (append-event!
+                     executor pin (:event/id authorized) :provider/call-started nil
+                     {:intent/id (:intent/id intent)
+                      :tool/id tool-id
+                      :idempotency/key (get-in intent [:metadata :idempotency/key])})
+            value-ref (put-payload! executor (:value result))
+            completed (append-event!
+                       executor pin (:event/id started) :provider/call-completed value-ref
+                       {:intent/id (:intent/id intent)
+                        :tool/id tool-id
+                        :result/status :ok})]
+        {:last-event completed
+         :outputs (conj outputs (:value result))})
+      (if (= :capability/denied (:error/type result))
+        {:last-event (append-event!
+                      executor pin (:event/id proposed) :intent/denied nil
+                      {:intent/id (:intent/id intent)
+                       :intent/type (:intent/type intent)
+                       :error/type :capability/denied
+                       :reason (get-in result [:error/data :reason])})
+         :outputs outputs}
+        {:last-event (append-event!
+                      executor pin (:event/id proposed) :intent/failed
+                      (put-payload! executor (dissoc result :usage))
+                      {:intent/id (:intent/id intent)
+                       :intent/type (:intent/type intent)
+                       :error/type (:error/type result)})
+         :outputs outputs}))))
+
+;; --- terminal session outcomes ----------------------------------------------
+
+(defn- fail-session!
+  "Fail the session (Task 6.3 Step 4): store the serializable error
+  payload as a CAS artifact, append :node/failed (chained to `cause`,
+  :payload-ref = the artifact), transition the session to :failed, and
+  append :session/failed carrying the artifact ref in its metadata
+  (:error/artifact-ref). Returns the run result map."
+  [executor pin cause node-id step error-data outputs]
+  (let [error-ref (put-payload! executor error-data)
+        node-failed (append-event! executor pin cause :node/failed error-ref
+                                   {:node/id node-id
+                                    :step step
+                                    :error/type (:error/type error-data)})]
+    (session/transition-session! (:sqlite (:stores executor))
+                                 (:session/id pin) :running :failed nil)
+    (append-event! executor pin (:event/id node-failed) :session/failed error-ref
+                   {:error/artifact-ref error-ref
+                    :error/type (:error/type error-data)})
+    {:status :failed
+     :session/id (:session/id pin)
+     :output-ref (outputs-ref executor outputs)
+     :error/artifact-ref error-ref
+     :episode/id nil}))
+
+(defn- budget-exhaust!
+  "Halt the run when the topology's :max-steps budget is consumed
+  (Task 6.3 Step 2): transition the session to :budget-exhausted and
+  append :session/budget-exhausted carrying the limit, the steps
+  consumed, and the accumulated outputs as a CAS artifact. Returns the
+  run result map."
+  [executor pin cause outputs limits steps]
+  (let [out-ref (outputs-ref executor outputs)]
+    (session/transition-session! (:sqlite (:stores executor))
+                                 (:session/id pin) :running :budget-exhausted nil)
+    (append-event! executor pin cause :session/budget-exhausted out-ref
+                   {:limits limits :steps steps :output/ref out-ref})
+    {:status :budget-exhausted
+     :session/id (:session/id pin)
+     :output-ref out-ref
+     :error/artifact-ref nil
+     :episode/id nil}))
+
+;; --- the scheduler ----------------------------------------------------------
+
+(defn run-session!
+  "Execute ONE session against the executor's phenotype topology
+  (deterministic single-session FIFO — v0 has no concurrency).
+
+  Reads the session's pinned genome/resolution/phenotype from the
+  store and verifies them against the executor's compiled genome
+  (never assumes the pin), walks the compiled topology from :entry,
+  steps each node's handler, dispatches every emitted intent through
+  evoclj.intent.dispatch! (the broker), feeds the provider results
+  back into the accumulated :outputs, and persists EVERY transition
+  via evoclj.store.event/append-event! (node/started, node/completed,
+  intent/proposed, intent/authorized | intent/denied,
+  provider/call-started, provider/call-completed, ...) and
+  evoclj.store.session/transition-session! (:created → :resolving →
+  :running → :waiting → :completed | :failed | :budget-exhausted —
+  the store's normative state machine). The topology's :limits
+  {:max-steps N}
+  halts overlong runs as :budget-exhausted; an unhandled node failure
+  fails the session with the error payload preserved as a CAS artifact
+  ref in the :session/failed event metadata.
+
+  See the namespace docstring for the executor map shape, the returned
+  result map, and the error contract (:scheduler/executor-invalid,
+  :scheduler/session-invalid, :scheduler/pin-mismatch,
+  :scheduler/task-input-invalid)."
+  [executor session-id task-input]
+  (validate-executor! executor)
+  (when-not (boundary/edn-safe? task-input)
+    (throw (err/error :scheduler/task-input-invalid
+                      "task-input must be plain EDN-safe data (Global Constraint 22)"
+                      {:reason :not-edn-safe
+                       :value (err/sanitize task-input)})))
+  (let [db (:sqlite (:stores executor))
+        pin (session/get-session db session-id)]
+    (when-not pin
+      (throw (err/error :scheduler/session-invalid
+                        "no session with this id"
+                        {:reason :not-found
+                         :session/id session-id})))
+    (when-not (= :created (:state pin))
+      (throw (err/error :scheduler/session-invalid
+                        "run-session! starts only sessions in :created"
+                        {:reason :not-created
+                         :session/id (:session/id pin)
+                         :state (:state pin)})))
+    ;; pin verification: the session's pinned identity IS the store's
+    ;; contract — the executor must agree with it, never the reverse
+    (let [compiled (:compiled (:phenotype executor))]
+      (when-not (= (:genome/id pin) (:compiled/genome-id compiled))
+        (throw (err/error :scheduler/pin-mismatch
+                          "session pin disagrees with the executor's compiled genome"
+                          {:reason :genome
+                           :session/genome-id (:genome/id pin)
+                           :executor/genome-id (:compiled/genome-id compiled)})))
+      (when-not (= (:resolution/id pin) (:compiled/resolution-id compiled))
+        (throw (err/error :scheduler/pin-mismatch
+                          "session pin disagrees with the executor's compiled resolution"
+                          {:reason :resolution
+                           :session/resolution-id (:resolution/id pin)
+                           :executor/resolution-id (:compiled/resolution-id compiled)})))
+      (when-not (= (:phenotype/id pin) (:phenotype/id (:phenotype executor)))
+        (throw (err/error :scheduler/pin-mismatch
+                          "session pin disagrees with the executor's phenotype"
+                          {:reason :phenotype
+                           :session/phenotype-id (:phenotype/id pin)
+                           :executor/phenotype-id (:phenotype/id (:phenotype executor))}))))
+    (let [topology (get-in executor [:phenotype :compiled :topology])
+          entry (:entry topology)
+          limits (or (:limits topology) {})
+          max-steps (:max-steps limits)
+          root (first (event/events-for-session db (:session/id pin)))]
+      (when-not (= :session/created (:event/type root))
+        (throw (err/error :scheduler/session-invalid
+                          "session causal chain must open with a :session/created root event"
+                          {:reason :missing-root-event
+                           :session/id (:session/id pin)
+                           :first-event (:event/type root)})))
+      ;; the store's state machine has no :created → :running edge;
+      ;; the :resolving hop is the normative path (Task 5.4)
+      (session/transition-session! db (:session/id pin) :created :resolving nil)
+      (session/transition-session! db (:session/id pin) :resolving :running nil)
+      (let [started (append-event! executor pin (:event/id root) :session/started
+                                   (put-payload! executor task-input)
+                                   {:entry entry})
+            outcome
+            (loop [node-id entry
+                   input-event {:event/id (:event/id started)
+                                :event/type :session/started
+                                :payload task-input}
+                   outputs []
+                   steps 0
+                   last-event started]
+              (if (and max-steps (>= steps max-steps))
+                (budget-exhaust! executor pin (:event/id last-event)
+                                 outputs limits steps)
+                (let [node (get (:nodes topology) node-id)]
+                  (if-not node
+                    (fail-session! executor pin (:event/id last-event)
+                                   node-id (inc steps)
+                                   {:error/type :scheduler/node-not-found
+                                    :error/message "topology :next references an undeclared node"
+                                    :node/id node-id}
+                                   outputs)
+                    (let [started-event (append-event!
+                                         executor pin (:event/id last-event)
+                                         :node/started nil
+                                         {:node/id node-id
+                                          :step (inc steps)
+                                          :node/type (:node/type node)})
+                          runtime-state {:session/id (:session/id pin)
+                                         :phenotype/id (:phenotype/id pin)
+                                         :node/id node-id
+                                         :outputs outputs
+                                         :sci-runtime (:sci-runtime (:phenotype executor))}
+                          stepped (try
+                                    {:transition
+                                     (node/validate-transition!
+                                      (node/step ((node/handler-for (:node/type node)))
+                                                 runtime-state node input-event))}
+                                    (catch Throwable t
+                                      {:failed-outcome
+                                       (fail-session! executor pin (:event/id started-event)
+                                                      node-id (inc steps)
+                                                      (err/error-data t) outputs)}))]
+                      (if-let [failed-outcome (:failed-outcome stepped)]
+                        failed-outcome
+                        (let [transition (:transition stepped)]
+                          (case (:transition/status transition)
+                            :failed
+                            (fail-session! executor pin (:event/id started-event)
+                                           node-id (inc steps)
+                                           (:error transition) outputs)
+
+                            :complete
+                            (let [out-ref (outputs-ref executor (:outputs transition))
+                                  completed (append-event!
+                                             executor pin (:event/id started-event)
+                                             :node/completed out-ref
+                                             {:node/id node-id
+                                              :step (inc steps)
+                                              :transition/status :complete})]
+                              ;; the store's state machine has no
+                              ;; :running → :completed edge (Task 5.4:
+                              ;; :running ↔ :waiting → :completed), so
+                              ;; completion walks :running → :waiting →
+                              ;; :completed
+                              (session/transition-session! db (:session/id pin)
+                                                           :running :waiting nil)
+                              (session/transition-session! db (:session/id pin)
+                                                           :waiting :completed nil)
+                              (append-event! executor pin (:event/id completed)
+                                             :session/completed out-ref
+                                             {:status :completed
+                                              :output/ref out-ref})
+                              {:status :completed
+                               :session/id (:session/id pin)
+                               :output-ref out-ref
+                               :error/artifact-ref nil
+                               :episode/id nil})
+
+                            :continue
+                            (let [completed (append-event!
+                                             executor pin (:event/id started-event)
+                                             :node/completed
+                                             (payload-ref executor (:outputs transition))
+                                             {:node/id node-id
+                                              :step (inc steps)
+                                              :transition/status :continue
+                                              :next (:next transition)})
+                                  dispatch-result
+                                  (try
+                                    (reduce (fn [{:keys [last-event outputs]} intent]
+                                              (dispatch-intent! executor pin
+                                                                (:event/id last-event)
+                                                                intent outputs))
+                                            {:last-event completed
+                                             :outputs (into outputs (:outputs transition))}
+                                            (:intents transition))
+                                    (catch Throwable t
+                                      {:failed-outcome
+                                       (fail-session! executor pin (:event/id completed)
+                                                      node-id (inc steps)
+                                                      (err/error-data t) outputs)}))]
+                              (if-let [failed-outcome (:failed-outcome dispatch-result)]
+                                failed-outcome
+                                (let [{:keys [last-event outputs]} dispatch-result]
+                                  (if-let [nxt (first (:next transition))]
+                                    (recur nxt
+                                           {:event/id (:event/id last-event)
+                                            :event/type (:event/type last-event)
+                                            :payload (peek outputs)}
+                                           outputs (inc steps) last-event)
+                                    (fail-session! executor pin (:event/id last-event)
+                                                   node-id (inc steps)
+                                                   {:error/type :scheduler/dangling-run
+                                                    :error/message "a :continue transition carries no successor"
+                                                    :node/id node-id}
+                                                   outputs)))))))))))))]
+        (assoc outcome :event/count (event-count executor pin))))))
