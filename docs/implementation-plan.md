@@ -154,7 +154,7 @@ Use deterministic fixture directories under `test/fixtures/`; do not put hidden 
 - [ ] **Step 2: Run only these tests and confirm failure because namespaces/functions do not exist.**
 
 ```bash
-clojure -M:test --focus evoclj.kernel.error-test --focus evoclj.genome.types-test
+clojure -M:test -n evoclj.kernel.error-test -n evoclj.genome.types-test
 ```
 
 - [ ] **Step 3: Implement the smallest error and ID helpers.** Do not introduce records yet; IDs remain strings/UUIDs in validated maps so they stay easy to persist and print.
@@ -293,7 +293,7 @@ Canonical hashing rules are normative:
 **Milestone 1 exit test:**
 
 ```bash
-clojure -M:test --focus evoclj.genome
+clojure -M:test -r ".*evoclj\.genome\..*"
 ```
 
 Expected: all Genome tests pass; no SCI, provider, network, or database namespace is needed.
@@ -2605,7 +2605,7 @@ At that point, the project has demonstrated the claim it is built around: **the 
 These rules are binding for every implementation agent working in this repository:
 
 1. `deps.edn` at the repo root is PRE-PROVISIONED with the complete declared stack: clojure 1.12.5, malli 0.20.1, integrant 1.0.1, sci 0.15.58, rewrite-clj 1.2.55, sqlite-jdbc 3.49.1.0, java.jdbc 0.7.12, and the cognitect test-runner under the `:test` alias. Do NOT remove or change dependency entries; add a new dependency only if your task section explicitly requires one.
-2. Test commands: full suite `clojure -M:test`; focused `clojure -M:test --focus <namespace-pattern>`.
+2. Test commands: full suite `clojure -M:test`; focused `clojure -M:test -n <namespace>` (the pinned cognitect test-runner v0.5.1 has no --focus; -n selects a namespace, -r takes a regex pattern for groups of namespaces).
 3. Implementation agents never run `git commit`. A separate reviewer agent verifies the work and commits it with the exact message listed in "Recommended commit progression" for the task.
 4. Repo root on this host is `D:/PROJECTS/EvoCLJ` (Git Bash path `/d/PROJECTS/EvoCLJ`). Windows host: never use CRLF line endings; keep all sources UTF-8 with LF.
 5. The plan's Global Constraints, Data Contracts, Event Taxonomy, and Transaction Boundaries are normative; when a task's text and a contract conflict, the Global Constraints win and the deviation must be reported.

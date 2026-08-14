@@ -287,6 +287,42 @@
         (is (= [ghost] (mapv :payload-ref (:missing-artifacts r))))))))
 
 ;; ============================================================================
+;; supplementary — a tampered event row is reported as an invalid chain
+;; (closes the Task 5.5 review gap: no recovery-level chain-tamper test)
+;; ============================================================================
+
+(deftest tampered-event-row-is-reported-as-invalid-chain
+  (let [db (fresh-db)
+        root (temp-root)
+        genome-id (put-genome! root)
+        _ (seed-generation! db genome-id)
+        sid (:session/id (session/create-session! db (session-request genome-id)))
+        created (event/append-event! db (base-event sid {:event/type :session/created}))
+        _ (event/append-event! db (base-event sid {:event/type :intent/proposed
+                                                   :cause/event-id (:event/id created)}))]
+    (testing "before tampering the chain verifies"
+      (is (true? (:valid? (event/verify-event-chain db sid)))))
+    (testing "a same-leaf cross-namespace type swap is detected at the recovery level"
+      ;; The append-only triggers (events_no_update/events_no_delete) make
+      ;; any UPDATE fail at the DB level — their own enforcement is verified
+      ;; in event_test. Here we drop the UPDATE trigger to simulate a direct
+      ;; tamper of the stored row and prove the RECOVERY layer re-detects it.
+      (sqlite/exec! db ["DROP TRIGGER IF EXISTS events_no_update"])
+      (sqlite/with-db [conn db]
+        (jdbc/update! conn :events {:event_type "node/proposed"}
+                      ["session_id = ? AND event_type = ?"
+                       (str sid) "intent/proposed"]))
+      (let [report (recovery/scan-recovery-state db root)]
+        (is (seq (:invalid-event-chains report)))
+        (let [entry (first (:invalid-event-chains report))]
+          (is (= sid (:session/id entry)))
+          (is (false? (:valid? entry))))))
+    (testing "strict mode fails closed on the tampered chain"
+      (let [e (scan-error #(recovery/startup-integrity-scan db root))]
+        (is (some? e))
+        (is (= :store/integrity-failure (:error/type (ex-data e))))))))
+
+;; ============================================================================
 ;; Step 3 — a prepared but uncommitted candidate is stale, never promoted
 ;; ============================================================================
 

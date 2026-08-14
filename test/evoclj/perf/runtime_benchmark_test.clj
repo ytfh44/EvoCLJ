@@ -22,11 +22,11 @@
 
   RUN: it runs with the full suite (`clojure -M:test`) and must pass
   there. To run JUST this namespace:
-      clojure -M:test --focus evoclj.perf.runtime-benchmark-test
+      clojure -M:test -n evoclj.perf.runtime-benchmark-test
   To exclude the perf namespace from a correctness run, filter on
-  :perf metadata (e.g. `--focus '(not :perf)'` is not supported by
-  the cognitect runner; use a metadata-aware runner or run the other
-  namespaces explicitly). The namespace is fully self-contained: it
+  :perf metadata (`clojure -M:test -e :perf`; the pinned cognitect
+  test-runner v0.5.1 has no --focus option). The namespace is fully
+  self-contained: it
   touches only its own temp dirs and the read-only genomes/seed
   bundle, so it can never affect the correctness suite.
 

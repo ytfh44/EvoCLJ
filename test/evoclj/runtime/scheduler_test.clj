@@ -438,3 +438,37 @@
       (is (uuid? (get-in denied [:metadata :intent/id]))))
     (testing "with nothing fed back, the session completes with empty outputs"
       (is (nil? (:output-ref result))))))
+
+;; ============================================================================
+;; supplementary — a dispatch failure (unknown tool) is persisted as
+;; :intent/failed and the session continues (closes the Task 6.3 review
+;; gap: the non-denial dispatch-error branch was untested)
+;; ============================================================================
+
+(deftest unknown-tool-intent-fails-dispatch-and-the-session-continues
+  (let [topology {:graph/id :graph/ghost-tool
+                  :entry :node/tool
+                  :nodes
+                  {:node/tool {:node/type :tool :tool :fixture/ghost :next :node/emit}
+                   :node/emit {:node/type :emit}}
+                  :limits {:max-steps 64}}
+        {:keys [executor executions]} (build-executor topology)
+        sid (create-pinned-session executor)
+        result (scheduler/run-session! executor sid {:text "abc"})
+        events (event/events-for-session (:sqlite (:stores executor)) sid)
+        failed (nth events 5)]
+    (testing "the session completes; the provider never ran"
+      (is (= :completed (:status result)))
+      (is (= 0 @executions))
+      (is (= [:session/created :session/started
+              :node/started :node/completed
+              :intent/proposed :intent/failed
+              :node/started :node/completed
+              :session/completed]
+             (mapv :event/type events))))
+    (testing "the :intent/failed event records the typed dispatch error"
+      (is (= :provider/not-found (get-in failed [:metadata :error/type])))
+      (is (uuid? (get-in failed [:metadata :intent/id]))))
+    (testing "the dispatch error record survives as a CAS artifact"
+      (is (re-matches #"^sha256:[0-9a-f]{64}$" (:payload-ref failed)))
+      (is (cas/exists? (:cas (:stores executor)) (:payload-ref failed))))))

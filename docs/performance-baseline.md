@@ -95,7 +95,7 @@ The benchmark namespace is `evoclj.perf.runtime-benchmark-test`. Every
 deftest carries `^:perf` metadata; the namespace is fully self-contained
 (only its own temp dirs plus the read-only `genomes/seed` bundle) and is
 independent of the correctness suite — timing assertions can never affect
-the 586 correctness tests.
+the 601 correctness tests.
 
 ```text
 # run ONLY the benchmark
