@@ -70,10 +70,12 @@
 ;; --- per-type payload contracts --------------------------------------------
 
 (def PayloadModelCallSchema
-  "A model-call payload: the model referenced by keyword and the
-  messages as a vector of message maps. Open to further keys."
+  "A model-call payload: the model referenced by its full models.dev
+  id (a string like \"deepseek/deepseek-v4-flash\", or a keyword
+  accepted for compatibility) and the messages as a vector of
+  message maps. Open to further keys."
   [:map {:closed false}
-   [:model/id keyword?]
+   [:model/id [:or keyword? string?]]
    [:messages [:vector :map]]])
 
 (def PayloadToolCallSchema

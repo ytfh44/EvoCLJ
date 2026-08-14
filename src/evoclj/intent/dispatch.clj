@@ -68,6 +68,7 @@
             [evoclj.capability.schema :as capability-schema]
             [evoclj.intent.schema :as intent-schema]
             [evoclj.kernel.error :as err]
+            [evoclj.provider.model-registry :as model-registry]
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]
             [evoclj.sci.boundary :as boundary]
@@ -112,7 +113,7 @@
 
   Returns a closed map. Malformed input throws
   :broker/context-invalid."
-  [{:keys [registry leases usage now max-attempts]}]
+  [{:keys [registry leases usage now max-attempts model-registry]}]
   (when-not (instance? clojure.lang.Atom registry)
     (throw (err/error :broker/context-invalid
                       "broker context requires a provider registry atom"
@@ -120,7 +121,13 @@
   (let [leases (or leases [])
         usage (or usage (atom {}))
         now (or now (fn [] (java.util.Date.)))
-        max-attempts (or max-attempts default-max-attempts)]
+        max-attempts (or max-attempts default-max-attempts)
+        model-registry (when model-registry
+                         (when-not (instance? clojure.lang.Atom model-registry)
+                           (throw (err/error :broker/context-invalid
+                                             "model-registry must be an atom or nil"
+                                             {:value (err/sanitize model-registry)})))
+                         model-registry)]
     (validate-lease-collection! leases)
     (when-not (instance? clojure.lang.Atom usage)
       (throw (err/error :broker/context-invalid
@@ -138,7 +145,8 @@
      :leases leases
      :usage usage
      :now now
-     :max-attempts max-attempts}))
+     :max-attempts max-attempts
+     :model-registry model-registry}))
 
 ;; --- result construction ---------------------------------------------------
 
@@ -272,25 +280,83 @@
 
 ;; --- the dispatcher --------------------------------------------------------
 
+(defn- dispatch-model-call!
+  "Dispatch an :intent/model-call through the broker pipeline: resolve
+  the full model id in the kernel-owned model registry, normalize the
+  request to the canonical {:kind :model ...} resource, authorize
+  against the model lease, and execute. Unknown models, unconfigured
+  providers (no API key / unsupported style), and denied requests are
+  typed error results — nothing executes without a matching lease."
+  [broker-context intent]
+  (let [usage-atom (:usage broker-context)
+        model-id (get-in intent [:payload :model/id])
+        full-id (if (keyword? model-id) (name model-id) model-id)
+        registry (:model-registry broker-context)]
+    (if-not registry
+      (result-error intent :provider/not-found
+                    "no model registry in the broker context"
+                    {:model/id full-id :reason :no-model-registry}
+                    nil @usage-atom)
+      (let [entry (model-registry/lookup registry full-id)]
+        (cond
+          (nil? entry)
+          (result-error intent :provider/not-found
+                        (str "unknown model " full-id)
+                        {:model/id full-id :reason :unknown-model}
+                        nil @usage-atom)
+
+          (nil? (:provider entry))
+          (result-error intent :provider/not-configured
+                        (str "model " full-id " is not configured: " (:reason entry))
+                        {:model/id full-id :reason (:reason entry)}
+                        nil @usage-atom)
+
+          :else
+          (let [provider (:provider entry)
+                descriptor (proto/describe provider)
+                normalized-step (normalize-request! broker-context provider intent)]
+            (if-let [error-result (:error-result normalized-step)]
+              error-result
+              (let [normalized (:normalized normalized-step)
+                    decision (broker/authorize
+                              {:intent intent
+                               :normalized-request normalized
+                               :leases (:leases broker-context)
+                               :usage @usage-atom
+                               :now ((:now broker-context))})]
+                (if (= :deny (:decision decision))
+                  (result-error intent :capability/denied
+                                "intent denied by the capability broker"
+                                {:reason (:reason decision)}
+                                decision @usage-atom)
+                  (let [execution (execute-with-retry!
+                                   broker-context provider descriptor
+                                   decision normalized)]
+                    (if-let [value (:ok execution)]
+                      (validate-output! intent descriptor decision
+                                        value @usage-atom)
+                      (result-error intent (:error-type execution)
+                                    (:error-message execution)
+                                    (:error-data execution)
+                                    decision @usage-atom))))))))))))
+
 (defn dispatch!
-  "Execute `intent` through the broker pipeline in the NORMATIVE order
+  "Execute intent through the broker pipeline in the NORMATIVE order
   (Task 4.5 Step 5): validate intent -> lookup provider -> normalize
   resource -> authorize -> execute once/retry per policy -> validate
   output -> return a typed result. See the namespace docstring for the
   result contract and the effect-protocol extension points.
 
-  `broker-context` is a map built by make-broker-context. `intent` is
-  a validated v0 Intent (a malformed intent throws
-  :intent/schema-invalid; a non-tool intent returns
-  :intent/unsupported-dispatch — the v0 dispatcher executes tool calls
-  only, and everything else fails closed)."
+  broker-context is a map built by make-broker-context. intent is a
+  validated v0 Intent (a malformed intent throws
+  :intent/schema-invalid; :intent/tool-call executes through the
+  provider registry, :intent/model-call executes through the model
+  registry, and every other intent type fails closed with
+  :intent/unsupported-dispatch)."
   [broker-context intent]
   (intent-schema/validate-intent intent)
-  (if-not (= :intent/tool-call (:intent/type intent))
-    (result-error intent :intent/unsupported-dispatch
-                  "the v0 dispatcher executes :intent/tool-call intents only"
-                  {:intent/type (:intent/type intent)}
-                  nil @(:usage broker-context))
+  (case (:intent/type intent)
+    :intent/tool-call
     (let [usage-atom (:usage broker-context)
           tool-id (get-in intent [:payload :tool/id])
           entry (registry/lookup (:registry broker-context) tool-id)]
@@ -316,6 +382,7 @@
                               {:reason (:reason decision)}
                               decision @usage-atom)
                 (if (and (not= :pure (:effect descriptor))
+                         (not= :model-call (:effect descriptor))
                          (nil? (get-in intent [:metadata :idempotency/key])))
                   (result-error intent :intent/idempotency-key-missing
                                 "non-pure writes require an idempotency key in :metadata before execution"
@@ -330,4 +397,9 @@
                       (result-error intent (:error-type execution)
                                     (:error-message execution)
                                     (:error-data execution)
-                                    decision @usage-atom))))))))))))
+                                    decision @usage-atom))))))))))
+    :intent/model-call (dispatch-model-call! broker-context intent)
+    (result-error intent :intent/unsupported-dispatch
+                  "the v0 dispatcher executes :intent/tool-call and :intent/model-call intents only"
+                  {:intent/type (:intent/type intent)}
+                  nil @(:usage broker-context))))

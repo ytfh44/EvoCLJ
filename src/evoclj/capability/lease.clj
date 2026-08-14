@@ -140,5 +140,11 @@
          (case kind
            :tool (and (keyword? (:id granted))
                       (= (:id granted) (:id normalized-resource)))
+           :model (and (:id granted)
+                       (let [g (str (:id granted))
+                             n (str (:id normalized-resource))]
+                         (or (= g n)
+                             (and (str/ends-with? g "/*")
+                                  (str/starts-with? n (subs g 0 (dec (count g))))))))
            :filesystem (path-inside? (:path granted) (:path normalized-resource))
            false))))

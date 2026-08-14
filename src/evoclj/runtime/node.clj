@@ -341,28 +341,29 @@
 ;; their constructors. Clojure's loader returns an in-progress
 ;; namespace immediately, so no load-order cycle occurs.
 (require '[evoclj.runtime.nodes.emit :as emit])
+(require '[evoclj.runtime.nodes.llm :as llm])
 (require '[evoclj.runtime.nodes.loop :as loop])
 (require '[evoclj.runtime.nodes.sci :as sci])
 (require '[evoclj.runtime.nodes.tool :as tool])
 
 (def node-handler-registry
   "The trusted registry: v0 node type keyword -> handler constructor
-  (a 0-ary fn returning a NodeHandler). :emit, :sci, :tool, and :loop
-  are implemented; every other v0 type throws
+  (a 0-ary fn returning a NodeHandler). :emit, :sci, :tool, :loop,
+  and :llm are implemented; every other v0 type throws
   :node/not-implemented-yet from handler-for until its task lands
-  (:loop landed in Task 6.4)."
+  (:loop landed in Task 6.4, :llm in post-v0 extension 1)."
   {:emit emit/emit-handler
    :sci sci/sci-handler
    :tool tool/tool-handler
-   :loop loop/loop-handler})
+   :loop loop/loop-handler
+   :llm llm/llm-handler})
 
 (def known-unimplemented-types
   "The v0 node types the compiler accepts but the runtime cannot
-  execute yet: :llm, :route, and the :memory/* nodes.
-  handler-for throws :node/not-implemented-yet for them so the
-  compiler's accepted types and the runtime's executable types stay
-  consistent."
-  #{:llm :route :memory/read :memory/write})
+  execute yet: :route and the :memory/* nodes. handler-for throws
+  :node/not-implemented-yet for them so the compiler's accepted types
+  and the runtime's executable types stay consistent."
+  #{:route :memory/read :memory/write})
 
 (defn handler-for
   "Resolve the trusted handler constructor for `node-type` (a v0 node

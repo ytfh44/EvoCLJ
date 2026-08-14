@@ -470,6 +470,7 @@
                                          :node/id node-id
                                          :outputs outputs
                                          :sci-runtime (:sci-runtime (:phenotype executor))
+                                         :compiled (:compiled (:phenotype executor))
                                          :loop-state loop-state}
                           stepped (try
                                     {:transition
