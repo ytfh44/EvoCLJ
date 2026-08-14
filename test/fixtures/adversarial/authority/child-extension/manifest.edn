@@ -1,0 +1,24 @@
+;; Child-extension Genome fixture — Task 11.1 (adversarial release
+;; gate).
+;;
+;; A successor (\"future extension\") Genome that REUSES the parent's
+;; capability REQUEST (:tool/call) and tries to run with the parent
+;; Phenotype's capability ID. The parent (genomes/seed) holds a host
+;; lease for :fixture/echo bound to the PARENT's phenotype id. The
+;; child is a different Genome -> a different Phenotype id, and the
+;; broker's subject matching is EXACT (Global Constraint 9): the child
+;; is denied with :capability/subject-mismatch even though it requests
+;; the same tool with the same request shape.
+{:genome/format 1
+ :agent/id :child-extension
+ :agent/entry :graph/child
+ :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+ :modules {:topology "topology.edn"
+           :models "models.edn"
+           :memory "memory.edn"
+           :evolution "evolution.edn"}
+ :capabilities/requested #{:tool/call}
+ :evolution {:max-risk :behavioral
+             :mutable #{:parameters :prompts :skills :programs}}
+ :metadata {:name "child-extension"
+            :description "successor Genome reusing the parent's capability request (Task 11.1)"}}

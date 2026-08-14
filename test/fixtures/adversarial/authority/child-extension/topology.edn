@@ -1,0 +1,12 @@
+;; Child-extension topology — Task 11.1. The :sci router emits the same
+;; :fixture/echo tool call the PARENT seed makes; the host lease is
+;; bound to the parent's phenotype id, so the child's request is denied
+;; with :capability/subject-mismatch.
+{:graph/id :graph/child
+ :entry :node/router
+ :nodes
+ {:node/router {:node/type :sci
+                :program :program/route
+                :next :node/emit}
+  :node/emit   {:node/type :emit}}
+ :limits {:max-steps 64}}

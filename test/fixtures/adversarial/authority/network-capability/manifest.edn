@@ -1,0 +1,23 @@
+;; Network-capability Genome fixture — Task 11.1 (adversarial release
+;; gate).
+;;
+;; This Genome's manifest REQUESTS a network capability
+;; (:capability/network) the host NEVER grants. The manifest is a
+;; DECLARATION ONLY (Global Constraint 9: a visible action/tool never
+;; grants resource authority); compilation therefore succeeds, and the
+;; kernel-owned broker denies the :net/fetch request with
+;; :capability/missing — no lease exists for it, so the provider never
+;; runs.
+{:genome/format 1
+ :agent/id :network-capability
+ :agent/entry :graph/net
+ :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+ :modules {:topology "topology.edn"
+           :models "models.edn"
+           :memory "memory.edn"
+           :evolution "evolution.edn"}
+ :capabilities/requested #{:capability/network}
+ :evolution {:max-risk :behavioral
+             :mutable #{:parameters :prompts :skills :programs}}
+ :metadata {:name "network-capability"
+            :description "requests a network capability the host never grants (Task 11.1)"}}

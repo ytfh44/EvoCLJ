@@ -1,0 +1,23 @@
+;; Hostile Genome fixture — Task 11.1 (adversarial release gate).
+;;
+;; Every program in this bundle carries an ambient-authority form the
+;; closed SCI context (Global Constraint 7) must deny: System/getenv,
+;; java.io.File, Runtime.getRuntime/exec, ProcessBuilder, slurp, spit,
+;; load-file, and eval. The compiler's static policy gate must reject
+;; the bundle at compile time (:program/policy-violation); even if the
+;; source somehow reached the sandbox, the closed SCI context denies it
+;; at analysis/eval time, so the malicious program NEVER RUNS any of
+;; these forms.
+{:genome/format 1
+ :agent/id :sci-hostile
+ :agent/entry :graph/hostile
+ :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+ :modules {:topology "topology.edn"
+           :models "models.edn"
+           :memory "memory.edn"
+           :evolution "evolution.edn"}
+ :capabilities/requested #{:tool/call}
+ :evolution {:max-risk :behavioral
+             :mutable #{:parameters :prompts :skills :programs}}
+ :metadata {:name "sci-hostile"
+            :description "deliberately hostile Genome — ambient-authority forms (Task 11.1)"}}

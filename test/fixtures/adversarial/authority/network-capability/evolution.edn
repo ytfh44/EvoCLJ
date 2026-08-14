@@ -1,0 +1,2 @@
+{:evolution {:max-risk :behavioral
+             :mutable #{:parameters :prompts :skills :programs}}}

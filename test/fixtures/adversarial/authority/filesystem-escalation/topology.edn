@@ -1,0 +1,12 @@
+;; Filesystem-escalation topology — Task 11.1. The :sci router emits a
+;; :fixture/path-resolve request for \"/\" — the filesystem root,
+;; broader than the host grant of /protected/work. The broker decides
+;; on the NORMALIZED resource and scope-denies it.
+{:graph/id :graph/fs
+ :entry :node/router
+ :nodes
+ {:node/router {:node/type :sci
+                :program :program/route
+                :next :node/emit}
+  :node/emit   {:node/type :emit}}
+ :limits {:max-steps 64}}

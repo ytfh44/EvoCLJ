@@ -1,0 +1,23 @@
+;; Filesystem-escalation Genome fixture — Task 11.1 (adversarial release
+;; gate).
+;;
+;; This Genome's program DEMANDS the filesystem ROOT (\"/\") — broader
+;; than any sane host grant. The host grants only /protected/work; the
+;; broker normalizes the raw request and decides coverage on the
+;; canonical resource, so the over-broad request is denied with
+;; :capability/scope-denied before the filesystem provider ever runs.
+;; The manifest requests the filesystem capability — a declaration
+;; only; the grant is the host's, and it is narrower.
+{:genome/format 1
+ :agent/id :filesystem-escalation
+ :agent/entry :graph/fs
+ :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+ :modules {:topology "topology.edn"
+           :models "models.edn"
+           :memory "memory.edn"
+           :evolution "evolution.edn"}
+ :capabilities/requested #{:capability/filesystem}
+ :evolution {:max-risk :behavioral
+             :mutable #{:parameters :prompts :skills :programs}}
+ :metadata {:name "filesystem-escalation"
+            :description "demands filesystem scope broader than the host grant (Task 11.1)"}}

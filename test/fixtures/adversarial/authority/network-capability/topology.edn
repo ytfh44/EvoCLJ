@@ -1,0 +1,12 @@
+;; Network-capability topology — Task 11.1. The :sci router emits a
+;; :net/fetch tool call; the :emit node completes. The broker denies
+;; the emitted intent (:capability/missing) because the host issued no
+;; network lease.
+{:graph/id :graph/net
+ :entry :node/router
+ :nodes
+ {:node/router {:node/type :sci
+                :program :program/route
+                :next :node/emit}
+  :node/emit   {:node/type :emit}}
+ :limits {:max-steps 64}}
