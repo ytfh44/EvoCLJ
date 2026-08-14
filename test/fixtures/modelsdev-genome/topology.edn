@@ -1,0 +1,6 @@
+{:graph/id :graph/llm
+ :entry :node/llm
+ :nodes
+ {:node/llm  {:node/type :llm :model :planner :next :node/emit}
+  :node/emit {:node/type :emit}}
+ :limits {:max-steps 16}}

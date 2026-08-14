@@ -1,0 +1,13 @@
+{:genome/format 1
+ :agent/id :llm-fixture
+ :agent/entry :graph/llm
+ :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+ :modules {:topology "topology.edn"
+           :models "models.edn"
+           :memory "memory.edn"
+           :evolution "evolution.edn"}
+ :capabilities/requested #{:model/call}
+ :evolution {:max-risk :behavioral
+             :mutable #{:parameters :prompts :skills :programs}}
+ :metadata {:name "llm-fixture"
+            :description "post-v0 extension 1 fixture: one :llm node"}}
