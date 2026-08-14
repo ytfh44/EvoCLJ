@@ -120,8 +120,10 @@
   :resolution, :phenotype), and :scheduler/task-input-invalid
   (:reason :not-edn-safe — nothing non-EDN crosses this boundary)."
   (:require [evoclj.genome.types :as types]
+            [evoclj.intent.core :as intent]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
+            [evoclj.provider.dialect :as dialect]
             [evoclj.runtime.node :as node]
             [evoclj.sci.boundary :as boundary]
             [evoclj.store.cas :as cas]
@@ -265,7 +267,8 @@
 
   A denied or failed intent is a node-level outcome: the session
   continues. Returns {:last-event <the final event appended>
-  :outputs <the updated accumulated outputs>}."
+  :outputs <the updated accumulated outputs>
+  :outcome :ok | :denied | :failed}."
   [executor pin cause intent outputs]
   (let [proposed (append-event! executor pin cause :intent/proposed nil
                                 {:intent/id (:intent/id intent)
@@ -293,7 +296,8 @@
                         :tool/id tool-id
                         :result/status :ok})]
         {:last-event completed
-         :outputs (conj outputs (:value result))})
+         :outputs (conj outputs (:value result))
+         :outcome :ok})
       (if (= :capability/denied (:error/type result))
         {:last-event (append-event!
                       executor pin (:event/id proposed) :intent/denied nil
@@ -301,14 +305,120 @@
                        :intent/type (:intent/type intent)
                        :error/type :capability/denied
                        :reason (get-in result [:error/data :reason])})
-         :outputs outputs}
+         :outputs outputs
+         :outcome :denied}
         {:last-event (append-event!
                       executor pin (:event/id proposed) :intent/failed
                       (put-payload! executor (dissoc result :usage))
                       {:intent/id (:intent/id intent)
                        :intent/type (:intent/type intent)
                        :error/type (:error/type result)})
-         :outputs outputs}))))
+         :outputs outputs
+         :outcome :failed}))))
+
+
+(def ^:private max-tool-rounds-default 4)
+
+(defn- tool-map-of
+  "The wire function-name -> declaration map from a model-call
+  payload :tools vector (each {:name ... :tool <kw> ...})."
+  [intent]
+  (into {}
+        (map (fn [t] [(:name t) t]))
+        (get-in intent [:payload :tools])))
+
+(defn- tool-call-intent
+  "A validated :intent/tool-call for one model-requested tool call,
+  attributed to the same session/phenotype/node as the model-call
+  intent and chained to the causal event id. Carries a fresh
+  idempotency key: the tool may be a non-pure write and every
+  model-requested execution is its own request."
+  [intent cause tool-call tool-id]
+  (intent/tool-call
+   (:session/id intent)
+   (:phenotype/id intent)
+   (:node/id intent)
+   cause
+   {:tool/id tool-id :args (:tool/arguments tool-call)}
+   (:budget intent)))
+
+(defn- tool-result-msg
+  "The :role :tool message fed back to the model for one executed
+  tool call: the provider value on success, a short error text on
+  denial/failure (the model sees the failure as data and may react)."
+  [tool-call outcome value]
+  {:role :tool
+   :tool-call-id (:tool/call-id tool-call)
+   :content (if (= :ok outcome)
+              (pr-str value)
+              (str "error: " (name outcome)))})
+
+(defn- execute-tool-calls!
+  "Execute every model-requested tool call through the broker (each
+  its own :intent/tool-call with full event persistence) and collect
+  the tool-result messages. Unknown tool names fail the session with
+  :scheduler/unknown-tool (the tool-map is host-declared; the model
+  cannot invent tools)."
+  [executor pin cause intent calls]
+  (loop [acc {:last-event cause :outputs [] :tool-msgs []}
+         calls (seq calls)]
+    (if-let [{:keys [call tool-id]} (first calls)]
+      (let [cause-id (if (map? (:last-event acc))
+                       (:event/id (:last-event acc))
+                       (:last-event acc))
+            step (dispatch-intent!
+                  executor pin cause-id
+                  (tool-call-intent intent cause-id call tool-id)
+                  (:outputs acc))
+            value (peek (:outputs step))]
+        (recur {:last-event (:last-event step)
+                :outputs (:outputs step)
+                :tool-msgs (conj (:tool-msgs acc)
+                                 (tool-result-msg call (:outcome step) value))}
+               (next calls)))
+      acc)))
+
+(defn- dispatch-with-tools!
+  "Dispatch one intent with the model tool-calling loop (post-v0
+  extension 1): after a :intent/model-call whose result carries
+  :tool-calls, each requested tool runs through the broker — never
+  inside the provider — and the conversation continues with the
+  assistant tool-call declaration plus the tool results until the
+  model stops requesting tools or :max-tool-rounds is consumed
+  (default 4, overridable via the payload :options). Every dispatch
+  persists its full effect protocol. Returns {:last-event <event>
+  :outputs <accumulated>}."
+  [executor pin cause intent outputs]
+  (let [rounds (get-in intent [:payload :options :max-tool-rounds]
+                       max-tool-rounds-default)
+        tool-map (tool-map-of intent)]
+    (loop [intent intent cause cause outputs outputs rounds rounds]
+      (let [cause-id (if (map? cause) (:event/id cause) cause)
+            step (dispatch-intent! executor pin cause-id intent outputs)
+            value (peek (:outputs step))
+            tool-calls (when (= :intent/model-call (:intent/type intent))
+                         (:tool-calls value))]
+        (if (and (seq tool-calls) (pos? rounds) (seq tool-map))
+          (let [calls (mapv (fn [tc]
+                              (if-let [t (get tool-map (:tool/name tc))]
+                                {:call tc :tool-id (:tool t)}
+                                (throw (err/error :scheduler/unknown-tool
+                                                  (str "model requested unknown tool "
+                                                       (:tool/name tc))
+                                                  {:tool/name (:tool/name tc)}))))
+                            tool-calls)
+                executed (execute-tool-calls! executor pin (:last-event step) intent calls)
+                assistant-msg {:role :assistant
+                               :content (get-in value [:model/output :text] "")
+                               :tool-calls (dialect/tool-calls->wire tool-calls)}
+                next-messages (into (get-in intent [:payload :messages])
+                                    (cons assistant-msg (:tool-msgs executed)))
+                next-intent (assoc-in intent [:payload :messages] next-messages)]
+            (recur next-intent
+                   (:last-event executed)
+                   (:outputs executed)
+                   (dec rounds)))
+          step)))))
 
 ;; --- terminal session outcomes ----------------------------------------------
 
@@ -543,9 +653,10 @@
                                   dispatch-result
                                   (try
                                     (reduce (fn [{:keys [last-event outputs]} intent]
-                                              (dispatch-intent! executor pin
-                                                                (:event/id last-event)
-                                                                intent outputs))
+                                              (dispatch-with-tools!
+                                               executor pin
+                                               (:event/id last-event)
+                                               intent outputs))
                                             {:last-event completed
                                              :outputs (into outputs (:outputs transition))}
                                             (:intents transition))

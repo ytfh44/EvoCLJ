@@ -12,8 +12,12 @@
   registry keys on.
 
   The input-event payload becomes a single :user message. Optional
-  node keys: :system (a system prompt string) and :options (call
-  options such as {:temperature 0.5 :max-tokens 1024}). Attribution
+  node keys: :system (a system prompt string), :options (call
+  options such as {:temperature 0.5 :max-tokens 1024}, plus
+  :max-tool-rounds for the tool-calling loop, default 4), and :tools
+  (function-tool declarations [{:name :description :parameters
+  :tool}] — :tool maps the wire function name back to the EvoCLJ
+  tool id the scheduler executes through the broker). Attribution
   comes from runtime-state and the input-event (Global Constraint
   20)."
   (:require [evoclj.intent.core :as intent]
@@ -44,9 +48,11 @@
               messages (if (:system node)
                          [{:role :system :content (:system node)} user-msg]
                          [user-msg])
-              payload {:model/id (:provider-model resolved)
-                       :messages messages
-                       :options (:options node)}
+              payload (cond-> {:model/id (:provider-model resolved)
+                               :messages messages
+                               :options (merge {:max-tool-rounds 4}
+                                               (:options node))}
+                        (:tools node) (assoc :tools (:tools node)))
               intent (intent/model-call
                       (:session/id runtime-state)
                       (:phenotype/id runtime-state)

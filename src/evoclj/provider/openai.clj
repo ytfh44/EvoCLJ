@@ -64,7 +64,8 @@
                                               ChatCompletionCreateParams$Body
                                               ChatCompletionUserMessageParam
                                               ChatCompletionSystemMessageParam
-                                              ChatCompletionAssistantMessageParam)))
+                                              ChatCompletionAssistantMessageParam
+                                              ChatCompletionToolMessageParam)))
 
 ;; --- schemas ------------------------------------------------------------------
 
@@ -86,6 +87,11 @@
    [:model/output [:map {:closed false}
                    [:text string?]
                    [:reasoning {:optional true} string?]]]
+   [:tool-calls {:optional true}
+    [:vector [:map {:closed false}
+              [:tool/call-id string?]
+              [:tool/name string?]
+              [:tool/arguments :map]]]]
    [:usage [:map {:closed true}
             [:model-input-tokens :int]
             [:model-output-tokens :int]]]
@@ -124,9 +130,13 @@
                             {:reason :not-edn-safe :value (err/sanitize x)}))))
 
 (defn- message->param
-  "Convert one EDN message {:role :system|:user|:assistant
-  :content <string>} into the SDK message param. Other roles are
-  rejected (v1 has no tool-calling loop)."
+  "Convert one EDN message into the SDK message param. Roles:
+  :system/:user/:assistant carry :content; :assistant may also carry
+  :tool-calls (the model's own tool-call declarations, serialized as
+  raw JSON via additionalProperties — the SDK's typed tool-call
+  builder is a sealed union, so raw is the portable path); :tool
+  messages carry :tool-call-id + :content and become
+  ChatCompletionToolMessageParam. Any other role is rejected."
   [msg]
   (let [role (:role msg)
         content (:content msg)]
@@ -137,7 +147,20 @@
     (case role
       :system (.build (.content (ChatCompletionSystemMessageParam/builder) content))
       :user (.build (.content (ChatCompletionUserMessageParam/builder) content))
-      :assistant (.build (.content (ChatCompletionAssistantMessageParam/builder) content))
+      :assistant (let [b (.content (ChatCompletionAssistantMessageParam/builder) content)]
+                   (if-let [tool-calls (:tool-calls msg)]
+                     (.build (.putAdditionalProperty
+                              b "tool_calls" (JsonValue/from (edn->json tool-calls))))
+                     (.build b)))
+      :tool (do
+              (when-not (and (string? (:tool-call-id msg))
+                             (not (str/blank? (:tool-call-id msg))))
+                (throw (err/error :provider/input-invalid
+                                  "tool message must carry a :tool-call-id string"
+                                  {:reason :messages-invalid :value (err/sanitize msg)})))
+              (.build (.toolCallId
+                       (.content (ChatCompletionToolMessageParam/builder) content)
+                       (:tool-call-id msg))))
       (throw (err/error :provider/input-invalid
                         (str "unsupported message role " role)
                         {:reason :unsupported-role :role role})))))
@@ -150,19 +173,40 @@
   (second (str/split model-id #"/")))
 
 (defn- supported-option?
-  "The v1 supported call options."
+  "The v1 supported call options. :max-tool-rounds is a
+  scheduler-level option (the model tool-calling loop bound) — the
+  adapter validates it but never serializes it to the wire."
   [k]
   (contains? #{:temperature :max-tokens :seed :reasoning
-              :server-side-search} k))
+              :server-side-search :max-tool-rounds} k))
+
+(defn- wire-tools
+  "The wire tools declaration from the payload :tools vector:
+  each entry {:name :description :parameters :tool} becomes the
+  OpenAI function-tool shape; the internal :tool id (the mapping
+  back to the EvoCLJ tool) is stripped before serialization."
+  [tools]
+  (mapv (fn [t]
+          (cond-> {:type "function"
+                   :function {:name (:name t)
+                              :description (or (:description t) "")
+                              :parameters (or (:parameters t) {})}}
+            (contains? t :tool) (assoc :tool/id (:tool t))))
+        tools))
 
 (defn- build-params
   "Build the SDK ChatCompletionCreateParams from the authorized EDN
   request: the body is assembled on the SDK Body builder (model,
   messages, supported options via builder methods, dialect extras
-  via putAdditionalProperty) and attached to the outer params."
+  and the tools declaration via putAdditionalProperty) and attached
+  to the outer params."
   [request dialect]
   (let [opts (or (:options request) {})
         extra (dialect/openai-request-extra dialect opts)
+        extra (if (seq (:tools request))
+                (assoc extra :tools (mapv #(dissoc % :tool/id)
+                                          (wire-tools (:tools request))))
+                extra)
         b (-> (ChatCompletionCreateParams$Body/builder)
               (.model (model-request-name (:model/id request))))
         b (reduce (fn [b m] (.addMessage b (message->param m)))
@@ -328,11 +372,19 @@
               (throw (err/error :provider/input-invalid
                                 (str "unsupported model-call option " k)
                                 {:reason :unknown-option :option k}))))
+          (when (and (:tools payload)
+                     (not (and (vector? (:tools payload))
+                               (every? map? (:tools payload)))))
+            (throw (err/error :provider/input-invalid
+                              "model-call payload :tools must be a vector of maps"
+                              {:reason :tools-invalid
+                               :value (err/sanitize (:tools payload))})))
           {:model/id full-id
            :resource {:kind :model :id full-id :provider provider-id}
            :request {:model/id full-id
                      :messages (:messages payload)
-                     :options (:options payload)}}))
+                     :options (:options payload)
+                     :tools (:tools payload)}}))
       (execute-request! [_ authorized-request]
         (when-not (and (map? authorized-request) (:request authorized-request))
           (throw (err/error :provider/request-invalid
@@ -346,8 +398,11 @@
               raw (execute-raw! client params)
               parsed (parse-http-response! raw dialect)
               usage (:usage parsed)
-              cost (dialect/estimate-cost (:model/cost entry) usage)]
-          (dialect/provider-result (:model/output parsed) usage cost))))))
+              cost (dialect/estimate-cost (:model/cost entry) usage)
+              result (dialect/provider-result (:model/output parsed) usage cost)]
+          (if (:tool-calls parsed)
+            (assoc result :tool-calls (:tool-calls parsed))
+            result))))))
 
 (defn served-models
   "The full model ids an endpoint serves (for diagnostics)."

@@ -46,7 +46,8 @@
 
   No secrets, no fns, no host objects: this namespace is safe to
   unit test exhaustively offline."
-  (:require [clojure.string :as str]))
+  (:require [cheshire.core :as json]
+            [clojure.string :as str]))
 
 ;; --- request side -------------------------------------------------------------
 
@@ -123,6 +124,18 @@
 
 ;; --- response side ------------------------------------------------------------
 
+(defn- parse-tool-arguments
+  "Parse a tool-call arguments JSON string into a map; malformed or
+  non-map arguments become an empty map (the call still executes
+  with no args — the tool's own input schema rejects bad shapes)."
+  [s]
+  (if (and (string? s) (seq s))
+    (try
+      (let [parsed (json/parse-string s true)]
+        (if (map? parsed) parsed {}))
+      (catch Exception _ {}))
+    {}))
+
 (defn parse-openai-response
   "Parse a decoded OpenAI-compatible chat-completions response map
   into the canonical provider result.
@@ -146,6 +159,16 @@
         reasoning (when (and (not= :none interleaved) (map? message))
                     (or (get message interleaved)
                         (get message (name interleaved))))
+        raw-tools (when (map? message) (:tool_calls message))
+        tool-calls (when (vector? raw-tools)
+                     (keep (fn [tc]
+                             (when (and (map? tc) (map? (:function tc)))
+                               {:tool/call-id (:id tc)
+                                :tool/name (get-in tc [:function :name])
+                                :tool/arguments (parse-tool-arguments
+                                                 (get-in tc [:function :arguments]))}))
+                           raw-tools))
+        tool-calls (seq tool-calls)
         usage (:usage response)]
     (when-not (and (vector? choices) (seq choices) (map? message))
       (throw (ex-info "openai response has no usable first choice"
@@ -156,12 +179,27 @@
                               (assoc :reasoning (str reasoning)))
              :usage {:input-tokens (get-in usage [:prompt_tokens] 0)
                      :output-tokens (get-in usage [:completion_tokens] 0)}}
+      tool-calls (assoc :tool-calls (vec tool-calls))
       (map? usage) (assoc :model/raw-usage (select-keys usage
                                                  [:prompt_tokens
                                                   :completion_tokens
                                                   :total_tokens
                                                   :prompt_tokens_details
                                                   :completion_tokens_details])))))
+
+(defn tool-calls->wire
+  "Convert the parsed tool-call records [{:tool/call-id :tool/name
+  :tool/arguments <map>} ...] into the OpenAI wire shape for an
+  assistant message: [{:id <str> :type \"function\" :function
+  {:name <str> :arguments <json-string>}} ...] — the exact shape
+  the follow-up request must echo back."
+  [tool-calls]
+  (mapv (fn [tc]
+          {:id (:tool/call-id tc)
+           :type "function"
+           :function {:name (:tool/name tc)
+                      :arguments (json/generate-string (:tool/arguments tc))}})
+        tool-calls))
 
 (defn parse-anthropic-response
   "Parse a decoded Anthropic messages response map into the

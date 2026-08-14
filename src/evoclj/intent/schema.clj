@@ -72,11 +72,15 @@
 (def PayloadModelCallSchema
   "A model-call payload: the model referenced by its full models.dev
   id (a string like \"deepseek/deepseek-v4-flash\", or a keyword
-  accepted for compatibility) and the messages as a vector of
-  message maps. Open to further keys."
+  accepted for compatibility), the messages as a vector of message
+  maps, and an optional :tools vector of function-tool declarations
+  (each {:name :description :parameters :tool} — :tool is the
+  internal mapping back to the EvoCLJ tool id, stripped before
+  serialization). Open to further keys."
   [:map {:closed false}
    [:model/id [:or keyword? string?]]
-   [:messages [:vector :map]]])
+   [:messages [:vector :map]]
+   [:tools {:optional true} [:vector :map]]])
 
 (def PayloadToolCallSchema
   "A tool-call payload: the tool referenced by keyword and its argument

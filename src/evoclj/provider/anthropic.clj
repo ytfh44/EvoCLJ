@@ -84,7 +84,7 @@
 (defn- supported-option?
   "v1 supported call options: temperature and max-tokens."
   [k]
-  (contains? #{:temperature :max-tokens} k))
+  (contains? #{:temperature :max-tokens :max-tool-rounds} k))
 
 (defn- build-params
   "Build the SDK MessageCreateParams: system messages become the
