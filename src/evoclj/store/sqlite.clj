@@ -24,16 +24,27 @@
     db))
 
 (defn enable-foreign-keys!
-  "Enable SQLite foreign-key enforcement on the given open connection.
-  Returns the connection."
+  "Enable SQLite foreign-key enforcement on `db` (a path string, a
+  java.jdbc spec, or the spec-with-connection map bound by `with-db`).
+  java.jdbc high-level functions accept any of these; returns the
+  input unchanged."
   [conn]
   (jdbc/execute! conn ["PRAGMA foreign_keys = ON"])
   conn)
 
 (defmacro with-db
-  "Open a connection to `db` (a path string or java.jdbc spec), enable
-  SQLite foreign-key enforcement, bind it to `conn-binding`, run body,
-  and close the connection."
+  "Run `body` on a single open connection to `db` (a path string or
+  java.jdbc spec), with SQLite foreign-key enforcement enabled, and
+  close the connection afterwards.
+
+  IMPORTANT CONTRACT: `conn-binding` is bound to the java.jdbc
+  spec-with-connection MAP (jdbc/with-db-connection semantics — the
+  map carries the live java.sql.Connection under its `:connection`
+  key), NOT to a raw Connection. Pass it to java.jdbc high-level
+  functions (insert!/query/execute!/update!) — never to raw JDBC
+  primitives. Code that needs a raw java.sql.Connection (e.g.
+  evoclj.promotion.current/cas-current!) must obtain one explicitly
+  with (clojure.java.jdbc/get-connection spec) or (:connection spec)."
   [[conn-binding db] & body]
   `(jdbc/with-db-connection [~conn-binding (evoclj.store.sqlite/spec ~db)]
      (evoclj.store.sqlite/enable-foreign-keys! ~conn-binding)

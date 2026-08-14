@@ -36,14 +36,7 @@ CURRENT row exists pointing at the winner. The concurrency suite
 (`test/evoclj/adversarial/concurrency_test.clj`) additionally pins the
 races with latches + the `:failpoint` seam.
 
-**Finding (API contract, not a bug).** `sqlite/with-db` binds the **db spec**
-(map), not a `java.sql.Connection` — its docstring says "connection", which
-is misleading. This is load-bearing design: java.jdbc high-level fns take
-the spec, while raw primitives (`cas-current!`, `read-current`) require an
-explicit `(jdbc/get-connection spec)` — exactly the split `promote.clj`
-follows. Any future caller passing a `with-db` binding to a raw-JDBC
-primitive will get a confusing `ClassCastException`. Recommended follow-up:
-clarify the docstring (or bind a Connection and let java.jdbc accept it).
+**Finding (doc/API contract — FIXED).** `sqlite/with-db`'s docstring said it binds a "connection"; the binding is actually the java.jdbc **spec-with-connection map** (`jdbc/with-db-connection` semantics — the live `java.sql.Connection` lives under the map's `:connection` key), as `candidate.clj`/`session.clj` docstrings already recorded. Code and comments disagreed — and the disagreement ran both ways (one docstring said "connection", two said "spec-with-connection map"). Audited every `with-db` call site: no latent misuse exists — java.jdbc high-level fns receive the spec-with-connection map, and the raw-JDBC primitives (`cas-current!`, `read-current`) receive an explicit `(jdbc/get-connection spec)` (as `promote.clj`/`rollback.clj` do). Both docstrings (`with-db`, `enable-foreign-keys!`) were rewritten to state the exact contract; the code needed no change.
 
 ## 2. Event hash-chain tamper-evidence — `verify2_hashchain.clj`
 
@@ -134,7 +127,7 @@ rejected with `:session/invalid-transition` — 66 checks.
 
 | # | Finding | Severity | Action |
 | --- | --------- | ---------- | -------- |
-| 1 | `sqlite/with-db` docstring says "connection" but binds the db spec | Low (doc/API contract) | Clarify docstring; callers of raw-JDBC primitives must use `jdbc/get-connection` explicitly (as `promote.clj` does) |
+| 1 | `with-db`/`enable-foreign-keys!` docstrings contradicted the real binding (spec-with-connection map, not a raw Connection) | Low (doc) | **Fixed**: docstrings rewritten to the exact contract; all call sites audited — no latent misuse, no code change needed |
 | 2 | Statement-level CAS is broken in 4/6 interleavings | Informational | Confirms the necessity of BEGIN IMMEDIATE; already relied upon, now formally justified |
 | 3 | Canary uniformity confirmed empirically (z ≤ 0.62 over 10k keys) | Informational | Binomial model holds; allocation percentages are accurate |
 | 4–7 | All invariants hold under exhaustive/real-code verification | — | No changes required |
