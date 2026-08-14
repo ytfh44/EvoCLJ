@@ -140,4 +140,20 @@
           :adapter-version "1"}}
   ;; :derive — a fresh host operator session uuid; the Task 10.2 CLI
   ;; overrides it with the real operator session for actual promotions
-  :event/session-id :derive}}
+  :event/session-id :derive}
+
+ ;; post-v0 extension 1 — real model providers. The catalog is
+ ;; auto-refreshed at every startup (fetched from models.dev,
+ ;; cached under the state dir, offline fallback to the cache);
+ ;; the model registry is built from it with per-provider API keys
+ ;; from the environment (the catalog's :env declarations) or the
+ ;; :registry/api-keys overrides below.
+ :modelsdev/catalog
+ {:url "https://models.dev/api.json"
+  :cache-dir "catalog"
+  :ttl-hours 24
+  :timeout-ms 30000}
+
+ :model/registry
+ {:catalog #ig/ref :modelsdev/catalog
+  :registry/api-keys {}}

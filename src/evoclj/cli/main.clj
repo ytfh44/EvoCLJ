@@ -32,6 +32,7 @@
             [clojure.string :as str]
             [evoclj.cli.evolution :as evolution]
             [evoclj.cli.genome :as genome]
+            [evoclj.cli.model :as model]
             [evoclj.cli.promotion :as promotion]
             [evoclj.cli.session :as session]
             [evoclj.kernel.error :as err]))
@@ -79,6 +80,8 @@
    ["replay"]                 {:fn session/replay! :arity 0}
    ["events"]                 {:fn session/events! :arity 0}
    ["capability" "inspect"]   {:fn session/capability-inspect! :arity 0}
+   ["model" "list"]            {:fn model/model-list! :arity 0}
+   ["model" "inspect"]         {:fn model/model-inspect! :arity 1}
    ["evolve"]                 {:fn evolution/evolve! :arity 0}
    ["candidate" "list"]       {:fn evolution/candidate-list! :arity 0}
    ["candidate" "inspect"]    {:fn evolution/candidate-inspect! :arity 1}

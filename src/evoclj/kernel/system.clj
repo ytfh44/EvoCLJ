@@ -72,6 +72,8 @@
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
             [evoclj.provider.fixture :as fixture]
+            [evoclj.provider.model-registry :as model-registry]
+            [evoclj.provider.modelsdev :as modelsdev]
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.scheduler :as scheduler]
             [evoclj.runtime.system]
@@ -93,13 +95,17 @@
 (def evolution-system-key :evolution/system)
 (def eval-system-key :eval/system)
 (def promotion-system-key :promotion/system)
+(def modelsdev-catalog-key :modelsdev/catalog)
+(def model-registry-key :model/registry)
 
 (def host-component-keys
-  "The normative Integrant-owned host component set (Task 10.1).
-  Genome graph nodes are NOT in this set."
+  "The normative Integrant-owned host component set (Task 10.1 plus
+  post-v0 extension 1: the models.dev catalog and the model
+  registry). Genome graph nodes are NOT in this set."
   [store-sqlite-key store-cas-key provider-registry-key
    capability-broker-key runtime-executor-key evolution-system-key
-   eval-system-key promotion-system-key])
+   eval-system-key promotion-system-key modelsdev-catalog-key
+   model-registry-key])
 
 ;; --- path resolution ---------------------------------------------------------
 
@@ -124,7 +130,9 @@
   [[[:store/sqlite] "EVOCLJ_DB_PATH"]
    [[:store/cas :root] "EVOCLJ_CAS_ROOT"]
    [[:evolution/system :genome-root] "EVOCLJ_GENOME_ROOT"]
-   [[:evolution/system :candidates-dir] "EVOCLJ_CANDIDATES_DIR"]])
+   [[:evolution/system :candidates-dir] "EVOCLJ_CANDIDATES_DIR"]
+   [[:modelsdev/catalog :url] "EVOCLJ_CATALOG_URL"]
+   [[:modelsdev/catalog :cache-dir] "EVOCLJ_CATALOG_CACHE_DIR"]])
 
 (defn- apply-env-overrides
   "Override scalar config entries from `env` (defaults to
@@ -175,6 +183,8 @@
           (update-in [:evolution/system :candidates-dir]
                      #(resolve-config-path base %))
           (update-in [:promotion/system :genome-root]
+                     #(when % (resolve-config-path base %)))
+          (update-in [:modelsdev/catalog :cache-dir]
                      #(when % (resolve-config-path base %)))
           (resolve-map-paths [:eval/system :genome/roots] base)
           (resolve-map-paths [:eval/system :dataset/roots] base)))))
@@ -428,4 +438,52 @@
 (defmethod ig/halt-key! :promotion/system
   [_ _component]
   "The promotion-system is a plain data map; nothing to close."
+  nil)
+
+;; --- :modelsdev/catalog and :model/registry (post-v0 extension 1) --------------
+
+(defn- catalog-config
+  "Translate the component config subtree (bare keys, matching the
+  system.edn style of the other components) into the namespaced
+  :catalog/* config the catalog service validates."
+  [config]
+  (into {}
+        (filter (fn [[_ v]] (some? v)))
+        {:catalog/url (:url config)
+         :catalog/cache-dir (:cache-dir config)
+         :catalog/ttl-hours (or (:ttl-hours config) 24)
+         :catalog/timeout-ms (or (:timeout-ms config) 30000)
+         :catalog/base-urls (:base-urls config)
+         :catalog/style-overrides (:style-overrides config)
+         :catalog/dialect-overrides (:dialect-overrides config)}))
+
+(defmethod ig/init-key :modelsdev/catalog
+  [_ config]
+  "Build the :modelsdev/catalog component: refresh the models.dev
+  catalog at startup (the operator requirement — the catalog is
+  auto-updated on every startup, cached under the state dir, and the
+  cached copy is used when the network is unavailable). The component
+  value is the refresh result {:catalog/status ... :catalog/data ...}."
+  (modelsdev/refresh-catalog! (catalog-config config)))
+
+(defmethod ig/halt-key! :modelsdev/catalog
+  [_ _component]
+  "The catalog result is plain data; nothing to close."
+  nil)
+
+(defmethod ig/init-key :model/registry
+  [_ config]
+  "Build the :model/registry component: the kernel-owned model
+  registry atom (post-v0 extension 1) from the catalog data and the
+  :registry/api-keys config. The catalog component must be injected
+  as :catalog."
+  (let [catalog (:catalog config)
+        index (get-in catalog [:catalog/data :catalog/models] {})]
+    (model-registry/build-model-registry
+     index
+     (dissoc config :catalog))))
+
+(defmethod ig/halt-key! :model/registry
+  [_ _component]
+  "The registry is a host atom; nothing to close."
   nil)

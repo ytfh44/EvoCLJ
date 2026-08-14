@@ -204,7 +204,19 @@
                ;; candidate/current Genome (promote!/rollback! consume
                ;; it); a :derive would try to compile the genomes dir
                ;; as a bundle at host init
-               :event/session-id :derive}}
+               :event/session-id :derive}
+               ;; post-v0 extension 1: the models.dev catalog
+               ;; (auto-refreshed at every startup, cached under the
+               ;; state dir, offline fallback) and the kernel-owned
+               ;; model registry built from it
+               :modelsdev/catalog
+               {:url "https://models.dev/api.json"
+                :cache-dir (str root "/catalog")
+                :ttl-hours 24
+                :timeout-ms 30000}
+               :model/registry
+               {:catalog (ig/ref :modelsdev/catalog)
+                :registry/api-keys {}}}
         overrides (:overrides opts)]
     (if overrides (deep-merge base overrides) base)))
 
@@ -216,6 +228,7 @@
   (doseq [d [(str (state-dir opts) "/db")
              (genomes-dir opts)
              (candidates-dir opts)
+             (str (state-dir opts) "/catalog")
              (str (state-dir opts) "/evals/evolution")
              (str (state-dir opts) "/evals/selection")
              (str (state-dir opts) "/evals/audit")]]
@@ -392,6 +405,23 @@
      :issued-at now
      :expires-at (Date. (+ (.getTime now) 60000))}))
 
+(defn- model-lease
+  "One per-session CapabilityLease granting this phenotype's exact id
+  the :invoke action on ONE model resource for the next minute (the
+  CLI grants leases ONLY for the models the operator names with
+  --model, by their full models.dev id, e.g.
+  deepseek/deepseek-v4-flash; a visible model never grants resource
+  authority — Global Constraint 9)."
+  [phenotype-id model-id]
+  (let [now (Date.)]
+    {:cap/id (UUID/randomUUID)
+     :subject {:phenotype/id phenotype-id}
+     :resource {:kind :model :id model-id}
+     :actions #{:invoke}
+     :constraints {:max-calls 10000}
+     :issued-at now
+     :expires-at (Date. (+ (.getTime now) 60000))}))
+
 (defn- program-sources
   "Decode every compiled program's source text from the immutable
   loaded bundle :files (the CompiledGenome carries only :source/digest
@@ -473,6 +503,7 @@
                               "run requires --task <edn-file>"
                               {:usage "evoclj run --genome <id|current> --task <edn-file> [--tool <tool-id> ...]"})))
         tools (mapv parse-tool-id (get-in opts [:options :tool]))
+        models (mapv str (get-in opts [:options :model]))
         system (build-system opts)
         task (read-task-file task-file)]
     (let [generation (resolve-generation system opts genome-spec)
@@ -489,7 +520,10 @@
             reg (:provider/registry system)
             usage (atom {})
             phenotype-id (:compiled/phenotype-id compiled)
-            leases (mapv #(tool-lease phenotype-id %) tools)
+            leases (concat (mapv #(tool-lease phenotype-id %) tools)
+                             (mapv #(model-lease phenotype-id %) models))
+            leases (vec leases)
+            model-reg (:model/registry system)
             ph (phenotype/instantiate
                 compiled
                 {:stores {:sqlite :poison :cas {:root :poison}}
@@ -499,7 +533,8 @@
             executor {:phenotype ph
                       :stores {:sqlite db :cas cas-store}
                       :dispatch (dispatch/make-broker-context
-                                 {:registry reg :leases leases :usage usage})}
+                                 {:registry reg :leases leases :usage usage
+                                  :model-registry model-reg})}
             sid (:session/id
                  (session/create-session!
                   db
