@@ -31,6 +31,7 @@
   (:require [clojure.pprint :as pprint]
             [clojure.string :as str]
             [evoclj.cli.cost :as cost]
+            [evoclj.cli.eval-inspect :as eval-inspect]
             [evoclj.cli.evolution :as evolution]
             [evoclj.cli.genome :as genome]
             [evoclj.cli.model :as model]
@@ -87,6 +88,7 @@
    ["candidate" "list"]       {:fn evolution/candidate-list! :arity 0}
    ["candidate" "inspect"]    {:fn evolution/candidate-inspect! :arity 1}
    ["eval"]                   {:fn evolution/eval! :arity 0}
+   ["eval-inspect"]           {:fn eval-inspect/eval-inspect! :arity 1}
    ["cycle"]                  {:fn evolution/cycle! :arity 0}
    ["promote"]                {:fn promotion/promote! :arity 0}
    ["rollback"]               {:fn promotion/rollback! :arity 0}

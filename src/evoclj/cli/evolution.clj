@@ -11,7 +11,8 @@
   API; it uses the read-only SELECT helper of evoclj.cli.session over
   the candidates table ONLY (never generations, never a write) and
   maps the rows back to the public Candidate contract shape."
-  (:require [evoclj.cli.session :as session]
+  (:require [clojure.edn :as edn]
+            [evoclj.cli.session :as session]
             [evoclj.compiler.core :as compiler]
             [evoclj.eval.core :as eval-core]
             [evoclj.evolution.candidate :as candidate]
