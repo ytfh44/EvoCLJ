@@ -73,9 +73,14 @@
        :seed <string>                                  ; OPTIONAL — G5
        :workspace/root <dir>                           ; OPTIONAL — G3
        :measure/cost (fn [bundle-root] -> number)      ; OPTIONAL — G6;
-       ;   absent → the :cost section is EMPTY (no fabricated cost
-       ;   claims — v0 has no scheduler token/latency telemetry
-       ;   contract, Global Constraint 24)
+       ;   when present it is the v0 cost instrument. When ABSENT but
+       ;   the G5 paired result carries real model usage, the :cost
+       ;   section is DERIVED from the aggregated :model-cost-units
+       ;   (:provider-reported-cost fallback) of the parent and
+       ;   candidate sides (Feature C). Only when NEITHER exists is
+       ;   the :cost section EMPTY — no fabricated cost claims (v0 has
+       ;   no scheduler token/latency telemetry contract, Global
+       ;   Constraint 24)
        :store-details! (fn [details] -> ref)           ; OPTIONAL —
        ;   default: CAS content-hash artifact ref (Global
        ;   Constraint 21)
@@ -101,7 +106,8 @@
               :paired {:parent :pass :candidate ...
                        :violations [<critical paired losses>]}}
        :utility {:task/success {:parent rate :candidate rate}}  ; from G5
-       :cost {:cost/units {:parent n :candidate n}}            ; :measure/cost, else {}
+       :cost {:cost/units {:parent n :candidate n}}            ; :measure/cost,
+       ;   else derived from parent/candidate model usage; else {}
        :complexity {:genome-bytes {...} :graph-nodes {...}}}   ; measured
 
   The eligibility decision is compare/eligibility over that summary —
@@ -529,12 +535,27 @@
                         StandardCharsets/UTF_8)]
     (count (:nodes (edn/read-string source)))))
 
+(defn- usage-model-cost-units
+  "The model cost units from one side's aggregated runtime.usage
+  sample: the canonical :model-cost-units counter when present, else
+  :provider-reported-cost (the accepted fallback counter key), else 0
+  when the side carried no model cost."
+  [usage]
+  (or (:model-cost-units usage)
+      (:provider-reported-cost usage)
+      0))
+
 (defn- cost-section
   "The :cost summary section. The evaluator's :measure/cost fn (root →
-  number) is the v0 cost instrument; when absent the section is EMPTY
-  — no fabricated cost claims (v0 has no scheduler token/latency
-  telemetry contract; Global Constraint 24)."
-  [evaluator parent-root candidate-root]
+  number) is the v0 cost instrument; when ABSENT but the G5 paired
+  result carries real model usage, the cost is DERIVED from the
+  aggregated :model-cost-units (:provider-reported-cost fallback) of
+  the parent and candidate sides — mirroring the :cost {:cost/units
+  {:parent n :candidate n}} shape (Feature C). When neither
+  :measure/cost nor model usage exists the section stays EMPTY — no
+  fabricated cost claims (v0 has no scheduler token/latency telemetry
+  contract; Global Constraint 24)."
+  [evaluator paired-result parent-root candidate-root]
   (if-let [m (:measure/cost evaluator)]
     (let [parent (m parent-root)
           candidate (m candidate-root)]
@@ -544,7 +565,17 @@
                           {:parent parent :candidate candidate})))
       {:cost {:cost/units {:parent (double parent)
                            :candidate (double candidate)}}})
-    {:cost {}}))
+    (let [parent-usage (get-in paired-result [:parent :usage])
+          candidate-usage (get-in paired-result [:candidate :usage])
+          parent-cost? (contains? (or parent-usage {}) :model-cost-units)
+          cand-cost? (contains? (or candidate-usage {}) :model-cost-units)
+          parent-reported? (contains? (or parent-usage {}) :provider-reported-cost)
+          cand-reported? (contains? (or candidate-usage {}) :provider-reported-cost)]
+      (if (or parent-cost? cand-cost? parent-reported? cand-reported?)
+        {:cost {:cost/units
+                {:parent (double (usage-model-cost-units parent-usage))
+                 :candidate (double (usage-model-cost-units candidate-usage))}}}
+        {:cost {}}))))
 
 (defn- complexity-section
   "The :complexity summary section: genome bytes and topology node
@@ -595,10 +626,13 @@
 
 (defn- run-g6-phase!
   "G6 cost/complexity guardrails: measure both sections from the two
-  bundle roots and compare each ratio against the profile's maxima.
-  The gate fails when any measured regression exceeds its guardrail."
-  [evaluator profile parent-root candidate-root]
-  (let [cost (cost-section evaluator parent-root candidate-root)
+  bundle roots (the :cost section derives from the G5 paired result's
+  model usage when no :measure/cost is injected) and compare each
+  ratio against the profile's maxima. The gate fails when any measured
+  regression exceeds its guardrail."
+  [evaluator profile paired-result parent-root candidate-root]
+  (let [cost (cost-section evaluator paired-result
+                           parent-root candidate-root)
         complexity (complexity-section parent-root candidate-root)
         reasons (g6-reasons profile cost complexity)
         report {:cost (:cost cost)
@@ -643,7 +677,8 @@
     :utility (if paired-result
                (:utility (metrics/summarize-utility paired-result))
                {})
-    :cost (:cost (cost-section evaluator parent-root candidate-root))
+    :cost (:cost (cost-section evaluator paired-result
+                                parent-root candidate-root))
     :complexity (:complexity (complexity-section parent-root candidate-root))}))
 
 (defn- eligibility
@@ -824,6 +859,7 @@
                                     (:report g4) (:report g5) nil
                                     parent-root candidate-root)
               (let [g6 (run-g6-phase! evaluator profile
+                                      (:report g5)
                                       parent-root candidate-root)]
                 (finalize-evaluation!
                  evaluator c profile

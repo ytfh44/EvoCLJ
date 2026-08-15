@@ -571,3 +571,22 @@
         (is (= :evaluated
                (:state (candidate/find-candidate store (:candidate/id pending))))
             "evaluation completed — the candidate is :evaluated, not promoted")))))
+
+;; ============================================================================
+;; Feature C — G6 cost derives from real model usage; fixture-only stays empty
+;; ============================================================================
+
+(deftest fixture-only-run-without-measure-cost-keeps-cost-section-empty
+  ;; No :measure/cost is injected AND the fixture-only bundles produce no
+  ;; model usage — the :cost section must stay EMPTY (no fabricated cost
+  ;; claims; Feature C derives cost ONLY from real model usage; Global
+  ;; Constraint 24).
+  (let [store (fresh-store)
+        pending (materialized-pending! store)
+        ev (dissoc (orchestrator-evaluator store pending
+                                           (bundle! "text") (bundle! "text"))
+                   :measure/cost)
+        evaluation (eval-core/evaluate-candidate! ev (:candidate/id pending)
+                                                  :test/v1)]
+    (testing "a fixture-only run with no :measure/cost never fabricates cost"
+      (is (= {} (get-in evaluation [:summary :cost]))))))

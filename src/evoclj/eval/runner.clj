@@ -56,6 +56,7 @@
             [evoclj.kernel.error :as err]
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.phenotype :as phenotype]
+            [evoclj.runtime.usage :as usage]
             [evoclj.runtime.scheduler :as scheduler]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -223,6 +224,71 @@
                           :metadata {}})
     sid))
 
+;; --- side usage (Task 12.1 counters, Feature C) ------------------------------
+
+(defn- usage-from-output
+  "Convert ONE side output value that carries model usage into a
+  runtime.usage-shaped sample, or nil when it carries none. Each such
+  output value is the provider result value of a model dispatch (e.g.
+  {:model/output {...} :usage {:model-input-tokens 10
+  :model-output-tokens 6} :model-cost-units 0.16}) — the Task 12.1
+  model counters appear either nested under :usage (:model-input-tokens
+  / :model-output-tokens) or at the value's own top level
+  (:model-cost-units / :provider-reported-cost, both runtime.usage
+  counter keys). Returns a counter-only sample for runtime.usage/add."
+  [out]
+  (when (map? out)
+    (let [u (:usage out)
+          has-usage? (and (map? u) (contains? u :model-input-tokens)
+                          (contains? u :model-output-tokens))
+          cost-units (or (get u :model-cost-units)
+                         (:model-cost-units out)
+                         (:provider-reported-cost out))
+          reported (or (get u :provider-reported-cost)
+                       (:provider-reported-cost out)
+                       (:model-cost-units out))]
+      (when (or has-usage?
+                (contains? out :model-cost-units)
+                (contains? out :provider-reported-cost))
+        (cond-> {}
+          has-usage? (assoc :model-input-tokens (:model-input-tokens u 0)
+                            :model-output-tokens (:model-output-tokens u 0))
+          (or has-usage?
+              (contains? out :model-cost-units)
+              (contains? out :provider-reported-cost))
+          (assoc :model-cost-units (or cost-units 0.0)
+                 :provider-reported-cost (or reported 0.0)))))))
+
+(defn- side-usage
+  "The runtime.usage-style sample for ONE side, attributed to the
+  side's fresh session (:session/id — Global Constraint 20).
+  Aggregated from (a) the model usage carried by every side output
+  value (each output from a model dispatch carries :usage and/or
+  :model-cost-units/:provider-reported-cost — scanned with
+  usage-from-output and combined with runtime.usage/add), plus (b)
+  :provider-calls (the total broker call count from the usage atom,
+  which maps :cap/id -> count) and (c) :steps / :wall-ms when the
+  scheduler result reports them (v0's scheduler result does not, so
+  they are absent unless a future scheduler emits them).
+
+  The map is ALWAYS present on the side result (consumers never
+  special-case nil): when a run produced no model usage it aggregates
+  to runtime.usage/empty-usage and carries only the :provider-calls
+  counter and the :session/id attribution."
+  [outputs usage-atom run sid]
+  (let [model (reduce (fn [acc out]
+                        (if-let [s (usage-from-output out)]
+                          (usage/add acc s)
+                          acc))
+                      usage/empty-usage
+                      (or outputs []))
+        calls (reduce + 0 (vals @usage-atom))
+        sample (cond-> model
+                 (contains? run :steps) (assoc :steps (:steps run))
+                 (contains? run :wall-ms) (assoc :wall-ms (:wall-ms run)))
+        sample (assoc sample :provider-calls calls)]
+    (usage/attributed sample {:session/id sid})))
+
 (defn run-side!
   "Run ONE side of ONE pair through the full scheduler with fresh temp
   stores.
@@ -252,6 +318,11 @@
        :side/status :completed | :failed | :budget-exhausted
        :side/output-ref <sha256 | nil>
        :side/outputs <vector | nil>  ; read back from the temp CAS
+       :side/usage <runtime.usage sample>  ; ALWAYS present: the Task 12.1
+       ;   model counters aggregated from the side outputs plus
+       ;   :provider-calls (the usage atom's :cap/id -> count total),
+       ;   attributed to the fresh session (see side-usage). A run with
+       ;   no model usage carries empty counters.
        :side/error <artifact ref | nil>}  ; :failed only
 
   The side result carries NO case prompts and NO expected outputs."
@@ -309,6 +380,7 @@
          :side/status (:status run)
          :side/output-ref (:output-ref run)
          :side/outputs outputs
+         :side/usage (side-usage outputs usage run sid)
          :side/error (:error/artifact-ref run)})
       (finally
         (dispose-stores! stores))))))

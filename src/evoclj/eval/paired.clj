@@ -92,7 +92,8 @@
   :eval/paired-equiv-unknown, :eval/paired-result-contaminated."
   (:require [evoclj.eval.runner :as runner]
             [evoclj.genome.hash :as hash]
-            [evoclj.kernel.error :as err])
+            [evoclj.kernel.error :as err]
+            [evoclj.runtime.usage :as usage])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file Files LinkOption Paths)
            (java.nio.file.attribute FileAttribute)))
@@ -367,6 +368,8 @@
         candidate-score (side-score candidate-side equiv-fn (:expected-output case-map))
         sides {:parent (assoc parent-side :side/score parent-score)
                :candidate (assoc candidate-side :side/score candidate-score)}
+        parent-usage (:side/usage parent-side)
+        candidate-usage (:side/usage candidate-side)
         case-outcome {:case/id (:case/id case-map)
                       :repetition repetition
                       :pair/seed seed
@@ -382,6 +385,9 @@
      :pair/seed seed
      :order order
      :sides sides
+     :usage {:parent parent-usage
+             :candidate candidate-usage
+             :total (usage/aggregate [parent-usage candidate-usage])}
      :case/outcome case-outcome}))
 
 (defn- resolve-genome-root
@@ -450,9 +456,10 @@
 
 (defn- summarize-side
   "The aggregate summary for one side across all pairs: how many
-  sides ran, how many scored 1.0, how many scored 0.0, and the total
+  sides ran, how many scored 1.0, how many scored 0.0, the total
   score (Step 5 — the aggregate/approved diagnostic the Mutator may
-  see)."
+  see), and the side's runtime.usage aggregated across all its pairs
+  (:usage — Feature C; always present)."
   [pairs kind id]
   (let [sides (map #(get-in % [:sides kind]) pairs)
         scores (map :side/score sides)]
@@ -461,7 +468,8 @@
      :cases (count sides)
      :passed (count (filter #(= 1.0 %) scores))
      :failed (count (filter #(= 0.0 %) scores))
-     :score (reduce + 0.0 scores)}))
+     :score (reduce + 0.0 scores)
+     :usage (usage/aggregate (keep :side/usage sides))}))
 
 (defn- aggregate
   "The run-level aggregate over all pairs."
@@ -521,12 +529,22 @@
   Returns:
 
       {:parent {:side/kind :parent :side/id <parent-generation>
-                :cases n :passed n :failed n :score n}
+                :cases n :passed n :failed n :score n
+                :usage <aggregated runtime.usage sample>}
        :candidate {<same, :side/id = candidate-id>}
        :pairs [<pair record> ...]
        :seed/base <the run's seed base>
        :aggregate {:pairs n :parent-wins n :candidate-wins n :ties n
-                   :parent-score n :candidate-score n :delta n}}"
+                   :parent-score n :candidate-score n :delta n}}
+
+  USAGE (Feature C): every side result carries the ALWAYS-present
+  :side/usage sample (see evoclj.eval.runner/side-usage) — the side's
+  aggregated Task 12.1 model counters + :provider-calls, attributed to
+  the side session. Each top-level side summary aggregates its
+  :side/usage across all pairs (:usage), and each pair record carries a
+  per-pair usage summary {:parent <usage> :candidate <usage> :total
+  <aggregate>}. The summary :cost section in evoclj.eval.core derives
+  from these when no :measure/cost is injected."
   [evaluator request]
   (validate-evaluator! evaluator)
   (validate-request! request)
