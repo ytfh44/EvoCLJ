@@ -8,3 +8,4 @@ target/
 *.log
 .nrepl-port
 .DS_Store
+evoclj-state/
