@@ -1,10 +1,11 @@
 # EvoCLJ Common Foundations
 
-**Status: FOUNDATION LAYING IN PROGRESS.** This document records the
-step-by-step analysis that derives the shared substrates ("common
-foundations") beneath the brainstormed feature backlog, and the module
-design that establishes each foundation in the codebase. Each
-foundation lands as its own tested module and its own commit.
+**Status: FOUNDATION LAYING COMPLETE (2026-08-16).** Every foundation
+below exists as a tested module; each landed in its own commit
+(see §6). This document records the step-by-step analysis that derives
+the shared substrates ("common foundations") beneath the brainstormed
+feature backlog, and the module design that established each
+foundation in the codebase.
 
 ## 1. Why this document
 
@@ -188,16 +189,23 @@ metrics, generated docs).
 - Errors: `:security/redact-invalid`, `:security/patch-lint-invalid`,
   `:security/patch-lint-fatal`.
 
-## 6. Commit plan
+## 6. Commit plan (executed)
 
-1. `docs: add common-foundations analysis (brainstorm → substrate)`
-2. `feat(analytics): add behavior-profile foundation (F1)`
-3. `feat(metrics): add metric records + inference foundation (F2)`
-4. `feat(store): add enrichment-store foundation (F3)`
-5. `feat(eval): add isolated worker-pool foundation (F4)`
-6. `feat(config): add config & policy-surface foundation (F5)`
-7. `feat(runtime): add event-trigger foundation (F6)`
-8. `feat(security): add trust & hygiene foundation (F7)`
+1. `0bfab05 docs: add common-foundations analysis (brainstorm → substrate)`
+2. `8e92e65 feat(analytics): add behavior-profile foundation (F1)`
+3. `173d63a feat(metrics): add metric records + inference foundation (F2)`
+4. `c1c9974 feat(store): add enrichment-store foundation (F3)`
+5. `e5dc7c2 feat(eval): add isolated worker-pool foundation (F4)`
+6. `37b892a feat(config): add config & policy-surface foundation (F5)`
+7. `9d94cdf feat(runtime): add event-trigger foundation (F6)`
+8. `f55acae feat(security): add trust & hygiene foundation (F7)`
+
+All eight landed in order on `main`; the working tree is clean and the
+full test suite passes. F4's worker pool additionally received a
+parent-side fix during integration: a `^Callable` hint on `.submit`
+(Clojure fns implement both Runnable and Callable — the untyped
+overload discards the return value) and a sliding-window submission
+design so early exit never races ahead of the settle loop.
 
 ## 7. What the features build on top (future)
 
