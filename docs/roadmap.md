@@ -36,7 +36,7 @@ as they land. Each direction must reach 3-10 COMPLETED features.
 ## Direction 4: Ops & Observability (cli/, store/)
 - [x] O1: session detail CLI — event-tree query for one session
 - [x] O2: cost report CLI — model usage/cost aggregated by generation
-- [ ] O3: recovery scan CLI — expose store recovery scan results
+- [x] O3: recovery scan CLI — expose store recovery scan results
 - [ ] O4: LLM performance baseline — update docs/performance-baseline.md with
       real-model cycle timings
 - [ ] O5: lineage CLI polish — promotion lineage with candidate diffs
