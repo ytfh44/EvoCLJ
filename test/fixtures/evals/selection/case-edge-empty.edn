@@ -1,0 +1,5 @@
+{:case/id :case/edge-empty
+ :task-input {:op :ask :text "reply with exactly the empty string"}
+ :expected-output {:text ""}
+ :tools #{}
+ :output/equiv? :equivalence/byte-identical}

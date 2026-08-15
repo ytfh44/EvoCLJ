@@ -1,0 +1,5 @@
+{:case/id :case/basic-echo
+ :task-input {:op :echo :text "hello"}
+ :expected-output {:text "hello"}
+ :tools #{:fixture/echo}
+ :output/equiv? :equivalence/byte-identical}

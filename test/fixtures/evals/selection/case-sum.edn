@@ -1,0 +1,5 @@
+{:case/id :case/sum
+ :task-input {:op :ask :text "add 2 and 3 and answer with just the number"}
+ :expected-output {:text "5"}
+ :tools #{}
+ :output/equiv? :equivalence/llm-judge}
