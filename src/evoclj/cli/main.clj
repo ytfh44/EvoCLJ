@@ -36,6 +36,7 @@
             [evoclj.cli.genome :as genome]
             [evoclj.cli.model :as model]
             [evoclj.cli.promotion :as promotion]
+            [evoclj.cli.recovery :as recovery]
             [evoclj.cli.session :as session]
             [evoclj.kernel.error :as err]))
 
@@ -93,7 +94,8 @@
    ["promote"]                {:fn promotion/promote! :arity 0}
    ["rollback"]               {:fn promotion/rollback! :arity 0}
    ["lineage"]                {:fn promotion/lineage! :arity 1}
-   ["cost"]                   {:fn cost/cost-report! :arity 0}})
+   ["cost"]                   {:fn cost/cost-report! :arity 0}
+   ["recovery"]               {:fn recovery/recovery-scan! :arity 0}})
 
 (defn- command-for
   "The command entry for a positional vector, or nil."
