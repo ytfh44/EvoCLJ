@@ -21,13 +21,15 @@ as they land. Each direction must reach 3-10 COMPLETED features.
       or injected fns only)
 - [ ] V2: judge score aggregation — judge verdicts per case feed utility summary
 - [x] V3: eval inspection CLI — per-evaluation detail query (gates, sides, usage)
-- [ ] V4: hard-case library — hidden selection cases shipped as fixtures
+- [x] V4: hard-case library — hidden selection cases shipped as fixtures
 - [ ] V5: judge config — temperature/system-prompt/max-tokens exposed in config
 
 ## Direction 3: Runtime & Memory (runtime/, intent/)
 - [x] R1: episodic memory wiring — memory/read + memory/write nodes against a
       kernel-owned memory store (currently intent types without a provider)
-- [ ] R2: per-session memory isolation — session-scoped memory keys
+- [x] R2: per-session memory isolation — session-scoped memory keys
+      (implemented in R1: the :memory/kv provider scopes rows by
+      :session/id; memory_test sessions-are-isolated proves it)
 - [x] R3: llm-node retry/backoff — transient model errors retried with policy
       (already covered by dispatch execute-with-retry! + model descriptor :retry {:safe? true})
 - [ ] R4: concurrency documentation — scheduler single-session semantics
