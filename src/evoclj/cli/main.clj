@@ -30,6 +30,7 @@
     evoclj.cli.promotion promote, rollback, lineage"
   (:require [clojure.pprint :as pprint]
             [clojure.string :as str]
+            [evoclj.cli.cost :as cost]
             [evoclj.cli.evolution :as evolution]
             [evoclj.cli.genome :as genome]
             [evoclj.cli.model :as model]
@@ -89,7 +90,8 @@
    ["cycle"]                  {:fn evolution/cycle! :arity 0}
    ["promote"]                {:fn promotion/promote! :arity 0}
    ["rollback"]               {:fn promotion/rollback! :arity 0}
-   ["lineage"]                {:fn promotion/lineage! :arity 1}})
+   ["lineage"]                {:fn promotion/lineage! :arity 1}
+   ["cost"]                   {:fn cost/cost-report! :arity 0}})
 
 (defn- command-for
   "The command entry for a positional vector, or nil."
