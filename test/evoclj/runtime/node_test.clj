@@ -303,7 +303,7 @@
 
 (deftest registry-throws-typed-errors-for-unimplemented-and-unknown-types
   (testing "every accepted-but-unimplemented v0 type throws :node/not-implemented-yet"
-    (doseq [t [:route :memory/read :memory/write]]
+    (doseq [t [:route]]
       (let [e (try (node/handler-for t) nil (catch clojure.lang.ExceptionInfo e e))]
         (is (= :node/not-implemented-yet (:error/type (ex-data e))) (str t))
         (is (= t (:node/type (ex-data e))) (str t)))))

@@ -202,7 +202,8 @@
     (testing "schema version and applied migrations are recorded in meta"
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
       (is (= "2" (meta-value db "schema_version")))
-      (is (= "001-init.sql 003-routing.sql" (meta-value db "applied_migrations"))))
+      (is (= "001-init.sql 002-memory.sql 003-routing.sql"
+             (meta-value db "applied_migrations"))))
     (testing "003-routing.sql added the session routing audit columns"
       (let [cols (set (map :name (sqlite/query db
                                                ["PRAGMA table_info(sessions)"])))]
@@ -377,6 +378,9 @@
         _ (sqlite/exec! db ["DROP INDEX sessions_routing_idx"])
         _ (sqlite/exec! db ["ALTER TABLE sessions DROP COLUMN routing_deployment_version"])
         _ (sqlite/exec! db ["ALTER TABLE sessions DROP COLUMN routing_bucket"])
+        ;; 002-memory.sql effects are also rewound (feature R1): a v1
+        ;; database predates the episodic_memory table entirely
+        _ (sqlite/exec! db ["DROP TABLE IF EXISTS episodic_memory"])
         _ (sqlite/exec! db ["UPDATE meta SET value = '1' WHERE key = 'schema_version'"])
         _ (sqlite/exec! db ["UPDATE meta SET value = '001-init.sql'
                             WHERE key = 'applied_migrations'"])

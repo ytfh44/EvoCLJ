@@ -340,6 +340,68 @@
                                     (:error-data execution)
                                     decision @usage-atom))))))))))))
 
+(defn- dispatch-registered!
+  "Dispatch an intent whose provider is resolved by the kernel-owned
+  provider registry under `tool-id`, through the full broker pipeline in
+  the NORMATIVE order (validate intent -> lookup provider -> normalize
+  resource -> authorize -> execute once/retry per policy -> validate
+  output). Shared by :intent/tool-call and the :intent/memory-read /
+  :intent/memory-write branches (feature R1).
+
+  Every memory intent resolves the SAME :memory/kv provider; the
+  tool-call branch resolves the :payload :tool/id. When
+  `require-idempotency-key?` is true (tool-call writes) a non-pure,
+  non-model-call effect is refused without a :metadata
+  {:idempotency/key ...}; the memory branch does NOT enforce it: an
+  episodic memory write through the kernel's own memory nodes is
+  bounded by the lease's :max-calls and is upserted (INSERT OR
+  REPLACE) by the provider, and no model-requested external write is
+  involved.
+
+  Returns the typed dispatch result (see the namespace docstring)."
+  [broker-context intent tool-id require-idempotency-key?]
+  (let [usage-atom (:usage broker-context)
+        entry (registry/lookup (:registry broker-context) tool-id)]
+    (if-not entry
+      (result-error intent :provider/not-found
+                    (str "no provider registered for tool " tool-id)
+                    {:tool/id tool-id}
+                    nil @usage-atom)
+      (let [{descriptor :descriptor provider :provider} entry
+            normalized-step (normalize-request! broker-context provider intent)]
+        (if-let [error-result (:error-result normalized-step)]
+          error-result
+          (let [normalized (:normalized normalized-step)
+                decision (broker/authorize
+                          {:intent intent
+                           :normalized-request normalized
+                           :leases (:leases broker-context)
+                           :usage @usage-atom
+                           :now ((:now broker-context))})]
+            (if (= :deny (:decision decision))
+              (result-error intent :capability/denied
+                            "intent denied by the capability broker"
+                            {:reason (:reason decision)}
+                            decision @usage-atom)
+              (if (and require-idempotency-key?
+                       (not= :pure (:effect descriptor))
+                       (not= :model-call (:effect descriptor))
+                       (nil? (get-in intent [:metadata :idempotency/key])))
+                (result-error intent :intent/idempotency-key-missing
+                              "non-pure writes require an idempotency key in :metadata before execution"
+                              {:tool/id tool-id :effect (:effect descriptor)}
+                              decision @usage-atom)
+                (let [execution (execute-with-retry!
+                                 broker-context provider descriptor
+                                 decision normalized)]
+                  (if-let [value (:ok execution)]
+                    (validate-output! intent descriptor decision
+                                      value @usage-atom)
+                    (result-error intent (:error-type execution)
+                                  (:error-message execution)
+                                  (:error-data execution)
+                                  decision @usage-atom)))))))))))
+
 (defn dispatch!
   "Execute intent through the broker pipeline in the NORMATIVE order
   (Task 4.5 Step 5): validate intent -> lookup provider -> normalize
@@ -349,57 +411,23 @@
 
   broker-context is a map built by make-broker-context. intent is a
   validated v0 Intent (a malformed intent throws
-  :intent/schema-invalid; :intent/tool-call executes through the
-  provider registry, :intent/model-call executes through the model
+  :intent/schema-invalid; :intent/tool-call, :intent/memory-read, and
+  :intent/memory-write execute through the provider registry,
+  :intent/model-call executes through the model
   registry, and every other intent type fails closed with
   :intent/unsupported-dispatch)."
   [broker-context intent]
   (intent-schema/validate-intent intent)
   (case (:intent/type intent)
     :intent/tool-call
-    (let [usage-atom (:usage broker-context)
-          tool-id (get-in intent [:payload :tool/id])
-          entry (registry/lookup (:registry broker-context) tool-id)]
-      (if-not entry
-        (result-error intent :provider/not-found
-                      (str "no provider registered for tool " tool-id)
-                      {:tool/id tool-id}
-                      nil @usage-atom)
-        (let [{descriptor :descriptor provider :provider} entry
-              normalized-step (normalize-request! broker-context provider intent)]
-          (if-let [error-result (:error-result normalized-step)]
-            error-result
-            (let [normalized (:normalized normalized-step)
-                  decision (broker/authorize
-                            {:intent intent
-                             :normalized-request normalized
-                             :leases (:leases broker-context)
-                             :usage @usage-atom
-                             :now ((:now broker-context))})]
-              (if (= :deny (:decision decision))
-                (result-error intent :capability/denied
-                              "intent denied by the capability broker"
-                              {:reason (:reason decision)}
-                              decision @usage-atom)
-                (if (and (not= :pure (:effect descriptor))
-                         (not= :model-call (:effect descriptor))
-                         (nil? (get-in intent [:metadata :idempotency/key])))
-                  (result-error intent :intent/idempotency-key-missing
-                                "non-pure writes require an idempotency key in :metadata before execution"
-                                {:tool/id tool-id :effect (:effect descriptor)}
-                                decision @usage-atom)
-                  (let [execution (execute-with-retry!
-                                   broker-context provider descriptor
-                                   decision normalized)]
-                    (if-let [value (:ok execution)]
-                      (validate-output! intent descriptor decision
-                                        value @usage-atom)
-                      (result-error intent (:error-type execution)
-                                    (:error-message execution)
-                                    (:error-data execution)
-                                    decision @usage-atom))))))))))
+    (dispatch-registered! broker-context intent
+                          (get-in intent [:payload :tool/id]) true)
+    :intent/memory-read
+    (dispatch-registered! broker-context intent :memory/kv false)
+    :intent/memory-write
+    (dispatch-registered! broker-context intent :memory/kv false)
     :intent/model-call (dispatch-model-call! broker-context intent)
     (result-error intent :intent/unsupported-dispatch
-                  "the v0 dispatcher executes :intent/tool-call and :intent/model-call intents only"
+                  "the v0 dispatcher executes :intent/tool-call, :intent/memory-read, :intent/memory-write, and :intent/model-call intents only"
                   {:intent/type (:intent/type intent)}
                   nil @(:usage broker-context))))

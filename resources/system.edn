@@ -34,7 +34,8 @@
  ;; host constructs and registers them at startup (fail-closed).
  :provider/registry
  {:providers [{:provider/type :fixture/echo}
-              {:provider/type :fixture/non-idempotent}]}
+              {:provider/type :fixture/non-idempotent}
+             {:provider/type :memory/kv}]}
 
  :capability/broker
  {:registry #ig/ref :provider/registry

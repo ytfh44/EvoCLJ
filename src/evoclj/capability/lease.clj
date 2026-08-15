@@ -24,8 +24,11 @@
 
   Resource coverage matches a CANONICAL resource plus an action:
   tool resources match by exact canonical id; filesystem resources
-  match by containment of CANONICAL RESOLVED PATHS. Matching never
-  happens on user-supplied strings: canonicalize-path resolves \".\"
+  match by containment of CANONICAL RESOLVED PATHS; memory resources
+  match by exact canonical key id ({:kind :memory :id <key>}, feature
+  R1 — the episodic-memory lease an :intent/memory-read/write carries
+  is scoped to one exact key, mirroring :tool). Matching never happens
+  on user-supplied strings: canonicalize-path resolves \".\"
   and \"..\" segments first, so a lease rooted at \"/work\" covers
   \"/work/a/../secret\" only because it resolves to \"/work/secret\"
   (inside the root), and a traversal escaping to \"/etc\" is never
@@ -122,9 +125,10 @@
   lease's :actions set AND the resource must match by kind. Tool
   resources match by exact canonical id ({:kind :tool :id ...});
   filesystem resources match by containment of canonical resolved
-  paths ({:kind :filesystem :path ...}). Any other kind, a kind
-  mismatch, a missing id/path, or a missing action fails closed. A
-  malformed lease, resource, or action throws
+  paths ({:kind :filesystem :path ...}); memory resources (feature R1)
+  match by exact key id ({:kind :memory :id <key>}, like :tool). Any
+  other kind, a kind mismatch, a missing id/path, or a missing action
+  fails closed. A malformed lease, resource, or action throws
   :capability/schema-invalid."
   [lease normalized-resource action]
   (validate-input! lease)
@@ -140,6 +144,8 @@
          (case kind
            :tool (and (keyword? (:id granted))
                       (= (:id granted) (:id normalized-resource)))
+           :memory (and (keyword? (:id granted))
+                        (= (:id granted) (:id normalized-resource)))
            :model (and (:id granted)
                        (let [g (str (:id granted))
                              n (str (:id normalized-resource))]

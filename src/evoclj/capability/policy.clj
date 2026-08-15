@@ -17,11 +17,12 @@
     a sibling phenotype from the same Genome is a different subject
     and must not match (Global Constraint 9).
   - `intent-action` derives the requested action from the intent
-    type. In v0 a :intent/tool-call requests the single action
-    :invoke — the :required-action of every v0 provider descriptor
-    (Task 4.3). Any other intent type requests nil, and a nil action
-    is never a member of any :actions set, so non-tool intents fail
-    closed at the action check.
+    type. A :intent/tool-call, :intent/model-call, :intent/memory-read,
+    and :intent/memory-write each request the single action :invoke —
+    the :required-action of every v0 provider descriptor (Task 4.3;
+    memory intents landed in feature R1). Any other intent type
+    requests nil, and a nil action is never a member of any :actions
+    set, so those intents fail closed at the action check.
   - `decide` returns, for one lease collection, a DETERMINISTIC
     decision:
 
@@ -83,21 +84,26 @@
   {:phenotype/id (:phenotype/id intent)})
 
 (def ^:private v0-actions
-  "The v0 action requested by each intent type. A :intent/tool-call
+  "The v0 action requested by each intent type. :intent/tool-call
   requests the single action :invoke — the :required-action of every
   v0 provider descriptor (Task 4.3); :intent/model-call also requests
   :invoke (post-v0 extension 1 — model leases carry :actions
-  #{:invoke}). Every other v0 intent type requests nil, which no
-  :actions set contains, so those intents fail closed at the action
-  check."
+  #{:invoke}); :intent/memory-read and :intent/memory-write request
+  :invoke too (feature R1 — a :memory-kv lease grants the exact
+  {:kind :memory :id <key>} resource with :actions #{:invoke}). Every
+  other v0 intent type requests nil, which no :actions set contains,
+  so those intents fail closed at the action check."
   {:intent/tool-call :invoke
-   :intent/model-call :invoke})
+   :intent/model-call :invoke
+   :intent/memory-read :invoke
+   :intent/memory-write :invoke})
 
 (defn intent-action
-  "The action intent requests: :invoke for a v0 :intent/tool-call
-  and :intent/model-call, nil for every other v0 intent type. A nil
-  action is never a member of any lease's :actions set, so an
-  unknown intent type is never granted by a v0 lease (fail closed)."
+  "The action intent requests: :invoke for a v0 :intent/tool-call,
+  :intent/model-call, :intent/memory-read, and :intent/memory-write;
+  nil for every other v0 intent type. A nil action is never a member
+  of any lease's :actions set, so an unknown intent type is never
+  granted by a v0 lease (fail closed)."
   [intent]
   (get v0-actions (:intent/type intent)))
 

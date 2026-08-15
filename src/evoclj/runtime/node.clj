@@ -281,12 +281,14 @@
   {:sci #{:program}
    :tool #{:tool}
    :loop #{:body :until :max-iterations}
-   :emit #{}})
+   :emit #{}
+   :memory/read #{:memory}
+   :memory/write #{:memory}})
 
 (def ^:private handler-attribute-keys
   "Node keys whose value must be a keyword when present (mirrors the
   compiler's attribute rule)."
-  [:program :tool :next :body :until])
+  [:program :tool :next :body :until :memory])
 
 (defn validate-node!
   "Validate the compiled node map for `expected-type` (the handler's
@@ -343,36 +345,42 @@
 (require '[evoclj.runtime.nodes.emit :as emit])
 (require '[evoclj.runtime.nodes.llm :as llm])
 (require '[evoclj.runtime.nodes.loop :as loop])
+(require '[evoclj.runtime.nodes.memory :as memory])
 (require '[evoclj.runtime.nodes.sci :as sci])
 (require '[evoclj.runtime.nodes.tool :as tool])
 
 (def node-handler-registry
   "The trusted registry: v0 node type keyword -> handler constructor
   (a 0-ary fn returning a NodeHandler). :emit, :sci, :tool, :loop,
-  and :llm are implemented; every other v0 type throws
-  :node/not-implemented-yet from handler-for until its task lands
-  (:loop landed in Task 6.4, :llm in post-v0 extension 1)."
+  :llm, :memory/read, and :memory/write are implemented; the only
+  remaining v0 type (:route) throws :node/not-implemented-yet from
+  handler-for until its task lands (:loop landed in Task 6.4, :llm in
+  post-v0 extension 1, :memory/* in feature R1)."
   {:emit emit/emit-handler
    :sci sci/sci-handler
    :tool tool/tool-handler
    :loop loop/loop-handler
-   :llm llm/llm-handler})
+   :llm llm/llm-handler
+   :memory/read memory/read-handler
+   :memory/write memory/write-handler})
 
 (def known-unimplemented-types
   "The v0 node types the compiler accepts but the runtime cannot
-  execute yet: :route and the :memory/* nodes. handler-for throws
-  :node/not-implemented-yet for them so the compiler's accepted types
-  and the runtime's executable types stay consistent."
-  #{:route :memory/read :memory/write})
+  execute yet: only :route. handler-for throws :node/not-implemented-yet
+  for it so the compiler's accepted types and the runtime's executable
+  types stay consistent (:memory/read and :memory/write landed in
+  feature R1)."
+  #{:route})
 
 (defn handler-for
   "Resolve the trusted handler constructor for `node-type` (a v0 node
   type keyword).
 
-  - :emit / :sci / :tool / :loop -> the constructor fn (call it with
-    no args to build the handler: ((handler-for :sci))).
-  - any other v0 type (:llm, :route, :memory/read, :memory/write)
-    -> throws :node/not-implemented-yet with the :node/type.
+  - :emit / :sci / :tool / :loop / :memory/read / :memory/write ->
+    the constructor fn (call it with no args to build the handler:
+    ((handler-for :sci))).
+  - any other v0 type (:llm, :route) -> throws :node/not-implemented-yet
+    with the :node/type.
   - anything else -> throws :node/unknown-type.
 
   The scheduler steps a node with

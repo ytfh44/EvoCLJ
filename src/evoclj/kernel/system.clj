@@ -86,6 +86,7 @@
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
             [evoclj.provider.fixture :as fixture]
+            [evoclj.provider.memory :as memory]
             [evoclj.provider.model-registry :as model-registry]
             [evoclj.provider.modelsdev :as modelsdev]
             [evoclj.provider.registry :as registry]
@@ -231,14 +232,19 @@
 
 (defn- provider-for
   "Construct a provider instance from a catalog entry
-  {:provider/type <keyword>}. v0 ships the fixture adapters
+  {:provider/type <keyword>}, injecting the resolved :store/sqlite spec
+  store so kernel providers that CLOSE OVER a store can be
+  built (feature R1). v0 ships the fixture adapters
   (evoclj.provider.fixture); the type keyword names the constructor."
-  [entry]
+  [entry store]
   (let [type (:provider/type entry)
         opts (dissoc entry :provider/type)]
     (case type
       :fixture/echo (fixture/echo-provider opts)
       :fixture/non-idempotent (fixture/non-idempotent-provider opts)
+      ;; :memory/kv closes over the SQLite spec so its store handle never
+      ;; crosses the Provider protocol boundary (feature R1).
+      :memory/kv (memory/memory-provider (assoc opts :store store))
       (throw (err/error :provider/catalog-invalid
                         (str "unknown :provider/type " type)
                         {:provider/type type
@@ -255,10 +261,13 @@
   "Host-startup step 2: register every catalog provider from the raw
   config into the built :provider/registry atom. Registration is
   fail-closed: a malformed or duplicate entry throws and changes
-  nothing (Global Constraint 19 — the registry is kernel-owned)."
+  nothing (Global Constraint 19 — the registry is kernel-owned). The
+  resolved :store/sqlite component is injected into catalog entries
+  that name store-closing providers (:memory/kv, feature R1)."
   [system config]
-  (doseq [entry (get-in config [:provider/registry :providers])]
-    (registry/register! (:provider/registry system) (provider-for entry)))
+  (let [store (:store/sqlite system)]
+    (doseq [entry (get-in config [:provider/registry :providers])]
+      (registry/register! (:provider/registry system) (provider-for entry store))))
   system)
 
 (defn init
