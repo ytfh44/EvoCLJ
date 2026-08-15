@@ -1,8 +1,9 @@
-# EvoCLJ Feature Roadmap (goal: 5 directions x 3-10 features each)
+# EvoCLJ Feature Roadmap
 
-Status: active goal — continue brainstorming, dispatch subagents per feature,
-verify each with real-token (local LM Studio) runs, and commit. Tick features
-as they land. Each direction must reach 3-10 COMPLETED features.
+**Status: COMPLETE (15/15)** — the five-direction goal finished on
+2026 (5 directions x 3 features; see the git log for the per-feature
+commits). Completed items are ticked below; unticked items are the
+backlog for a future round.
 
 ## Direction 1: Evolution Loop Depth (evolution/)
 - [x] LLM Diagnostician + LLM Mutator + host wiring (committed 4086cfd/4972398/b7bb858)
@@ -51,5 +52,7 @@ as they land. Each direction must reach 3-10 COMPLETED features.
 - [x] S4: model-output schema hardening — strict output validation tests for
       judge/diagnosis/mutation shapes
 
-## Progress
-- Round 1: V1 (LLM-as-judge) in progress.
+## Progress log
+- Round 1-27 (goal rounds): all 15 completed features landed one at a time,
+  each verified (targeted + full suite) and committed; real-token (LM Studio)
+  verification was run for the judge and the full evolve/eval/promote loop.

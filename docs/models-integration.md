@@ -5,6 +5,32 @@ the v0 release gate: the models.dev catalog service, the dialect layer,
 the OpenAI-compatible and Anthropic provider adapters, and their wiring
 through the broker, leases, the :llm node, and the CLI.
 
+
+## Contents
+
+- [What was added](#what-was-added)
+- [The catalog](#the-catalog)
+- [The dialect layer (OpenAI-compatible dialects)](#the-dialect-layer-openai-compatible-dialects)
+- [Providers](#providers)
+- [Authorization and execution](#authorization-and-execution)
+- [API keys](#api-keys)
+- [CLI](#cli)
+- [Tests](#tests)
+- [Configuration (resources/system.edn)](#configuration-resourcessystemedn)
+- [LLM-driven evolution](#llm-driven-evolution)
+  - [Enabling it in system.edn](#enabling-it-in-systemedn)
+  - [The :model-call injection contract](#the-model-call-injection-contract)
+  - [The kernel-computes-:expect/hash security property](#the-kernel-computes-expecthash-security-property)
+  - [Fail-loud error contract](#fail-loud-error-contract)
+  - [Driving a cycle through the CLI](#driving-a-cycle-through-the-cli)
+- [`evoclj cycle` — one command walks the whole loop](#evoclj-cycle--one-command-walks-the-whole-loop)
+- [Real end-to-end loop on a local server (verified with LM Studio)](#real-end-to-end-loop-on-a-local-server-verified-with-lm-studio)
+  - [Provider catalog and resolution](#provider-catalog-and-resolution)
+  - [Registry timeouts for slow local models](#registry-timeouts-for-slow-local-models)
+  - [JSON stability: use the server's json_schema mode](#json-stability-use-the-servers-json_schema-mode)
+  - [Model-output robustness the adapters already handle](#model-output-robustness-the-adapters-already-handle)
+  - [Attribution](#attribution)
+
 ## What was added
 
 | Component | File | Role |
@@ -355,4 +381,3 @@ Small local models drift out of strict-JSON output. LM Studio does NOT support r
 ### Attribution
 
 All evolution/evaluation model calls are attributed to deterministic kernel ids (see the :model-call injection contract above) and the eval runner attributes its model usage to the side session, so every cost figure is auditable (Global Constraint 20).
-
