@@ -80,6 +80,7 @@
             [evoclj.evolution.diagnose :as diagnose]
             [evoclj.evolution.llm-diagnostician :as llm-diag]
             [evoclj.evolution.llm-mutator :as llm-mut]
+            [evoclj.eval.judge :as judge]
             [evoclj.genome.hash :as hash]
             [evoclj.intent.core :as intent-core]
             [evoclj.intent.dispatch :as dispatch]
@@ -418,10 +419,10 @@
   :result/status is :ok; otherwise a thrown ExceptionInfo with a stable
   :error/type (the adapters' \"throws ExceptionInfo\" contract). EDN-safe
   only — all error data is sanitized (Global Constraint 22)."
-  [dispatch-context model-registry model-lease]
+  [dispatch-context model-registry model-lease prefix]
   (let [session-id (UUID/nameUUIDFromBytes
-                    (.getBytes "evoclj/evolution/session" StandardCharsets/UTF_8))
-        phenotype-id (hash/text-digest "evoclj/evolution")
+                    (.getBytes (str prefix "/session") StandardCharsets/UTF_8))
+        phenotype-id (hash/text-digest prefix)
         local-ctx (assoc dispatch-context
                          :model-registry model-registry
                          :leases (if model-lease
@@ -478,7 +479,8 @@
                                            {:reason :llm-needs-dispatch})))
                        (build-model-call (:dispatch config)
                                          (:model/registry config)
-                                         (:model-lease config))))
+                                         (:model-lease config)
+                                         "evoclj/evolution")))
         evo (cond-> {:store {:sqlite (:sqlite (:store config))
                              :cas (:cas (:store config))}
                      :provider-catalog (or (:provider-catalog config) {})
@@ -516,22 +518,65 @@
   evaluator map, letting the G5 runner evaluate :llm-topology
   candidates against real providers. Both keys are OPTIONAL — absent,
   the shipped behavior is unchanged and an :llm genome fails closed
-  with :provider/not-found :reason :no-model-registry."
-  (cond-> {:store {:sqlite (:sqlite (:store config))
-                   :cas (:cas (:store config))}
-           :provider/catalog (or (:provider/catalog config) {})
-           :kernel/abi (:kernel/abi config)
-           :profiles (or (:profiles config) {"default-v1" profile/default-v1})
-           :genome/roots (or (:genome/roots config) {})
-           :dataset/roots (:dataset/roots config)
-           :selection/cases (or (:selection/cases config) {})
-           :selection/fixtures (or (:selection/fixtures config) {})
-           :replay/cases (or (:replay/cases config) {})
-           :replay/fixtures (or (:replay/fixtures config) {})}
-    (contains? config :model/registry)
-    (assoc :model/registry (:model/registry config))
-    (contains? config :model/resource)
-    (assoc :model/resource (:model/resource config))))
+  with :provider/not-found :reason :no-model-registry.
+
+  OPTIONAL LLM-AS-JUDGE (feature V1): when the config carries a :judge
+  {:type :llm :model/id <string> :system-prompt <optional> :max-tokens
+  <optional>} map, the host builds a model-call closure (attributed to
+  \"evoclj/eval-judge\") and registers an LLM equivalence judge under
+  :equivalence/llm-judge in the evaluator's :equivalence/by-keyword
+  (the keyword a selection case declares via :output/equiv?). :judge
+  requires :model/registry and :dispatch in the config — missing
+  either fails closed with :eval/system-invalid. Absent :judge leaves
+  the equivalence registry empty (shipped behavior)."
+  (let [judge-config (:judge config)
+        judge-registry
+        (when (and (map? judge-config) (= :llm (:type judge-config)))
+          (let [allowed #{:type :model/id :system-prompt :max-tokens}
+                unknown (remove allowed (keys judge-config))]
+            (when (seq unknown)
+              (throw (err/error :eval/system-invalid
+                                "invalid :judge :type :llm config — unknown keys"
+                                {:reason :judge-config-invalid
+                                 :keys (mapv (comp str name) unknown)})))
+            (when-not (contains? config :model/registry)
+              (throw (err/error :eval/system-invalid
+                                "an :llm judge requires :model/registry"
+                                {:reason :judge-needs-model-registry})))
+            (when-not (contains? config :dispatch)
+              (throw (err/error :eval/system-invalid
+                                "an :llm judge requires :dispatch"
+                                {:reason :judge-needs-dispatch})))
+            (let [model-call (build-model-call (:dispatch config)
+                                               (:model/registry config)
+                                               (:model-lease config)
+                                               "evoclj/eval-judge")
+                  j (judge/llm-judge
+                     (cond-> {:model-call model-call
+                              :model/id (:model/id judge-config)}
+                       (:system-prompt judge-config)
+                       (assoc :system-prompt (:system-prompt judge-config))
+                       (contains? judge-config :max-tokens)
+                       (assoc :max-tokens (:max-tokens judge-config))))]
+              (judge/merge-judge
+               (or (:equivalence/by-keyword config) {})
+               j))))]
+    (cond-> {:store {:sqlite (:sqlite (:store config))
+                     :cas (:cas (:store config))}
+             :provider/catalog (or (:provider/catalog config) {})
+             :kernel/abi (:kernel/abi config)
+             :profiles (or (:profiles config) {"default-v1" profile/default-v1})
+             :genome/roots (or (:genome/roots config) {})
+             :dataset/roots (:dataset/roots config)
+             :selection/cases (or (:selection/cases config) {})
+             :selection/fixtures (or (:selection/fixtures config) {})
+             :replay/cases (or (:replay/cases config) {})
+             :replay/fixtures (or (:replay/fixtures config) {})}
+      judge-registry (assoc :equivalence/by-keyword judge-registry)
+      (contains? config :model/registry)
+      (assoc :model/registry (:model/registry config))
+      (contains? config :model/resource)
+      (assoc :model/resource (:model/resource config)))))
 
 (defmethod ig/halt-key! :eval/system
   [_ _component]

@@ -175,6 +175,18 @@
   ;;   runner uses a default {:kind :model :id "*/*"} that matches no
   ;;   concrete model id — a fail-closed default, so a provider prefix
   ;;   must be configured for any model call to authorize.
+  ;;
+  ;; OPTIONAL LLM-AS-JUDGE (feature V1): a selection case can declare
+  ;; :output/equiv? :equivalence/llm-judge to have a real model decide
+  ;; semantic output equivalence. Enable it by wiring a :judge map:
+  ;;
+  ;;   :judge {:type :llm
+  ;;           :model/id "lmstudio/gemma-4-e2b-uncensored-hauhaucs-aggressive"}
+  ;;
+  ;; :judge requires :model/registry and :dispatch (the
+  ;; :capability/broker value) in this config subtree — missing either
+  ;; fails closed with :eval/system-invalid. The judge is attributed to
+  ;; the deterministic kernel id "evoclj/eval-judge".
   ;; ==================================================================}
 
  :promotion/system
