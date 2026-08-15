@@ -44,7 +44,7 @@ as they land. Each direction must reach 3-10 COMPLETED features.
 ## Direction 5: Security & Adversarial (sci/, capability/, adversarial/)
 - [x] S1: prompt-injection suite — adversarial inputs to :llm nodes must not
       change tool behavior; assert tool-call boundaries hold
-- [ ] S2: SCI sandbox adversarial expansion — new escape attempts rejected
+- [x] S2: SCI sandbox adversarial expansion — new escape attempts rejected
 - [ ] S3: lease refinement tests — per-model and per-tool lease denial cases
 - [ ] S4: model-output schema hardening — strict output validation tests for
       judge/diagnosis/mutation shapes
