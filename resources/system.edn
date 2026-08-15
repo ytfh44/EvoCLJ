@@ -77,7 +77,40 @@
   ;; registers one (YAGNI, Global Constraint 24)
   :mutator :none
   :budget-profile {:max-candidates 3}
-  :programs-registry []}
+  :programs-registry []
+  ;; ==================================================================
+  ;; OPTIONAL LLM-DRIVEN EVOLUTION (opt-in — the shipped defaults above
+  ;; stay unchanged; LLM evolution must be ENABLED explicitly).
+  ;;
+  ;; To use the LLM diagnostician/mutator adapters, wire the model
+  ;; registry and the broker dispatch context into :evolution/system,
+  ;; grant a model lease, and switch :diagnostician / :mutator to a
+  ;; {:type :llm ...} config. Example (uncomment to enable):
+  ;;
+  ;;   :model/registry #ig/ref :model/registry
+  ;;   :dispatch #ig/ref :capability/broker
+  ;;   :model-lease {:kind :model :id "lmstudio/*"}
+  ;;   :diagnostician {:type :llm
+  ;;                   :model/id "lmstudio/qwen3.6-35b-a3b-uncensored-hauhaucs-aggressive"
+  ;;                   :max-hypotheses 3
+  ;;                   :confidence-band :medium}
+  ;;   :mutator {:type :llm
+  ;;             :model/id "lmstudio/qwen3.6-35b-a3b-uncensored-hauhaucs-aggressive"
+  ;;             :max-mutations 3}
+  ;;
+  ;; - :model/registry must be an injected #ig/ref to the :model/registry
+  ;;   component (or a host-injected atom); :dispatch must be the
+  ;;   :capability/broker value (or a compatible broker context). Both
+  ;;   are REQUIRED once an :llm adapter is configured — the host fails
+  ;;   closed (:evolution/system-invalid) rather than silently falling
+  ;;   back to the pattern adapters.
+  ;; - :model-lease is an optional capability lease granting the model
+  ;;   resource (:kind :model :id "<provider>/*"); without one the
+  ;;   broker denies every model call. Use the CLI (evoclj evolve) to
+  ;;   drive a full cycle end to end.
+  ;; ==================================================================
+  :model/registry #ig/ref :model/registry
+  :dispatch #ig/ref :capability/broker}
 
  :eval/system
  {:store {:sqlite #ig/ref :store/sqlite
@@ -156,4 +189,4 @@
 
  :model/registry
  {:catalog #ig/ref :modelsdev/catalog
-  :registry/api-keys {}}
+  :registry/api-keys {}}}

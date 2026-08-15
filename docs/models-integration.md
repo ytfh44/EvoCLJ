@@ -148,3 +148,111 @@ All model tests are offline: local HttpServer fixtures only.
      :registry/api-keys {}}        ; provider-id -> api key (or env)
 
 Environment overrides: EVOCLJ_CATALOG_URL, EVOCLJ_CATALOG_CACHE_DIR.
+
+## LLM-driven evolution
+
+The deterministic pattern Diagnostician (Task 7.2) and the no-op
+default Mutator are the shipped defaults, but both evolution adapters
+can be switched to LLM-driven ones by configuring a `{:type :llm ...}`
+map in `resources/system.edn`. LLM evolution is strictly OPT-IN — the
+shipped `:diagnostician` pattern map and `:mutator :none` stay
+unchanged until an operator enables it.
+
+### Enabling it in system.edn
+
+Within the `:evolution/system` block, inject the model registry and
+the broker dispatch context, grant a model lease, and switch the two
+adapters to their `:llm` forms:
+
+    :evolution/system
+    {:store {...}
+     :diagnostician {:task/success-threshold 1.0 ...}   ; shipped default
+     :mutator :none                                      ; shipped default
+     ...
+     ;; --- enable LLM-driven evolution (uncomment to turn on) ---
+     ;; :model/registry #ig/ref :model/registry
+     ;; :dispatch #ig/ref :capability/broker
+     ;; :model-lease {:kind :model :id "lmstudio/*"}
+     ;; :diagnostician {:type :llm
+     ;;                 :model/id "lmstudio/qwen3.6-35b-a3b-uncensored-hauhaucs-aggressive"
+     ;;                 :max-hypotheses 3
+     ;;                 :confidence-band :medium}
+     ;; :mutator {:type :llm
+     ;;           :model/id "lmstudio/qwen3.6-35b-a3b-uncensored-hauhaucs-aggressive"
+     ;;           :max-mutations 3}}
+
+The three wiring keys are OPTIONAL and only consulted when an `:llm`
+adapter is present:
+
+- `:model/registry` — the kernel-owned model registry (`#ig/ref
+  :model/registry` or an injected atom). REQUIRED once an `:llm`
+  adapter is configured.
+- `:dispatch` — the `:capability/broker` value (or a compatible
+  broker context). REQUIRED once an `:llm` adapter is configured.
+- `:model-lease` — an optional capability lease granting the model
+  resource (`:kind :model :id "<provider>/*"`). Without one the
+  broker denies every model call.
+
+If an `:llm` adapter is configured but `:model/registry` or
+`:dispatch` is missing, the host FAILS CLOSED with
+`:evolution/system-invalid` (reason `:llm-needs-model-registry` /
+`:llm-needs-dispatch`) — it never silently falls back to the pattern
+adapter or the no-op mutator.
+
+### The :model-call injection contract
+
+The host builds ONE `:model-call` closure (in
+`evoclj.kernel.system/build-model-call`) and wires it into both LLM
+adapters. Each call constructs a single attributable
+`:intent/model-call` and dispatches it through a LOCAL broker context
+(the host broker context is never mutated — only the model registry and
+lease are injected locally):
+
+    (fn [model-id messages options])   ; -> the broker dispatch result
+        {:result/status :ok
+         :value {:model/output {:text "..."}
+                 :usage {...}}}
+        ;; or THROWS ExceptionInfo with a stable :error/type
+
+Attribution is kernel-deterministic (Global Constraint 20): a fixed
+`session-id` over `evoclj/evolution/session`, a content-addressed
+`phenotype-id` (`sha256:...`, from `evoclj/evolution`), the
+`:node/evolution` node, and `cause/event-id 0`. The adapters never
+call a provider directly (Global Constraint 8) — every external effect
+crosses the broker. Error data is EDN-safe and sanitized (Global
+Constraint 22).
+
+### The kernel-computes-:expect/hash security property
+
+The LLM Mutator proposes mutation ops WITHOUT `:expect/hash` (a
+language model cannot compute digests). The adapter — not the model —
+attaches each op's `:expect/hash` from the parent Genome's `:files`
+digest, using the same `sha256:...` convention the patch runtime
+verifies against. A model can never name a preimage it does not know,
+so stale patches are impossible. The persisted candidate record's
+mutation `:expect/hash` therefore always equals the parent file's
+digest, even when the model JSON carried none.
+
+### Fail-loud error contract
+
+Model failures never silently degrade the evolution loop. The
+adapter's `:model-call` throws `:evolution/model-call-failed` on a
+non-`:ok` dispatch; the LLM Diagnostician/Mutator translate that into
+`:diagnosis/llm-failed` / `:mutation/llm-failed`. A model response
+that cannot be parsed, or whose hypotheses/mutations are entirely
+unusable, throws `:diagnosis/llm-response-invalid` /
+`:mutation/llm-response-invalid` rather than returning an empty
+result (the LLM-NOISE TOLERANCE POLICY).
+
+### Driving a cycle through the CLI
+
+Use the CLI to run a full evolution cycle end to end:
+
+    evoclj evolve --generation current
+
+With the `:llm` adapters wired, `evolve` calls
+`evolution.core/propose-candidates!`, which freezes the evidence pack,
+runs the LLM Diagnostician and Mutator through the broker, and persists
+candidate records — all against the injected model lease. (See
+`test/evoclj/kernel/evolution_llm_wiring_test.clj` for a fully
+offline fake-endpoint integration test of the wiring.)

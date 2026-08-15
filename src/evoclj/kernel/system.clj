@@ -31,7 +31,16 @@
                          :genome-root <dir> | :genome-loader <fn>
                          :candidates-dir <dir> :diagnostician {...}
                          :mutator <fn> | :none :budget-profile {...}
-                         :programs-registry [...]}
+                         :programs-registry [...]
+                         ;; optional LLM-driven adapters (opt-in): a
+                         ;; :diagnostician/:mutator {:type :llm ...} map is
+                         ;; wired through a host-built :model-call closure
+                         ;; that dispatches :intent/model-call through the
+                         ;; injected :capability/broker. These three keys are
+                         ;; OPTIONAL; pattern-only hosts omit them entirely.
+                         :model/registry <registry>   ; host-injected model registry
+                         :dispatch <broker context>   ; the :capability/broker value
+                         :model-lease <optional lease map>}
     :eval/system        {:store {...} :provider/catalog {...}
                          :kernel/abi {...} :profiles {...}
                          :genome/roots {...} :dataset/roots {...}
@@ -69,6 +78,10 @@
             [evoclj.evolution.budget :as budget]
             [evoclj.evolution.core :as evolution]
             [evoclj.evolution.diagnose :as diagnose]
+            [evoclj.evolution.llm-diagnostician :as llm-diag]
+            [evoclj.evolution.llm-mutator :as llm-mut]
+            [evoclj.genome.hash :as hash]
+            [evoclj.intent.core :as intent-core]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
             [evoclj.provider.fixture :as fixture]
@@ -81,7 +94,8 @@
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite]
             [integrant.core :as ig])
-  (:import (java.nio.file Files Path)
+  (:import (java.nio.charset StandardCharsets)
+           (java.nio.file Files Path)
            (java.nio.file.attribute FileAttribute)
            (java.util UUID)))
 
@@ -314,28 +328,120 @@
     (propose-mutations [_ _context] nil)))
 
 (defn- build-diagnostician
-  "Build the Diagnostician from config: a plain map becomes the
-  deterministic pattern adapter (evoclj.evolution.diagnose), an object
-  that already satisfies the protocol passes through (dependency
-  injection)."
-  [config]
-  (if (satisfies? diagnose/Diagnostician config)
-    config
-    (diagnose/pattern-diagnostician config)))
+  "Build the Diagnostician from config:
+    - an object already satisfying the Diagnostician protocol passes
+      through unchanged (dependency injection);
+    - a plain map becomes the deterministic pattern adapter
+      (evoclj.evolution.diagnose);
+    - a {:type :llm ...} map becomes the LLM adapter
+      (evoclj.evolution.llm-diagnostician) closed over the host-built
+      :model-call closure. An unknown :type or an invalid :llm config
+      fails closed (:evolution/system-invalid)."
+  [config model-call]
+  (cond
+    (and (map? config) (= :llm (:type config)))
+    (let [allowed #{:type :model/id :max-hypotheses :confidence-band :system-prompt}
+          unknown (remove allowed (keys config))]
+      (when (seq unknown)
+        (throw (err/error :evolution/system-invalid
+                          "invalid :diagnostician :type :llm config — unknown keys"
+                          {:reason :llm-config-invalid
+                           :keys (mapv (comp str name) unknown)})))
+      (llm-diag/llm-diagnostician
+       (cond-> {:model-call model-call
+                :model/id (:model/id config)}
+         (:max-hypotheses config) (assoc :max-hypotheses (:max-hypotheses config))
+         (contains? config :confidence-band)
+         (assoc :confidence-band (:confidence-band config))
+         (:system-prompt config) (assoc :system-prompt (:system-prompt config)))))
+    (and (map? config) (contains? config :type))
+    (throw (err/error :evolution/system-invalid
+                      "unknown :diagnostician :type"
+                      {:reason :unknown-diagnostician-type
+                       :type (:type config)}))
+    (satisfies? diagnose/Diagnostician config) config
+    :else (diagnose/pattern-diagnostician config)))
 
 (defn- build-mutator
-  "Build the Mutator from config: a function passes through, :none (or
-  absence) yields the no-op adapter, anything else is a config error."
-  [config]
+  "Build the Mutator from config:
+    - nil / :none yield the no-op adapter (v0 default);
+    - a function passes through (wrapped into the protocol);
+    - a {:type :llm ...} map becomes the LLM adapter
+      (evoclj.evolution.llm-mutator) closed over the host-built
+      :model-call closure;
+    - an unknown :type fails closed (:evolution/system-invalid)."
+  [config model-call]
   (cond
     (nil? config) (no-op-mutator)
     (= :none config) (no-op-mutator)
     (fn? config) (reify evolution/Mutator
                    (propose-mutations [_ context]
                      (config context)))
+    (map? config)
+    (if (= :llm (:type config))
+      (let [allowed #{:type :model/id :max-mutations :risk :system-prompt}
+            unknown (remove allowed (keys config))]
+        (when (seq unknown)
+          (throw (err/error :evolution/system-invalid
+                            "invalid :mutator :type :llm config — unknown keys"
+                            {:reason :llm-config-invalid
+                             :keys (mapv (comp str name) unknown)})))
+        (llm-mut/llm-mutator
+         (cond-> {:model-call model-call
+                  :model/id (:model/id config)}
+           (:max-mutations config) (assoc :max-mutations (:max-mutations config))
+           (contains? config :risk) (assoc :risk (:risk config))
+           (:system-prompt config) (assoc :system-prompt (:system-prompt config)))))
+      (throw (err/error :evolution/system-invalid
+                        "unknown :mutator :type"
+                        {:reason :unknown-mutator-type
+                         :type (:type config)})))
     :else (throw (err/error :evolution/system-invalid
-                            "host :mutator must be a fn, :none, or absent"
+                            "host :mutator must be a fn, :none, absent, or a {:type :llm ...} map"
                             {:value (err/sanitize config)}))))
+
+(defn- build-model-call
+  "Build the host-injected :model-call closure used by the LLM
+  evolution adapters: ONE attribute :intent/model-call dispatched
+  through a LOCAL broker context (the injected :capability/broker
+  value, with the model registry and lease injected locally — the host
+  broker context is NEVER mutated).
+
+  Attribution is kernel-deterministic (Global Constraint 20 — every
+  externally visible effect is auditable, never random):
+    - a fixed session id over \"evoclj/evolution/session\";
+    - a deterministic content-addressed phenotype id derived from
+      \"evoclj/evolution\" (satisfies the intent PhenotypeIdSchema);
+    - the :node/evolution node and a 0 cause/event-id.
+
+  Contract (returned to the adapters): the dispatch result when
+  :result/status is :ok; otherwise a thrown ExceptionInfo with a stable
+  :error/type (the adapters' \"throws ExceptionInfo\" contract). EDN-safe
+  only — all error data is sanitized (Global Constraint 22)."
+  [dispatch-context model-registry model-lease]
+  (let [session-id (UUID/nameUUIDFromBytes
+                    (.getBytes "evoclj/evolution/session" StandardCharsets/UTF_8))
+        phenotype-id (hash/text-digest "evoclj/evolution")
+        local-ctx (assoc dispatch-context
+                         :model-registry model-registry
+                         :leases (if model-lease
+                                   (conj (:leases dispatch-context) model-lease)
+                                   (:leases dispatch-context)))]
+    (fn [model-id messages options]
+      (let [intent (intent-core/model-call
+                    session-id phenotype-id :node/evolution 0
+                    {:model/id model-id
+                     :messages messages
+                     :options options}
+                    {:wall-ms 1000 :max-steps 1})
+            result (dispatch/dispatch! local-ctx intent)]
+        (if (= :ok (:result/status result))
+          result
+          (throw (err/error :evolution/model-call-failed
+                            "model call failed during evolution"
+                            {:error/type (:result/status result)
+                             :error/message (:error/message result)
+                             :error/data (err/sanitize (:error/data result))})))))))
 
 (defmethod ig/init-key :evolution/system
   [_ config]
@@ -343,13 +449,42 @@
   (Task 7.8 contract, see evoclj.evolution.core) assembled from the
   config subtree and the injected store. The provider catalog is
   plain data; the diagnostician and mutator are constructed here
-  (or injected as objects/fns — Step 4)."
-  (let [evo (cond-> {:store {:sqlite (:sqlite (:store config))
+  (or injected as objects/fns — Step 4).
+
+  OPTIONAL LLM-DRIVEN ADAPTERS (opt-in): when :diagnostician or
+  :mutator is a {:type :llm ...} map, the host builds ONCE a :model-call
+  closure (build-model-call) closed over :model/registry, :dispatch
+  (the :capability/broker value) and the optional :model-lease, and
+  wires it into both adapters. When an :llm adapter is configured but
+  :model/registry or :dispatch is missing, the host fails closed
+  (:evolution/system-invalid — never silently falls back to the pattern
+  adapter or the no-op mutator). These three config keys are OPTIONAL
+  and only consulted when an :llm adapter is present."
+  (let [diagnostician-config (:diagnostician config)
+        mutator-config (:mutator config)
+        llm? (or (and (map? diagnostician-config)
+                      (= :llm (:type diagnostician-config)))
+                 (and (map? mutator-config)
+                      (= :llm (:type mutator-config))))
+        model-call (when llm?
+                     (do
+                       (when-not (contains? config :model/registry)
+                         (throw (err/error :evolution/system-invalid
+                                           "an :llm evolution adapter requires :model/registry"
+                                           {:reason :llm-needs-model-registry})))
+                       (when-not (contains? config :dispatch)
+                         (throw (err/error :evolution/system-invalid
+                                           "an :llm evolution adapter requires :dispatch"
+                                           {:reason :llm-needs-dispatch})))
+                       (build-model-call (:dispatch config)
+                                         (:model/registry config)
+                                         (:model-lease config))))
+        evo (cond-> {:store {:sqlite (:sqlite (:store config))
                              :cas (:cas (:store config))}
                      :provider-catalog (or (:provider-catalog config) {})
                      :candidates-dir (:candidates-dir config)
-                     :diagnostician (build-diagnostician (:diagnostician config))
-                     :mutator (build-mutator (:mutator config))
+                     :diagnostician (build-diagnostician diagnostician-config model-call)
+                     :mutator (build-mutator mutator-config model-call)
                      :budget-profile (or (:budget-profile config)
                                          budget/v0-profile)}
               (:genome-root config) (assoc :genome-root (:genome-root config))
