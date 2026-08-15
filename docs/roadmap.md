@@ -16,7 +16,7 @@ as they land. Each direction must reach 3-10 COMPLETED features.
 - [ ] E5: evidence-pack enrichment — model usage/cost enters pack summaries
 
 ## Direction 2: Evaluation Depth (eval/)
-- [ ] V1: LLM-as-judge equivalence — :equivalence/llm-judge keyword registered,
+- [x] V1: LLM-as-judge equivalence — :equivalence/llm-judge keyword registered,
       real model decides semantic output equivalence (currently byte-identical
       or injected fns only)
 - [ ] V2: judge score aggregation — judge verdicts per case feed utility summary
