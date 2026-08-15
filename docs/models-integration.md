@@ -256,3 +256,56 @@ runs the LLM Diagnostician and Mutator through the broker, and persists
 candidate records — all against the injected model lease. (See
 `test/evoclj/kernel/evolution_llm_wiring_test.clj` for a fully
 offline fake-endpoint integration test of the wiring.)
+## `evoclj cycle` — one command walks the whole loop
+
+`evoclj cycle` is the single orchestrated path from evidence to
+promotion, so an operator no longer runs `evolve`, then `eval` per
+candidate, then `promote` per evaluation by hand. It composes the same
+public subsystem entry points the individual commands use and stays a
+driver (Global Constraint 15 — the only pointer that ever moves is the
+atomic CURRENT compare-and-set inside `promotion.promote/promote!`; it
+never auto-schedules or daemonizes):
+
+    evoclj cycle [--generation <id|current>] [--profile <profile-id>]
+                 [--max-candidates <n>] [--evolve] [--no-promote]
+
+Phases:
+
+1. **Resolve the generation** (default `current`, via
+   `evoclj.cli.session/current-generation-info`).
+2. **EVOLVE** — run exactly what `evolve` runs
+   (`evolution.core/propose-candidates!` with the standard
+   evidence-selector and `--max-candidates`, default 3). It runs only
+   when `--evolve` is given OR no `:evaluation-pending` candidate exists
+   for that generation, so a rerun evaluates pre-existing candidates
+   without proposing a duplicate cycle.
+3. **EVAL** — for every `:evaluation-pending` candidate of the
+   generation, run the `eval` pipeline
+   (`evoclj.cli.session/build-evaluator` + `eval.core/evaluate-candidate!`
+   under `--profile`, default `:default-v1`) and collect each Evaluation.
+4. **PROMOTE** — for every evaluation whose eligibility verdict is
+   exactly `:eligible? true`, run the `promote` pipeline as
+   `evoclj.cli.promotion/promote!` does (operator session, the compiled
+   Resolution id of the candidate bundle, `expected-parent-generation`
+   = the candidate parent generation). `--no-promote` skips the pointer
+   move and reports what WOULD happen.
+
+A failed eval or failed promote for ONE candidate never aborts the
+cycle — the failure is collected into the report as per-candidate
+evidence. A broken system map or a genuinely missing candidate id stays
+a hard typed `:cli/*` error. The command returns a plain EDN-safe
+report (Global Constraint 22):
+
+    {:generation/id <stable-id>
+     :phases {:evolve {:run? bool :candidates [<candidate-shape> ...]}
+              :eval [{:candidate/id <uuid> :evaluation/id <uuid>
+                      :eligibility {:eligible? bool :reasons [...]}}
+                     | {:candidate/id <uuid> :error {...}} ...]
+              :promote [{:candidate/id <uuid> :status <kw> :outcome <result>
+                         :error {...}} ...]}}
+
+For the promotion to pass `promote!` Database Invariant 7 integrity
+re-hash, the candidate Genome canonical body must be present in the
+CAS. `evoclj cycle` performs that host bookkeeping itself (the same
+storage a standalone `promote` assumes the operator already did) before
+promoting each passing candidate.

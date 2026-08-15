@@ -41,7 +41,7 @@
 
 (def ^:private flag-options
   "Options that take no value (present => true)."
-  #{:pretty})
+  #{:pretty :evolve :no-promote})
 
 (defn- option-value?
   "True when the next token can be this option's value."
@@ -86,6 +86,7 @@
    ["candidate" "list"]       {:fn evolution/candidate-list! :arity 0}
    ["candidate" "inspect"]    {:fn evolution/candidate-inspect! :arity 1}
    ["eval"]                   {:fn evolution/eval! :arity 0}
+   ["cycle"]                  {:fn evolution/cycle! :arity 0}
    ["promote"]                {:fn promotion/promote! :arity 0}
    ["rollback"]               {:fn promotion/rollback! :arity 0}
    ["lineage"]                {:fn promotion/lineage! :arity 1}})
