@@ -599,11 +599,43 @@
      :error/artifact-ref (when-let [r (:payload-ref failed)]
                            (read-artifact store r))}))
 
+(defn event-tree
+  "The session's causal trace as a NESTED tree (feature O1): each
+  event becomes {:event/seq :event/type :children [<nested> ...]}
+  where :children holds the events whose :cause/event-id points at
+  this event. The root event (nil cause) is the tree root; orphaned
+  events (a cause pointing at an unknown seq) are collected under
+  :orphans. Pure data — the trace is never mutated."
+  [events]
+  (let [by-id (into {} (map (fn [e] [(:event/seq e) e])) events)
+        roots (filter #(nil? (:cause/event-id %)) events)
+        children-of (fn [seq-id]
+                      (filter #(= seq-id (:cause/event-id %)) events))
+        known (set (keys by-id))
+        orphans (filter (fn [e]
+                         (and (:cause/event-id e)
+                              (not (contains? known (:cause/event-id e)))))
+                       events)
+        node (fn node [e]
+               {:event/seq (:event/seq e)
+                :event/type (:event/type e)
+                :children (mapv node (children-of (:event/seq e)))})]
+    {:roots (mapv node roots)
+     :orphans (mapv (fn [e]
+                     {:event/seq (:event/seq e)
+                      :event/type (:event/type e)
+                      :cause/event-id (:cause/event-id e)})
+                   orphans)}))
+
 (defn events!
-  "evoclj events --session <uuid>
+  "evoclj events --session <uuid> [--tree]
 
   The session's full append-only causal trace (public event contract
-  fields), ascending :event/seq."
+  fields), ascending :event/seq. With --tree the trace is returned as
+  a NESTED causal tree (feature O1): children are the events chained
+  to their cause, so the effect protocol (:intent/proposed ->
+  :intent/authorized -> :provider/call-started ->
+  :provider/call-completed) is visible as parent/child structure."
   [opts]
   (let [sid (get-in opts [:options :session])
         _ (when-not sid
@@ -614,11 +646,14 @@
         system (build-system opts)
         _ (session-or-throw! system sid)
         events (event/events-for-session (db-of system) sid)]
-    {:session/id sid
-     :events (mapv (fn [e]
-                     (select-keys e [:event/seq :event/type :cause/event-id
-                                     :payload-ref :metadata]))
-                   events)}))
+    (if (get-in opts [:options :tree])
+      {:session/id sid
+       :tree (event-tree events)}
+      {:session/id sid
+       :events (mapv (fn [e]
+                       (select-keys e [:event/seq :event/type :cause/event-id
+                                       :payload-ref :metadata]))
+                     events)})))
 
 (defn capability-inspect!
   "evoclj capability inspect --session <uuid>

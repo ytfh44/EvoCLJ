@@ -43,7 +43,7 @@
 
 (def ^:private flag-options
   "Options that take no value (present => true)."
-  #{:pretty :evolve :no-promote})
+  #{:pretty :evolve :no-promote :tree})
 
 (defn- option-value?
   "True when the next token can be this option's value."
