@@ -306,8 +306,8 @@
       (when (and pattern claim target-kind target-id effect-metric)
         {:pattern pattern
          :claim claim
-         :support (mapv ref-entry (as-vector (:support raw)))
-         :counterevidence (mapv counter-ref-entry (as-vector (:counterevidence raw)))
+         :support (vec (keep ref-entry (as-vector (:support raw))))
+         :counterevidence (vec (keep counter-ref-entry (as-vector (:counterevidence raw))))
          :target {:kind target-kind :id target-id}
          :expected-effect {:metric effect-metric
                            :direction (if (= (to-keyword (:effect-direction raw)) :decrease)

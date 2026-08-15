@@ -400,6 +400,30 @@
       (is (= :after (:position op)))            ; string -> keyword coerced
       (is (= op (ms/validate-op op))))))
 
+(deftest model-style-colon-keywords-are-sanitized
+  (testing "models emit keywords with leading colons in JSON (\"::type\",
+            \":steps\"); cheshire keywordizes them into names that would
+            pr-str to ILLEGAL EDN (::steps). The adapter rewrites them to
+            plain keywords so the mutation never compile-fails the
+            candidate."
+    (let [[mc _] (canned-call
+                  (value-with
+                   (mutation-text
+                    [{:ops [{"op" "set-edn"
+                             "file" skills-file
+                             "path" ["steps"]
+                             "value" {":steps" [{":name" "a"
+                                                 ":action" "b"}]}}]}]
+                   )))
+          out (propose {:model-call mc :model/id "m"})
+          op (get-in out [0 :ops 0])
+          value (:value op)]
+      (is (= placeholder-hash (:expect/hash op)))
+      (is (= {:steps [{:name "a" :action "b"}]} value))
+      (is (= op (ms/validate-op op)))
+      (is (not (re-find #"::" (pr-str value)))
+          (str "no illegal :: token survives: " (pr-str value))))))
+
 ;; --- user message carries the bounded context ------------------------------------
 
 (deftest user-message-rendered

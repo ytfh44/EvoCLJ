@@ -404,25 +404,53 @@
 
         :else op))))
 
+(defn- sanitize-edn
+  "Recursively repair the EDN VALUES a model emits in its JSON: models
+  routinely write keywords with leading colons in the JSON string
+  (\"::type\", \":steps\"), which cheshire keywordizes into keywords
+  whose NAME starts with a colon (e.g. ::steps). pr-str of such a
+  keyword yields an ILLEGAL EDN token (::steps is an alias reference
+  and fails to read without a namespace alias), so a set-edn value
+  carrying one would compile-fail the candidate. This walks the value
+  and rewrites every such keyword to the keyword WITHOUT its leading
+  colons (:steps -> :steps), keeping maps/vectors/sets intact. A
+  keyword whose name has no leading colon passes through unchanged."
+  [x]
+  (cond
+    (keyword? x)
+    (let [n (name x)]
+      (if (str/starts-with? n ":")
+        (keyword (str/replace-first n ":" ""))
+        x))
+    (map? x) (into {} (map (fn [[k v]] [(sanitize-edn k) (sanitize-edn v)])) x)
+    (vector? x) (mapv sanitize-edn x)
+    (seq? x) (map sanitize-edn x)
+    (set? x) (into #{} (map sanitize-edn) x)
+    :else x))
+
 (defn- complete-op
   "Attach the kernel-computed :expect/hash to ONE op from the parent's
   :files map (the op's :file digested by the SAME convention the patch
   runtime verifies against). :op is coerced to a keyword (the model
   emits it as a JSON string; the op schemas dispatch on a keyword) and
   the keyword-valued payload fields are coerced alongside, so the
-  completed op is schema-valid. Returns the completed op, or nil when
-  it cannot be hash-completed: a non-map op, an un-coercible :op, a
-  missing/non-string :file, or a :file NOT in the parent's :files map
-  (the model hallucinated a file). The kernel-computed digest OVERRIDES
-  any model-supplied :expect/hash — a model can never name a preimage
-  it does not know, so stale patches are impossible."
+  completed op is schema-valid. EDN payload values (:value / :form)
+  are sanitized (see sanitize-edn) so model-typical \"::type\"-style
+  keywords never compile-fail the candidate. Returns the completed op,
+  or nil when it cannot be hash-completed: a non-map op, an
+  un-coercible :op, a missing/non-string :file, or a :file NOT in the
+  parent's :files map (the model hallucinated a file). The
+  kernel-computed digest OVERRIDES any model-supplied :expect/hash — a
+  model can never name a preimage it does not know, so stale patches
+  are impossible."
   [files op]
   (when (and (map? op) (to-keyword (:op op)))
     (let [opk (to-keyword (:op op))
           file (:file op)]
       (when (and (string? file) (seq file))
         (when-let [digest (get-in files [file :digest])]
-          (assoc (coerce-op-keywords (assoc op :op opk))
+          (assoc (sanitize-edn
+                  (coerce-op-keywords (assoc op :op opk)))
                  :expect/hash digest))))))
 
 (defn- normalize-expected-effect

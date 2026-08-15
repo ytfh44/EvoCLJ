@@ -180,6 +180,24 @@
       (is (= 1 (count (:hypotheses diagnosis))))
       (is (= "task success rate is low" (:claim (first (:hypotheses diagnosis))))))))
 
+(deftest string-array-counterevidence-is-dropped
+  (testing "models often emit a string-array counterevidence (strings,
+            not refs) — those entries are dropped as noise, and a
+            hypothesis whose refs survive still validates"
+    (let [raw [(assoc (valid-hypothesis)
+                      :counterevidence ["None" "nothing"])
+               (assoc (valid-hypothesis)
+                      :claim "second hypothesis"
+                      :support [])]
+          [mc _] (canned-call (value-with (model-text raw)))
+          d (llm/llm-diagnostician {:model-call mc :model/id "m"})
+          p (pack episodes1 {:selected 1})
+          diagnosis (diag/diagnose d p)
+          h1 (first (:hypotheses diagnosis))]
+      (is (= 1 (count (:hypotheses diagnosis))) "the empty-support entry is dropped")
+      (is (= [] (:counterevidence h1)) "string entries were dropped")
+      (is (= [{:episode/id (uuid-of 1) :event-ids [12]}] (:support h1))))))
+
 (deftest all-invalid-fails-loud
   (testing "a non-empty hypotheses array that is ALL noise throws"
     (let [[mc _] (canned-call

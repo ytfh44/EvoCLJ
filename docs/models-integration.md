@@ -309,3 +309,50 @@ re-hash, the candidate Genome canonical body must be present in the
 CAS. `evoclj cycle` performs that host bookkeeping itself (the same
 storage a standalone `promote` assumes the operator already did) before
 promoting each passing candidate.
+
+## Real end-to-end loop on a local server (verified with LM Studio)
+
+The full real-model loop — evidence, LLM diagnosis, LLM mutation, candidate, real-model evaluation, CAS promotion — has been verified end to end against a local LM Studio server (gemma-4-e2b, one cycle in about a minute; repeated runs produced candidates, real cost figures, and {:status :promoted} CAS switches). Deployment guidance learned from those runs:
+
+### Provider catalog and resolution
+
+The :provider-catalog of BOTH :evolution/system and :eval/system must resolve the genome's model alias to the real model id, otherwise the compiled topology names a fixture model:
+
+    {:reasoning/high {:provider :lmstudio
+                      :provider-model "lmstudio/gemma-4-e2b-uncensored-hauhaucs-aggressive"
+                      :adapter-version "1"}}
+
+The runtime model dispatch itself is driven by the model registry (:model/registry plus a model lease), independent of the compile-time catalog — a mismatch between them surfaces as :provider/not-found :reason :unknown-model at dispatch time.
+
+### Registry timeouts for slow local models
+
+Local models are slow: the SDK default is 60s per call. Set :registry/timeout-ms on the :model/registry component (e.g. 300000) so evolution/evaluation calls are not killed mid-generation.
+
+### JSON stability: use the server's json_schema mode
+
+Small local models drift out of strict-JSON output. LM Studio does NOT support response_format json_object (400 error) but DOES support json_schema. Pin the model's dialect extra-params so every diagnosis/mutation response is forced into valid JSON:
+
+    :model/dialect {:interleaved :none
+                    :reasoning-options []
+                    :server-side-search :off
+                    :extra-params
+                    {:response_format
+                     {:type "json_schema"
+                      :json_schema
+                      {:name "diagnosis_or_mutations"
+                       :schema {:type "object"
+                                :properties
+                                {:hypotheses {:type "array"}
+                                 :mutations {:type "array"}}
+                                :required []}}}}}
+
+### Model-output robustness the adapters already handle
+
+- Models emit counterevidence as string arrays like ["None"] — the LLM Diagnostician drops non-ref entries and keeps the hypothesis.
+- Models emit keywords with leading colons in EDN values ("::type", ":steps"), which would pr-str to ILLEGAL EDN (::steps) and compile-fail the candidate — the LLM Mutator sanitizes every op's EDN payload to plain keywords.
+- The evaluation stage carries real model usage into the G6 cost guardrail: with :measure/cost absent, the :cost summary section is derived from the aggregated :model-cost-units of both sides.
+
+### Attribution
+
+All evolution/evaluation model calls are attributed to deterministic kernel ids (see the :model-call injection contract above) and the eval runner attributes its model usage to the side session, so every cost figure is auditable (Global Constraint 20).
+
