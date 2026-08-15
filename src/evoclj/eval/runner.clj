@@ -27,7 +27,27 @@
   :eval/paired-fixture-missing (a case tool has no fixture provider),
   :eval/paired-genome-unresolved (the evaluator cannot resolve a
   side's genome root). Scheduler/compiler/phenotype/store errors
-  propagate as their own typed errors."
+  propagate as their own typed errors.
+
+  REAL MODEL EXECUTION (post-v0 extension 1): the G5 evaluator is
+  OPTIONALLY augmented to run Genomes whose topology contains :llm
+  nodes through real model providers, with both new keys reserved by
+  the Task 8.7 contract:
+
+    :model/registry  — the kernel-owned model registry atom (the
+      result of evoclj.provider.model-registry/build-model-registry);
+      when PRESENT the broker context is built with :model-registry
+      injected AND a model lease for this side's exact phenotype id,
+      so the llm node's :intent/model-call intents (attributed to the
+      side phenotype) dispatch through dispatch-model-call! to real
+      providers. When ABSENT no model lease and no :model-registry
+      are injected — an :llm topology fails closed with the existing
+      :provider/not-found :reason :no-model-registry (never a silent
+      fallback); fixture-only Genomes are unaffected.
+    :model/resource  — the model resource template the model lease
+      grants, e.g. {:kind :model :id \"lmstudio/*\"} (the prefix the
+      model leases grant). Optional even when :model/registry is
+      present; defaults to {:kind :model :id \"*/*\"}."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [evoclj.compiler.core :as compiler]
@@ -146,6 +166,40 @@
              :expires-at expires})
           tool-ids)))
 
+(def ^:private default-model-resource
+  "The model lease resource used when the evaluator supplies NO
+  :model/resource: {:kind :model :id \"*/*\"}. Because the capability
+  matcher treats a model grant ending in \"/*\" as the literal string
+  prefix before it, the \"*/*\" grant becomes the prefix \"*\" — which
+  no concrete model id (e.g. \"lmstudio/fake\") ever starts with — so
+  this default matches NOTHING. It is a deliberately fail-closed
+  default: enabling :model/registry without a :model/resource never
+  accidentally over-grants, it simply lets the side fail closed with a
+  model denial until the host wires a real provider prefix (e.g.
+  {:kind :model :id \"lmstudio/*\"})."
+  {:kind :model :id "*/*"})
+
+(defn- model-lease
+  "One CapabilityLease granting this side's exact phenotype id the
+  :model resource's :invoke action. The llm node attributes its
+  :intent/model-call intents to the side phenotype
+  (:phenotype/id), so the lease subject MUST match it exactly —
+  mirroring how leases-for grants tool leases with the same subject
+  (Global Constraint 9: a sibling phenotype never resource-authorizes).
+  :resource is the evaluator's :model/resource or
+  default-model-resource; :max-calls is generous so legitimate
+  evaluation loop traffic is never budget-starved mid-run."
+  [phenotype-id resource]
+  (let [now (Date.)
+        expires (Date. (+ (.getTime now) 60000))]
+    {:cap/id (random-uuid)
+     :subject {:phenotype/id phenotype-id}
+     :resource (or resource default-model-resource)
+     :actions #{:invoke}
+     :constraints {:max-calls 10000}
+     :issued-at now
+     :expires-at expires}))
+
 (defn- create-pinned-session!
   "create-session! pinned to the compiled genome's identity, then
   append the :session/created root event (the host's job — the
@@ -174,7 +228,10 @@
   stores.
 
   `evaluator` is the G5 evaluator context (see evoclj.eval.paired for
-  its contract). `opts` keys:
+  its contract — plus the optional G5 evaluator keys :model/registry
+  (the kernel-owned model registry atom) and :model/resource (the model
+  lease resource template), which switch on real model execution for
+  :llm topologies (see the ns docstring). `opts` keys:
 
       :genome/root    <bundle directory path>   ; the side's Genome
       :side/kind      :parent | :candidate
@@ -219,8 +276,15 @@
                 (registry/register! registry (fixture-for evaluator tool-id seed)))
             usage (atom {})
             leases (leases-for tool-ids (:compiled/phenotype-id compiled))
+            model-registry (when (contains? evaluator :model/registry)
+                             (:model/registry evaluator))
+            leases (cond-> leases
+                     model-registry
+                     (conj (model-lease (:compiled/phenotype-id compiled)
+                                        (:model/resource evaluator))))
             broker (dispatch/make-broker-context
-                    {:registry registry :leases leases :usage usage})
+                    (cond-> {:registry registry :leases leases :usage usage}
+                      model-registry (assoc :model-registry model-registry)))
             ph (phenotype/instantiate
                 compiled
                 {:stores {:sqlite :poison :cas {:root :poison}}

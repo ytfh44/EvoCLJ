@@ -53,6 +53,20 @@
        ;   the physical dataset separation contract (Global Constraint
        ;   11): carried and validated, never mounted into any
        ;   workspace (Global Constraint 23)
+       :model/registry <model registry atom>           ; OPTIONAL —
+       ;   the kernel-owned model registry (result of
+       ;   evoclj.provider.model-registry/build-model-registry); when
+       ;   present the G5 runner injects it into the broker context and
+       ;   grants a model lease so :llm topologies run with real
+       ;   providers. Absent → an :llm genome fails closed with
+       ;   :provider/not-found :reason :no-model-registry. Passed
+       ;   through unchanged to evoclj.eval.runner/run-side!.
+       :model/resource {:kind :model :id \"<provider>/*\"} ; OPTIONAL —
+       ;   the model resource template the G5 model lease grants (the
+       ;   prefix model leases authorize). Optional even when
+       ;   :model/registry is present; default {:kind :model :id
+       ;   \"*/*\"} (matches no concrete id — fail-closed). See
+       ;   evoclj.eval.runner.
        :programs <resolver fn | vector>                ; OPTIONAL
        :equivalence/by-keyword <kw -> fn>              ; OPTIONAL
        :artifact/root <dir>                            ; OPTIONAL — G5
@@ -381,12 +395,14 @@
 
 (defn- paired-context
   "The Task 8.4 paired-selection evaluator context (a subset of the
-  orchestrator evaluator — the same :genome/roots and :programs)."
+  orchestrator evaluator — the same :genome/roots and :programs, plus
+  the optional :model/registry / :model/resource keys that switch on
+  real model execution for :llm topologies)."
   [evaluator]
   (select-keys evaluator
                [:provider/catalog :selection/cases :selection/fixtures
                 :programs :seed :equivalence/by-keyword :artifact/root
-                :genome/roots]))
+                :genome/roots :model/registry :model/resource]))
 
 ;; --- :not-run records (never implicit passes) ----------------------------------------
 

@@ -58,7 +58,15 @@
        ;  default derived from parent-generation + candidate-id
        :equivalence/by-keyword <kw -> equiv fn>             ; optional
        :artifact/root <directory path>                      ; optional;
-       ;  evaluator-only artifact path for case-level results}
+       ;  evaluator-only artifact path for case-level results
+       :model/registry <model registry atom>                ; optional;
+       ;  switches on real model execution for :llm topologies: the
+       ;  runner injects it into the broker context and grants a model
+       ;  lease (see evoclj.eval.runner). Absent → :llm genomes fail
+       ;  closed with :provider/not-found :reason :no-model-registry.
+       :model/resource {:kind :model :id \"<provider>/*\"}   ; optional;
+       ;  the model lease resource template; default {:kind :model
+       ;  :id \"*/*\"} matches no concrete id (fail-closed default)}
 
   The selection case contract (the case bodies the evaluator resolves
   from the selection dataset):

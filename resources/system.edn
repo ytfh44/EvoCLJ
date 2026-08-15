@@ -150,7 +150,32 @@
   :selection/cases {}
   :selection/fixtures {}
   :replay/cases {}
-  :replay/fixtures {}}
+  :replay/fixtures {}
+  ;; ==================================================================
+  ;; OPTIONAL REAL MODEL EXECUTION (opt-in — the shipped defaults above
+  ;; stay unchanged; evaluating :llm-topology candidates must be ENABLED
+  ;; explicitly).
+  ;;
+  ;; To let the G5 paired evaluator run Genomes whose topology contains
+  ;; an :llm node against real model providers, inject the kernel-owned
+  ;; model registry and declare the model resource prefix the model
+  ;; leases grant. Example (uncomment to enable):
+  ;;
+  ;;   :model/registry #ig/ref :model/registry
+  ;;   :model/resource {:kind :model :id "lmstudio/*"}
+  ;;
+  ;; - :model/registry must be an injected #ig/ref to the :model/registry
+  ;;   component (or a host-injected registry atom). Both keys are
+  ;;   OPTIONAL and passed through to the evaluator unchanged; without
+  ;;   :model/registry an :llm topology fails closed at eval time
+  ;;   (:provider/not-found :reason :no-model-registry) rather than
+  ;;   silently falling back.
+  ;; - :model/resource is the model lease resource template (the prefix
+  ;;   the model leases grant, e.g. "lmstudio/*"); when absent the
+  ;;   runner uses a default {:kind :model :id "*/*"} that matches no
+  ;;   concrete model id — a fail-closed default, so a provider prefix
+  ;;   must be configured for any model call to authorize.
+  ;; ==================================================================}
 
  :promotion/system
  {:store {:sqlite #ig/ref :store/sqlite

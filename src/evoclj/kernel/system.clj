@@ -506,18 +506,32 @@
   contract, see evoclj.eval.core) assembled from the config subtree
   and the injected store. Fixture maps (:selection/fixtures,
   :replay/fixtures) default to empty — v0 ships no hidden fixtures;
-  the host injects fixture fns where a deployment has them."
-  {:store {:sqlite (:sqlite (:store config))
-           :cas (:cas (:store config))}
-   :provider/catalog (or (:provider/catalog config) {})
-   :kernel/abi (:kernel/abi config)
-   :profiles (or (:profiles config) {"default-v1" profile/default-v1})
-   :genome/roots (or (:genome/roots config) {})
-   :dataset/roots (:dataset/roots config)
-   :selection/cases (or (:selection/cases config) {})
-   :selection/fixtures (or (:selection/fixtures config) {})
-   :replay/cases (or (:replay/cases config) {})
-   :replay/fixtures (or (:replay/fixtures config) {})})
+  the host injects fixture fns where a deployment has them.
+
+  OPTIONAL REAL MODEL EXECUTION for :llm topologies: when the config
+  carries :model/registry (the kernel-owned model registry atom,
+  result of evoclj.provider.model-registry/build-model-registry) and
+  :model/resource (the model lease resource template, e.g. {:kind
+  :model :id \"lmstudio/*\"}), both are passed through onto the
+  evaluator map, letting the G5 runner evaluate :llm-topology
+  candidates against real providers. Both keys are OPTIONAL — absent,
+  the shipped behavior is unchanged and an :llm genome fails closed
+  with :provider/not-found :reason :no-model-registry."
+  (cond-> {:store {:sqlite (:sqlite (:store config))
+                   :cas (:cas (:store config))}
+           :provider/catalog (or (:provider/catalog config) {})
+           :kernel/abi (:kernel/abi config)
+           :profiles (or (:profiles config) {"default-v1" profile/default-v1})
+           :genome/roots (or (:genome/roots config) {})
+           :dataset/roots (:dataset/roots config)
+           :selection/cases (or (:selection/cases config) {})
+           :selection/fixtures (or (:selection/fixtures config) {})
+           :replay/cases (or (:replay/cases config) {})
+           :replay/fixtures (or (:replay/fixtures config) {})}
+    (contains? config :model/registry)
+    (assoc :model/registry (:model/registry config))
+    (contains? config :model/resource)
+    (assoc :model/resource (:model/resource config))))
 
 (defmethod ig/halt-key! :eval/system
   [_ _component]
