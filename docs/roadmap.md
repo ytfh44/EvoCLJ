@@ -46,7 +46,7 @@ as they land. Each direction must reach 3-10 COMPLETED features.
       change tool behavior; assert tool-call boundaries hold
 - [x] S2: SCI sandbox adversarial expansion — new escape attempts rejected
 - [ ] S3: lease refinement tests — per-model and per-tool lease denial cases
-- [ ] S4: model-output schema hardening — strict output validation tests for
+- [x] S4: model-output schema hardening — strict output validation tests for
       judge/diagnosis/mutation shapes
 
 ## Progress
