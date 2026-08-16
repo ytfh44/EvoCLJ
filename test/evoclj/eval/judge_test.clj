@@ -17,11 +17,24 @@
   parent and one candidate verdict on the same case/repetition),
   aggregate-verdicts (verdict list -> summary record; counts correct;
   per-category breakdown stable; empty list -> zeroed summary), and
-  join-utility-summary (pure join into the paired outcome)."
+  join-utility-summary (pure join into the paired outcome).
+
+  Task V5 (judge configuration, roadmap V5) is also under test here:
+  the judge's model-call settings (:temperature, :system-prompt,
+  :max-tokens) are configurable with built-in defaults (temperature
+  0.0, max-tokens 1024, the built-in system prompt) that apply when
+  absent; overrides flow into the model-call options/messages;
+  invalid values are rejected both by the judge config
+  (:eval/judge-config-invalid) and, for the :config/judge envelope
+  section, by evoclj.config/validate-config! (:config/invalid). The
+  fixture judge path — judges constructed without any V5 keys — keeps
+  the default behavior unchanged."
   (:require [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.config :as cfg]
             [evoclj.eval.judge :as judge]
+            [malli.core :as m]
             [evoclj.store.cas :as cas]
             [evoclj.store.enrichment :as enrichment]
             [evoclj.store.migrate :as migrate]
@@ -452,6 +465,83 @@
     (let [pairs [(win-pair :sel/c1 1) (loss-pair :sel/c1 2) (equiv-pair :sel/c2 1)]
           s (judge/aggregate-verdicts pairs)]
       (is (= s (edn/read-string (pr-str s)))))))
+
+;; ============================================================================
+;; Task V5 — judge configuration (roadmap V5)
+;; ============================================================================
+
+(deftest judge-config-defaults-apply-when-absent
+  (testing "the judge's built-in defaults apply when the config carries no
+            V5 keys: temperature 0.0, max-tokens 1024, and the built-in
+            system prompt (the fixture judge path is unaffected)"
+    (let [[mc calls] (canned-call (value-with (yes-text)))
+          j (judge/llm-judge {:model-call mc :model/id "m"})]
+      (is (true? (j 1 [1])))
+      (let [call (first @calls)]
+        (is (= 0.0 (get-in call [:options :temperature])))
+        (is (= 1024 (get-in call [:options :max-tokens])))
+        (is (re-find #"SEMANTICALLY EQUIVALENT"
+                     (get-in call [:messages 0 :content])))))))
+
+(deftest judge-config-overrides-flow-into-the-call
+  (testing "configured :temperature flows into the model-call options"
+    (let [[mc calls] (canned-call (value-with (yes-text)))
+          j (judge/llm-judge {:model-call mc :model/id "m" :temperature 0.7})]
+      (is (true? (j 1 [1])))
+      (is (= 0.7 (get-in (first @calls) [:options :temperature])))))
+  (testing "configured :max-tokens flows into the model-call options"
+    (let [[mc calls] (canned-call (value-with (yes-text)))
+          j (judge/llm-judge {:model-call mc :model/id "m" :max-tokens 64})]
+      (is (true? (j 1 [1])))
+      (is (= 64 (get-in (first @calls) [:options :max-tokens])))))
+  (testing "configured :system-prompt replaces the built-in system message"
+    (let [[mc calls] (canned-call (value-with (yes-text)))
+          j (judge/llm-judge {:model-call mc :model/id "m"
+                              :system-prompt "Be extremely strict."})]
+      (is (true? (j 1 [1])))
+      (is (= "Be extremely strict."
+             (get-in (first @calls) [:messages 0 :content]))))))
+
+(deftest judge-config-invalid-temperature-rejected
+  (testing "a non-numeric :temperature is rejected by the judge config"
+    (is (= :eval/judge-config-invalid
+           (thrown-error-type #(judge/llm-judge
+                                {:model-call identity :model/id "m"
+                                 :temperature "hot"}))))))
+
+(deftest config-section-judge-admits-v5-keys-and-stays-open
+  (testing "the :config/judge section admits the V5 keys as overrides and
+            keeps admitting unknown keys (the section stays open, so
+            host-wiring keys like :model/:type pass through unchanged)"
+    (let [c (cfg/load-config {:config/judge {:temperature 0.5
+                                             :max-tokens 512
+                                             :system-prompt "custom"
+                                             :model :critic}})]
+      (is (= 0.5 (get-in c [:config/judge :temperature])))
+      (is (= 512 (get-in c [:config/judge :max-tokens])))
+      (is (= "custom" (get-in c [:config/judge :system-prompt])))
+      (is (= :critic (get-in c [:config/judge :model])))
+      (is (nil? (m/explain cfg/ConfigSchema c))))))
+
+(deftest config-section-judge-invalid-values-rejected
+  (testing "invalid judge values are rejected by load-config (which routes
+            through validate-config!) with :config/invalid"
+    (is (= :config/invalid
+           (thrown-error-type #(cfg/load-config
+                                {:config/judge {:temperature "hot"}}))))
+    (is (= :config/invalid
+           (thrown-error-type #(cfg/load-config
+                                {:config/judge {:max-tokens -1}}))))
+    (is (= :config/invalid
+           (thrown-error-type #(cfg/load-config
+                                {:config/judge {:max-tokens "many"}}))))
+    (is (= :config/invalid
+           (thrown-error-type #(cfg/load-config
+                                {:config/judge {:system-prompt 42}})))))
+  (testing "validate-config! itself rejects an invalid judge value"
+    (let [c (assoc-in (cfg/load-config {}) [:config/judge :temperature] "hot")]
+      (is (= :config/invalid
+             (thrown-error-type #(cfg/validate-config! c)))))))
 
 ;; --- join-utility-summary: pure join into the paired outcome -------------------
 

@@ -37,11 +37,13 @@
                    :error/type. REQUIRED.
     :model/id    — a string model identifier, passed through to
                    :model-call unchanged. REQUIRED.
+    :temperature — optional number, default 0.0 (deterministic
+                   judgement); passed through to the :model-call
+                   options.
     :system-prompt — optional string; defaults to a built-in prompt that
                    instructs the model to decide semantic equivalence and
                    answer with STRICT JSON {\"equivalent\": true|false}.
-    :max-tokens  — optional pos-int, default 1024. :temperature is fixed
-                   at 0.0 (deterministic judgement).
+    :max-tokens  — optional pos-int, default 1024.
 
   FAIL-LOUD POLICY: the judge NEVER guesses. A non-parseable response or
   a thrown model-call throws a typed error :eval/judge-failed (preserving
@@ -78,7 +80,15 @@
   join-utility-summary (the pure join into the paired outcome —
   evoclj.eval.paired stays read-only). Aggregation fails loud with
   :eval/judge-summary-invalid — silently pairing or tallying
-  misaligned verdicts would corrupt the win/loss counts."
+  misaligned verdicts would corrupt the win/loss counts.
+
+  Task V5 (roadmap V5): judge configuration. The judge's model-call
+  settings are configurable and validated: :temperature (optional
+  number, default 0.0 — deterministic judgement), :system-prompt
+  (optional string, built-in default), :max-tokens (optional pos-int,
+  default 1024). Overrides flow into the :model-call options/messages;
+  the host's evoclj.config envelope exposes the same three keys under
+  :config/judge (JudgeSectionSchema), validated by validate-config!."
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [evoclj.kernel.error :as err]
@@ -123,10 +133,13 @@
 (def LlmJudgeConfigSchema
   "The LLM judge's constructor config — a CLOSED map (any unknown key
   is rejected): :model-call (required fn), :model/id (required
-  string), optional :system-prompt and :max-tokens."
+  string), optional :temperature (number, default 0.0),
+  :system-prompt (string, built-in default), and :max-tokens
+  (pos-int, default 1024)."
   [:map {:closed true}
    [:model-call fn?]
    [:model/id string?]
+   [:temperature {:optional true} number?]
    [:system-prompt {:optional true} string?]
    [:max-tokens {:optional true} pos-int?]])
 
@@ -221,6 +234,8 @@
                     {:model/output {:text ...} :usage ...}} or throws
                     ExceptionInfo with a stable :error/type.
     :model/id     — REQUIRED string model identifier.
+    :temperature  — optional number, default 0.0 (deterministic
+                    judgement); flows into the model-call options.
     :system-prompt — optional string; built-in default instructs
                     strict-JSON {\"equivalent\": true|false} answers.
     :max-tokens   — optional pos-int, default 1024.
@@ -235,6 +250,7 @@
   (let [v (validate-config config)
         model-call (:model-call v)
         model-id (:model/id v)
+        temperature (or (:temperature v) 0.0)
         system-prompt (or (:system-prompt v) default-system-prompt)
         max-tokens (or (:max-tokens v) 1024)]
     (fn [expected outputs]
@@ -243,7 +259,8 @@
                        :content (user-message expected outputs)}]
             result (try
                      (model-call model-id messages
-                                 {:temperature 0.0 :max-tokens max-tokens})
+                                 {:temperature temperature
+                                  :max-tokens max-tokens})
                      (catch clojure.lang.ExceptionInfo e
                        (throw (err/error :eval/judge-failed
                                          "judge model call failed"

@@ -6,12 +6,16 @@
   of top-level sections (`:config/version`, `:config/profiles`,
   `:config/model-routing`, `:config/budget`, `:config/judge`,
   `:config/retention`) — with defaults and a single, consistent merge
-  + validation path. The section maps are intentionally OPEN (:map):
-  the concrete routing/budget/judge/retention keys arrive with their
-  features. The CONTRACT here is the envelope, the defaults, and the
-  merge semantics. `ConfigSchema` is a closed map, so any unknown
-  top-level key is rejected at trust boundaries (Global Constraint 22:
-  only validated, EDN-safe data crosses module boundaries).
+  + validation path. The routing/budget/retention sections are
+  intentionally OPEN (:map): their concrete keys arrive with their
+  features. The :config/judge section (roadmap V5) is VALIDATED — its
+  three model-call keys (:temperature, :system-prompt, :max-tokens)
+  are checked when present — yet stays OPEN so host-wiring keys
+  (e.g. :model/:type/:model/id) still pass. The CONTRACT here is the
+  envelope, the defaults, and the merge semantics. `ConfigSchema` is a
+  closed map, so any unknown top-level key is rejected at trust
+  boundaries (Global Constraint 22: only validated, EDN-safe data
+  crosses module boundaries).
 
   The namespace also carries the \"gated policy\" essence (Global
   Constraints 19/24 — the dual-control substrate): policy changes are
@@ -42,16 +46,35 @@
 ;; the config schema
 ;; ============================================================================
 
+(def JudgeSectionSchema
+  "The :config/judge section contract (roadmap V5): the judge's
+  model-call settings are exposed as :temperature (number),
+  :system-prompt (string), and :max-tokens (pos-int). All three keys
+  are OPTIONAL — the concrete defaults live in the judge itself
+  (temperature 0.0, max-tokens 1024, the built-in system prompt) and
+  apply when a key is absent. The section stays OPEN (unknown keys
+  still pass, e.g. host-wiring keys like :model/:type/:model/id), so
+  the three keys are validated WHEN PRESENT without closing the map:
+  an invalid value (non-number :temperature, non-string
+  :system-prompt, non-pos-int :max-tokens) is rejected by
+  validate-config! with :config/invalid."
+  [:map {:closed false}
+   [:temperature {:optional true} number?]
+   [:system-prompt {:optional true} string?]
+   [:max-tokens {:optional true} pos-int?]])
+
 (def ConfigSchema
-  "The closed envelope for a validated EvoCLJ configuration. Sections are
-  intentionally open maps — concrete routing/budget/judge keys arrive with
-  their features; the contract is the envelope + defaults + merge semantics."
+  "The closed envelope for a validated EvoCLJ configuration. Sections
+  are open maps — concrete routing/budget/retention keys arrive with
+  their features; the :config/judge section is additionally validated
+  via JudgeSectionSchema (V5 keys checked when present); the contract
+  is the envelope + defaults + merge semantics."
   [:map {:closed true}
    [:config/version int?]
    [:config/profiles [:map-of keyword? :map]]
    [:config/model-routing :map]
    [:config/budget :map]
-   [:config/judge :map]
+   [:config/judge JudgeSectionSchema]
    [:config/retention :map]])
 
 (defn- default-config*
