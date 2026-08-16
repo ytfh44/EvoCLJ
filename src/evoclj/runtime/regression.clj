@@ -1,6 +1,6 @@
 (ns evoclj.runtime.regression
   "Foundation F6 regression-detection trigger rules (Task A7 alert,
-  Task C2a auto-rollback).
+  Task C2a auto-rollback, Task C2b failure-driven case evolution).
 
   A data-driven :metric trigger rule that fires when a promoted
   child's paired utility drops below its parent by a threshold within
@@ -60,13 +60,19 @@
   Both handlers return their result as the action result; a handler
   failure (e.g. an unknown session) surfaces as an :error entry
   inside run-actions! results, per the trigger isolation contract."
-  (:require [evoclj.genome.types :as types]
+  (:require [evoclj.eval.dataset :as dataset]
+            [evoclj.genome.hash :as hash]
+            [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
             [evoclj.promotion.rollback :as rollback]
             [evoclj.runtime.trigger :as trigger]
+            [evoclj.store.enrichment :as enrich]
             [evoclj.store.event :as event]
             [evoclj.store.sqlite :as sqlite])
-  (:import (java.util UUID)))
+  (:import (java.nio.charset StandardCharsets)
+           (java.nio.file Files Paths)
+           (java.time Instant)
+           (java.util UUID)))
 
 (def drop-metric-name
   "The metric name the regression rule observes: the drop (parent
@@ -184,6 +190,28 @@
             0.0
             scoped)))
 
+(defn- windowed-samples
+  "The samples within the rule's window (nil or non-positive window =
+  the whole series; a window larger than the series = all samples)."
+  [window samples]
+  (let [n (count samples)]
+    (if (and window (pos-int? window) (<= window n))
+      (subvec (vec samples) (- n window))
+      samples)))
+
+(defn- worst-sample
+  "The sample with the maximum drop (parent utility minus child
+  utility) within `window` — ties resolve to the earliest such sample
+  — or nil for an empty series. Callers must have already validated
+  the samples (windowed-drop throws on malformed ones)."
+  [window samples]
+  (let [scoped (windowed-samples window samples)]
+    (when (seq scoped)
+      (reduce (fn [best s]
+                (if (> (sample-drop s) (sample-drop best)) s best))
+              (first scoped)
+              (rest scoped)))))
+
 (defn check-series!
   "Evaluate `rule` against a synthetic paired-utility `samples` series
   and dispatch any fired rule through `registry`. Returns
@@ -196,19 +224,35 @@
   fired rule's :trigger/context also carries :monitor/samples — the
   length of the `samples` series (the observation count) — so
   guarded actions such as :promotion/auto-rollback can refuse to act
-  below a minimum observation count. Throws :trigger/invalid for a
-  malformed rule, registry argument, or sample series, exactly as
-  `evaluate` and `run-actions!` do."
-  [registry rule samples]
-  (let [drop (windowed-drop (:window (:trigger/rule rule)) samples)
-        n (count samples)
-        fired (trigger/evaluate [rule] {:events [] :metrics {drop-metric-name drop}})
-        ;; every fired rule carries the observation count so guarded
-        ;; actions (:promotion/auto-rollback) can refuse below their
-        ;; minimum observation count
-        fired (mapv #(update % :trigger/context assoc :monitor/samples n) fired)]
-    {:trigger/fired fired
-     :trigger/actions (trigger/run-actions! registry fired)}))
+  below a minimum observation count. When the worst sample within the
+  window carries a :sample/input, the fired context additionally
+  carries that input as :monitor/failing-input — the input the
+  case-evolution action (:monitor/evolve-case, Task C2b) turns into a
+  new hidden-dataset case. Optional fourth argument `evidence-ref`
+  (the triggering evidence-pack reference) is attached to every fired
+  rule's context as :monitor/evidence-ref for the same action. Throws
+  :trigger/invalid for a malformed rule, registry argument, or sample
+  series, exactly as `evaluate` and `run-actions!` do."
+  ([registry rule samples]
+   (check-series! registry rule samples nil))
+  ([registry rule samples evidence-ref]
+   (let [drop (windowed-drop (:window (:trigger/rule rule)) samples)
+         n (count samples)
+         worst (worst-sample (:window (:trigger/rule rule)) samples)
+         attach-input? (and worst (contains? worst :sample/input))
+         failing-input (:sample/input worst)
+         fired (trigger/evaluate [rule] {:events [] :metrics {drop-metric-name drop}})
+         ;; every fired rule carries the observation count so guarded
+         ;; actions (:promotion/auto-rollback) can refuse below their
+         ;; minimum observation count; the worst sample's input and the
+         ;; optional evidence ref feed the case-evolution action (C2b)
+         fired (mapv (fn [f]
+                       (cond-> (update f :trigger/context assoc :monitor/samples n)
+                         attach-input? (update :trigger/context assoc :monitor/failing-input failing-input)
+                         (some? evidence-ref) (update :trigger/context assoc :monitor/evidence-ref evidence-ref)))
+                     fired)]
+     {:trigger/fired fired
+      :trigger/actions (trigger/run-actions! registry fired)})))
 
 (defn- read-anchor!
   "The audit-event anchor for `session-key`: the session's pinned
@@ -369,3 +413,217 @@
                                (rollback-handler store cas
                                                  (str (types/session-id session-id))
                                                  from-generation to-generation opts)))))
+
+;; --- Task C2b: failure-driven evaluation case evolution ----------------------
+
+(def case-evolution-action-id
+  "The action id the case-evolution regression targets: appends ONE
+  evaluation case derived from the failing input into the hidden
+  (Selection) dataset — append-only, provenance-linked to the
+  triggering evidence."
+  :monitor/evolve-case)
+
+(def case-origin-kind
+  "The derived-metadata :kind attached to an evolved case: the
+  enrichment class recording the case's regression origin and its
+  evidence cause ref."
+  :case/origin)
+
+(def case-evolution-source
+  "The :case/source marker carried by every evolved case."
+  :regression)
+
+(defn- validate-evolution-inputs!
+  "Validate the case-evolution inputs: the failing input must be
+  non-nil and the triggering evidence-pack ref a string. Throws
+  :regression/invalid otherwise."
+  [failing-input evidence-ref]
+  (when (nil? failing-input)
+    (throw (err/error :regression/invalid
+                      "case evolution requires a non-nil failing input"
+                      {:failing-input failing-input})))
+  (when-not (string? evidence-ref)
+    (throw (err/error :regression/invalid
+                      "case evolution requires the triggering evidence pack ref as a string"
+                      {:evidence-ref evidence-ref})))
+  nil)
+
+(defn- canonical-edn
+  "Deterministic EDN form for hashing: maps sorted by their pr-str key
+  form, sets by their pr-str element form, collections realized eagerly
+  (the same convention as evoclj.eval.dataset and
+  evoclj.evolution.evidence)."
+  [x]
+  (cond
+    (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
+                   (map (fn [[k v]] [k (canonical-edn v)])) x)
+    (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
+                   (map canonical-edn) x)
+    (vector? x) (mapv canonical-edn x)
+    (seq? x) (mapv canonical-edn x)
+    :else x))
+
+(defn- body-ref
+  "The content address of a case :body — the deterministic hash of its
+  canonical EDN form (the same canonical convention evoclj.eval.dataset
+  uses, at body granularity). The dedup key: a duplicate regression is
+  one whose failing input produces the same body address."
+  [body]
+  (hash/text-digest (pr-str (canonical-edn body))))
+
+(defn- new-evolved-case
+  "Build the append-only case map for a confirmed regression: a fresh
+  uuid-derived :case/id, the failing input as the case :body (wrapped
+  as {:input <failing-input>}), the deterministic :case/body-ref (the
+  dedup key), the cause ref to the triggering evidence pack, and the
+  :case/source marker."
+  [failing-input evidence-ref]
+  (let [id (keyword (str "case/regression-" (UUID/randomUUID)))
+        body {:input failing-input}]
+    {:case/id id
+     :body body
+     :case/body-ref (body-ref body)
+     :case/cause evidence-ref
+     :case/source case-evolution-source
+     :case/created-at (str (Instant/now))}))
+
+(defn- existing-case-with-body
+  "The first case in `cases` whose :body has the same deterministic
+  content address as `body` (the dedup key), or nil. The address is
+  always recomputed from the stored body, so pre-existing cases without
+  a :case/body-ref still dedup correctly."
+  [cases body]
+  (let [target (body-ref body)]
+    (first (filter #(= target (body-ref (:body %))) cases))))
+
+(defn- attach-case-provenance!
+  "Attach the versioned enrichment record linking the evolved case to
+  its triggering evidence via evoclj.store.enrichment/put-enrichment!:
+  :entity/kind :case, :entity/id the case id string, :kind
+  :case/origin, :cause the evidence-pack ref (the cause ref), and a
+  small :payload recording the regression origin (source, body ref,
+  cause). The derived-metadata layer never mutates the case body
+  (Global Constraint 21 — the row stores refs, never the body)."
+  [store case evidence-ref]
+  (enrich/put-enrichment! store
+                          {:entity/kind :case
+                           :entity/id (str (:case/id case))
+                           :kind case-origin-kind
+                           :payload {:source case-evolution-source
+                                     :body-ref (:case/body-ref case)
+                                     :cause evidence-ref}
+                           :cause evidence-ref}))
+
+(defn- append-case-file!
+  "Append ONE case file to `root`: a fresh .edn filename derived from
+  the case id, written as pr-str EDN with LF endings. This is the ONLY
+  dataset write and it NEVER touches an existing file (append-only)."
+  [root case]
+  (let [p (Paths/get (str root java.io.File/separator
+                          (name (:case/id case)) ".edn")
+                     (make-array String 0))]
+    (Files/write p
+                 (.getBytes (str (pr-str case) "\n") StandardCharsets/UTF_8)
+                 (make-array java.nio.file.OpenOption 0)))
+  case)
+
+(defn evolve-case!
+  "Append ONE evaluation case derived from a confirmed regression into
+  the hidden (Selection) dataset — append-only and provenance-linked
+  to the triggering evidence (Task C2b, Purpose T1b).
+
+  `store` is the executor :stores map {:sqlite ... :cas ...} that
+  evoclj.store.enrichment needs for the provenance record. `roots` is
+  the dataset source -> root registry (default
+  evoclj.eval.dataset/dataset-roots); the case is appended under the
+  Selection root (:evals/selection — the informationally isolated,
+  kernel-only selection set, Global Constraint 11). `failing-input` is
+  the input the confirmed regression failed on (any non-nil EDN
+  value); `evidence-ref` is the triggering evidence-pack reference (a
+  string, e.g. \"sha256:<64 hex>\").
+
+  APPEND-ONLY: the dedup scan is read-only — an existing case whose
+  :body carries the same deterministic content address (:case/body-ref)
+  short-circuits to {:case <existing> :duplicate true :appended false}
+  with NO write (a duplicate regression never duplicates the case). On
+  a miss the write path ONLY creates a NEW .edn file with a fresh
+  uuid-derived :case/id; existing files are never modified or deleted.
+
+  PROVENANCE: every evolved case carries :case/cause = evidence-ref
+  (the cause ref to the triggering evidence pack) and a versioned
+  :case/origin enrichment record (enrichment :cause = evidence-ref) is
+  attached through the read-only evoclj.store.enrichment API BEFORE the
+  file write — a provenance failure therefore leaves the dataset
+  untouched.
+
+  Returns {:case <case map> :duplicate <bool> :appended <bool>}.
+
+  Typed errors: :regression/invalid (nil failing input, non-string
+  evidence ref), :enrichment/* and :dataset/* passthrough from the
+  store/dataset layers."
+  ([store failing-input evidence-ref]
+   (evolve-case! store dataset/dataset-roots failing-input evidence-ref))
+  ([store roots failing-input evidence-ref]
+   (validate-evolution-inputs! failing-input evidence-ref)
+   (let [root (str (dataset/dataset-root :evals/selection roots))
+         existing (existing-case-with-body (dataset/load-cases root)
+                                           {:input failing-input})]
+     (if existing
+       {:case existing :duplicate true :appended false}
+       (let [case (new-evolved-case failing-input evidence-ref)]
+         (attach-case-provenance! store case evidence-ref)
+         (append-case-file! root case)
+         {:case case :duplicate false :appended true})))))
+
+(defn- fired-failing-input
+  "The failing input carried by `fired`'s :trigger/context — attached
+  by check-series! from the worst sample's :sample/input."
+  [fired]
+  (get-in fired [:trigger/context :monitor/failing-input]))
+
+(defn- fired-evidence-ref
+  "The triggering evidence-pack ref carried by `fired`'s
+  :trigger/context (:monitor/evidence-ref, attached by check-series!
+  or the monitoring caller)."
+  [fired]
+  (get-in fired [:trigger/context :monitor/evidence-ref]))
+
+(defn- case-evolution-handler
+  "The :monitor/evolve-case handler: append ONE evaluation case derived
+  from the confirmed regression into the hidden (Selection) dataset —
+  append-only, provenance-linked to the triggering evidence — via
+  evolve-case!, and return its {:case ... :duplicate ... :appended ...}
+  result as the action result. The failing input and the evidence-pack
+  ref are read from the fired rule's :trigger/context
+  (:monitor/failing-input / :monitor/evidence-ref); when either is
+  absent the action SKIPS with {:case-evolution :skipped :reason ...}
+  and changes nothing — a case is never created without its evidence."
+  [store roots]
+  (fn [fired]
+    (let [input (fired-failing-input fired)
+          evidence (fired-evidence-ref fired)]
+      (cond
+        (nil? input) {:case-evolution :skipped
+                      :reason :missing-failing-input}
+        (nil? evidence) {:case-evolution :skipped
+                         :reason :missing-evidence-ref}
+        :else (evolve-case! store roots input evidence)))))
+
+(defn register-case-evolution-action!
+  "Wire the :monitor/evolve-case action into `registry` (via
+  trigger/register-action!) so that a fired regression rule appends ONE
+  evaluation case derived from the failing input into the hidden
+  (Selection) dataset — append-only, provenance-linked to the
+  triggering evidence — and returns the evolve-case! result
+  ({:case ... :duplicate ... :appended ...}) as the action result.
+  `store` is the executor :stores map and `roots` the dataset roots
+  registry (both forwarded to evolve-case!; the case lands under
+  :evals/selection). The failing input and evidence-pack ref come from
+  the fired rule's :trigger/context (check-series! attaches
+  :monitor/failing-input from the worst sample's :sample/input and
+  :monitor/evidence-ref from its optional evidence-ref argument); a
+  fired rule lacking either is SKIPPED with no state change. Returns
+  the registry."
+  [registry store roots]
+  (trigger/register-action! registry case-evolution-action-id
+                            (case-evolution-handler store roots)))

@@ -26,13 +26,22 @@
   roll back; the rollback goes through the public promotion-system
   contract; and a real rollback (CURRENT moved back, child
   :rolled-back, parent :active, :promotion/rollback event appended,
-  chain verifies)."
+  chain verifies).
+
+  Task C2b (case evolution): a confirmed regression appends ONE new
+  evaluation case derived from the failing input into the hidden
+  (Selection) dataset — append-only, provenance-linked to the
+  triggering evidence; a duplicate regression does not duplicate the
+  case; the dataset stays append-only."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.eval.dataset :as dataset]
             [evoclj.runtime.regression :as reg]
             [evoclj.runtime.trigger :as trigger]
             [evoclj.store.cas :as cas]
+            [evoclj.store.enrichment :as enrich]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -50,6 +59,7 @@
 
 (def ^:private db-paths (atom []))
 (def ^:private cas-roots (atom []))
+(def ^:private selection-roots (atom []))
 
 (defn- temp-db-path
   "A throwaway SQLite file in the system temp dir."
@@ -86,8 +96,11 @@
     (Files/deleteIfExists (Paths/get p (make-array String 0))))
   (doseq [p @cas-roots]
     (delete-tree! p))
+  (doseq [p @selection-roots]
+    (delete-tree! p))
   (reset! db-paths [])
-  (reset! cas-roots []))
+  (reset! cas-roots [])
+  (reset! selection-roots []))
 
 (use-fixtures :each (fn [f] (f) (cleanup!)))
 
@@ -540,4 +553,243 @@
       (is (invalid? {:reason "canary-regression"})))
     (testing "a non-function :rollback-fn is rejected"
       (is (invalid? {:rollback-fn 42})))))
+
+;; ============================================================================
+;; Task C2b — failure-driven evaluation case evolution
+;; ============================================================================
+
+(def ^:private case-evolution-evidence
+  "A synthetic triggering evidence-pack ref for the C2b tests."
+  (str "sha256:" (apply str (repeat 64 "d"))))
+
+(def ^:private other-evidence
+  "A second evidence-pack ref (a duplicate regression may arrive from
+  different evidence)."
+  (str "sha256:" (apply str (repeat 64 "e"))))
+
+(defn- write-case-file!
+  "Write `content` to `path` as UTF-8 with LF endings (case-file
+  seeding for the C2b fixtures)."
+  [path content]
+  (let [p (Paths/get path (make-array String 0))]
+    (Files/write p
+                 (.getBytes ^String content StandardCharsets/UTF_8)
+                 (make-array java.nio.file.OpenOption 0))))
+
+(defn- temp-selection-root
+  "A throwaway hidden (Selection) dataset root seeded with one fixture
+  case, recorded for cleanup."
+  []
+  (let [d (str (Files/createTempDirectory "evoclj-regression-selection-"
+                                          (make-array FileAttribute 0)))]
+    (swap! selection-roots conj d)
+    (write-case-file! (str d java.io.File/separator "cases.edn")
+                      "{:case/id :case/selection-1\n :body {:prompt \"paired task\" :expected :pass}}\n")
+    d))
+
+(defn- evolution-store
+  "A migrated sqlite db + fresh CAS root as the executor :stores map
+  {:sqlite ... :cas ...} — what the provenance enrichment (C2b)
+  needs."
+  []
+  (let [db (fresh-db)
+        cas-root (temp-cas-root)]
+    {:sqlite db :cas (cas/->cas cas-root)}))
+
+(defn- input-sample
+  "One paired-utility sample carrying the input it evaluated (the
+  failing input for the case-evolution path)."
+  [parent child input]
+  (assoc (sample parent child) :sample/input input))
+
+(defn- edn-files
+  "The *.edn filenames (sorted) directly under `root`."
+  [root]
+  (let [dir (Paths/get root (make-array String 0))]
+    (->> (Files/list dir)
+         (.iterator)
+         (iterator-seq)
+         (map (fn [^java.nio.file.Path p] (str (.getFileName p))))
+         (filter #(str/ends-with? % ".edn"))
+         sort)))
+
+(deftest evolve-case-appends-provenance-linked-case
+  (let [store (evolution-store)
+        sel-root (temp-selection-root)
+        roots {:evals/selection sel-root}
+        failing-input {:prompt "solve the regression task" :context {:k 1}}
+        result (reg/evolve-case! store roots failing-input case-evolution-evidence)]
+    (testing "the case was appended (fresh, not a duplicate)"
+      (is (true? (:appended result)))
+      (is (false? (:duplicate result))))
+    (testing "the case carries the failing input, its cause ref, and the regression marker"
+      (let [case (:case result)]
+        (is (keyword? (:case/id case)))
+        (is (= {:input failing-input} (:body case)))
+        (is (= case-evolution-evidence (:case/cause case)))
+        (is (= :regression (:case/source case)))
+        (is (re-matches #"sha256:[0-9a-f]{64}" (:case/body-ref case)))
+        (is (string? (:case/created-at case)))))
+    (testing "the case is persisted in the hidden (Selection) dataset and loads back"
+      (let [cases (dataset/load-cases sel-root)
+            persisted (some #(when (= (:case/id (:case result)) (:case/id %)) %)
+                            cases)]
+        (is (= 2 (count cases))) ; the fixture + the evolved case
+        (is (some? persisted))
+        (is (= {:input failing-input} (:body persisted)))))))
+
+(deftest evolve-case-attaches-cause-ref-to-the-evidence-pack
+  (let [store (evolution-store)
+        sel-root (temp-selection-root)
+        result (reg/evolve-case! store {:evals/selection sel-root}
+                                 {:prompt "provenance input"}
+                                 case-evolution-evidence)
+        case (:case result)
+        rec (enrich/latest-enrichment store :case (str (:case/id case))
+                                      reg/case-origin-kind)]
+    (testing "a versioned :case/origin enrichment links the case to its evidence"
+      (is (some? rec))
+      (is (= case-evolution-evidence (:cause rec)))
+      (is (= 1 (:version rec))))
+    (testing "the enrichment payload round-trips through the CAS"
+      (let [payload (enrich/payload store rec)]
+        (is (= :regression (:source payload)))
+        (is (= (:case/body-ref case) (:body-ref payload)))
+        (is (= case-evolution-evidence (:cause payload)))))))
+
+(deftest duplicate-regression-does-not-duplicate-the-case
+  (let [store (evolution-store)
+        sel-root (temp-selection-root)
+        roots {:evals/selection sel-root}
+        input {:prompt "the same failing input"}
+        first-result (reg/evolve-case! store roots input case-evolution-evidence)
+        ;; a SECOND confirmation of the SAME failing input — even from
+        ;; a different evidence pack — must not append a second case
+        second-result (reg/evolve-case! store roots input other-evidence)]
+    (testing "the second confirmation is a duplicate and appends nothing"
+      (is (true? (:appended first-result)))
+      (is (true? (:duplicate second-result)))
+      (is (false? (:appended second-result))))
+    (testing "the duplicate resolves to the EXISTING case (first evidence preserved)"
+      (is (= (:case/id (:case first-result)) (:case/id (:case second-result))))
+      (is (= case-evolution-evidence (:case/cause (:case second-result)))))
+    (testing "the dataset holds exactly ONE case for that failing input"
+      (let [cases (dataset/load-cases sel-root)
+            matching (filter #(= (:body %) (:body (:case first-result))) cases)]
+        (is (= 1 (count matching)))))
+    (testing "no second enrichment record was created for the duplicate"
+      (is (= 1 (count (enrich/enrichments store :case
+                                          (str (:case/id (:case first-result)))
+                                          reg/case-origin-kind)))))))
+
+(deftest evolve-case-keeps-the-dataset-append-only
+  (let [store (evolution-store)
+        sel-root (temp-selection-root)
+        roots {:evals/selection sel-root}
+        fixture (Paths/get (str sel-root java.io.File/separator "cases.edn")
+                           (make-array String 0))
+        before-bytes (vec (Files/readAllBytes fixture))
+        r1 (reg/evolve-case! store roots {:prompt "appended input"}
+                             case-evolution-evidence)
+        r2 (reg/evolve-case! store roots {:prompt "another appended input"}
+                             case-evolution-evidence)]
+    (testing "the pre-existing fixture file is byte-identical (never modified)"
+      (is (= before-bytes (vec (Files/readAllBytes fixture)))))
+    (testing "the append-only write path only ever ADDS new case files"
+      (is (= #{"cases.edn"
+               (str (name (:case/id (:case r1))) ".edn")
+               (str (name (:case/id (:case r2))) ".edn")}
+             (set (edn-files sel-root)))))
+    (testing "every evolved file is a valid single case map readable by the dataset layer"
+      (is (= 3 (count (dataset/load-cases sel-root)))))))
+
+(deftest evolve-case-validates-inputs
+  (let [store (evolution-store)
+        roots {:evals/selection (temp-selection-root)}]
+    (testing "a nil failing input is rejected"
+      (is (= :regression/invalid
+             (error-type #(reg/evolve-case! store roots nil case-evolution-evidence)))))
+    (testing "a non-string evidence ref is rejected"
+      (is (= :regression/invalid
+             (error-type #(reg/evolve-case! store roots {:prompt "x"} :not-a-ref)))))
+    (testing "an unknown selection source is rejected"
+      (is (= :dataset/source-unknown
+             (error-type #(reg/evolve-case! store {} {:prompt "x"}
+                                            case-evolution-evidence)))))))
+
+(deftest register-case-evolution-action-wires-the-action
+  (let [store (evolution-store)
+        reg (trigger/make-registry)
+        returned (reg/register-case-evolution-action!
+                  reg store {:evals/selection (temp-selection-root)})]
+    (testing "registration returns the registry and wires the action id"
+      (is (identical? reg returned))
+      (is (= #{:monitor/evolve-case} (set (keys @reg)))))))
+
+(deftest check-series-attaches-failing-input-from-worst-sample
+  (let [reg (trigger/make-registry)
+        samples [(input-sample 10.0 1.0 {:prompt "worst"})
+                 (input-sample 10.0 9.0 {:prompt "mild"})]
+        result (reg/check-series! reg (reg/regression-rule 5.0 2) samples)]
+    (testing "the worst sample's input rides on the fired context"
+      (is (= 1 (count (:trigger/fired result))))
+      (is (= {:prompt "worst"}
+             (get-in (first (:trigger/fired result))
+                     [:trigger/context :monitor/failing-input])))
+      (is (= 2 (get-in (first (:trigger/fired result))
+                       [:trigger/context :monitor/samples]))))))
+
+(deftest case-evolution-action-appends-on-confirmed-regression
+  (let [store (evolution-store)
+        sel-root (temp-selection-root)
+        reg (trigger/make-registry)
+        _ (reg/register-case-evolution-action! reg store {:evals/selection sel-root})
+        failing-input {:prompt "the failing task input"}
+        rule (reg/regression-rule 5.0 2
+                                  {:trigger/action reg/case-evolution-action-id})
+        samples [(input-sample 10.0 9.0 {:prompt "a passing input"})
+                 (input-sample 10.0 3.0 failing-input)]
+        result (reg/check-series! reg rule samples case-evolution-evidence)]
+    (testing "the rule fired and the case-evolution action ran :ok, appending the case"
+      (is (= 1 (count (:trigger/fired result))))
+      (let [a (first (:trigger/actions result))]
+        (is (= :ok (:action/status a)))
+        (is (= :monitor/evolve-case (:action/id a)))
+        (let [outcome (:action/result a)]
+          (is (true? (:appended outcome)))
+          (is (false? (:duplicate outcome)))
+          (is (= {:input failing-input} (:body (:case outcome))))
+          (is (= case-evolution-evidence (:case/cause (:case outcome)))))))
+    (testing "the case is persisted in the hidden dataset"
+      (let [cases (dataset/load-cases sel-root)]
+        (is (= 2 (count cases)))
+        (is (some #(= {:input failing-input} (:body %)) cases))))))
+
+(deftest case-evolution-action-skips-without-evidence-or-input
+  (let [store (evolution-store)
+        sel-root (temp-selection-root)
+        reg (trigger/make-registry)
+        _ (reg/register-case-evolution-action! reg store {:evals/selection sel-root})]
+    (testing "a fired rule without a failing input skips (missing input)"
+      (let [result (reg/check-series!
+                    reg
+                    (reg/regression-rule 5.0 1
+                                         {:trigger/action reg/case-evolution-action-id})
+                    (series [[10.0 1.0]]))]
+        (is (= 1 (count (:trigger/fired result))))
+        (let [a (first (:trigger/actions result))]
+          (is (= :ok (:action/status a)))
+          (is (= {:case-evolution :skipped :reason :missing-failing-input}
+                 (:action/result a))))))
+    (testing "a fired rule with an input but no evidence-ref skips (missing evidence)"
+      (let [result (reg/check-series!
+                    reg
+                    (reg/regression-rule 5.0 1
+                                         {:trigger/action reg/case-evolution-action-id})
+                    [(input-sample 10.0 1.0 {:prompt "x"})])]
+        (is (= :missing-evidence-ref
+               (get-in (first (:trigger/actions result))
+                       [:action/result :reason])))))
+    (testing "nothing was appended to the hidden dataset"
+      (is (= 1 (count (dataset/load-cases sel-root)))))))
 
