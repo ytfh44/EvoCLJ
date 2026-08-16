@@ -28,7 +28,11 @@
   tests inject what v0 ships empty: the evaluator's hidden selection/
   replay cases and fixture providers, an evolution :mutator adapter,
   and so on — the CLI itself ships no cases and no mutator (YAGNI,
-  Global Constraint 24).
+  Global Constraint 24). Task D1 adds ONE built-in exception: the
+  :demo profile injects the demo heuristic Mutator and the demo's
+  hidden selection cases/fixtures through the SAME :overrides seam, so
+  a fresh state dir + the :demo profile runs the whole demo loop
+  headless.
 
   PUBLIC-ONLY MUTATION: every state change the CLI performs goes
   through a public subsystem API (create-session!,
@@ -43,6 +47,8 @@
             [evoclj.compiler.core :as compiler]
             [evoclj.config :as config]
             [evoclj.eval.profile :as profile]
+            [evoclj.evolution.core :as evolution]
+            [evoclj.evolution.demo-mutator :as demo-mutator]
             [evoclj.kernel.error :as err]
             [evoclj.kernel.system :as kernel]
             [evoclj.intent.dispatch :as dispatch]
@@ -195,6 +201,13 @@
           config
           config-env-overrides))
 
+(defn- active-profile-key
+  "The selected config profile as a keyword — the :config/profile opts
+  value or the EVOCLJ_PROFILE env — or nil when none is selected (the
+  same resolution config-envelope applies)."
+  [opts env]
+  (some-> (or (:config/profile opts) (get env "EVOCLJ_PROFILE")) keyword))
+
 (defn- config-envelope
   "The validated F5 config envelope for `opts` (foundation F5):
   defaults deep-merged with the config source (config/load-config),
@@ -203,17 +216,43 @@
   EVOCLJ_* scalar overrides on top (env wins over file). The result
   is re-validated against ConfigSchema before use.
 
+  Task D1: the :demo profile is BUILT-IN — when selected, its profile
+  map (config/demo-profile) is merged into the config source so
+  resolve-profile finds it without a config file (a map source still
+  wins per-key).
+
   Throws the typed :config/invalid error (malformed envelope,
   unparseable EDN, unknown top-level key, non-map section) and
   :config/profile-not-found (unknown profile) — the errors the CLI
   surfaces as {:exit 1 :error/type ...} instead of a stack trace."
   [opts env]
-  (let [loaded (config/load-config (or (config-source opts env) {}))
-        profile-key (or (:config/profile opts) (get env "EVOCLJ_PROFILE"))
+  (let [profile-key (active-profile-key opts env)
+        demo? (= :demo profile-key)
+        source (config-source opts env)
+        source (if demo?
+                 (merge (config/demo-profile)
+                        (if (map? source) source {}))
+                 (or source {}))
+        loaded (config/load-config source)
         profiled (if profile-key
-                   (config/resolve-profile loaded (keyword profile-key))
+                   (config/resolve-profile loaded profile-key)
                    loaded)]
     (config/validate-config! (apply-config-env-overrides profiled env))))
+
+(defn- demo-host-overrides
+  "The :demo profile's host-injected surface (Task D1): the built-in
+  heuristic Mutator (a plain fn the kernel wraps into the Mutator
+  protocol — kernel.system/build-mutator) plus the demo's hidden
+  selection cases and fixture providers, injected through the SAME
+  :overrides seam any host uses."
+  []
+  (let [m (demo-mutator/demo-mutator)]
+    {:evolution/system
+     {:mutator (fn [context]
+                 (evolution/propose-mutations m context))}
+     :eval/system
+     {:selection/cases (demo-mutator/demo-selection-cases)
+      :selection/fixtures (demo-mutator/demo-selection-fixtures)}}))
 
 (defn build-config
   "Assemble the CLI host config for `opts` (:state-dir, :config,
@@ -228,6 +267,11 @@
   :config/budget section feeds the evolution-system's
   :budget-profile (the envelope's first CLI consumer; the base
   {:max-candidates 3} cap stays when the section is empty).
+
+  Task D1: selecting the :demo profile injects the built-in heuristic
+  Mutator and the demo's hidden selection cases/fixture providers
+  through the SAME :overrides seam below (a host's own :overrides
+  still win per-key).
 
   `:overrides` deep-merges config subtrees (e.g.
   {:eval/system {:selection/cases ...}}) so hosts/tests inject the
@@ -302,7 +346,11 @@
                :model/registry
                {:catalog (ig/ref :modelsdev/catalog)
                 :registry/api-keys {}}}
-        overrides (:overrides opts)]
+        ;; Task D1: the :demo profile's host-injected surface is merged
+        ;; in first, then a host's own :overrides win per-key
+        overrides (merge (when (= :demo (active-profile-key opts env))
+                           (demo-host-overrides))
+                         (:overrides opts))]
     (if overrides (deep-merge base overrides) base)))
 
 (defn- ensure-state-dirs!

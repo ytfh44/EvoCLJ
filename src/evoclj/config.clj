@@ -261,6 +261,29 @@
   (get-in config path))
 
 ;; ============================================================================
+;; the built-in :demo profile (Task D1)
+;; ============================================================================
+
+(defn demo-profile
+  "The built-in :demo profile (Task D1): a load-config input map whose
+  :config/profiles :demo entry carries the demo's declared config
+  section overrides (the v0 budget cap). Merge it into a config source
+  and load with `load-config` to make the :demo profile resolvable —
+  the CLI host does this automatically whenever the :demo profile is
+  selected (Task D1), so a fresh state dir needs no config file.
+
+  The profile's NON-config surface — the built-in heuristic Mutator
+  (evoclj.evolution.demo-mutator) plus the demo's hidden selection
+  cases and fixture providers — is injected by the host through the
+  SAME :overrides seam any host uses, never smuggled into this
+  validated envelope (ConfigSchema is closed). Returns a fresh value
+  each call so callers may build on it."
+  []
+  {:config/profiles
+   {:demo
+    {:config/budget {:max-candidates 3}}}})
+
+;; ============================================================================
 ;; gated policy proposals (dual-control substrate)
 ;; ============================================================================
 
