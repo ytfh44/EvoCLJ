@@ -1,0 +1,17 @@
+;; Seed trust anchors (Task C3, T2c).
+;;
+;; A map of seed genome id -> expected "sha256:" digest. Each entry
+;; pins one seed bundle to its canonical content address (Global
+;; Constraint 6: deterministic hashing), so a seed whose bytes changed
+;; in ANY way computes a different digest and is refused at load time
+;; with :genome/trust-anchor-mismatch.
+;;
+;; This file is the reference anchors for the shipped seed bundle
+;; (genomes/seed). Operators may override the anchors in force via
+;; config by passing their own map to
+;; evoclj.genome.load/load-genome (see trust-anchors there); when the
+;; seed bundle is legitimately regenerated, this file must be updated
+;; with the new digest — a stale pin is detected the same way.
+
+{"sha256:de5835d812703df33f707864529c854867807c5120744072207774be316cc096"
+ "sha256:de5835d812703df33f707864529c854867807c5120744072207774be316cc096"}

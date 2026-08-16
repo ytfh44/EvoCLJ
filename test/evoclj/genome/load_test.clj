@@ -328,3 +328,111 @@
       (let [e (is-load-error (.resolve dir "does-not-exist") :genome/root-invalid)]
         (is (= :not-found (:reason (ex-data e)))))
       (finally (delete-recursively! dir)))))
+
+;; --- seed trust anchors (Task C3) ------------------------------------------
+;; The trust-anchor contract: a map of seed genome id -> expected
+;; "sha256:" digest. load-genome verifies a bundle against the anchors
+;; in force; a mismatch (including a tampered seed, whose id no longer
+;; matches any pinned seed) refuses with :genome/trust-anchor-mismatch.
+;; With NO anchors in force the load is unanchored (backward compatible).
+
+(defn- load-error-with
+  "The ExceptionInfo thrown by (load/load-genome root anchors), or nil
+  when it succeeds."
+  [root anchors]
+  (try (load/load-genome root anchors)
+       nil
+       (catch clojure.lang.ExceptionInfo e e)))
+
+(defn- is-load-error-with
+  "Assert that (load/load-genome root anchors) throws ExceptionInfo with
+  the given :error/type; returns the exception."
+  [root anchors expected-type]
+  (let [e (load-error-with root anchors)]
+    (is (instance? clojure.lang.ExceptionInfo e) (str "expected " expected-type))
+    (is (= expected-type (:error/type (ex-data e))) (pr-str (ex-data e)))
+    e))
+
+(defn- tamper-text-byte!
+  "Change EXACTLY ONE byte of `rel` under `dir`: the final character of
+  the file's UTF-8 content is replaced by a different character. The
+  file stays a readable, valid declared module, but its on-disk bytes
+  differ, so its file digest and the bundle's tree digest both change."
+  [^Path dir rel]
+  (let [p (.resolve dir (Paths/get rel (make-array String 0)))
+        s (String. (Files/readAllBytes p) StandardCharsets/UTF_8)]
+    (when (empty? s)
+      (throw (ex-info "cannot tamper an empty file" {:path rel})))
+    (let [i (dec (count s))
+          ch (.charAt s i)
+          repl (if (= ch \newline) \space \newline)]
+      (Files/write p (.getBytes (str (subs s 0 i) repl) StandardCharsets/UTF_8)
+                   (make-array OpenOption 0)))))
+
+(deftest pristine-anchored-seed-loads
+  (let [dir (temp-dir!)]
+    (try
+      (write-minimal-bundle! dir)
+      (let [id (:genome/id (load/load-genome dir))
+            g (load/load-genome dir {id id})]
+        (testing "an anchored pristine seed loads and is verified against its digest"
+          (is (= id (:genome/id g)))
+          (is (= id (get {id id} (:genome/id g))))))
+      (finally (delete-recursively! dir)))))
+
+(deftest shipped-trust-anchors-pin-the-seed
+  (let [seed-root (io/file "genomes/seed")]
+    (if-not (.isDirectory seed-root)
+      (testing "repo seed bundle not present in cwd; skipped"
+        (is true))
+      (let [anchors (load/trust-anchors)
+            id (:genome/id (load/load-genome (.toPath seed-root)))]
+        (testing "the shipped anchor file pins the repo seed's canonical digest"
+          (is (types/genome-id? (get anchors id)))
+          (is (= id (get anchors id))))))))
+
+(deftest tampered-seed-refused
+  (let [dir (temp-dir!)]
+    (try
+      (write-minimal-bundle! dir)
+      (let [pristine-id (:genome/id (load/load-genome dir))
+            anchors {pristine-id pristine-id}]
+        (testing "the pristine bundle still loads under its own anchor"
+          (is (= pristine-id (:genome/id (load/load-genome dir anchors)))))
+        (tamper-text-byte! dir "topology.edn")
+        (testing "a seed with ANY byte changed refuses with the typed error"
+          (let [e (is-load-error-with dir anchors :genome/trust-anchor-mismatch)
+                data (ex-data e)]
+            (is (= :not-anchored (:reason data)))
+            (is (types/genome-id? (:genome/id data)))
+            (is (not= pristine-id (:genome/id data)))
+            (is (= [pristine-id] (:anchored-ids data))))))
+      (finally (delete-recursively! dir)))))
+
+(deftest unanchored-genomes-unaffected
+  (let [dir (temp-dir!)]
+    (try
+      (write-minimal-bundle! dir)
+      (testing "no anchors (1-arity) — behavior unchanged"
+        (is (types/genome-id? (:genome/id (load/load-genome dir)))))
+      (testing "explicitly empty anchors — unanchored, unaffected"
+        (is (types/genome-id? (:genome/id (load/load-genome dir {})))))
+      (testing "nil anchors — unanchored, unaffected"
+        (is (types/genome-id? (:genome/id (load/load-genome dir nil)))))
+      (finally (delete-recursively! dir)))))
+
+(deftest malformed-trust-anchors-rejected
+  (let [dir (temp-dir!)]
+    (try
+      (write-minimal-bundle! dir)
+      (testing "non-map anchors are rejected at the trust boundary"
+        (is-load-error-with dir [:not :a :map] :genome/trust-anchor-invalid))
+      (testing "a non-canonical digest value is rejected"
+        (is-load-error-with dir {"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                                 "not-a-digest"}
+                            :genome/trust-anchor-invalid))
+      (testing "a non-canonical seed id key is rejected"
+        (is-load-error-with dir {"seed"
+                                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+                            :genome/trust-anchor-invalid))
+      (finally (delete-recursively! dir)))))
