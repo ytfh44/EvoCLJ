@@ -41,6 +41,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [evoclj.compiler.core :as compiler]
+            [evoclj.config :as config]
             [evoclj.eval.profile :as profile]
             [evoclj.kernel.error :as err]
             [evoclj.kernel.system :as kernel]
@@ -146,15 +147,98 @@
     (merge-with deep-merge a b)
     b))
 
+;; ============================================================================
+;; the validated F5 config envelope (foundation F5, Task A4)
+;; ============================================================================
+
+(def ^:private config-env-overrides
+  "The EVOCLJ_* env vars that override scalar values of the validated
+  F5 config envelope (the same env-wins-over-file seam
+  kernel.system/load-config uses for the host paths). Values are EDN
+  (a number, keyword, string, or map, depending on the path)."
+  [[[:config/budget :max-candidates] "EVOCLJ_BUDGET_MAX_CANDIDATES"]])
+
+(defn- config-source
+  "The F5 config input for `opts`: the direct `:config` value (a map
+  or EDN string — the host/test injection seam for the envelope), or
+  the EVOCLJ_CONFIG env file, or nil (defaults only). A missing or
+  unreadable EVOCLJ_CONFIG file throws the typed :config/invalid
+  error (a CLI startup failure, never a stack trace)."
+  [opts env]
+  (or (:config opts)
+      (when-let [f (get env "EVOCLJ_CONFIG")]
+        (try
+          (slurp f)
+          (catch Throwable t
+            (throw (err/error :config/invalid
+                              (str "unable to read EVOCLJ_CONFIG file " f)
+                              {:config-file f
+                               :message (.getMessage t)})))))))
+
+(defn- apply-config-env-overrides
+  "Assoc-in every set EVOCLJ_* env override over `config`. Values are
+  parsed as EDN; an unparseable value throws :config/invalid."
+  [config env]
+  (reduce (fn [cfg [path env-var]]
+            (if-let [v (get env env-var)]
+              (assoc-in cfg path
+                        (try
+                          (edn/read-string v)
+                          (catch Throwable t
+                            (throw (err/error :config/invalid
+                                              (str "unable to parse " env-var
+                                                   " as EDN: " v)
+                                              {:env-var env-var
+                                               :value v
+                                               :message (.getMessage t)})))))
+              cfg))
+          config
+          config-env-overrides))
+
+(defn- config-envelope
+  "The validated F5 config envelope for `opts` (foundation F5):
+  defaults deep-merged with the config source (config/load-config),
+  the selected profile applied (config/resolve-profile — the
+  :config/profile opts value or the EVOCLJ_PROFILE env), then the
+  EVOCLJ_* scalar overrides on top (env wins over file). The result
+  is re-validated against ConfigSchema before use.
+
+  Throws the typed :config/invalid error (malformed envelope,
+  unparseable EDN, unknown top-level key, non-map section) and
+  :config/profile-not-found (unknown profile) — the errors the CLI
+  surfaces as {:exit 1 :error/type ...} instead of a stack trace."
+  [opts env]
+  (let [loaded (config/load-config (or (config-source opts env) {}))
+        profile-key (or (:config/profile opts) (get env "EVOCLJ_PROFILE"))
+        profiled (if profile-key
+                   (config/resolve-profile loaded (keyword profile-key))
+                   loaded)]
+    (config/validate-config! (apply-config-env-overrides profiled env))))
+
 (defn build-config
-  "Assemble the CLI host config for `opts` (:state-dir, :overrides).
-  Mirrors resources/system.edn with every path rooted at the state
-  dir. `:overrides` deep-merges config subtrees (e.g.
+  "Assemble the CLI host config for `opts` (:state-dir, :config,
+  :config/profile, :env, :overrides). Mirrors resources/system.edn
+  with every path rooted at the state dir.
+
+  The validated F5 config envelope (foundation F5) is loaded through
+  evoclj.config/load-config — defaults deep-merged over the input (a
+  `:config` map or EDN string, or the EVOCLJ_CONFIG file), the
+  :config/profile / EVOCLJ_PROFILE profile resolved, and the EVOCLJ_*
+  scalar overrides applied on top (env wins over file). Its
+  :config/budget section feeds the evolution-system's
+  :budget-profile (the envelope's first CLI consumer; the base
+  {:max-candidates 3} cap stays when the section is empty).
+
+  `:overrides` deep-merges config subtrees (e.g.
   {:eval/system {:selection/cases ...}}) so hosts/tests inject the
   hidden cases, fixture providers, and evolution :mutator v0 ships
-  empty."
+  empty — the highest-precedence seam, above env and file. A
+  malformed envelope throws :config/invalid, surfacing through the
+  CLI's typed exit contract rather than a stack trace."
   [opts]
   (let [root (state-dir opts)
+        env (or (:env opts) (System/getenv))
+        envelope (config-envelope opts env)
         base {:store/sqlite (db-path opts)
               :store/cas {:root (cas-root opts) :verify false}
               :provider/registry
@@ -180,7 +264,8 @@
                                :max-hypotheses 3
                                :confidence-band :medium}
                :mutator :none
-               :budget-profile {:max-candidates 3}
+               :budget-profile (merge {:max-candidates 3}
+                                      (config/config-value envelope [:config/budget]))
                :programs-registry [route-descriptor]}
               :eval/system
               {:store {:sqlite (ig/ref :store/sqlite)

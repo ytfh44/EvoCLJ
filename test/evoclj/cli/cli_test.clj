@@ -32,6 +32,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.cli.main :as main]
+            [evoclj.cli.session :as cli-session]
             [evoclj.compiler.core :as compiler]
             [evoclj.eval.replay :as replay]
             [evoclj.evolution.candidate :as candidate]
@@ -867,3 +868,118 @@
             (is (= (:session/id data) (:session/id rdata)))
             (is (= task (:task-input rdata)))
             (is (= expected (:output rdata)))))))))
+
+;; ============================================================================
+;; STEP 5 (Task A4) — validated config in CLI startup (foundation F5)
+;;
+;; build-config must route the CLI's config through evoclj.config/load-config
+;; (validated merge + defaults), resolve-profile, and config-value; the
+;; EVOCLJ_* env overrides must win over the config file; a malformed envelope
+;; must surface as the typed :config/invalid exit (never a stack trace); and
+;; the :overrides deep-merge seam (host/test injection) must keep working.
+;; ============================================================================
+
+(defn- write-config-file!
+  "Write `m` as EDN to a temp file (registered for cleanup) and return
+  its path."
+  [m]
+  (let [f (java.io.File/createTempFile "evoclj-cli-config-" ".edn")]
+    (swap! temp-paths conj (.getPath f))
+    (spit f (pr-str m))
+    (.getPath f)))
+
+(deftest cli-config-envelope-feeds-the-host
+  (let [dir (temp-dir "evoclj-cli-config-")]
+    (testing "no config source — the base evolution budget-profile cap stays"
+      (let [cfg (cli-session/build-config {:state-dir dir})]
+        (is (= {:max-candidates 3}
+               (get-in cfg [:evolution/system :budget-profile])))))
+    (testing ":config opts as a map validates through load-config and feeds
+              the :config/budget section into the host budget-profile"
+      (let [cfg (cli-session/build-config {:state-dir dir
+                                       :config {:config/budget {:max-candidates 7}}})]
+        (is (= 7 (get-in cfg [:evolution/system :budget-profile :max-candidates])))
+        (is (= {:max-candidates 7}
+               (get-in cfg [:evolution/system :budget-profile])))))
+    (testing ":config opts as an EDN string parses through load-config"
+      (let [cfg (cli-session/build-config {:state-dir dir
+                                       :config (pr-str {:config/budget {:max-candidates 2}})})]
+        (is (= 2 (get-in cfg [:evolution/system :budget-profile :max-candidates])))))
+    (testing "host :overrides deep-merge on top of the validated envelope
+              (cases/fixtures/mutator injection still works)"
+      (let [cfg (cli-session/build-config
+                 {:state-dir dir
+                  :config {:config/budget {:max-candidates 7}}
+                  :overrides {:evolution/system {:mutator :none}
+                              :eval/system {:selection/cases {:case/a 1}}}})]
+        (is (= 7 (get-in cfg [:evolution/system :budget-profile :max-candidates])))
+        (is (= :none (get-in cfg [:evolution/system :mutator])))
+        (is (= {:case/a 1} (get-in cfg [:eval/system :selection/cases])))))))
+
+(deftest cli-config-env-overrides-win-over-file
+  (let [dir (temp-dir "evoclj-cli-config-")
+        file (write-config-file! {:config/budget {:max-candidates 5}})
+        file-with-profile
+        (write-config-file!
+         {:config/budget {:max-candidates 5}
+          :config/profiles {:ops {:config/budget {:max-candidates 4}}}})]
+    (testing "EVOCLJ_CONFIG env names the config file"
+      (let [cfg (cli-session/build-config {:state-dir dir
+                                       :env {"EVOCLJ_CONFIG" file}})]
+        (is (= 5 (get-in cfg [:evolution/system :budget-profile :max-candidates])))))
+    (testing "EVOCLJ_PROFILE env selects a profile over the file's base values"
+      (let [cfg (cli-session/build-config {:state-dir dir
+                                       :env {"EVOCLJ_CONFIG" file-with-profile
+                                             "EVOCLJ_PROFILE" "ops"}})]
+        (is (= 4 (get-in cfg [:evolution/system :budget-profile :max-candidates])))))
+    (testing ":config/profile opts selects a profile the same way"
+      (let [cfg (cli-session/build-config {:state-dir dir
+                                       :env {"EVOCLJ_CONFIG" file-with-profile}
+                                       :config/profile :ops})]
+        (is (= 4 (get-in cfg [:evolution/system :budget-profile :max-candidates])))))
+    (testing "an EVOCLJ_* scalar override wins over the file"
+      (let [cfg (cli-session/build-config {:state-dir dir
+                                       :env {"EVOCLJ_CONFIG" file
+                                             "EVOCLJ_BUDGET_MAX_CANDIDATES" "9"}})]
+        (is (= 9 (get-in cfg [:evolution/system :budget-profile :max-candidates])))))))
+
+(deftest cli-invalid-config-exits-typed-not-stack-trace
+  (let [ctx (provision!)
+        dir (:state-dir ctx)]
+    (testing "an unknown top-level config key exits 1 with :config/invalid"
+      (let [{:keys [exit data]} (main/execute ["recovery"]
+                                              {:state-dir dir
+                                               :config {:config/bogus {}}})]
+        (is (= 1 exit))
+        (is (= :config/invalid (:error/type data)))
+        (is (string? (:message data)))))
+    (testing "a non-map config section exits 1 with :config/invalid"
+      (let [{:keys [exit data]} (main/execute ["recovery"]
+                                              {:state-dir dir
+                                               :config {:config/budget 42}})]
+        (is (= 1 exit))
+        (is (= :config/invalid (:error/type data)))))
+    (testing "a config file named by EVOCLJ_CONFIG with unparseable EDN exits 1
+              with :config/invalid"
+      (let [bad (java.io.File/createTempFile "evoclj-cli-config-bad-" ".edn")]
+        (swap! temp-paths conj (.getPath bad))
+        (spit bad "{:config/budget {:max-candidates")
+        (let [{:keys [exit data]} (main/execute ["recovery"]
+                                                {:state-dir dir
+                                                 :env {"EVOCLJ_CONFIG" (.getPath bad)}})]
+          (is (= 1 exit))
+          (is (= :config/invalid (:error/type data))))))
+    (testing "a missing EVOCLJ_CONFIG file exits 1 with :config/invalid"
+      (let [{:keys [exit data]} (main/execute ["recovery"]
+                                              {:state-dir dir
+                                               :env {"EVOCLJ_CONFIG"
+                                                     (str dir "/no-such-config.edn")}})]
+        (is (= 1 exit))
+        (is (= :config/invalid (:error/type data)))))
+    (testing "an unknown profile exits 1 with :config/profile-not-found"
+      (let [{:keys [exit data]} (main/execute ["recovery"]
+                                              {:state-dir dir
+                                               :config {:config/profiles {:a {}}}
+                                               :config/profile :nope})]
+        (is (= 1 exit))
+        (is (= :config/profile-not-found (:error/type data)))))))
