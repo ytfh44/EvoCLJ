@@ -46,7 +46,12 @@
   :text; a :replace-text op adds the length of its :text and deletes
   the length of its string anchor; a :delete-text op deletes the
   length of its string anchor. A line-offset anchor has no computable
-  preimage size from the op alone, so it contributes 0 deleted bytes."
+  preimage size from the op alone, so it contributes 0 deleted bytes.
+
+  Task E4 (roadmap E4) adds `adapt-budget`, which adapts a profile
+  from rejection history (per mutation-class success rate): allowance
+  shrinks after consecutive rejections, grows after successes, with
+  floor/ceiling caps; deterministic and check-budget-compatible."
   (:require [clojure.string :as str]
             [evoclj.kernel.error :as err])
   (:import (java.nio.charset StandardCharsets)))
@@ -304,5 +309,130 @@
          (when (seq failures)
            (throw (err/error :evolution/budget-exceeded
                              "mutation exceeds the budget profile limits"
-                             {:cost cost :failures failures})))))
+                             {:cost cost :failures failures})))))  
      mutation)))
+
+;; --- Task E4: budget adaptation from rejection history ------------------------
+
+(def adapt-defaults
+  "Task E4 adaptation knobs. The allowance multiplier of a risk class
+  is clamped into [:floor :ceiling] — the caps that prevent both
+  explosion and zeroing — and combines two deterministic signals from
+  the class's own history:
+
+      streak signal — the consecutive run of the most recent verdicts:
+                      each trailing acceptance grows the allowance by
+                      :grow-step, each trailing rejection shrinks it
+                      by :shrink-step
+      rate signal   — the class's window success rate (accepted /
+                      accepted+rejected — the per-mutation-class
+                      success rate) pulls the multiplier toward the
+                      ceiling (all successes) or the floor (all
+                      failures), weighted by :rate-weight over the
+                      distance (:ceiling - :floor)"
+  {:floor 0.5
+   :ceiling 2.0
+   :grow-step 0.25
+   :shrink-step 0.25
+   :rate-weight 0.5})
+
+(defn- verdict-entries
+  "The verdict-carrying (:accepted/:rejected) history entries of one
+  risk class in CHRONOLOGICAL order. `history` is the Task 7.7
+  newest-first vector; a :pending entry carries no verdict, so it
+  neither breaks nor extends a streak."
+  [history risk]
+  (->> history
+       (filter #(= risk (:risk %)))
+       (filter #(contains? #{:accepted :rejected} (:state %)))
+       reverse
+       vec))
+
+(defn- trailing-streak
+  "The consecutive run of equal verdicts at the NEWEST end of a
+  chronological entry vector: {:state ... :length n}."
+  [entries]
+  (let [newest-state (:state (peek entries))]
+    {:state newest-state
+     :length (count (take-while #(= newest-state (:state %))
+                                (reverse entries)))}))
+
+(defn- class-multiplier
+  "The Task E4 allowance multiplier of one risk class: the streak
+  signal plus the success-rate pull, clamped into [:floor :ceiling].
+  A class with no verdicts has no signal and keeps its base allowance
+  (multiplier 1)."
+  [entries {:keys [floor ceiling grow-step shrink-step rate-weight]}]
+  (if (empty? entries)
+    1.0
+    (let [n (count entries)
+          accepted (count (filter #(= :accepted (:state %)) entries))
+          rate (/ accepted n)
+          {:keys [state length]} (trailing-streak entries)
+          streak-mult (if (= :accepted state)
+                        (+ 1.0 (* grow-step length))
+                        (- 1.0 (* shrink-step length)))
+          rate-pull (* rate-weight (- rate 0.5) (- ceiling floor))]
+      (max floor (min ceiling (+ streak-mult rate-pull))))))
+
+(defn- adapt-class
+  "Scale every numeric limit of one class's profile entry by the
+  class's allowance multiplier; non-numeric values pass through. A
+  limit never drops below 1 — the cap that prevents zeroing."
+  [limit-map multiplier]
+  (into {}
+        (map (fn [[k v]]
+               [k (if (number? v)
+                    (max 1 (Math/round (* v multiplier)))
+                    v)]))
+        limit-map))
+
+(defn adapt-budget
+  "Task E4: adapt a budget profile from rejection history — pure and
+  deterministic.
+
+  `history` is a vector of Task 7.7 history entries, NEWEST FIRST (the
+  recent-mutation-history contract); each entry contributes its :risk
+  class and its resolved verdict :state (:accepted / :rejected /
+  :pending — pending carries no verdict). Every risk class present in
+  the profile adapts INDEPENDENTLY from its own verdicts (the
+  per-mutation-class success rate); a class with no verdicts keeps
+  its base allowance unchanged, so an unchanged history yields an
+  unchanged profile.
+
+  The allowance of a class is its profile entry's numeric limits,
+  scaled by a multiplier m clamped into [:floor :ceiling] (defaults
+  in adapt-defaults):
+
+      m = clamp(streak-mult + rate-pull, floor, ceiling)
+
+      streak-mult = 1 + :grow-step * k   the k most recent verdicts
+                   1 - :shrink-step * k  are all accepted/rejected
+      rate-pull   = :rate-weight * (r - 0.5) * (ceiling - floor)
+                    r = accepted / (accepted + rejected)
+
+  Consecutive rejections shrink the allowance, successes grow it, and
+  the caps keep the result bounded: limits are rounded to integers
+  and never drop below 1, so the profile can neither explode nor
+  reach zero. The result has the same shape as the base profile
+  (v0-profile by default) and is safe to pass to check-budget — the
+  propose loop's budget check consumes it wherever the host supplies
+  an adapted :budget-profile.
+
+  Typed error: :evolution/adapt-invalid when history is not a
+  sequential collection (fail-closed)."
+  ([history] (adapt-budget history v0-profile))
+  ([history profile] (adapt-budget history profile adapt-defaults))
+  ([history profile opts]
+   (when-not (or (nil? history) (sequential? history))
+     (throw (err/error :evolution/adapt-invalid
+                       "adapt-budget history must be a sequential collection of Task 7.7 entries"
+                       {:history (err/sanitize history)})))
+   (reduce (fn [acc [risk limit-map]]
+             (let [m (class-multiplier (verdict-entries (vec history) risk)
+                                       (merge adapt-defaults opts))]
+               (if (= 1.0 m)
+                 acc
+                 (assoc acc risk (adapt-class limit-map m)))))
+           profile
+           profile)))

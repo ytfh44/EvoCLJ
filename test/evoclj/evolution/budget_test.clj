@@ -454,3 +454,144 @@
               is rejected before any op is examined"
       (is (= :evolution/risk-not-enabled
              (thrown-error-type #(budget/check-budget (assoc m :ops []))))))))
+
+;; ============================================================================
+;; Task E4 — budget adaptation from rejection history
+;; ============================================================================
+
+(defn- history-entry
+  "A Task 7.7-shaped history entry: a risk class plus a resolved
+  verdict :state (:accepted / :rejected / :pending)."
+  [risk state n]
+  {:mutation/id (uuid n)
+   :risk risk
+   :state state})
+
+(deftest task-e4-unchanged-history-returns-the-base-profile-unchanged
+  (testing "no history at all keeps every limit of the v0 profile"
+    (is (= budget/v0-profile (budget/adapt-budget [])))
+    (is (= budget/v0-profile (budget/adapt-budget nil))))
+  (testing "a history with no verdicts carries no adaptation signal"
+    (is (= budget/v0-profile
+           (budget/adapt-budget [{:risk :behavioral :state :pending}
+                                 {:risk :program :state :pending}]))))
+  (testing "an explicit base profile is kept unchanged too"
+    (let [custom {:behavioral {:max-files 10 :max-added-bytes 100}}]
+      (is (= custom (budget/adapt-budget [] custom))))))
+
+(deftest task-e4-consecutive-rejections-shrink-the-allowance
+  (let [profile (budget/adapt-budget
+                 (mapv #(history-entry :behavioral :rejected %) [3 2 1]))]
+    (testing "3 consecutive behavioral rejections shrink the allowance to the floor"
+      (is (= {:max-files 1 :max-added-bytes 4096 :max-deleted-bytes 4096}
+             (:behavioral profile))))
+    (testing "classes without a rejection run keep their base limits"
+      (is (= (:parameter budget/v0-profile) (:parameter profile)))
+      (is (= (:program budget/v0-profile) (:program profile)))
+      (is (= (:topology budget/v0-profile) (:topology profile))))
+    (testing "every adapted limit is strictly below its base (shrink)"
+      (is (< (:max-files (:behavioral profile))
+             (:max-files (:behavioral budget/v0-profile)))))))
+
+(deftest task-e4-consecutive-successes-grow-the-allowance
+  (let [profile (budget/adapt-budget
+                 (mapv #(history-entry :topology :accepted %) [2 1]))]
+    (testing "2 consecutive topology acceptances grow the allowance toward the ceiling"
+      (is (= {:max-new-nodes 4 :max-removed-nodes 2 :max-edge-changes 8}
+             (:topology profile))))
+    (testing "every adapted limit is strictly above its base (grow)"
+      (is (> (:max-new-nodes (:topology profile))
+             (:max-new-nodes (:topology budget/v0-profile)))))))
+
+(deftest task-e4-floor-and-ceiling-caps-bound-the-allowance
+  (testing "a long rejection run bottoms out at the floor — never zero"
+    (let [profile (budget/adapt-budget
+                   (mapv #(history-entry :parameter :rejected %) (range 100 0 -1)))]
+      (is (= {:max-ops 4} (:parameter profile)))
+      (is (every? pos? (mapcat vals (vals profile))))))
+  (testing "a long acceptance run tops out at the ceiling — never explodes"
+    (let [profile (budget/adapt-budget
+                   (mapv #(history-entry :parameter :accepted %) (range 100 0 -1)))]
+      (is (= {:max-ops 16} (:parameter profile)))))
+  (testing "custom caps are honored"
+    (let [opts {:floor 0.25 :ceiling 3.0}
+          rej (budget/adapt-budget
+               (mapv #(history-entry :parameter :rejected %) (range 100 0 -1))
+               budget/v0-profile opts)
+          acc (budget/adapt-budget
+               (mapv #(history-entry :parameter :accepted %) (range 100 0 -1))
+               budget/v0-profile opts)]
+      (is (= {:max-ops 2} (:parameter rej)))
+      (is (= {:max-ops 24} (:parameter acc)))))
+  (testing "a single-unit limit cannot drop below 1"
+    (let [profile (budget/adapt-budget
+                   (mapv #(history-entry :topology :rejected %) [3 2 1]))]
+      (is (= 1 (:max-removed-nodes (:topology profile)))))))
+
+(deftest task-e4-each-mutation-class-adapts-from-its-own-history
+  (let [history [(history-entry :behavioral :accepted 8)
+                 (history-entry :behavioral :accepted 7)
+                 (history-entry :behavioral :rejected 6)
+                 (history-entry :behavioral :rejected 5)
+                 (history-entry :program :accepted 4)
+                 (history-entry :program :accepted 3)
+                 (history-entry :program :accepted 2)
+                 (history-entry :program :accepted 1)
+                 (history-entry :parameter :rejected 9)]
+        profile (budget/adapt-budget history)]
+    (testing ":behavioral — rate 0.5 with 2 trailing successes → ×1.5"
+      (is (= {:max-files 3 :max-added-bytes 12288 :max-deleted-bytes 12288}
+             (:behavioral profile))))
+    (testing ":program — all successes → allowance at the ceiling"
+      (is (= {:max-files 4 :max-top-level-forms 6} (:program profile))))
+    (testing ":parameter — a single rejection bottoms out at the floor"
+      (is (= {:max-ops 4} (:parameter profile))))
+    (testing ":topology — no verdicts in the window → unchanged"
+      (is (= (:topology budget/v0-profile) (:topology profile))))))
+
+(deftest task-e4-pending-entries-carry-no-verdict-and-break-no-streak
+  (let [history [(history-entry :behavioral :pending 3)
+                 (history-entry :behavioral :rejected 2)
+                 (history-entry :behavioral :rejected 1)
+                 (history-entry :behavioral :accepted 4)]]
+    ;; chronological verdicts: accepted, rejected, rejected (pending
+    ;; dropped) → trailing 2 rejections → the behavioral allowance
+    ;; bottoms out at the floor even with the older acceptance
+    (is (= {:max-files 1}
+           (select-keys (:behavioral (budget/adapt-budget history))
+                        [:max-files])))))
+
+(deftest task-e4-adaptation-is-deterministic
+  (let [history [(history-entry :behavioral :accepted 2)
+                 (history-entry :behavioral :rejected 1)
+                 (history-entry :topology :rejected 3)]]
+    (is (= (budget/adapt-budget history)
+           (budget/adapt-budget history)))))
+
+(deftest task-e4-a-non-sequential-history-fails-closed
+  (is (= :evolution/adapt-invalid
+         (thrown-error-type #(budget/adapt-budget :not-history))))
+  (is (= :evolution/adapt-invalid
+         (thrown-error-type #(budget/adapt-budget {:risk :behavioral
+                                                   :state :accepted})))))
+
+(deftest task-e4-adapted-profiles-plug-into-check-budget
+  (testing "a grown allowance admits a mutation the base profile would reject"
+    (let [grown (budget/adapt-budget
+                 (mapv #(history-entry :behavioral :accepted %) [2 1]))
+          m (mutation* {:risk :behavioral
+                        :ops [(insert-text-op "skills/a.edn")
+                              (insert-text-op "skills/b.edn")
+                              (insert-text-op "prompts/c.txt")]})]
+      (is (= :evolution/budget-exceeded
+             (thrown-error-type #(budget/check-budget m))))
+      (is (= m (budget/check-budget m grown)))))
+  (testing "a shrunken allowance rejects a mutation the base profile admits"
+    (let [shrunk (budget/adapt-budget
+                  (mapv #(history-entry :behavioral :rejected %) [3 2 1]))
+          m (mutation* {:risk :behavioral
+                        :ops [(insert-text-op "skills/a.edn")
+                              (insert-text-op "skills/b.edn")]})]
+      (is (= m (budget/check-budget m)))
+      (is (= :evolution/budget-exceeded
+             (thrown-error-type #(budget/check-budget m shrunk)))))))
