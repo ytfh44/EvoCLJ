@@ -1,6 +1,6 @@
 # EvoCLJ Improvements Plan
 
-**Status: IN PROGRESS (2026-08-16)**
+**Status: COMPLETE (2026-08-16)** — all 26 tasks landed as individual commits (see git log from 058baf0); full suite green (990 tests / 8378 assertions).
 
 Source: brainstorm session (T1 闭环验证 / T2 信任审计 / T3 操作体验 / T4 研究纵深)
 plus the unticked items of `docs/roadmap.md` (E1–E5, V2, V5, R4, O4, O5, S3).
