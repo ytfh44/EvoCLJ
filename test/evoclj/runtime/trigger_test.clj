@@ -10,11 +10,23 @@
   and throwing-handler :error entries, per-fired-rule isolation); and
   check-events! end to end.
 
+  Task C1 adds the action-registry authority audit + ACL: descriptor
+  validation (a descriptor missing :action/id / :action/allowlist /
+  :action/subject-scope throws :trigger/invalid); unauthorized subjects
+  denied with :trigger/action-unauthorized and NEVER executed; and, with
+  an audit context {:store ... :session/id ...}, every executed action
+  and every denial appends an audit event (:action/executed /
+  :action/denied) to the session's append-only store.
+
   All rule data is pure data (Global Constraint 22): handlers live only
   in the registry atom, never inside rules."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.java.jdbc :as jdbc]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.kernel.error :as err]
-            [evoclj.runtime.trigger :as trigger])
+            [evoclj.runtime.trigger :as trigger]
+            [evoclj.store.event :as event]
+            [evoclj.store.migrate :as migrate]
+            [evoclj.store.sqlite :as sqlite])
   (:import (java.util UUID)))
 
 ;; --- helpers ---------------------------------------------------------------
@@ -88,6 +100,80 @@
           :trigger/kind :event
           :trigger/action :alarm}
          overrides))
+
+;; --- store fixtures (audit tests) ------------------------------------------
+
+(def ^:private now "2025-01-01T00:00:00Z")
+(def ^:private gen "generation-1")
+(def ^:private genome (str "sha256:" (apply str (repeat 64 "a"))))
+(def ^:private phenotype (str "sha256:" (apply str (repeat 64 "b"))))
+(def ^:private resolution "resolution-1")
+
+(def ^:private db-paths (atom []))
+
+(defn- temp-db-path
+  "A throwaway SQLite file in the system temp dir."
+  []
+  (let [p (str (java.nio.file.Files/createTempFile
+                "evoclj-trigger-" ".db"
+                (make-array java.nio.file.attribute.FileAttribute 0)))]
+    (swap! db-paths conj p)
+    p))
+
+(defn- cleanup!
+  "Delete every temp db file created during this run."
+  []
+  (doseq [p @db-paths]
+    (java.nio.file.Files/deleteIfExists
+     (java.nio.file.Paths/get p (make-array String 0))))
+  (reset! db-paths []))
+
+(use-fixtures :each (fn [f] (f) (cleanup!)))
+
+(defn- fresh-db
+  "A migrated database spec backed by a fresh temp file."
+  []
+  (let [db (sqlite/spec (temp-db-path))]
+    (migrate/migrate! db)
+    db))
+
+(defn- seed-session!
+  "Insert a generation row (once) and a session row; returns the
+  session id (a #uuid)."
+  [db]
+  (let [sid (random-uuid)]
+    (sqlite/with-db [conn db]
+      (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
+        (jdbc/insert! conn :generations
+                      {:id gen
+                       :genome_id genome
+                       :resolution_id resolution
+                       :parent_id nil
+                       :state "active"
+                       :current 0
+                       :created_at now}))
+      (jdbc/insert! conn :sessions
+                    {:id (str sid)
+                     :generation_id gen
+                     :genome_id genome
+                     :resolution_id resolution
+                     :phenotype_id phenotype
+                     :state "created"
+                     :created_at now}))
+    sid))
+
+(defn- seed-root-event!
+  "Append the :session/created root event that opens `sid`'s causal
+  chain; returns the persisted event (the audit event's cause anchor)."
+  [db sid]
+  (event/append-event! db
+                       {:session/id sid
+                        :generation/id gen
+                        :phenotype/id phenotype
+                        :event/type :session/created
+                        :cause/event-id nil
+                        :payload-ref nil
+                        :metadata {}}))
 
 ;; --- match-event-rule -------------------------------------------------------
 
@@ -369,3 +455,229 @@
         (is (= :ok (:action/status r)))
         (is (= :t/alarm (:action/id r)))
         (is (= {:alerted :t/fire-1} (:action/result r)))))))
+
+;; --- Task C1: action descriptor validation ---------------------------------
+
+(deftest register-action-descriptor-validates
+  (let [reg (trigger/make-registry)]
+    (testing "a descriptor map missing a required key is rejected"
+      (is (= :trigger/invalid (error-type #(trigger/register-action!
+                                            reg {:action/allowlist [:ops/operator]
+                                                 :action/subject-scope :scope/alert}
+                                            (fn [_] 1))))) ; missing :action/id
+      (is (= :trigger/invalid (error-type #(trigger/register-action!
+                                            reg {:action/id :a
+                                                 :action/subject-scope :scope/alert}
+                                            (fn [_] 1))))) ; missing :action/allowlist
+      (is (= :trigger/invalid (error-type #(trigger/register-action!
+                                            reg {:action/id :a
+                                                 :action/allowlist [:ops/operator]}
+                                            (fn [_] 1))))) ; missing :action/subject-scope
+      (is (= :trigger/invalid (error-type #(trigger/register-action! reg {} (fn [_] 1))))))
+    (testing "a malformed descriptor is rejected"
+      (is (= :trigger/invalid (error-type #(trigger/register-action!
+                                            reg {:action/id :a
+                                                 :action/allowlist ["ops"]
+                                                 :action/subject-scope :scope/alert}
+                                            (fn [_] 1)))))
+      (is (= :trigger/invalid (error-type #(trigger/register-action!
+                                            reg {:action/id :a
+                                                 :action/allowlist [:ops/operator]
+                                                 :action/subject-scope 7}
+                                            (fn [_] 1))))))
+    (testing "a valid descriptor registers the action under :action/id and preserves it"
+      (let [desc {:action/id :a
+                  :action/allowlist [:ops/operator]
+                  :action/subject-scope :scope/alert}]
+        (is (identical? reg (trigger/register-action! reg desc (fn [_] :done))))
+        (is (= #{:a} (set (keys @reg))))
+        (is (= desc (get-in @reg [:a :descriptor])))))))
+
+;; --- Task C1: ACL enforcement ----------------------------------------------
+
+(deftest run-actions-unauthorized-action-never-executes
+  (let [calls (atom 0)
+        reg (trigger/make-registry)
+        _ (trigger/register-action! reg
+                                    {:action/id :alarm
+                                     :action/allowlist [:ops/operator]
+                                     :action/subject-scope :scope/alert}
+                                    (fn [_] (swap! calls inc) {:alerted true}))]
+    (testing "a subject outside the allowlist is denied and NEVER executed"
+      (let [r (first (trigger/run-actions!
+                      reg [(assoc (fired-map 1) :action/subject :ops/agent)]))]
+        (is (= :error (:action/status r)))
+        (is (= :trigger/action-unauthorized (:error/type r)))
+        (is (string? (:error/message r)))
+        (is (= 0 @calls))))
+    (testing "a fired rule with no subject is denied for an access-restricted action"
+      (let [r (first (trigger/run-actions! reg [(fired-map 2)]))]
+        (is (= :error (:action/status r)))
+        (is (= :trigger/action-unauthorized (:error/type r)))
+        (is (= 0 @calls))))
+    (testing "an authorized subject runs the action"
+      (let [r (first (trigger/run-actions!
+                      reg [(assoc (fired-map 3) :action/subject :ops/operator)]))]
+        (is (= :ok (:action/status r)))
+        (is (= {:alerted true} (:action/result r)))
+        (is (= 1 @calls))))))
+
+;; --- Task C1: audit trail ---------------------------------------------------
+
+(deftest run-actions-audits-authorized-execution
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        root (seed-root-event! db sid)
+        before (count (event/events-for-session db sid))
+        reg (trigger/make-registry)
+        _ (trigger/register-action! reg
+                                    {:action/id :alarm
+                                     :action/allowlist [:ops/operator]
+                                     :action/subject-scope :scope/alert}
+                                    (fn [f] {:alerted (:trigger/name f)}))
+        fired [(assoc (fired-map 1) :action/subject :ops/operator)]
+        results (trigger/run-actions! reg fired {:store db :session/id sid})]
+    (testing "the authorized action ran :ok and was audited"
+      (let [r (first results)]
+        (is (= :ok (:action/status r)))
+        (is (= {:alerted :f/fired-1} (:action/result r)))
+        (is (pos-int? (:audit/event-id r)))))
+    (testing "exactly one :action/executed audit event was appended with attribution"
+      (is (= (inc before) (count (event/events-for-session db sid))))
+      (let [audit (last (event/events-for-session db sid))]
+        (is (= :action/executed (:event/type audit)))
+        (is (= (:event/id root) (:cause/event-id audit)))
+        (is (= :alarm (get-in audit [:metadata :action/id])))
+        (is (= :ops/operator (get-in audit [:metadata :action/subject])))
+        (is (= :scope/alert (get-in audit [:metadata :action/subject-scope])))
+        (is (= :ok (get-in audit [:metadata :action/status])))
+        (is (= :f/fired-1 (get-in audit [:metadata :trigger/name])))))))
+
+(deftest run-actions-audits-unauthorized-denial
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        _ (seed-root-event! db sid)
+        before (count (event/events-for-session db sid))
+        calls (atom 0)
+        reg (trigger/make-registry)
+        _ (trigger/register-action! reg
+                                    {:action/id :alarm
+                                     :action/allowlist [:ops/operator]
+                                     :action/subject-scope :scope/alert}
+                                    (fn [_] (swap! calls inc) {:alerted true}))
+        fired [(assoc (fired-map 1) :action/subject :ops/agent)]
+        results (trigger/run-actions! reg fired {:store db :session/id sid})]
+    (testing "the unauthorized action was NOT executed"
+      (is (= 0 @calls)))
+    (testing "the denial is an :error entry, never a throw, and was audited"
+      (let [r (first results)]
+        (is (= :error (:action/status r)))
+        (is (= :trigger/action-unauthorized (:error/type r)))
+        (is (pos-int? (:audit/event-id r)))))
+    (testing "one :action/denied audit event was appended with the attempted subject"
+      (is (= (inc before) (count (event/events-for-session db sid))))
+      (let [audit (last (event/events-for-session db sid))]
+        (is (= :action/denied (:event/type audit)))
+        (is (= :ops/agent (get-in audit [:metadata :action/subject])))
+        (is (= :denied (get-in audit [:metadata :action/status])))
+        (is (= :trigger/action-unauthorized (get-in audit [:metadata :error/type])))))))
+
+(deftest run-actions-audits-unknown-action-denial
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        _ (seed-root-event! db sid)
+        before (count (event/events-for-session db sid))
+        reg (trigger/make-registry)
+        fired [(assoc (fired-map 1) :trigger/action :no-such-action)]
+        results (trigger/run-actions! reg fired {:store db :session/id sid})]
+    (testing "an unknown action is an :error entry and audited as a denial"
+      (let [r (first results)]
+        (is (= :error (:action/status r)))
+        (is (= :trigger/action-not-found (:error/type r)))
+        (is (pos-int? (:audit/event-id r))))
+      (is (= (inc before) (count (event/events-for-session db sid))))
+      (let [audit (last (event/events-for-session db sid))]
+        (is (= :action/denied (:event/type audit)))
+        (is (= :no-such-action (get-in audit [:metadata :action/id])))))))
+
+(deftest run-actions-audits-executed-handler-failure
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        _ (seed-root-event! db sid)
+        before (count (event/events-for-session db sid))
+        reg (trigger/make-registry)
+        _ (trigger/register-action! reg
+                                    {:action/id :boom!
+                                     :action/allowlist [:ops/operator]
+                                     :action/subject-scope :scope/x}
+                                    (fn [_] (throw (err/error :t/failure "bad" {}))))
+        results (trigger/run-actions! reg [(assoc (fired-map 1)
+                                                  :trigger/action :boom!
+                                                  :action/subject :ops/operator)]
+                                       {:store db :session/id sid})]
+    (testing "a throwing handler is still an executed (audited) action"
+      (let [r (first results)]
+        (is (= :error (:action/status r)))
+        (is (= :t/failure (:error/type r)))
+        (is (pos-int? (:audit/event-id r))))
+      (is (= (inc before) (count (event/events-for-session db sid))))
+      (let [audit (last (event/events-for-session db sid))]
+        (is (= :action/executed (:event/type audit)))
+        (is (= :error (get-in audit [:metadata :action/status])))
+        (is (= :t/failure (get-in audit [:metadata :error/type])))))))
+
+(deftest run-actions-without-audit-context-appends-nothing
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        _ (seed-root-event! db sid)
+        before (count (event/events-for-session db sid))
+        reg (trigger/make-registry)
+        _ (trigger/register-action! reg
+                                    {:action/id :alarm
+                                     :action/allowlist [:ops/operator]
+                                     :action/subject-scope :scope/alert}
+                                    (fn [_] :done))
+        results (trigger/run-actions! reg [(assoc (fired-map 1) :action/subject :ops/operator)])]
+    (testing "the 2-arity path performs the ACL but appends no audit events"
+      (let [r (first results)]
+        (is (= :ok (:action/status r)))
+        (is (nil? (:audit/event-id r)))
+        (is (= before (count (event/events-for-session db sid))))))))
+
+(deftest run-actions-audit-failure-is-isolated
+  (let [db (fresh-db) ; migrated, but no session seeded
+        reg (trigger/make-registry)
+        _ (trigger/register-action! reg
+                                    {:action/id :alarm
+                                     :action/allowlist [:ops/operator]
+                                     :action/subject-scope :scope/alert}
+                                    (fn [_] :done))
+        fired [(assoc (fired-map 1) :action/subject :ops/operator)]
+        results (trigger/run-actions! reg fired {:store db :session/id (random-uuid)})]
+    (testing "an audit append failure becomes :audit/error; the action still ran; no throw"
+      (let [r (first results)]
+        (is (= :ok (:action/status r)))
+        (is (= :done (:action/result r)))
+        (is (string? (:audit/error r)))))))
+
+(deftest check-events-end-to-end-with-audit
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        _ (seed-root-event! db sid)
+        events (event-vector) ; 5 tool-calls
+        reg (trigger/make-registry)
+        _ (trigger/register-action! reg
+                                    {:action/id :t/alarm
+                                     :action/allowlist nil
+                                     :action/subject-scope :scope/alert}
+                                    (fn [f] {:alerted (:trigger/name f)}))
+        result (trigger/check-events! reg [(event-rule 1 {:threshold 4 :comparator :gt})]
+                                      events {:store db :session/id sid})]
+    (testing "check-events! with an audit context executes and audits"
+      (is (= 1 (count (:trigger/fired result))))
+      (let [r (first (:trigger/actions result))]
+        (is (= :ok (:action/status r)))
+        (is (= :t/alarm (:action/id r)))
+        (is (= {:alerted :t/fire-1} (:action/result r)))
+        (is (pos-int? (:audit/event-id r))))
+      (is (= :action/executed (:event/type (last (event/events-for-session db sid))))))))

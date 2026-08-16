@@ -14,12 +14,19 @@
        pure data (Global Constraint 22): they carry no functions, only
        threshold / comparator / window values.
 
-    2. The ACTION REGISTRY — an atom mapping action keywords to handler
-       functions. Handlers live ONLY in the registry atom (kernel-side
-       state); rule data never contains a function. `run-actions!`
-       dispatches each fired rule to its handler with per-fired-rule
-       isolation: an unknown action id or a throwing handler produces an
-       :error entry without stopping the other actions.
+    2. The ACTION REGISTRY — an atom mapping action keywords to
+       {:descriptor ... :handler ...} entries (Task C1). Every
+       registration carries an action descriptor {:action/id
+       :action/allowlist :action/subject-scope}; `run-actions!` enforces
+       the ACL — an unknown action id or a subject outside the
+       descriptor's allowlist produces an :error entry and the handler
+       is NEVER invoked. Handlers live ONLY in the registry atom
+       (kernel-side state); rule data never contains a function. With an
+       optional audit context {:store ... :session/id ...} every
+       executed action and every denial appends an audit event
+       (:action/executed / :action/denied) to the session's append-only
+       store, carrying the authorization decision and outcome (Global
+       Constraint 20).
 
   DATA contract: a trigger rule
 
@@ -47,13 +54,16 @@
   {:metric/name ... :metric/value ...}.
 
   ERROR CONTRACT (Global Constraint 22 — plain serializable data):
-  :trigger/invalid — a malformed rule, context, registry argument, or
-  non-numeric metric value; :trigger/action-not-found — an unknown
-  action id, surfaced ONLY as an :error ENTRY inside run-actions!
-  results and never thrown by run-actions!."
+  :trigger/invalid — a malformed rule, context, descriptor, registry
+  argument, audit context, or non-numeric metric value;
+  :trigger/action-not-found — an unknown action id;
+  :trigger/action-unauthorized — a subject outside the action's
+  allowlist. Both denial types surface ONLY as an :error ENTRY inside
+  run-actions! results and are never thrown by run-actions!."
   (:require [malli.core :as m]
             [malli.error :as me]
-            [evoclj.kernel.error :as err])
+            [evoclj.kernel.error :as err]
+            [evoclj.store.event :as event])
   (:import (java.time Instant)
            (java.time.format DateTimeFormatter)))
 
@@ -85,8 +95,23 @@
    [:trigger/fired-at string?]
    [:trigger/context :map]])
 
+(def ActionDescriptorSchema
+  "The action descriptor contract (Task C1, closed): the ACL identity
+  of one registered action. :action/id is the action keyword (the
+  registry key); :action/allowlist is the set of subject keywords
+  authorized to trigger the action (nil = the legacy permissive
+  default — no subject restriction); :action/subject-scope declares the
+  scope the action operates in, carried into the audit trail."
+  [:map {:closed true}
+   [:action/id keyword?]
+   [:action/allowlist [:maybe [:sequential keyword?]]]
+   [:action/subject-scope [:maybe keyword?]]])
+
 (def ActionResultSchema
-  "One per-fired-rule action result returned by `run-actions!` (closed)."
+  "One per-fired-rule action result returned by `run-actions!` (closed).
+  When an audit context was supplied, a successful audit append adds
+  :audit/event-id; an audit append failure adds :audit/error instead.
+  Without an audit context no audit keys appear."
   [:map {:closed true}
    [:trigger/id uuid?]
    [:trigger/name keyword?]
@@ -94,7 +119,9 @@
    [:action/status [:enum :ok :error]]
    [:action/result {:optional true} :any]
    [:error/type {:optional true} keyword?]
-   [:error/message {:optional true} string?]])
+   [:error/message {:optional true} string?]
+   [:audit/event-id {:optional true} pos-int?]
+   [:audit/error {:optional true} string?]])
 
 (defn- trigger-error!
   "Throw :trigger/invalid with a humanized Malli explanation."
@@ -270,76 +297,218 @@
 
 (defn make-registry
   "Return a fresh empty action registry: an atom mapping action-id
-  keyword -> handler-fn. Handlers live only here (kernel-side state),
-  never inside rule data (Global Constraint 22)."
+  keyword -> {:descriptor <ActionDescriptorSchema> :handler <fn>}.
+  Handlers live only here (kernel-side state), never inside rule data
+  (Global Constraint 22)."
   []
   (atom {}))
 
 (defn register-action!
-  "Register `handler` under `action-id` in `registry` and return the
-  registry. `handler` is a function of one argument, the fired-rule
-  map, returning an EDN-safe result. Validates: `registry` must be an
-  atom, `action-id` a keyword and `handler` a function — else throws
-  :trigger/invalid."
-  [registry action-id handler]
-  (when-not (instance? clojure.lang.Atom registry)
+  "Register an action in `registry` and return the registry. Two
+  forms:
+
+    (register-action! registry descriptor handler)
+      Descriptor form (Task C1): `descriptor` is a map satisfying
+      ActionDescriptorSchema — :action/id (the registry key), the
+      :action/allowlist of subject keywords authorized to trigger the
+      action (nil = no subject restriction), and the
+      :action/subject-scope the action operates in (carried into the
+      audit trail). A descriptor missing any required key throws
+      :trigger/invalid.
+
+    (register-action! registry action-id handler)
+      Legacy keyword form kept for existing call sites: registers
+      `handler` under the keyword `action-id` with a permissive
+      descriptor (:action/allowlist nil — every subject is allowed).
+
+  `handler` is a function of one argument, the fired-rule map,
+  returning an EDN-safe result. Validates: `registry` must be an atom,
+  the descriptor must satisfy ActionDescriptorSchema, and `handler`
+  must be a function — else throws :trigger/invalid."
+  [registry action-id-or-descriptor handler]
+  (let [descriptor (if (map? action-id-or-descriptor)
+                     action-id-or-descriptor
+                     {:action/id action-id-or-descriptor
+                      :action/allowlist nil
+                      :action/subject-scope nil})]
+    (when-not (instance? clojure.lang.Atom registry)
+      (throw (err/error :trigger/invalid
+                        "registry must be an atom"
+                        {:registry registry})))
+    (when-let [expl (m/explain ActionDescriptorSchema descriptor)]
+      (throw (err/error :trigger/invalid
+                        "action descriptor does not satisfy the action descriptor contract"
+                        {:descriptor descriptor
+                         :errors (me/humanize expl)})))
+    (when-not (fn? handler)
+      (throw (err/error :trigger/invalid
+                        "handler must be a function"
+                        {:action/id (:action/id descriptor)})))
+    (swap! registry assoc (:action/id descriptor)
+           {:descriptor descriptor :handler handler})
+    registry))
+
+(defn- allowed-subject?
+  "The ACL decision for `subject` against the descriptor's
+  :action/allowlist: a nil allowlist is the legacy permissive default
+  (no subject restriction); a non-nil allowlist admits exactly the
+  listed subject keywords."
+  [allowlist subject]
+  (or (nil? allowlist)
+      (contains? (set allowlist) subject)))
+
+(defn- validate-audit-context!
+  "Validate an optional `audit-context`: nil (no audit) or a map with
+  :store and :session/id (a #uuid or its canonical string). Throws
+  :trigger/invalid otherwise."
+  [audit-context]
+  (when (and audit-context
+             (not (map? audit-context)))
     (throw (err/error :trigger/invalid
-                      "registry must be an atom"
-                      {:registry registry})))
-  (when-not (keyword? action-id)
+                      "audit context must be a map"
+                      {:audit-context audit-context})))
+  (when (and audit-context
+             (not (contains? audit-context :store)))
     (throw (err/error :trigger/invalid
-                      "action-id must be a keyword"
-                      {:action/id action-id})))
-  (when-not (fn? handler)
-    (throw (err/error :trigger/invalid
-                      "handler must be a function"
-                      {:action/id action-id})))
-  (swap! registry assoc action-id handler)
-  registry)
+                      "audit context must carry a :store"
+                      {:audit-context audit-context})))
+  (let [sid (:session/id audit-context)]
+    (when (and audit-context
+               (not (or (uuid? sid) (string? sid))))
+      (throw (err/error :trigger/invalid
+                        "audit context :session/id must be a UUID or its canonical string"
+                        {:audit-context audit-context}))))
+  audit-context)
+
+(defn- audit-anchor
+  "The anchor for one audit event: the session's pinned
+  :generation/id and :phenotype/id and the id of its newest event as
+  the causal :cause/event-id (the promotion event-anchoring pattern).
+  nil when the session has no events yet (or does not exist)."
+  [store session-id]
+  (let [events (event/events-for-session store session-id)]
+    (when-let [newest (last events)]
+      {:generation/id (:generation/id newest)
+       :phenotype/id (:phenotype/id newest)
+       :cause/event-id (:event/id newest)})))
+
+(defn- append-audit!
+  "Append ONE audit event for a fired action to the audit context's
+  session. `status` is :ok / :error for executed actions (event type
+  :action/executed) or :denied for denials (event type :action/denied);
+  `extra` supplies outcome details (error type / message on failures).
+  The metadata carries the fired rule, the action, the authorization
+  subject and scope, and the outcome — the attribution Global
+  Constraint 20 requires.
+
+  Returns {:audit/event-id <id>} on success or {:audit/error <message>}
+  on failure. Never throws: an audit failure must not break
+  per-fired-rule isolation."
+  [audit-context fired action-id subject-scope subject status extra]
+  (try
+    (let [store (:store audit-context)
+          session-id (:session/id audit-context)
+          anchor (audit-anchor store session-id)]
+      (if (nil? anchor)
+        {:audit/error "cannot anchor the audit event: the session has no events (unknown or empty session)"}
+        (let [ev (event/append-event!
+                  store
+                  {:session/id session-id
+                   :generation/id (:generation/id anchor)
+                   :phenotype/id (:phenotype/id anchor)
+                   :event/type (if (= :denied status)
+                                 :action/denied
+                                 :action/executed)
+                   :cause/event-id (:cause/event-id anchor)
+                   :payload-ref nil
+                   :metadata (merge {:action/id action-id
+                                     :action/subject subject
+                                     :action/subject-scope subject-scope
+                                     :trigger/id (str (:trigger/id fired))
+                                     :trigger/name (:trigger/name fired)
+                                     :action/status status}
+                                    extra)})]
+          {:audit/event-id (:event/id ev)})))
+    (catch Throwable t
+      {:audit/error (or (.getMessage t) (str t))})))
 
 (defn- run-actions-for-fired
-  "Dispatch ONE fired rule to its handler, returning a single action
-  result map. Per-fired-rule isolation: an unknown action id or a
-  throwing handler produces an :error entry and does not stop anything
-  else. A handler's ExceptionInfo ex-data :error/type is preserved when
-  present, else :trigger/action-failed."
-  [registry fired]
+  "Dispatch ONE fired rule through the registry, returning a single
+  action result map. Per-fired-rule isolation: an unknown action id or
+  a subject outside the action's allowlist yields an :error entry and
+  the handler is NEVER invoked; a throwing handler yields an :error
+  entry; none of these stop the other actions. A handler's ExceptionInfo
+  ex-data :error/type is preserved when present, else
+  :trigger/action-failed. With an `audit-context`, every executed action
+  and every denial appends an audit event (:action/executed /
+  :action/denied) to the store; the persisted audit event id is carried
+  back as :audit/event-id (or :audit/error when the append failed)."
+  [registry fired audit-context]
   (let [fired-id (:trigger/id fired)
         fired-name (:trigger/name fired)
         action-id (:trigger/action fired)
-        handler (get @registry action-id)]
-    (cond
-      (nil? handler)
-      {:trigger/id fired-id
-       :trigger/name fired-name
-       :action/id action-id
-       :action/status :error
-       :error/type :trigger/action-not-found
-       :error/message "no handler registered for action"}
-
-      :else
-      (try
-        {:trigger/id fired-id
-         :trigger/name fired-name
-         :action/id action-id
-         :action/status :ok
-         :action/result (handler fired)}
-        (catch clojure.lang.ExceptionInfo e
-          (let [data (ex-data e)
-                t (or (:error/type data) :trigger/action-failed)]
-            {:trigger/id fired-id
-             :trigger/name fired-name
-             :action/id action-id
-             :action/status :error
-             :error/type t
-             :error/message (.getMessage e)}))
-        (catch Throwable t
-          {:trigger/id fired-id
-           :trigger/name fired-name
-           :action/id action-id
-           :action/status :error
-           :error/type :trigger/action-failed
-           :error/message (.getMessage t)})))))
+        entry (get @registry action-id)]
+    (if (nil? entry)
+      (let [result {:trigger/id fired-id
+                    :trigger/name fired-name
+                    :action/id action-id
+                    :action/status :error
+                    :error/type :trigger/action-not-found
+                    :error/message "no handler registered for action"}
+            audit (when audit-context
+                    (append-audit! audit-context fired action-id nil nil :denied
+                                   {:error/type :trigger/action-not-found
+                                    :error/message "no handler registered for action"}))]
+        (merge result audit))
+      (let [desc (:descriptor entry)
+            allowlist (:action/allowlist desc)
+            subject (:action/subject fired)
+            scope (:action/subject-scope desc)]
+        (if-not (allowed-subject? allowlist subject)
+          (let [denied-message (if (nil? subject)
+                                 "action requires an authorized subject"
+                                 "subject is not in the action allowlist")
+                result {:trigger/id fired-id
+                        :trigger/name fired-name
+                        :action/id action-id
+                        :action/status :error
+                        :error/type :trigger/action-unauthorized
+                        :error/message denied-message}
+                audit (when audit-context
+                        (append-audit! audit-context fired action-id scope subject :denied
+                                       {:error/type :trigger/action-unauthorized
+                                        :error/message denied-message}))]
+            (merge result audit))
+          (let [handler (:handler entry)
+                outcome (try
+                          {:status :ok
+                           :result (handler fired)}
+                          (catch clojure.lang.ExceptionInfo e
+                            (let [data (ex-data e)
+                                  t (or (:error/type data) :trigger/action-failed)]
+                              {:status :error
+                               :error/type t
+                               :error/message (.getMessage e)}))
+                          (catch Throwable t
+                            {:status :error
+                             :error/type :trigger/action-failed
+                             :error/message (.getMessage t)}))
+                ok? (= :ok (:status outcome))
+                base (merge {:trigger/id fired-id
+                             :trigger/name fired-name
+                             :action/id action-id
+                             :action/status (:status outcome)}
+                            (when ok? {:action/result (:result outcome)})
+                            (when-not ok?
+                              {:error/type (:error/type outcome)
+                               :error/message (:error/message outcome)}))
+                audit (when audit-context
+                        (append-audit! audit-context fired action-id scope subject
+                                       (:status outcome)
+                                       (when-not ok?
+                                         {:error/type (:error/type outcome)
+                                          :error/message (:error/message outcome)})))]
+            (merge base audit)))))))
 
 (defn run-actions!
   "Dispatch every `fired` rule (as returned by `evaluate`) through
@@ -351,30 +520,50 @@
        :error/type k :error/message s  (on :error)}
 
   Per-fired-rule isolation: an unknown :trigger/action (no registered
-  handler) or a throwing handler produces an :error entry and does NOT
-  stop the other actions. A handler exception whose ex-data carries an
-  :error/type preserves that type; otherwise the type is
-  :trigger/action-failed. An unknown action id yields an :error entry
-  with :error/type :trigger/action-not-found — this is never thrown by
-  run-actions!."
-  [registry fired-rules]
-  (when-not (instance? clojure.lang.Atom registry)
-    (throw (err/error :trigger/invalid
-                      "registry must be an atom"
-                      {:registry registry})))
-  (when-not (sequential? fired-rules)
-    (throw (err/error :trigger/invalid
-                      "fired-rules must be a sequential collection"
-                      {:fired-rules fired-rules})))
-  (mapv #(run-actions-for-fired registry %) fired-rules))
+  entry), a subject outside the action's :action/allowlist, or a
+  throwing handler produces an :error entry and does NOT stop the other
+  actions. ACL-denied and unknown actions NEVER invoke their handler. A
+  handler exception whose ex-data carries an :error/type preserves that
+  type; otherwise the type is :trigger/action-failed. An unknown action
+  id yields :trigger/action-not-found; an unauthorized subject yields
+  :trigger/action-unauthorized — neither is ever thrown by
+  run-actions!.
+
+  Optional third argument `audit-context` (Task C1): nil or a map
+  {:store <db> :session/id <uuid-or-string>}. When provided, every
+  executed action and every denial appends an audit event to the
+  session's append-only store (:action/executed / :action/denied,
+  carrying the authorization decision and outcome — Global Constraint
+  20); the persisted audit event id is carried back on each result as
+  :audit/event-id, or :audit/error when the append failed. Without an
+  audit context no audit events are appended (backward compatible)."
+  ([registry fired-rules]
+   (run-actions! registry fired-rules nil))
+  ([registry fired-rules audit-context]
+   (when-not (instance? clojure.lang.Atom registry)
+     (throw (err/error :trigger/invalid
+                       "registry must be an atom"
+                       {:registry registry})))
+   (when-not (sequential? fired-rules)
+     (throw (err/error :trigger/invalid
+                       "fired-rules must be a sequential collection"
+                       {:fired-rules fired-rules})))
+   (validate-audit-context! audit-context)
+   (mapv #(run-actions-for-fired registry % audit-context) fired-rules)))
 
 (defn check-events!
   "Convenience: evaluate `rules` over {:events events :metrics {}}
   then dispatch the fired rules through `registry`. Returns
   {:trigger/fired [...] :trigger/actions [...]}. Throws
   :trigger/invalid for a malformed rule, context or registry argument
-  exactly as `evaluate` and `run-actions!` do."
-  [registry rules events]
-  (let [fired (evaluate rules {:events events :metrics {}})]
-    {:trigger/fired fired
-     :trigger/actions (run-actions! registry fired)}))
+  exactly as `evaluate` and `run-actions!` do.
+
+  Optional fourth argument `audit-context` (Task C1) is forwarded to
+  `run-actions!`: when provided, every executed action and every denial
+  appends an audit event to the session's append-only store."
+  ([registry rules events]
+   (check-events! registry rules events nil))
+  ([registry rules events audit-context]
+   (let [fired (evaluate rules {:events events :metrics {}})]
+     {:trigger/fired fired
+      :trigger/actions (run-actions! registry fired audit-context)})))
