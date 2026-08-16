@@ -172,7 +172,23 @@
   scoped :candidate / the candidate id, per-phase wall-ms, per-gate
   :pass/:fail outcomes (numeric 1.0/0.0 — the closed MetricSchema
   requires numeric values), and the total evaluation wall-ms. See
-  record-eval-metrics! for the exact vocabulary."
+  record-eval-metrics! for the exact vocabulary.
+
+  Task A3 (Foundation F4): evaluate-batch! evaluates a BATCH of
+  :evaluation-pending candidates under ONE profile in PARALLEL through
+  evoclj.eval.workers/run-batch! (bounded concurrency, default 4),
+  reusing the exact single-candidate pipeline (run-pipeline) per task
+  — the single-candidate path (evaluate-candidate!) is untouched, and
+  the batch records no per-candidate metric records (the Task A2
+  collector envelope is single-candidate only). Per-task timeout
+  (:timeout-ms) and per-task error isolation come from the pool; every
+  candidate's pipeline keeps run-side!'s fresh-temp-store isolation
+  (Global Constraints 11/12/23). The result is the structured run-batch!
+  batch result: completed entries carry the candidate's immutable
+  Evaluation record (the eval ref — its :evaluation/id is already
+  durable, persisted by the finalization transaction), failed entries
+  carry the typed per-candidate error. See evaluate-batch! for the
+  exact contract."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [malli.core :as m]
@@ -184,6 +200,8 @@
             [evoclj.eval.paired :as paired]
             [evoclj.eval.profile :as profile]
             [evoclj.eval.replay :as replay]
+            [evoclj.eval.runner :as runner]
+            [evoclj.eval.workers :as workers]
             [evoclj.evolution.candidate :as candidate]
             [evoclj.genome.load :as load]
             [evoclj.genome.types :as types]
@@ -938,3 +956,110 @@
      (record-eval-metrics! collector (:candidate/id evaluation)
                            (:gates evaluation) (elapsed t0))
      evaluation)))
+
+;; --- Task A3 — F4 parallel candidate batch evaluation -----------------------------
+
+(defn- batch-task-runner
+  "The DEFAULT batch task-runner: one full Task 8.7 pipeline run for
+  the task's candidate under the batch's profile. Returns the
+  immutable Evaluation record — the :task/result that becomes the
+  per-candidate eval ref. This is the SAME pipeline evaluate-candidate!
+  runs (run-pipeline), so a batch candidate and a single candidate
+  observe identical evaluation semantics; only the Task A2 metric
+  envelope (single-candidate) is absent. Throws are caught per task by
+  run-batch! and become :batch/failed entries — never another task's
+  outcome (Global Constraint 22)."
+  [evaluator profile-id]
+  (fn [task]
+    (run-pipeline evaluator (:candidate/id task) profile-id)))
+
+(defn- validate-batch-candidates!
+  "Validate the batch's candidate ids UP FRONT — before ANY task is
+  submitted (the run-batch! validate-before-submit philosophy):
+  `candidate-ids` must be a sequential collection of distinct ids, and
+  every id must resolve to a :evaluation-pending Candidate (the machine
+  edge precondition). Caller errors fail fast with typed
+  :eval/evaluator-invalid / :eval/candidate-not-found /
+  :eval/candidate-state-invalid; per-candidate RUNTIME errors (gate
+  failures, an unresolved genome root, ...) still isolate inside the
+  batch as :batch/failed entries. Returns the vectorized ids."
+  [evaluator candidate-ids]
+  (when-not (and (sequential? candidate-ids)
+                 (not (map? candidate-ids))
+                 (not (set? candidate-ids)))
+    (throw (err/error :eval/evaluator-invalid
+                      "candidate-ids must be a sequential collection of candidate ids"
+                      {:reason :candidate-ids-not-sequential
+                       :value (err/sanitize candidate-ids)})))
+  (let [ids (vec candidate-ids)]
+    (when-not (= (count (set ids)) (count ids))
+      (throw (err/error :eval/evaluator-invalid
+                        "batch candidate ids must be distinct"
+                        {:reason :candidate-ids-not-distinct
+                         :value (err/sanitize ids)})))
+    (doseq [cid ids]
+      (resolve-candidate! evaluator cid))
+    ids))
+
+(defn evaluate-batch!
+  "Task A3 — F4 parallel candidate batch evaluation. Evaluate a BATCH
+  of candidates under ONE profile in parallel through
+  evoclj.eval.workers/run-batch!, reusing the exact single-candidate
+  pipeline per task (fresh temp stores per G5 side — run-side!'s
+  isolation, Global Constraints 11/12/23). The single-candidate path
+  (evaluate-candidate!) is untouched; the batch records no per-task
+  metric records (the Task A2 collector is single-candidate only).
+
+  `candidate-ids` is a sequential collection of distinct candidate ids,
+  each required to be :evaluation-pending (persisted as 'evaluating')
+  — the whole batch is validated up front and fails fast before ANY
+  task is submitted (:eval/candidate-not-found /
+  :eval/candidate-state-invalid / :eval/evaluator-invalid).
+
+  `opts` keys:
+
+      :concurrency  pos-int, default 4; the bounded pool size (the
+                    worker pool validates positivity).
+      :timeout-ms   optional pos-int; a per-task wall-clock cap. A
+                    task exceeding it is reported as :eval/worker-timeout
+                    and aborts ONLY that task — the other candidates
+                    complete normally.
+      :task-runner  optional (fn [task] -> EDN-safe result); a test
+                    seam replacing the default per-candidate pipeline
+                    runner (fast, deterministic pool-semantics tests —
+                    the same philosophy as evoclj.eval.workers-test).
+
+  Returns the structured run-batch! batch result, indexed by the
+  ORIGINAL candidate order:
+
+      {:batch/completed [{:task/index int? :task/id <candidate-id>
+                          :task/result <immutable Evaluation record>} ...]
+       :batch/failed    [{:task/index int? :task/id <candidate-id>
+                          :error/type keyword? :error/message string?
+                          :error/data map?} ...]
+       :batch/cancelled [...]
+       :batch/stats     {:total int? :ok int? :failed int?
+                         :cancelled int? :wall-ms int?}}
+
+  Completed entries pair each candidate id with ITS OWN Evaluation
+  record — the per-candidate status (:eligibility, :gates) plus the
+  eval refs (:evaluation/id — the durable eval_runs row id — and, for
+  candidates that reached G5, :paired-results-ref). Failed entries
+  carry the typed per-candidate error, never another candidate's
+  outcome."
+  ([evaluator candidate-ids profile-id]
+   (evaluate-batch! evaluator candidate-ids profile-id nil))
+  ([evaluator candidate-ids profile-id opts]
+   (validate-evaluator! evaluator)
+   (resolve-profile! evaluator profile-id)
+   (let [ids (validate-batch-candidates! evaluator candidate-ids)
+         opts (or opts {})
+         concurrency (or (:concurrency opts) 4)
+         timeout-ms (:timeout-ms opts)
+         task-runner (or (:task-runner opts)
+                         (batch-task-runner evaluator profile-id))]
+     (workers/run-batch!
+      task-runner
+      (runner/candidate-batch-tasks ids)
+      (cond-> {:concurrency concurrency}
+        timeout-ms (assoc :timeout-ms timeout-ms))))))

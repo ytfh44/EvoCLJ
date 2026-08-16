@@ -29,6 +29,15 @@
   side's genome root). Scheduler/compiler/phenotype/store errors
   propagate as their own typed errors.
 
+  Task A3 (Foundation F4): candidate-batch-tasks builds the run-batch!
+  task maps for a batch of candidate ids — the eval layer's task
+  contract for the worker pool (evoclj.eval.workers), consumed by
+  evoclj.eval.core/evaluate-batch!. The batch reuses this harness's
+  run-side! isolation (fresh throwaway stores per side, Global
+  Constraints 11/12/23) for every candidate of every task; the pool
+  adds only bounded concurrency, per-task timeout, and per-task error
+  isolation on top.
+
   REAL MODEL EXECUTION (post-v0 extension 1): the G5 evaluator is
   OPTIONALLY augmented to run Genomes whose topology contains :llm
   nodes through real model providers, with both new keys reserved by
@@ -384,3 +393,18 @@
          :side/error (:error/artifact-ref run)})
       (finally
         (dispose-stores! stores))))))
+
+;; --- Task A3 — the batch task contract (Foundation F4) --------------------------
+
+(defn candidate-batch-tasks
+  "Build the run-batch! task maps for a batch of candidate ids (Task
+  A3 — Foundation F4): one {:task/id <candidate-id> :candidate/id
+  <candidate-id>} per id. :task/id is the stable per-candidate
+  identity every batch entry carries (:task/index is force-set by
+  run-batch! to the original position); :candidate/id is the payload
+  key the batch task-runner evaluates. `candidate-ids` must be a
+  sequential collection of distinct EDN-safe ids — the caller
+  (evoclj.eval.core/evaluate-batch!) has already resolved them
+  against the candidate store, so this stays pure."
+  [candidate-ids]
+  (mapv (fn [cid] {:task/id cid :candidate/id cid}) candidate-ids))
