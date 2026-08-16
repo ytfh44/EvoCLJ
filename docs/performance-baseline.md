@@ -127,3 +127,87 @@ unacceptable in CI.
 | 6/7 | `cas/put-bytes!` (+ `get-bytes` round-trip) for 1 KiB / 1 MiB payloads | `evoclj.store.cas` |
 | 8 | Real seed end-to-end: load → compile → instantiate → pinned session → `scheduler/run-session!` → broker dispatch → event store (no model network) | `evoclj.runtime.scheduler` + broker + store |
 | 9 | `eval-core/evaluate-candidate!` full G0–G6 phase order on a minimal valid evaluator | `evoclj.eval.core` |
+
+## 7. Full-cycle harness (Task O4)
+
+`scripts/full-cycle.clj` (ns `evoclj.perf.full-cycle-harness`) runs the
+whole evolve → eval → promote loop through the same public subsystem
+APIs the `cycle` CLI command walks — `propose-candidates!`,
+`evaluate-candidate!` (with the Task A2 F2 collector), and the atomic
+`promote!` CAS — timing every phase with `System/nanoTime` and
+collecting F2 metric records (`evoclj.metrics.core`, closed
+MetricSchema) into one structured EDN report.
+
+**The harness seed genome is `test/fixtures/evolution-e2e/route-a`**
+(G1), the same deterministic full-cycle fixture the cli cycle tests
+use, with the hidden selection set
+(`test/fixtures/evolution-e2e/selection`, sel-a/sel-b) and the
+recorded replay case. It is NOT `genomes/seed`: the seed route never
+fails (every input finishes), so it can never produce the failure
+evidence the deterministic pattern Diagnostician needs to fire a
+`:task/success` hypothesis; route-a fails `:echo-b` by construction,
+producing the Evolution set (1 success + 2 failures) that fires the
+mutation and a real promotion (route-b behavior).
+
+### 7.1 NO MODEL ENDPOINT (explicit)
+
+The host system is built with the real models.dev catalog (3 s fetch
+timeout; cached under the state dir; an unreachable source degrades
+to `:catalog/unavailable` without failing startup). A model endpoint
+is reported reachable ONLY when the kernel-owned model registry has a
+live provider (an API key). **On the recording host no API keys are
+configured** (`:model/configured []`, `:model/endpoint? false`, catalog
+`:catalog/fresh`), so the harness falls back to the fixture providers:
+**the numbers below are FIXTURE-mode timings, NOT real-model cycle
+timings.** Roadmap O4's real-model timings are deferred until a host
+with a configured model endpoint runs the harness; the report's
+`:provider` section always states this honestly.
+
+### 7.2 Measured numbers (single headless run, recording host, 2026-08-16)
+
+| Phase | Wall time | What it measures |
+| --- | --- | --- |
+| EVOLVE | 274 ms | evidence pack + deterministic Diagnostician + 1 bounded mutation, `propose-candidates!` |
+| EVAL | 2 242 ms | full G0–G6 evaluation of the candidate (per-gate breakdown below) |
+| PROMOTE | 98 ms | candidate CAS body + atomic `promote!` CAS moving CURRENT |
+| **CYCLE total** | **2 620 ms** | evolve + eval + promote, one headless run |
+
+Per-gate eval breakdown (the Task A2 `:eval/<phase>-ms` records):
+
+| Gate | Wall time |
+| --- | --- |
+| G0 parse | 31 ms |
+| G1 schema/ABI | 10 ms |
+| G2 static policy | 18 ms |
+| G3 deterministic suites | 23 ms |
+| G4 replay | 68 ms |
+| G5 paired hidden selection | 2 003 ms (dominant: two fresh isolated stores + SQLite/CAS per side) |
+| G6 cost/complexity | 10 ms |
+| eval total | 2 237 ms |
+
+Outcome: 1 candidate evolved, 1 eligible evaluation, 1 promotion
+(`:cycle/promoted? 1.0`); the report's `:f2/metrics` vector holds 21
+schema-valid records. Seed genome id
+`sha256:ec7134443cff4ea57c44b6d3fbcbd17ed3e5c1aa9e78ae91e0046a062d6ffeb5`.
+
+### 7.3 Running the harness
+
+```text
+# full run, report as EDN on stdout (fresh temp state dir, cleaned up)
+clojure -M scripts/full-cycle.clj
+
+# write the report to a file (kept for the baseline record)
+clojure -M scripts/full-cycle.clj --out reports/full-cycle-report.edn
+
+# pin the state dir (inspect the db/cas afterwards)
+clojure -M scripts/full-cycle.clj --state-dir /tmp/fullcycle-state --out /tmp/fullcycle-report.edn
+
+# the harness test (drives the same code in-process)
+clojure -M:test -n evoclj.perf.full-cycle-test
+```
+
+Run from the repo root (`D:/PROJECTS/EvoCLJ`). The harness is
+headless and deterministic: no network is needed (the catalog fetch
+times out to `:catalog/unavailable` when offline and the fixture
+providers keep working), and the full suite runs the test as part of
+`clojure -M:test`.
