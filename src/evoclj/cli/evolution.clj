@@ -1,6 +1,7 @@
 (ns evoclj.cli.evolution
   "The evolution-facing CLI commands (Task 10.2): `evolve`,
-  `candidate list`, `candidate inspect`, and `eval`.
+  `candidate list`, `candidate inspect` (with the Task E3 `--diff`
+  report), and `eval`.
 
   `evolve` and `eval` are the MUTATING commands of the evolution
   lifecycle; both go through the public subsystem entry points
@@ -12,11 +13,13 @@
   the candidates table ONLY (never generations, never a write) and
   maps the rows back to the public Candidate contract shape."
   (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [evoclj.cli.session :as session]
             [evoclj.compiler.core :as compiler]
             [evoclj.eval.core :as eval-core]
             [evoclj.evolution.candidate :as candidate]
             [evoclj.evolution.core :as evolution]
+            [evoclj.genome.load :as load]
             [evoclj.genome.path :as gpath]
             [evoclj.kernel.error :as err]
             [evoclj.promotion.promote :as promote]
@@ -49,6 +52,162 @@
          (throw (err/error :cli/usage-invalid
                            "expected a uuid"
                            {:value s})))))
+
+;; --- candidate diff report (Task E3, roadmap E3) -----------------------------
+;;
+;; `candidate inspect <id> --diff` shows the per-file LINE diff of the
+;; candidate Genome vs its parent Genome. The comparison is the canonical
+;; one (evoclj.genome.load :files keyed by canonical relative path);
+;; identical files are absent from the report, so a diff of a genome
+;; against itself is empty. Line hunks are computed with a deterministic
+;; LCS line diff — no dependency beyond the existing clojure.string.
+
+(defn- split-lines
+  "`content` split into its lines (1-indexed by construction). An empty
+  string is zero lines; a trailing newline yields no empty final line."
+  [content]
+  (if (empty? content)
+    []
+    (str/split-lines content)))
+
+(defn- decode-text
+  "The UTF-8 text of one loaded Genome file value (the :bytes are an
+  immutable vector of bytes, as evoclj.genome.load documents)."
+  [file-value]
+  (String. (byte-array (:bytes file-value)) StandardCharsets/UTF_8))
+
+(defn- line-diff
+  "The deterministic LCS line diff of `left` and `right` (vectors of
+  lines): a sequence of steps, each {:op :keep|:del|:add, :text <line>}
+  plus the 1-based line number on the step's side (:left for :keep and
+  :del, :right for :keep and :add). Ties in the LCS backtrack break
+  toward the deletion (up) first, so identical inputs produce the same
+  steps on every run."
+  [left right]
+  (let [m (count left)
+        n (count right)
+        table (make-array Integer/TYPE (inc m) (inc n))]
+    (doseq [i (range (inc m))
+            j (range (inc n))]
+      (aset-int table i j
+                (cond
+                  (zero? i) 0
+                  (zero? j) 0
+                  (= (nth left (dec i)) (nth right (dec j)))
+                  (inc (aget table (dec i) (dec j)))
+                  :else
+                  (max (aget table (dec i) j)
+                       (aget table i (dec j))))))
+    (loop [i m j n acc []]
+      (cond
+        (and (zero? i) (zero? j)) (vec (reverse acc))
+        (zero? j)
+        (recur (dec i) j
+               (conj acc {:op :del :left i :text (nth left (dec i))}))
+        (zero? i)
+        (recur i (dec j)
+               (conj acc {:op :add :right j :text (nth right (dec j))}))
+        (= (nth left (dec i)) (nth right (dec j)))
+        (recur (dec i) (dec j)
+               (conj acc {:op :keep :left i :right j
+                          :text (nth left (dec i))}))
+        (>= (aget table (dec i) j) (aget table i (dec j)))
+        (recur (dec i) j
+               (conj acc {:op :del :left i :text (nth left (dec i))}))
+        :else
+        (recur i (dec j)
+               (conj acc {:op :add :right j :text (nth right (dec j))}))))))
+
+(defn- numbered-lines
+  "`lines` as the report's line maps {:number <1-based> :text <line>}."
+  [lines]
+  (mapv (fn [i l] {:number (inc i) :text l})
+        (range) lines))
+
+(defn- hunks-of
+  "Group the consecutive non-:keep steps of a line diff into hunks.
+  Each hunk carries the first 1-based line on each side (:left/start,
+  :right/start — nil when that side has no lines in the hunk) plus the
+  per-side line maps."
+  [steps]
+  (->> steps
+       (partition-by #(= :keep (:op %)))
+       (remove (fn [g] (= :keep (:op (first g)))))
+       (mapv (fn [g]
+               (let [lefts (->> g
+                                (filter #(= :del (:op %)))
+                                (mapv (fn [s] {:number (:left s) :text (:text s)})))
+                     rights (->> g
+                                 (filter #(= :add (:op %)))
+                                 (mapv (fn [s] {:number (:right s) :text (:text s)})))]
+                 {:left/start (when (seq lefts) (:number (first lefts)))
+                  :right/start (when (seq rights) (:number (first rights)))
+                  :left/lines lefts
+                  :right/lines rights})))))
+
+(defn- file-diff
+  "The per-file diff of one path present in at least one of the two
+  genomes: :changed (both sides, line hunks), :added (right only), or
+  :removed (left only)."
+  [path left-text right-text]
+  (cond
+    (nil? left-text)
+    {:file path
+     :status :added
+     :hunks [{:left/start nil :right/start 1
+              :left/lines [] :right/lines (numbered-lines
+                                            (split-lines right-text))}]}
+
+    (nil? right-text)
+    {:file path
+     :status :removed
+     :hunks [{:left/start 1 :right/start nil
+              :left/lines (numbered-lines (split-lines left-text))
+              :right/lines []}]}
+
+    :else
+    {:file path
+     :status :changed
+     :hunks (hunks-of (line-diff (split-lines left-text)
+                                 (split-lines right-text)))}
+    ))
+
+(defn diff-genomes
+  "The per-file LINE diff of two loaded immutable Genomes (Task E3):
+
+    {:diff/identical? <bool>
+     :diff/files [{:file <canonical relative path>
+                   :status :added|:removed|:changed
+                   :hunks [{:left/start <n|nil> :right/start <n|nil>
+                            :left/lines [{:number <n> :text <s>} ...]
+                            :right/lines [{:number <n> :text <s>} ...]} ...]} ...]}
+
+  Files whose decoded text is identical in both Genomes are ABSENT from
+  :diff/files — the report lists exactly the added, removed, and
+  changed paths. :diff/identical? is true exactly when no file differs
+  (which, for content-addressed Genomes, is the same as the two
+  :genome/id values being equal). Read-only and deterministic."
+  [left right]
+  (let [lf (:files left)
+        rf (:files right)
+        paths (into (sorted-set) (concat (keys lf) (keys rf)))
+        files (->> paths
+                   (keep (fn [p]
+                           (let [l (get lf p)
+                                 r (get rf p)]
+                             (cond
+                               (and l r)
+                               (let [lt (decode-text l)
+                                     rt (decode-text r)]
+                                 (when (not= lt rt)
+                                   (file-diff p lt rt)))
+
+                               l (file-diff p (decode-text l) nil)
+                               r (file-diff p nil (decode-text r))
+                               :else nil))))
+                   vec)]
+    {:diff/identical? (empty? files)
+     :diff/files files}))
 
 ;; --- candidate record mapping (Task 5.1 vocabulary → public states) ----------
 
@@ -144,10 +303,18 @@
     {:candidates (mapv (comp candidate-shape row->candidate) rows)}))
 
 (defn candidate-inspect!
-  "evoclj candidate inspect <id>
+  "evoclj candidate inspect <id> [--diff]
 
   One Candidate record, through the public read API
-  (evolution.candidate/find-candidate)."
+  (evolution.candidate/find-candidate). With --diff, the report also
+  carries the per-file line diff of the parent Genome vs the candidate
+  Genome (Task E3): both bundles are loaded from the CLI genome store
+  and compared with diff-genomes, so the diff is read-only and
+  deterministic.
+
+  NOTE on argument order: --diff is a read-only flag and the CLI parser
+  consumes a following non-option token as its value, so it must trail
+  the candidate id: `candidate inspect <id> --diff`."
   [opts]
   (let [cid (uuid-arg (positional opts 0))
         system (session/build-system opts)
@@ -156,7 +323,13 @@
       (throw (err/error :cli/candidate-not-found
                         "no candidate with this id"
                         {:candidate/id cid})))
-    (candidate-shape c)))
+    (if (:diff (:options opts))
+      (let [parent (load/load-genome
+                    (session/resolve-bundle-root opts (:parent/genome-id c)))
+            candidate (load/load-genome
+                       (session/resolve-bundle-root opts (:candidate/genome-id c)))]
+        (merge (candidate-shape c) (diff-genomes parent candidate)))
+      (candidate-shape c))))
 
 (defn eval!
   "evoclj eval <candidate-id> --profile <profile-id>
