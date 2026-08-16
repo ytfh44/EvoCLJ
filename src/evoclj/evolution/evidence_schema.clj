@@ -25,6 +25,13 @@
                            any randomness is seeded and the seed lives
                            IN the pack)
 
+  USAGE ENRICHMENT (roadmap E5): :usage is OPTIONAL on the Episode
+  contract and on the pack's episode refs. When present it must be a
+  map of keyword → number — the model-call channel's token counts and
+  cost estimate (Task 12.1 counters) — and non-numeric usage is
+  rejected at the trust boundary. Unknown usage is ABSENT, never
+  fabricated as zeros (honest accounting).
+
   Closed maps everywhere: unknown keys at a trust boundary are
   rejected (:evidence/request-invalid, :evidence/pack-invalid,
   :evidence/excerpt-invalid) with a humanized Malli explanation."
@@ -39,6 +46,16 @@
   (throw (err/error error-type
                     (str kind " does not satisfy the evidence contract")
                     {:errors (me/humanize expl)})))
+
+(def UsageSchema
+  "The model usage of one episode: numeric counters from the
+  model-call channel (Task 12.1) — token counts (:model-input-tokens,
+  :model-output-tokens) and a cost estimate (:model-cost-units,
+  :total-cost, :cost). Every value MUST be numeric: usage is
+  accounting data, so a non-numeric value is rejected at the trust
+  boundary (honest accounting — unknown usage is ABSENT, never
+  fabricated as zeros)."
+  [:map-of keyword? number?])
 
 (def SelectorSchema
   "The pack selector: representation quotas over the eligible episode
@@ -75,7 +92,7 @@
             [:first-event int?]
             [:last-event int?]]]
    [:outcome map?]
-   [:usage map?]])
+   [:usage {:optional true} UsageSchema]])
 
 (def EpisodeRefSchema
   "One entry of the pack's :episodes vector: COMPACT metadata (id,
@@ -92,7 +109,7 @@
    [:trace [:map {:closed true}
             [:first-event int?]
             [:last-event int?]]]
-   [:usage map?]])
+   [:usage {:optional true} UsageSchema]])
 
 (def EvidencePackSchema
   "The frozen evidence pack returned by build-evidence-pack. The

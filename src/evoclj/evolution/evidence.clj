@@ -14,9 +14,13 @@
        :cutoff-event-id 9001
        :episodes [{:episode/id ... :session/id ... :generation/id ...
                    :excerpt-ref \"sha256:...\" :outcome ... :trace ...
-                   :usage ...} ...]
+                   :usage ...} ...]   ; :usage ONLY when the episode
+                                       ; carries model usage (roadmap E5)
        :summary {:selector ... :seed ... :eligible n :selected n
-                 :successes n :failures n :high-cost n}}
+                 :successes n :failures n :high-cost n
+                 :usage ...}}          ; aggregate when any selected
+                                       ; episode carries usage, ABSENT
+                                       ; otherwise (never zero)
 
   CUTOFF IMMUTABILITY (Step 2): eligibility is decided purely by the
   request's :cutoff-event-id against each episode's stored
@@ -72,11 +76,18 @@
   :evidence/store-invalid (:reason :not-a-map :sqlite-missing
   :cas-missing), :evidence/request-invalid, :evidence/episode-invalid,
   :evidence/pack-invalid, :evidence/excerpt-invalid (Malli
-  explanations). CAS/store errors (:store/cas-*) propagate as-is."
+  explanations). CAS/store errors (:store/cas-*) propagate as-is.
+
+  USAGE ENRICHMENT (roadmap E5): a pack entry carries :usage only when
+  its episode carries model usage from the model-call channel (token
+  counts, cost estimate — Task 12.1 counters); the pack summary
+  aggregates those counters over the SELECTED episodes. Unknown usage
+  is ABSENT — never fabricated as zeros (honest accounting)."
   (:require [clojure.edn :as edn]
             [evoclj.evolution.evidence-schema :as es]
             [evoclj.genome.hash :as hash]
             [evoclj.kernel.error :as err]
+            [evoclj.runtime.usage :as usage]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.sqlite :as sqlite])
@@ -119,18 +130,22 @@
 
 (defn- row->episode
   "Convert an episodes DB row into the Episode contract map (the same
-  shape materialize-episode! produces)."
+  shape materialize-episode! produces). The :usage column is nullable
+  (EDN map or NULL — roadmap E5): when NULL the key is omitted
+  entirely, so unknown usage never enters the pack as a fabricated
+  zero."
   [row]
-  {:episode/id (UUID/fromString (:id row))
-   :session/id (UUID/fromString (:session_id row))
-   :generation/id (:generation_id row)
-   :genome/id (:genome_id row)
-   :resolution/id (:resolution_id row)
-   :task-ref (:task_ref row)
-   :trace {:first-event (:first_event_id row)
-           :last-event (:last_event_id row)}
-   :outcome (edn/read-string (:outcome row))
-   :usage (edn/read-string (:usage row))})
+  (let [usage (some-> (:usage row) edn/read-string)]
+    (cond-> {:episode/id (UUID/fromString (:id row))
+             :session/id (UUID/fromString (:session_id row))
+             :generation/id (:generation_id row)
+             :genome/id (:genome_id row)
+             :resolution/id (:resolution_id row)
+             :task-ref (:task_ref row)
+             :trace {:first-event (:first_event_id row)
+                     :last-event (:last_event_id row)}
+             :outcome (edn/read-string (:outcome row))}
+      usage (assoc :usage usage))))
 
 ;; --- classification ----------------------------------------------------------
 
@@ -161,6 +176,19 @@
   "A high-cost episode: a strictly positive usage cost."
   [episode]
   (pos? (episode-cost episode)))
+
+(defn- summary-usage
+  "The model usage of the selected evidence (roadmap E5): the Task
+  12.1 counters of the selected episodes accumulated with the standard
+  evoclj.runtime.usage merge (counters sum — monotonic accounting).
+  Attribution keys (which may be non-numeric) are dropped so the
+  summary stays a numeric-only usage map. Returns {} when no selected
+  episode carries usage — the caller then omits :usage from the
+  summary entirely (unknown is ABSENT, never zero: honest
+  accounting)."
+  [episodes]
+  (let [total (usage/aggregate (keep :usage episodes))]
+    (into {} (filter (fn [[_ v]] (number? v))) total)))
 
 ;; --- deterministic ranking ---------------------------------------------------
 
@@ -326,24 +354,32 @@
                               (cas/put-bytes! (:cas store)
                                               (utf8-bytes (pr-str (canonical excerpt)))
                                               {:media-type excerpt-media-type})]
-                          {:episode/id (:episode/id episode)
+                          (cond-> {:episode/id (:episode/id episode)
                            :session/id (:session/id episode)
                            :generation/id (:generation/id episode)
                            :excerpt-ref (:artifact/id put-result)
                            :outcome (:outcome episode)
-                           :trace (:trace episode)
-                           :usage (:usage episode)}))
+                           :trace (:trace episode)}
+                          ;; roadmap E5: usage is included ONLY when the
+                          ;; episode carries it — unknown usage is ABSENT,
+                          ;; never a fabricated zero (honest accounting)
+                          (seq (:usage episode))
+                          (assoc :usage (:usage episode)))))
                       ordered)
+        usage-total (summary-usage ordered)
         data {:generation/id generation-id
               :cutoff-event-id cutoff-event-id
               :episodes entries
-              :summary {:selector selector
-                        :seed (:seed selector)
-                        :eligible (count eligible)
-                        :selected (:selected counts)
-                        :successes (:successes counts)
-                        :failures (:failures counts)
-                        :high-cost (:high-cost counts)}}
+              :summary (cond-> {:selector selector
+                                :seed (:seed selector)
+                                :eligible (count eligible)
+                                :selected (:selected counts)
+                                :successes (:successes counts)
+                                :failures (:failures counts)
+                                :high-cost (:high-cost counts)}
+                         ;; roadmap E5: the aggregate appears only when
+                         ;; some selected episode carries usage
+                         (seq usage-total) (assoc :usage usage-total))}
         id (pack-digest data)
         ;; freeze: the canonical pack data IS stored under its own
         ;; content hash, so :evidence/id is a resolvable ArtifactId

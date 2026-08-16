@@ -24,6 +24,11 @@
     compact metadata in the pack, and every excerpt preserves the
     original episode provenance (:episode/id inside the artifact).
     The pack itself carries NO trace payload bytes.
+  - Task E5: model-usage enrichment — a pack entry carries :usage
+    (token counts, cost estimate) only when its episode carries usage
+    from the model-call channel; the pack summary aggregates the
+    selected episodes' usage; unknown usage is ABSENT (never zero),
+    and non-numeric usage is rejected by the schema.
 
   FIXTURE DESIGN: episodes are fabricated directly into the store
   (generation → session → events → episode rows) so the tests control
@@ -37,6 +42,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.evolution.evidence :as evidence]
+            [evoclj.evolution.evidence-schema :as es]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -411,11 +417,14 @@
       (let [excerpt (artifact-edn store (:excerpt-ref (first (:episodes pack))))]
         (is (str/includes? (pr-str (:events excerpt)) "trace-payload"))))
     (testing "every episode is a compact ref: id, provenance, outcome,
-              trace bounds, usage — and a resolvable :excerpt-ref"
+              trace bounds — and a resolvable :excerpt-ref"
       (doseq [e (:episodes pack)]
-        (is (= #{:episode/id :session/id :generation/id :excerpt-ref
-                 :outcome :trace :usage}
-               (set (keys e))))
+        (let [expected-keys (cond-> #{:episode/id :session/id :generation/id
+                                     :excerpt-ref :outcome :trace}
+                              (seq (:usage e)) (conj :usage))]
+          (is (= expected-keys (set (keys e)))
+              "Task E5: :usage appears only when the episode carries usage
+               (unknown usage is omitted, never zero)"))
         (is (uuid? (:episode/id e)))
         (is (re-matches #"^sha256:[0-9a-f]{64}$" (:excerpt-ref e)))
         (is (cas/exists? (:cas store) (:excerpt-ref e)))
@@ -435,6 +444,88 @@
     (testing "high-cost episodes are represented alongside successes/failures"
       (is (pos? (:high-cost (:summary pack))))
       (is (some #(= {:total-cost 55} (:usage %)) (:episodes pack))))))
+
+;; ============================================================================
+;; Task E5 — model-usage enrichment (optional :usage, absent when unknown)
+;; ============================================================================
+
+(deftest e5-usage-round-trips-through-the-pack
+  (let [store (fresh-store)
+        db (:sqlite store)
+        usage {:model-input-tokens 100 :model-output-tokens 50
+               :model-cost-units 0.75}
+        _ (scene! db {:outcome {:status :completed :score nil}
+                      :usage usage})
+        _ (scene! db {:outcome {:status :failed :score nil}})
+        pack (build store)]
+    (testing "the episode's model-call usage (token counts + cost estimate)
+              round-trips into its pack entry"
+      (is (some #(= usage (:usage %)) (:episodes pack)))
+      (is (= usage (:usage (first (filter #(contains? % :usage)
+                                          (:episodes pack)))))))
+    (testing "the pack summary carries the selected episodes' model usage"
+      (is (= usage (get-in pack [:summary :usage]))))
+    (testing "the frozen pack body round-trips through the CAS with the
+              usage intact"
+      (is (= (dissoc pack :evidence/id)
+             (artifact-edn store (:evidence/id pack)))))))
+
+(deftest e5-usage-is-absent-when-unknown
+  (let [store (fresh-store)
+        db (:sqlite store)
+        _ (scene! db {:outcome {:status :completed :score nil}})
+        _ (scene! db {:outcome {:status :failed :score nil}})
+        pack (build store)]
+    (testing "episodes without usage omit the :usage key entirely — unknown
+              usage is never fabricated as zeros (honest accounting)"
+      (is (every? #(not (contains? % :usage)) (:episodes pack))))
+    (testing "the pack summary omits :usage when no selected episode carries
+              usage"
+      (is (not (contains? (:summary pack) :usage)))
+      (is (not (str/includes? (pr-str pack) ":model-input-tokens"))))))
+
+(deftest e5-usage-accumulates-across-selected-episodes
+  (let [store (fresh-store)
+        db (:sqlite store)
+        _ (scene! db {:outcome {:status :completed :score nil}
+                      :usage {:model-input-tokens 100 :model-output-tokens 50
+                              :model-cost-units 0.25}})
+        _ (scene! db {:outcome {:status :failed :score nil}
+                      :usage {:model-input-tokens 200 :model-output-tokens 60
+                              :model-cost-units 0.5}})
+        pack (build store)
+        s-usage (get-in pack [:summary :usage])]
+    (testing "token counters and cost estimates accumulate over the selected
+              episodes"
+      (is (= 300 (:model-input-tokens s-usage)))
+      (is (= 110 (:model-output-tokens s-usage)))
+      (is (= 0.75 (:model-cost-units s-usage))))))
+
+(deftest e5-schema-rejects-non-numeric-usage
+  (let [store (fresh-store)
+        db (:sqlite store)
+        _ (scene! db {:outcome {:status :completed :score nil}
+                      :usage {:model-input-tokens "one hundred"}})]
+    (testing "non-numeric usage is rejected at the store trust boundary"
+      (is (= :evidence/episode-invalid
+             (thrown-error-type #(build store)))))
+    (testing "non-numeric usage in a pack is rejected at the pack boundary"
+      (is (= :evidence/pack-invalid
+             (thrown-error-type
+              #(es/validate-pack
+                {:evidence/id placeholder-hash
+                 :generation/id generation-id
+                 :cutoff-event-id 1000
+                 :episodes [{:episode/id (random-uuid)
+                             :session/id (random-uuid)
+                             :generation/id generation-id
+                             :excerpt-ref placeholder-hash
+                             :outcome {:status :completed :score nil}
+                             :trace {:first-event 1 :last-event 1}
+                             :usage {:model-cost-units :unknown}}]
+                 :summary {:selector (base-selector) :seed nil
+                           :eligible 1 :selected 1 :successes 1
+                           :failures 0 :high-cost 0}})))))))
 
 ;; ============================================================================
 ;; Error contract and generation scoping
