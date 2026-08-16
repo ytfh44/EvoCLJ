@@ -88,7 +88,19 @@
   (optional string, built-in default), :max-tokens (optional pos-int,
   default 1024). Overrides flow into the :model-call options/messages;
   the host's evoclj.config envelope exposes the same three keys under
-  :config/judge (JudgeSectionSchema), validated by validate-config!."
+  :config/judge (JudgeSectionSchema), validated by validate-config!.
+
+  Task E-judge (T4c): the judge calibration harness.
+  calibration-judgement runs ONE judge decision over ONE calibration
+  pair (known-equivalent or known-different expected/actual outputs)
+  into a plain per-pair record; agreement-stats is the pure agreement
+  statistics fn (exact agree/disagree counts plus a stable per-label
+  breakdown; zeroed on empty input); run-calibration is the harness —
+  it runs any judge fn over a calibration fixture and reports the
+  stats. In CI the harness runs the fixture judge (deterministic, no
+  network), so the calibration fixture reports exact agreement; with a
+  real model the same harness reports real agreement rates. Errors are
+  typed :eval/judge-calibration-invalid."
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [evoclj.kernel.error :as err]
@@ -577,3 +589,186 @@
                           "the paired outcome must be a map"
                           paired-result)))
   (assoc paired-result :utility/summary summary))
+
+;; --- Task E-judge — judge calibration harness ----------------------------------
+
+(def ^:private calibration-labels
+  "The binary ground-truth labels a calibration pair may carry: the
+  judge's verdict either agrees with the label (:equivalent expects
+  true, :different expects false) or it does not."
+  #{:equivalent :different})
+
+(defn- calibration-error
+  "A typed :eval/judge-calibration-invalid error for the calibration
+  boundary, with a :reason distinguishing the failure (Global
+  Constraint 22 — plain serializable data)."
+  [reason message value]
+  (err/error :eval/judge-calibration-invalid message
+             {:reason reason :value (err/sanitize value)}))
+
+(defn- check-pair!
+  "Validate one calibration PAIR (a fixture entry): a map with a
+  keyword :calib/id, a binary :label, a present :expected-output, and
+  a sequential :outputs. Throws :eval/judge-calibration-invalid on the
+  first violation."
+  [pair]
+  (when-not (map? pair)
+    (throw (calibration-error :pair-not-a-map
+                              "calibration pairs must be maps"
+                              pair)))
+  (when-not (keyword? (:calib/id pair))
+    (throw (calibration-error :pair-missing-id
+                              "each calibration pair must carry a keyword :calib/id"
+                              pair)))
+  (when-not (keyword? (:label pair))
+    (throw (calibration-error :pair-missing-label
+                              "each calibration pair must carry a keyword :label"
+                              pair)))
+  (when-not (contains? calibration-labels (:label pair))
+    (throw (calibration-error :unsupported-label
+                              "calibration labels are binary: :equivalent or :different"
+                              (:label pair))))
+  (when-not (contains? pair :expected-output)
+    (throw (calibration-error :pair-missing-expected
+                              "each calibration pair must carry :expected-output"
+                              pair)))
+  (when-not (sequential? (:outputs pair))
+    (throw (calibration-error :pair-outputs-not-sequential
+                              "each calibration pair's :outputs must be sequential"
+                              (:outputs pair))))
+  pair)
+
+(defn- check-record!
+  "Validate ONE calibration RECORD (the per-pair outcome of running the
+  judge): a map with a keyword :calib/id, a binary :label, and a
+  boolean :judge/equivalent. Throws
+  :eval/judge-calibration-invalid on the first violation."
+  [record]
+  (when-not (map? record)
+    (throw (calibration-error :pair-not-a-map
+                              "calibration records must be maps"
+                              record)))
+  (when-not (keyword? (:calib/id record))
+    (throw (calibration-error :pair-missing-id
+                              "each calibration record must carry a keyword :calib/id"
+                              record)))
+  (when-not (keyword? (:label record))
+    (throw (calibration-error :pair-missing-label
+                              "each calibration record must carry a keyword :label"
+                              record)))
+  (when-not (contains? calibration-labels (:label record))
+    (throw (calibration-error :unsupported-label
+                              "calibration labels are binary: :equivalent or :different"
+                              (:label record))))
+  (when-not (instance? Boolean (:judge/equivalent record))
+    (throw (calibration-error :non-boolean-judge-equivalent
+                              "each calibration record must carry a boolean :judge/equivalent"
+                              (:judge/equivalent record))))
+  record)
+
+(defn- agrees?
+  "Does the judge's boolean verdict agree with the binary ground-truth
+  label? :equivalent expects true, :different expects false."
+  [label judge-equivalent]
+  (if (= :equivalent label)
+    judge-equivalent
+    (not judge-equivalent)))
+
+(defn calibration-judgement
+  "Run ONE judge decision over ONE calibration pair and produce the
+  per-pair calibration record (Task E-judge):
+
+      (calibration-judgement judge-fn pair)
+      ;; => {:calib/id <kw>
+      ;;     :label <:equivalent|:different>
+      ;;     :judge/equivalent <bool>
+      ;;     :agree <bool>}
+
+  The judge fn has the equivalence contract (fn [expected-output
+  outputs] -> boolean) — the same shape llm-judge returns. The judge
+  call is the ONLY effect channel (Global Constraint 8): with a real
+  model this is one model call per pair; in CI the fixture judge is
+  deterministic and network-free, so the fixture reports exact
+  agreement. The record is plain serializable data (Global Constraint
+  22). A malformed pair fails loud with
+  :eval/judge-calibration-invalid BEFORE the judge runs."
+  [judge-fn pair]
+  (check-pair! pair)
+  (let [label (:label pair)
+        equivalent (judge-fn (:expected-output pair) (:outputs pair))]
+    {:calib/id (:calib/id pair)
+     :label label
+     :judge/equivalent (boolean equivalent)
+     :agree (agrees? label (boolean equivalent))}))
+
+(defn agreement-stats
+  "The pure calibration agreement statistics (Task E-judge):
+
+      (agreement-stats records)
+      ;; => {:total 10 :agree 10 :disagree 0
+      ;;     :by-label {:equivalent {:total 5 :agree 5 :disagree 0}
+      ;;                :different {:total 5 :agree 5 :disagree 0}}}
+
+  Input: the per-pair calibration records produced by
+  calibration-judgement (or hand-built maps carrying :calib/id,
+  :label, :judge/equivalent). Agreement is DERIVED from :label and
+  :judge/equivalent — a stale :agree field on the input is never
+  trusted. The summary counts:
+
+    :total    — the input length; every record is accounted for once.
+    :agree    — the judge's verdict matches the binary label
+                (:equivalent expects true, :different expects false).
+    :disagree — the judge's verdict contradicts the label.
+    :by-label — the same total/agree/disagree tally per label, in a
+                sorted map so the breakdown's iteration order is STABLE
+                (identical input always yields an identical summary);
+                both binary labels are always present (zeroed when
+                absent).
+
+  Pure and deterministic; the empty list yields a ZEROED summary.
+  Fail-loud on malformed input with :eval/judge-calibration-invalid
+  (:reason distinguishes :not-sequential, :pair-not-a-map,
+  :pair-missing-id, :pair-missing-label, :unsupported-label,
+  :non-boolean-judge-equivalent)."
+  [records]
+  (when-not (sequential? records)
+    (throw (calibration-error :not-sequential
+                              "calibration records must be a sequential collection"
+                              records)))
+  (doseq [r records]
+    (check-record! r))
+  (let [label-totals
+        (reduce (fn [acc r]
+                  (let [agree? (agrees? (:label r) (:judge/equivalent r))]
+                    (-> acc
+                        (update-in [(:label r) :total] inc)
+                        (update-in [(:label r) (if agree? :agree :disagree)] inc))))
+                {:equivalent {:total 0 :agree 0 :disagree 0}
+                 :different {:total 0 :agree 0 :disagree 0}}
+                records)
+        agree (+ (:agree (:equivalent label-totals))
+                 (:agree (:different label-totals)))
+        disagree (+ (:disagree (:equivalent label-totals))
+                    (:disagree (:different label-totals)))]
+    {:total (+ agree disagree)
+     :agree agree
+     :disagree disagree
+     :by-label (into (sorted-map) label-totals)}))
+
+(defn run-calibration
+  "The judge calibration HARNESS (Task E-judge): run a judge fn over a
+  calibration fixture and report agreement:
+
+      (run-calibration judge-fn pairs)
+      ;; => {:verdicts [<calibration-judgement records>]
+      ;;     :stats <agreement-stats summary>}
+
+  judge-fn is any equivalence fn (fn [expected-output outputs] ->
+  boolean) — llm-judge for a real model, the fixture judge in CI. The
+  verdicts are the per-pair records (one judge call per pair — the only
+  effect channel, Global Constraint 8) and :stats is the pure
+  agreement-stats summary over them. Pure except for the judge calls."
+  [judge-fn pairs]
+  (let [verdicts (mapv (fn [p] (calibration-judgement judge-fn p)) pairs)]
+    {:verdicts verdicts
+     :stats (agreement-stats verdicts)}))

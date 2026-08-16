@@ -1,0 +1,90 @@
+;; EvoCLJ judge calibration fixture (Task E-judge).
+;;
+;; Known-equivalent and known-different expected/actual output pairs with
+;; HUMAN labels. The judge calibration harness (evoclj.eval.judge/
+;; run-calibration) runs a judge over these pairs and reports agreement
+;; against the labels via the pure agreement-stats fn.
+;;
+;; In CI the harness runs the FIXTURE JUDGE — llm-judge wired to a
+;; deterministic, network-free :model-call that decides BYTE-IDENTICAL
+;; equivalence. The labels below are therefore chosen to match
+;; byte-identical comparison exactly: the harness reports EXACT
+;; agreement on this fixture (agree = total, disagree = 0). With a real
+;; model the same harness would report real agreement rates.
+;;
+;; Each pair:
+;;   :calib/id          — unique keyword id
+;;   :calib/category    — :equiv | :non-equiv | :shared-edge
+;;   :label             — binary ground truth: :equivalent | :different
+;;   :expected-output   — the oracle output
+;;   :outputs           — the judged side's actual outputs (vector)
+;;
+;; The three required categories (Task E-judge acceptance):
+;;   :equiv       — outputs are byte-identical to the expected output.
+;;   :non-equiv   — outputs differ from the expected output.
+;;   :shared-edge — boundary cases the byte-identical comparison and a
+;;                  fuzzy semantic judgement disagree about: empty and
+;;                  whitespace-only outputs, an empty output list, and
+;;                  a multi-output actual whose first element matches.
+;;
+;; Values are kept single-line so the fixture judge's rendered-message
+;; comparison stays unambiguous.
+[{:calib/id :calib/equiv-basic
+  :calib/category :equiv
+  :label :equivalent
+  :expected-output {:text "hello"}
+  :outputs [{:text "hello"}]}
+
+ {:calib/id :calib/equiv-structured
+  :calib/category :equiv
+  :label :equivalent
+  :expected-output {:result 5 :unit "cm"}
+  :outputs [{:result 5 :unit "cm"}]}
+
+ {:calib/id :calib/equiv-nested
+  :calib/category :equiv
+  :label :equivalent
+  :expected-output {:items [{:id 1} {:id 2}]}
+  :outputs [{:items [{:id 1} {:id 2}]}]}
+
+ {:calib/id :calib/non-equiv-value
+  :calib/category :non-equiv
+  :label :different
+  :expected-output {:text "hello"}
+  :outputs [{:text "goodbye"}]}
+
+ {:calib/id :calib/non-equiv-missing-key
+  :calib/category :non-equiv
+  :label :different
+  :expected-output {:text "hello"}
+  :outputs [{}]}
+
+ {:calib/id :calib/non-equiv-type
+  :calib/category :non-equiv
+  :label :different
+  :expected-output 5
+  :outputs ["5"]}
+
+ {:calib/id :calib/edge-empty
+  :calib/category :shared-edge
+  :label :equivalent
+  :expected-output {:text ""}
+  :outputs [{:text ""}]}
+
+ {:calib/id :calib/edge-whitespace
+  :calib/category :shared-edge
+  :label :equivalent
+  :expected-output {:text "  "}
+  :outputs [{:text "  "}]}
+
+ {:calib/id :calib/edge-no-output
+  :calib/category :shared-edge
+  :label :different
+  :expected-output {:text "hello"}
+  :outputs []}
+
+ {:calib/id :calib/edge-multi-output
+  :calib/category :shared-edge
+  :label :different
+  :expected-output {:text "hi"}
+  :outputs [{:text "hi"} {:text "HI"}]}]
