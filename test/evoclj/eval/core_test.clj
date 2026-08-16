@@ -50,6 +50,7 @@
             [evoclj.eval.replay :as replay]
             [evoclj.eval.static :as static]
             [evoclj.evolution.candidate :as candidate]
+            [evoclj.metrics.core :as metrics]
             [evoclj.provider.protocol :as proto]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
@@ -590,3 +591,126 @@
                                                   :test/v1)]
     (testing "a fixture-only run with no :measure/cost never fabricates cost"
       (is (= {} (get-in evaluation [:summary :cost]))))))
+
+;; ============================================================================
+;; Task A2 — F2 metric records during evaluation (injectable collector)
+;; ============================================================================
+
+(defn- phase-metric-names
+  "The 7 :eval/<phase>-ms metric names (Task A2)."
+  []
+  (mapv (fn [p] (keyword "eval" (str (name p) "-ms")))
+        eval-core/phase-ids))
+
+(defn- outcome-metric-names
+  "The 7 :eval/<phase>-outcome metric names (Task A2)."
+  []
+  (mapv (fn [p] (keyword "eval" (str (name p) "-outcome")))
+        eval-core/phase-ids))
+
+(deftest collector-receives-phase-duration-and-gate-outcome-metrics
+  (let [store (fresh-store)
+        pending (materialized-pending! store)
+        collector (atom [])
+        ev (orchestrator-evaluator store pending
+                                   (bundle! "(str text \"-parent\")")
+                                   (bundle! "text"))
+        evaluation (eval-core/evaluate-candidate! ev (:candidate/id pending)
+                                                  :test/v1 collector)
+        records @collector]
+    (testing "the run recorded one record per phase duration, per gate outcome, plus the total"
+      (is (= 15 (count records))))
+    (testing "every record is scoped :candidate to the evaluated candidate id"
+      (is (every? #(= :candidate (:metric/scope %)) records))
+      (is (every? #(= (str (:candidate/id pending)) (:metric/scope-id %))
+                   records)))
+    (testing "every record satisfies the closed MetricSchema contract"
+      (doseq [r records]
+        (metrics/validate-record! r)))
+    (testing "per-phase wall-ms records exist for all seven phases"
+      (doseq [[phase name] (map vector eval-core/phase-ids
+                                (phase-metric-names))]
+        (let [rs (metrics/metrics-by-name collector name)]
+          (is (= 1 (count rs)) (str "one " name " record"))
+          (is (= :ms (:metric/unit (first rs))))
+          (is (and (number? (:metric/value (first rs)))
+                   (not (neg? (:metric/value (first rs)))))
+              (str name " is a non-negative wall-ms")))))
+    (testing "per-gate :pass/:fail outcomes — every phase passed on this run"
+      (doseq [[phase name] (map vector eval-core/phase-ids
+                                (outcome-metric-names))]
+        (let [rs (metrics/metrics-by-name collector name)]
+          (is (= 1 (count rs)) (str "one " name " record"))
+          (is (= :boolean (:metric/unit (first rs))))
+          (is (= 1.0 (:metric/value (first rs)))
+              (str name " encodes :pass as 1.0")))))
+    (testing "the total evaluation wall-ms is recorded and bounds the phases"
+      (let [rs (metrics/metrics-by-name collector :eval/total-ms)]
+        (is (= 1 (count rs)))
+        (is (= :ms (:metric/unit (first rs))))
+        (let [total (:metric/value (first rs))
+              phase-max (apply max
+                               (map #(:metric/value
+                                      (first (metrics/metrics-by-name
+                                              collector %)))
+                                    (phase-metric-names)))]
+          (is (not (neg? total)))
+          (is (>= total phase-max)
+              "the total window contains every measured phase"))))))
+
+(deftest collector-records-fail-outcomes-and-zero-ms-for-not-run-phases
+  (let [store (fresh-store)
+        pending (materialized-pending! store)
+        collector (atom [])
+        candidate-bundle (bundle! "text")]
+    (write-file! (str candidate-bundle "/eval/tamper.edn") "{:x 1}")
+    (let [ev (orchestrator-evaluator store pending
+                                     (bundle! "text") candidate-bundle)
+          evaluation (eval-core/evaluate-candidate! ev (:candidate/id pending)
+                                                    :test/v1 collector)
+          outcome (fn [name]
+                    (:metric/value
+                     (first (metrics/metrics-by-name collector name))))]
+      (testing "passed gates encode 1.0; the failing gate and every not-run phase encode 0.0"
+        (is (= 1.0 (outcome :eval/G0-parse-outcome)))
+        (is (= 1.0 (outcome :eval/G1-schema-abi-outcome)))
+        (is (= 0.0 (outcome :eval/G2-static-policy-outcome)))
+        (is (= 0.0 (outcome :eval/G3-deterministic-suites-outcome)))
+        (is (= 0.0 (outcome :eval/G4-replay-outcome)))
+        (is (= 0.0 (outcome :eval/G5-paired-selection-outcome)))
+        (is (= 0.0 (outcome :eval/G6-cost-complexity-outcome))))
+      (testing "not-run phases carry a 0 wall-ms record — evidence of no execution"
+        (is (zero? (:metric/value
+                    (first (metrics/metrics-by-name
+                            collector :eval/G3-deterministic-suites-ms))))))
+      (testing "the evaluation still completed normally"
+        (is (false? (:eligible? (:eligibility evaluation))))
+        (is (= :evaluated
+               (:state (candidate/find-candidate store
+                                                 (:candidate/id pending)))))))))
+
+(deftest without-collector-evaluation-is-a-metric-no-op
+  (testing "the three-argument call (no collector) is unchanged"
+    (let [store (fresh-store)
+          pending (materialized-pending! store)
+          ev (orchestrator-evaluator store pending
+                                     (bundle! "(str text \"-parent\")")
+                                     (bundle! "text"))
+          evaluation (eval-core/evaluate-candidate! ev (:candidate/id pending)
+                                                    :test/v1)]
+      (is (true? (:eligible? (:eligibility evaluation))))
+      (is (= [:G0-parse :G1-schema-abi :G2-static-policy
+              :G3-deterministic-suites :G4-replay
+              :G5-paired-selection :G6-cost-complexity]
+             (mapv :gate/id (:gates evaluation))))))
+  (testing "an explicit nil collector is a no-op — nothing is recorded"
+    (let [store (fresh-store)
+          pending (materialized-pending! store)
+          ev (orchestrator-evaluator store pending
+                                     (bundle! "(str text \"-parent\")")
+                                     (bundle! "text"))
+          collector (atom [])
+          evaluation (eval-core/evaluate-candidate! ev (:candidate/id pending)
+                                                    :test/v1 nil)]
+      (is (true? (:eligible? (:eligibility evaluation))))
+      (is (empty? @collector) "the nil collector path records nothing"))))

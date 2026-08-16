@@ -165,7 +165,14 @@
   :eval/genome-unresolved, :eval/measure-invalid. Gate/phase
   exceptions become :fail/:error gate results with persisted details;
   the failure-injection hook's throw propagates (the transaction has
-  already rolled back)."
+  already rolled back).
+
+  Task A2 (Foundation F2): evaluate-candidate! accepts an optional
+  metric collector (atom of metric records; nil = no-op) and records,
+  scoped :candidate / the candidate id, per-phase wall-ms, per-gate
+  :pass/:fail outcomes (numeric 1.0/0.0 — the closed MetricSchema
+  requires numeric values), and the total evaluation wall-ms. See
+  record-eval-metrics! for the exact vocabulary."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [malli.core :as m]
@@ -181,6 +188,7 @@
             [evoclj.genome.load :as load]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
+            [evoclj.metrics.core :as f2-metrics]
             [evoclj.store.cas :as cas]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
@@ -800,27 +808,54 @@
                       (str candidate-id)])
        (mapv (fn [row] (validate-evaluation! (row->evaluation row))))))
 
+;; --- Task A2 — F2 metric records during evaluation ----------------------------------------
+
+(defn- record-eval-metrics!
+  "Task A2 — F2 metric records during evaluation. `collector` is an
+  injectable atom holding a vector of metric records
+  (evoclj.metrics.core/collect-metric!); nil means no-op (zero
+  overhead — the default for every existing caller). Records, scoped
+  :candidate with scope-id = the candidate id string:
+
+  - one :eval/<phase>-ms record per gate result (its :duration-ms; a
+    :not-run phase records 0 — evidence of no execution);
+  - one :eval/<phase>-outcome record per gate (unit :boolean, value
+    1.0 for :pass, 0.0 for any non-pass status — the numeric encoding
+    the closed MetricSchema requires);
+  - one :eval/total-ms record for the whole run.
+
+  Every record flows through collect-metric!, so the closed
+  MetricSchema (Global Constraint 22) validates each record before it
+  lands in the collector. Records only completed runs: a throwing
+  pipeline records nothing."
+  [collector candidate-id gate-results total-ms]
+  (when collector
+    (let [scope-id (str candidate-id)]
+      (doseq [g gate-results]
+        (let [phase (name (:gate/id g))]
+          (f2-metrics/collect-metric!
+           collector
+           (f2-metrics/record-metric (keyword "eval" (str phase "-ms"))
+                                  :candidate scope-id
+                                  (long (or (:duration-ms g) 0))
+                                  :ms))
+          (f2-metrics/collect-metric!
+           collector
+           (f2-metrics/record-metric (keyword "eval" (str phase "-outcome"))
+                                  :candidate scope-id
+                                  (if (= :pass (:status g)) 1.0 0.0)
+                                  :boolean))))
+      (f2-metrics/collect-metric!
+       collector
+       (f2-metrics/record-metric :eval/total-ms :candidate scope-id
+                              total-ms :ms)))))
+
 ;; --- the entry point ----------------------------------------------------------------------
 
-(defn evaluate-candidate!
-  "Run the NORMATIVE Task 8.7 phase order for one candidate under one
-  profile and return the immutable Evaluation record.
-
-  The candidate must be :evaluation-pending (persisted as 'evaluating'
-  — the machine edge precondition). The pipeline runs G0–G3 through
-  the hard-gate front door; a non-pass records every later phase as
-  :not-run. Otherwise G4 replay, G5 paired hidden selection, and G6
-  cost/complexity guardrails run in order, each non-pass also
-  :not-run-ing the phases after it. The summary is built from the
-  gates + paired results (every section separate) and the eligibility
-  decision is lexicographic via evoclj.eval.compare/eligibility. The
-  finalized report and the candidate's :evaluation-pending → :evaluated
-  transition are committed in ONE SQL transaction.
-
-  Canary and promotion remain Promotion's responsibility (Milestone 9)
-  — this namespace only produces eligibility FACTS; it never changes
-  CURRENT (no promotion/current dependency exists)."
-
+(defn- run-pipeline
+  "The Task 8.7 phase pipeline — the body of evaluate-candidate!,
+  kept private so the public entry point can wrap it with the Task A2
+  metric envelope."
   [evaluator candidate-id profile-id]
   (validate-evaluator! evaluator)
   (let [c (resolve-candidate! evaluator candidate-id)
@@ -866,3 +901,40 @@
                  (concat front-gates [(:gate g4) (:gate g5) (:gate g6)])
                  (:report g4) (:report g5) (:report g6)
                  parent-root candidate-root)))))))))
+
+(defn evaluate-candidate!
+  "Run the NORMATIVE Task 8.7 phase order for one candidate under one
+  profile and return the immutable Evaluation record.
+
+  The candidate must be :evaluation-pending (persisted as 'evaluating'
+  — the machine edge precondition). The pipeline runs G0–G3 through
+  the hard-gate front door; a non-pass records every later phase as
+  :not-run. Otherwise G4 replay, G5 paired hidden selection, and G6
+  cost/complexity guardrails run in order, each non-pass also
+  :not-run-ing the phases after it. The summary is built from the
+  gates + paired results (every section separate) and the eligibility
+  decision is lexicographic via evoclj.eval.compare/eligibility. The
+  finalized report and the candidate's :evaluation-pending → :evaluated
+  transition are committed in ONE SQL transaction.
+
+  Canary and promotion remain Promotion's responsibility (Milestone 9)
+  — this namespace only produces eligibility FACTS; it never changes
+  CURRENT (no promotion/current dependency exists).
+
+  Task A2 — F2 metric records: the optional `collector` (an atom
+  holding a vector of metric records, evoclj.metrics.core) receives,
+  scoped :candidate / the candidate id string, one :eval/<phase>-ms
+  record per gate result (its :duration-ms; :not-run phases record 0),
+  one :eval/<phase>-outcome record per gate (:boolean — 1.0 for
+  :pass, 0.0 for any non-pass status), and one :eval/total-ms record
+  for the whole run. Every record flows through collect-metric! so the
+  closed MetricSchema validates it before it lands. Default nil =
+  no-op (zero overhead) — every existing caller is unchanged."
+  ([evaluator candidate-id profile-id]
+   (evaluate-candidate! evaluator candidate-id profile-id nil))
+  ([evaluator candidate-id profile-id collector]
+   (let [t0 (System/nanoTime)
+         evaluation (run-pipeline evaluator candidate-id profile-id)]
+     (record-eval-metrics! collector (:candidate/id evaluation)
+                           (:gates evaluation) (elapsed t0))
+     evaluation)))
