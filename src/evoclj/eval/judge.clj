@@ -65,7 +65,20 @@
   payload in the CAS): the pure verdict→enrichment mapping
   (verdict-record, verdict-payload) plus the isolated store adapter
   (persist-verdict-enrichment!) that NEVER fails the evaluation — a
-  store failure is caught and returned as a :failed record."
+  store failure is caught and returned as a :failed record.
+
+  Task V2 (roadmap V2): this namespace also owns judge score
+  aggregation. Per-case judge verdicts feed a utility summary
+  (win/loss/equiv counts plus a per-case — category — breakdown)
+  joined into the paired outcome. The pure surface: verdict-pair
+  (join ONE parent verdict record and ONE candidate verdict record on
+  the same case/repetition into a paired verdict), aggregate-verdicts
+  (verdict list → summary record; counts correct; per-category
+  breakdown stable; empty list → zeroed summary), and
+  join-utility-summary (the pure join into the paired outcome —
+  evoclj.eval.paired stays read-only). Aggregation fails loud with
+  :eval/judge-summary-invalid — silently pairing or tallying
+  misaligned verdicts would corrupt the win/loss counts."
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [evoclj.kernel.error :as err]
@@ -348,3 +361,202 @@
        :error/type :eval/judge-enrichment-failed
        :error/message (.getMessage t)
        :error/data (err/error-data t)})))
+
+;; --- Task V2 — judge score aggregation (roadmap V2) ---------------------------
+
+(defn- summary-error
+  "A typed :eval/judge-summary-invalid error for the aggregation
+  boundary, with a :reason distinguishing the failure (Global
+  Constraint 22 — plain serializable data)."
+  [reason message value]
+  (err/error :eval/judge-summary-invalid message
+             {:reason reason :value (err/sanitize value)}))
+
+(defn- side-verdict
+  "The aggregation view of ONE side of a paired verdict: the judge's
+  boolean decision and its derived score (1.0 iff equivalent — the
+  same derivation as verdict-record)."
+  [equivalent]
+  {:equivalent (boolean equivalent)
+   :score (if equivalent 1.0 0.0)})
+
+(defn verdict-pair
+  "Join ONE parent verdict record and ONE candidate verdict record on
+  the same (case, repetition) into a paired verdict for aggregation
+  (Task V2):
+
+      (verdict-pair parent-record candidate-record)
+      ;; => {:case/id <kw> :repetition <pos-int> :pair/seed <string>
+      ;;     :parent {:equivalent <bool> :score 1.0|0.0}
+      ;;     :candidate {:equivalent <bool> :score 1.0|0.0}}
+
+  Both inputs are the Task A6 verdict-record maps (the records the
+  two sides persist as enrichments). The paired-verdict map carries
+  the case context plus each side's decision and derived score, ready
+  for aggregate-verdicts.
+
+  FAIL-LOUD ON MISALIGNMENT: pairing verdicts from different
+  :case/id or :repetition values (or differing :pair/seed when both
+  sides carry one — the paired invariant requires both sides to
+  observe the SAME fixture seed) throws :eval/judge-summary-invalid;
+  silently pairing misaligned verdicts would corrupt the win/loss
+  counts. A non-boolean :equivalent on either side fails the same
+  way."
+  [parent candidate]
+  (when-not (and (map? parent) (map? candidate))
+    (throw (summary-error :side-not-a-map
+                          "both verdict sides must be verdict-record maps"
+                          {:parent parent :candidate candidate})))
+  (let [pe (:equivalent parent)
+        ce (:equivalent candidate)]
+    (when-not (and (instance? Boolean pe) (instance? Boolean ce))
+      (throw (summary-error :non-boolean-equivalent
+                            "both verdict sides must carry a boolean :equivalent"
+                            {:parent/equivalent pe
+                             :candidate/equivalent ce})))
+    (when-not (= (:case/id parent) (:case/id candidate))
+      (throw (summary-error :verdicts-misaligned
+                            "paired verdicts must share the same :case/id"
+                            {:parent-case (:case/id parent)
+                             :candidate-case (:case/id candidate)})))
+    (when-not (= (:repetition parent) (:repetition candidate))
+      (throw (summary-error :verdicts-misaligned
+                            "paired verdicts must share the same :repetition"
+                            {:parent-repetition (:repetition parent)
+                             :candidate-repetition (:repetition candidate)})))
+    (let [ps (:pair/seed parent)
+          cs (:pair/seed candidate)]
+      (when (and ps cs (not= ps cs))
+        (throw (summary-error :seed-mismatch
+                              "paired verdicts must share the same :pair/seed"
+                              {:parent-seed ps :candidate-seed cs}))))
+    {:case/id (:case/id parent)
+     :repetition (:repetition parent)
+     :pair/seed (or (:pair/seed parent) (:pair/seed candidate))
+     :parent (side-verdict pe)
+     :candidate (side-verdict ce)}))
+
+(defn- pair-outcome
+  "The win/loss/equiv outcome of ONE paired verdict, in the paired
+  runner's own vocabulary: :win when the candidate is strictly better
+  (it delivered while the parent did not — paired :candidate-wins),
+  :loss when the parent is strictly better (paired :parent-wins),
+  :equiv when BOTH sides are equivalent (the paired :tie), and
+  :both-failed when NEITHER side is equivalent (the paired
+  :both-failed — a shared failure, never counted as a win or as an
+  equiv of success)."
+  [{:keys [parent candidate]}]
+  (let [pe (:equivalent parent)
+        ce (:equivalent candidate)]
+    (cond
+      (and ce (not pe)) :win
+      (and pe (not ce)) :loss
+      (and pe ce) :equiv
+      :else :both-failed)))
+
+(defn- zeroed-counts
+  "A fresh zeroed tally: the win/loss/equiv/both-failed counts plus
+  :total. Fresh per use — never shared or mutated."
+  []
+  {:win 0 :loss 0 :equiv 0 :both-failed 0 :total 0})
+
+(defn- tally
+  "Add one pair outcome to a counts map (increments the outcome key
+  and the :total)."
+  [counts outcome]
+  (-> counts
+      (update outcome inc)
+      (update :total inc)))
+
+(defn aggregate-verdicts
+  "Aggregate paired judge verdicts into a utility summary (Task V2):
+
+      (aggregate-verdicts pairs)
+      ;; => {:total 4 :win 1 :loss 1 :equiv 1 :both-failed 1
+      ;;     :by-category {:sel/c1 {:total 2 :win 1 :loss 1
+      ;;                             :equiv 0 :both-failed 0}
+      ;;                   :sel/c2 {...}}}
+
+  Input: a sequential collection of paired verdict maps built with
+  verdict-pair — one per (case, repetition), each carrying the parent
+  and candidate sides' boolean :equivalent. The summary counts, in
+  the paired runner's own vocabulary:
+
+    :win         — the candidate is strictly better (candidate
+                   equivalent, parent not) — paired :candidate-wins.
+    :loss        — the parent is strictly better (parent equivalent,
+                   candidate not) — paired :parent-wins.
+    :equiv       — BOTH sides equivalent — the paired :tie.
+    :both-failed — BOTH sides NOT equivalent — the paired
+                   :both-failed; a shared failure is never counted as
+                   a win or as an equiv of success.
+    :total       — win + loss + equiv + both-failed (= the input
+                   length); every input pair is accounted for exactly
+                   once, so the counts always sum to the total.
+
+  :by-category is the per-case (category) breakdown — the same
+  win/loss/equiv/both-failed/total tally per :case/id (the only
+  grouping dimension the verdict records carry), keyed in a sorted
+  map so the breakdown's iteration order is STABLE across runs:
+  identical input always yields an identical summary.
+
+  Pure and deterministic; the empty list yields a ZEROED summary (all
+  counts 0, empty :by-category). Fail-loud on malformed input with
+  :eval/judge-summary-invalid (:reason distinguishes :not-sequential,
+  :pair-not-a-map, :pair-missing-case-id, :pair-missing-sides,
+  :non-boolean-equivalent)."
+  [pairs]
+  (when-not (sequential? pairs)
+    (throw (summary-error :not-sequential
+                          "paired verdicts must be a sequential collection"
+                          pairs)))
+  (doseq [p pairs]
+    (when-not (map? p)
+      (throw (summary-error :pair-not-a-map
+                            "each paired verdict must be a map"
+                            p)))
+    (when-not (keyword? (:case/id p))
+      (throw (summary-error :pair-missing-case-id
+                            "each paired verdict must carry a keyword :case/id"
+                            p)))
+    (let [parent (:parent p)
+          candidate (:candidate p)]
+      (when-not (and (map? parent) (map? candidate))
+        (throw (summary-error :pair-missing-sides
+                              "each paired verdict must carry :parent and :candidate sides"
+                              p)))
+      (when-not (and (instance? Boolean (:equivalent parent))
+                     (instance? Boolean (:equivalent candidate)))
+        (throw (summary-error :non-boolean-equivalent
+                              "each side must carry a boolean :equivalent"
+                              p)))))
+  (let [totals (reduce tally (zeroed-counts) (map pair-outcome pairs))
+        by-category (into (sorted-map)
+                          (map (fn [[case-id case-pairs]]
+                                 [case-id
+                                  (reduce tally (zeroed-counts)
+                                          (map pair-outcome case-pairs))]))
+                          (group-by :case/id pairs))]
+    (assoc totals :by-category by-category)))
+
+(defn join-utility-summary
+  "Join the judge-derived utility summary into a paired outcome record
+  (Task V2). evoclj.eval.paired stays read-only; this pure join is
+  the wiring point for the orchestrator:
+
+      (join-utility-summary paired-result summary)
+      ;; => paired-result assoc'd with :utility/summary = summary
+
+  The joined key is namespaced in the :utility namespace but is
+  DISTINCT from the :utility section of the evaluation summary —
+  evoclj.eval.metrics/summarize-utility derives the task/success rate
+  from the paired scores, while this summary carries the judge's
+  win/loss/equiv aggregation over the per-case verdicts. Pure and
+  deterministic; a non-map paired outcome fails loud with
+  :eval/judge-summary-invalid."
+  [paired-result summary]
+  (when-not (map? paired-result)
+    (throw (summary-error :paired-result-not-a-map
+                          "the paired outcome must be a map"
+                          paired-result)))
+  (assoc paired-result :utility/summary summary))
