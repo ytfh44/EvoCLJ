@@ -17,6 +17,7 @@
   deleted after every test."
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.security.redact :as redact]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite]))
@@ -401,3 +402,121 @@
           (is (false? (:valid? v)))
           (is (= :event/hash-mismatch (:reason v)))
           (is (= (:event/seq ev2) (:event/seq v))))))))
+
+;; ============================================================================
+;; Task A1 — redaction on the event write path (F7)
+;; ============================================================================
+
+(def ^:private bearer-spec
+  "A :pattern redaction spec matching Authorization bearer tokens."
+  {:redact/kind :pattern
+   :redact/pattern #"Bearer\s+[A-Za-z0-9._~+/=-]+"})
+
+(def ^:private api-key-spec
+  "A :key-path redaction spec replacing the api key under :credentials."
+  {:redact/kind :key-path
+   :redact/paths [[:credentials :api-key]]})
+
+(deftest append-with-specs-redacts-payload-and-chain-verifies
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        specs [bearer-spec api-key-spec]
+        root (event/append-event!
+              db
+              (base-event sid
+                          {:event/type :session/created
+                           :metadata {:source :event-test
+                                      :auth {:header (str "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.super-secret-token")}
+                                      :credentials {:api-key "sk-live-abc123"}
+                                      :public 1}})
+              specs)
+        ev2 (event/append-event!
+             db
+             (base-event sid
+                         {:cause/event-id (:event/id root)
+                          :metadata {:credentials {:api-key "sk-live-abc123"}}})
+             specs)]
+    (testing "pattern redaction replaced the embedded bearer token"
+      (is (not (re-find #"super-secret-token" (pr-str (:metadata root)))))
+      (is (re-find #"\[REDACTED\]" (pr-str (:metadata root)))))
+    (testing "key-path redaction replaced the api key in persisted metadata"
+      (is (= "[REDACTED]" (get-in (:metadata root) [:credentials :api-key])))
+      (is (= "[REDACTED]" (get-in (:metadata ev2) [:credentials :api-key]))))
+    (testing "non-secret values pass through untouched"
+      (is (= 1 (:public (:metadata root))))
+      (is (= :event-test (:source (:metadata root)))))
+    (testing "the hash chain stays valid after redacted appends"
+      (is (= {:valid? true :events 2} (event/verify-event-chain db sid))))))
+
+(deftest redaction-is-idempotent
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        specs [bearer-spec api-key-spec]
+        ev (event/append-event!
+            db
+            (base-event sid
+                        {:event/type :session/created
+                         :metadata {:auth {:token "Bearer tok-secret-123"}
+                                    :credentials {:api-key "sk-live-abc123"}}})
+            specs)]
+    (testing "re-redacting the persisted event leaves its metadata unchanged"
+      (is (= (:metadata ev)
+             (:metadata (redact/redact-event ev specs)))))
+    (testing "a marker already present before append survives redaction"
+      (let [ev2 (event/append-event!
+                 db
+                 (base-event sid
+                             {:cause/event-id (:event/id ev)
+                              :metadata {:already "[REDACTED]"
+                                         :credentials {:api-key "sk-live-xyz"}}})
+                 specs)]
+        (is (= "[REDACTED]" (:already (:metadata ev2))))
+        (is (= "[REDACTED]" (get-in (:metadata ev2) [:credentials :api-key])))))))
+
+(deftest invalid-redaction-specs-throw-before-any-write
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        e (event-error #(event/append-event!
+                         db
+                         (base-event sid {:event/type :session/created})
+                         :not-sequential))]
+    (is (some? e))
+    (is (= :security/redact-invalid (:error/type (ex-data e))))
+    (is (= :not-sequential (:reason (ex-data e)))))
+  (testing "a spec violating the closed RedactSpecSchema is rejected"
+    (let [db (fresh-db)
+          sid (seed-session! db)
+          e (event-error #(event/append-event!
+                           db
+                           (base-event sid {:event/type :session/created})
+                           [{}]))]
+      (is (some? e))
+      (is (= :security/redact-invalid (:error/type (ex-data e))))
+      (is (= :spec-invalid (:reason (ex-data e))))
+      (testing "the failed append left no row and consumed no sequence"
+        (is (= [] (event/events-for-session db sid)))))))
+
+(deftest no-specs-path-is-unchanged
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        metadata {:source :event-test
+                  :credentials {:api-key "sk-live-abc123"}
+                  :auth {:header "Authorization: Bearer tok-secret-123"}}
+        e (event/append-event! db (base-event sid {:event/type :session/created
+                                                   :metadata metadata}))]
+    (testing "the two-arity call stores metadata verbatim, byte for byte"
+      (is (= metadata (:metadata e)))
+      (is (= (pr-str metadata)
+             (:payload (first (sqlite/query db ["SELECT payload FROM events WHERE id = ?"
+                                                (:event/id e)]))))))
+    (testing "an explicit nil specs arity behaves identically"
+      (let [ev2 (event/append-event!
+                 db
+                 (base-event sid {:cause/event-id (:event/id e)
+                                  :metadata metadata})
+                 nil)]
+        (is (= metadata (:metadata ev2)))
+        (is (= 2 (:event/seq ev2)))))
+    (testing "the chain verifies and hashes keep the canonical form"
+      (is (= {:valid? true :events 2} (event/verify-event-chain db sid)))
+      (is (re-matches #"^sha256:[0-9a-f]{64}$" (:event-hash e))))))

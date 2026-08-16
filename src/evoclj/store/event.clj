@@ -8,6 +8,11 @@
   so the log cannot be silently rewritten through the application
   path.
 
+  Redaction (Task A1, foundation F7): append-event! accepts optional
+  redaction specs and applies evoclj.security.redact/redact-event to
+  :metadata BEFORE hashing/append; without specs the write path is
+  byte-identical.
+
   Causality: every event belongs to exactly one session and carries
   :cause/event-id referencing an EARLIER event in the SAME session.
   The v0 root set — the events exempt from that rule because they open
@@ -53,6 +58,7 @@
             [evoclj.genome.hash :as hash]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
+            [evoclj.security.redact :as redact]
             [evoclj.store.event-schema :as es]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
@@ -231,6 +237,15 @@
   "Append one event to a session's append-only log inside a single
   transaction and return the persisted event (public Event contract).
 
+  Optional third argument `redaction-specs` (Task A1, foundation F7):
+  when non-nil, evoclj.security.redact/redact-event is applied to the
+  event BEFORE any hash is computed or row inserted, so secrets keyed
+  or embedded in :metadata never reach persistent storage. Specs are
+  validated by redact-event (invalid specs throw
+  :security/redact-invalid before any transaction opens). A nil
+  `redaction-specs` — the default, via the two-arity call — leaves the
+  write path byte-identical to the pre-F7 behavior.
+
   Inside the transaction: the session must exist and the event's
   :generation/id must match the session's pinned generation; the
   per-session :event/seq is allocated as max(seq)+1; the cause rule is
@@ -241,12 +256,18 @@
   failure rolls back the whole append, so a failed append leaves no
   row and consumes no sequence number.
 
-  Typed errors: :store/event-invalid (contract or causality
-  violation), :store/session-not-found, :store/cause-not-found,
+  Typed errors: :security/redact-invalid (invalid redaction specs),
+  :store/event-invalid (contract or causality violation),
+  :store/session-not-found, :store/cause-not-found,
   :store/cause-session-mismatch, :store/cause-not-earlier."
-  [store event]
-  (es/validate-append-request event)
-  (with-append-tx [conn store]
+  ([store event]
+   (append-event! store event nil))
+  ([store event redaction-specs]
+   (es/validate-append-request event)
+   (let [event (if (nil? redaction-specs)
+                 event
+                 (redact/redact-event event redaction-specs))]
+     (with-append-tx [conn store]
     (let [session-id (types/session-id (:session/id event))
           session-key (str session-id)
           type (:event/type event)
@@ -331,7 +352,7 @@
                                         WHERE session_id = ? AND event_seq = ?"
                                    [session-key new-seq]))]
         (es/validate-event (row->event row))
-        (row->event row)))))
+        (row->event row)))))))
 
 ;; --- read/verify queries (no update, no delete — by design) -----------------
 
