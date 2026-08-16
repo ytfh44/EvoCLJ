@@ -38,8 +38,11 @@
   still schema-valid end to end."
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
+            [evoclj.compiler.topology :as topology]
             [evoclj.evolution.mutation :as mutation]
-            [evoclj.evolution.mutation-schema :as ms])
+            [evoclj.evolution.mutation-schema :as ms]
+            [evoclj.genome.hash :as hash]
+            [evoclj.genome.patch-edn :as patch-edn])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file Files Path Paths LinkOption)
            (java.nio.file.attribute FileAttribute)))
@@ -495,3 +498,184 @@
           (is true)))
       (finally
         (delete-recursively! dir)))))
+
+;; ============================================================================
+;; Task E-cross — dual-parent crossover (host opt-in)
+;;
+;; The crossover mutation recombines TWO parent Genomes into one child
+;; by topology-aware recombination: split parent A's topology at a
+;; node, take that node's subtree from parent B, re-resolve
+;; dependencies. The child MUST satisfy compiler topology validity;
+;; the operation is pure (identical inputs -> identical child) and is
+;; NOT part of the default mutation distribution — a host opts in by
+;; calling evoclj.evolution.mutation/crossover directly.
+;; ============================================================================
+
+(def ^:private topology-a
+  "Parent A's topology: a linear graph whose subtree at :node/planner
+  is {planner, finish}."
+  {:graph/id :graph/main
+   :entry :node/entry
+   :nodes {:node/entry {:node/type :route :next :node/planner}
+           :node/planner {:node/type :llm :model :model/planner :next :node/finish}
+           :node/finish {:node/type :emit}}
+   :limits {:max-steps 64}})
+
+(def ^:private topology-b
+  "Parent B's topology: the planner subtree grows an extra :node/tool
+  and lacks :node/finish entirely — the graft the crossover must
+  transplant into the child."
+  {:graph/id :graph/main
+   :entry :node/entry
+   :nodes {:node/entry {:node/type :route :next :node/planner}
+           :node/planner {:node/type :sci :program :program/route :next :node/tool}
+           :node/tool {:node/type :tool :tool :fixture/echo}}
+   :limits {:max-steps 32}})
+
+(defn- topology-text
+  "The canonical EDN text of a topology value — the deterministic byte
+  form of a topology module (the patch pipeline's canonical writer)."
+  [v]
+  (str (patch-edn/canonical-str v) "\n"))
+
+(defn- genome-context
+  "A loaded-Genome-shaped parent context ({:genome/id :manifest
+  :files}) whose declared :modules :topology file carries
+  `topology-value`, with canonical digest and immutable byte payload
+  (the same conventions evoclj.genome.load and
+  evoclj.genome.patch use)."
+  [manifest topology-value]
+  (let [topo-file (get-in manifest [:modules :topology])
+        text (topology-text topology-value)
+        digest (hash/text-digest text)]
+    {:genome/id (hash/tree-digest [{:path topo-file :digest digest}])
+     :manifest manifest
+     :files {topo-file {:digest digest
+                        :bytes (vec (.getBytes text StandardCharsets/UTF_8))
+                        :kind :edn}}}))
+
+(defn- child-topology
+  "The child's topology value, parsed back from the crossover result's
+  :files payload (the byte form a host would load)."
+  [child]
+  (let [topo-file (get-in child [:manifest :modules :topology])
+        {:keys [bytes]} (get-in child [:files topo-file])]
+    (edn/read-string (String. (byte-array bytes) StandardCharsets/UTF_8))))
+
+(deftest ecross-valid-crossover-produces-a-topology-valid-child
+  (let [ctx-a (genome-context seed-manifest topology-a)
+        ctx-b (genome-context seed-manifest topology-b)
+        child (mutation/crossover ctx-a ctx-b {:cut/node :node/planner})
+        t (child-topology child)]
+    (testing "the child topology satisfies compiler topology validity"
+      (is (map? (topology/compile-topology t))))
+    (testing "A's prefix is kept and B's subtree is grafted at the cut"
+      (is (= :node/entry (:entry t)))
+      (is (= #{:node/entry :node/planner :node/tool}
+             (set (keys (:nodes t)))))
+      (is (= :sci (get-in t [:nodes :node/planner :node/type])))
+      (is (= :program/route (get-in t [:nodes :node/planner :program]))))
+    (testing "the child is a new genome, distinct from both parents"
+      (is (not= (:genome/id child) (:genome/id ctx-a)))
+      (is (not= (:genome/id child) (:genome/id ctx-b))))
+    (testing "the child genome carries A's manifest and canonical payloads"
+      (is (= (:manifest ctx-a) (:manifest child)))
+      (let [{:keys [digest kind]} (get-in child [:files "topology.edn"])]
+        (is (= :edn kind))
+        (is (= digest (hash/text-digest (topology-text t))))))))
+
+(deftest ecross-deterministic-for-identical-inputs
+  (let [ctx-a (genome-context seed-manifest topology-a)
+        ctx-b (genome-context seed-manifest topology-b)
+        opts {:cut/node :node/planner}
+        child-1 (mutation/crossover ctx-a ctx-b opts)
+        child-2 (mutation/crossover ctx-a ctx-b opts)]
+    (testing "identical parents and options yield the identical child"
+      (is (= child-1 child-2))
+      (is (= (:genome/id child-1) (:genome/id child-2)))
+      (is (= (child-topology child-1) (child-topology child-2))))))
+
+(deftest ecross-cut-at-the-entry-replaces-the-whole-downstream
+  (let [ctx-a (genome-context seed-manifest topology-a)
+        ctx-b (genome-context seed-manifest topology-b)
+        child (mutation/crossover ctx-a ctx-b {:cut/node :node/entry})
+        t (child-topology child)]
+    (testing "cutting at the entry transplants B's entire graph"
+      (is (map? (topology/compile-topology t)))
+      (is (= :node/entry (:entry t)))
+      (is (= (set (keys (:nodes topology-b)))
+             (set (keys (:nodes t))))))))
+
+(deftest ecross-valid-parents-always-yield-a-topology-valid-child
+  (doseq [cut [:node/entry :node/planner]]
+    (let [ctx-a (genome-context seed-manifest topology-a)
+          ctx-b (genome-context seed-manifest topology-b)
+          child (mutation/crossover ctx-a ctx-b {:cut/node cut})
+          t (child-topology child)]
+      (testing (str "cut at " cut)
+        (is (map? (topology/compile-topology t)))))))
+
+(deftest ecross-incompatible-parents-are-rejected-with-typed-errors
+  (let [ctx-a (genome-context seed-manifest topology-a)
+        ctx-b (genome-context seed-manifest topology-b)]
+    (testing "a cut node present in A but absent from B is rejected"
+      (let [e (try (mutation/crossover ctx-a ctx-b {:cut/node :node/finish})
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo e))
+        (is (= :evolution/crossover-invalid (:error/type (ex-data e))))
+        (is (= :cut-node-missing-b (:reason (ex-data e))))))
+    (testing "a cut node absent from parent A is rejected"
+      (let [e (try (mutation/crossover ctx-a ctx-b {:cut/node :node/tool})
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo e))
+        (is (= :evolution/crossover-invalid (:error/type (ex-data e))))
+        (is (= :cut-node-missing-a (:reason (ex-data e))))))))
+
+(deftest ecross-malformed-inputs-are-rejected-with-typed-errors
+  (let [ctx-a (genome-context seed-manifest topology-a)
+        ctx-b (genome-context seed-manifest topology-b)]
+    (testing "a parent whose topology fails compiler validation is rejected"
+      (let [bad {:graph/id :graph/main
+                 :entry :node/ghost
+                 :nodes {:node/entry {:node/type :route :next :node/planner}
+                         :node/planner {:node/type :llm :model :m :next :node/finish}
+                         :node/finish {:node/type :emit}}}
+            ctx-bad (genome-context seed-manifest bad)
+            e (try (mutation/crossover ctx-a ctx-bad {:cut/node :node/planner})
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo e))
+        (is (= :evolution/crossover-invalid (:error/type (ex-data e))))
+        (is (= :parent-invalid (:reason (ex-data e))))
+        (is (= :b (:parent (ex-data e))))))
+    (testing "a parent missing its declared topology file is rejected"
+      (let [ctx-missing (update ctx-b :files dissoc "topology.edn")
+            e (try (mutation/crossover ctx-a ctx-missing {:cut/node :node/planner})
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo e))
+        (is (= :evolution/crossover-invalid (:error/type (ex-data e))))
+        (is (= :topology-file-missing (:reason (ex-data e))))))
+    (testing "a parent that is not a Genome context is rejected"
+      (is (= :evolution/crossover-invalid
+             (thrown-error-type
+              #(mutation/crossover "not-a-genome" ctx-b {:cut/node :node/planner})))))
+    (testing "invalid options are rejected"
+      (is (= :evolution/crossover-invalid
+             (thrown-error-type #(mutation/crossover ctx-a ctx-b nil))))
+      (is (= :evolution/crossover-invalid
+             (thrown-error-type #(mutation/crossover ctx-a ctx-b {})))))))
+
+(deftest ecross-is-not-in-the-default-mutation-distribution
+  (testing ":crossover is absent from the default op distribution"
+    (is (not (contains? mutation/default-op-distribution :crossover))))
+  (testing "a :crossover op is rejected by the default mutation op schema"
+    (is (= :mutation/op-invalid
+           (thrown-error-type #(ms/validate-op {:op :crossover
+                                                :file "topology.edn"})))))
+  (testing "the crossover entry point is the explicit host opt-in"
+    (let [ctx-a (genome-context seed-manifest topology-a)
+          ctx-b (genome-context seed-manifest topology-b)]
+      (is (map? (mutation/crossover ctx-a ctx-b {:cut/node :node/planner}))))))
