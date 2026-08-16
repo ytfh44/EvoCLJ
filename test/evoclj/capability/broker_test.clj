@@ -29,7 +29,14 @@
   silently judged. Step 5 asserts monotonicity: removing leases from
   an authorization input can never turn a prior deny into an allow —
   exhaustively over a fixed deny config's lease subsets and over
-  seeded-randomized lease subsets of a mixed pool."
+  seeded-randomized lease subsets of a mixed pool. Step 6 adds the
+  S3 (roadmap) per-model and per-tool lease denial cases: an exact
+  model grant allows model A and denies model B with
+  :capability/scope-denied, a wildcard \"<provider>/*\" model grant
+  covers only models inside the provider prefix, a model grant never
+  covers a tool resource (and vice versa), and the window-expiry and
+  call-budget edges hold for BOTH tool and model leases — each case
+  asserts the stable deny code."
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [evoclj.capability.broker :as broker]
@@ -87,6 +94,46 @@
   ([leases usage now]
    (broker/authorize {:intent echo-intent
                       :normalized-request echo-request
+                      :leases leases
+                      :usage usage
+                      :now now})))
+
+;; --- S3 (roadmap) model fixtures -------------------------------------------
+
+(def ^:private model-a-id "deepseek/deepseek-v4-flash")
+(def ^:private model-b-id "anthropic/claude-sonnet-4-5")
+
+(def ^:private model-cap-id #uuid "99999999-9999-4999-8999-999999999999")
+
+(defn- model-lease
+  "A valid model lease for phenotype-p1 on model-a-id, optionally
+  with assoc-style overrides."
+  [& kvs]
+  (let [base {:cap/id model-cap-id
+              :subject {:phenotype/id phenotype-p1}
+              :resource {:kind :model :id model-a-id}
+              :actions #{:invoke}
+              :constraints {:max-calls 10}
+              :issued-at issued-at
+              :expires-at expires-at}]
+    (if (seq kvs) (apply assoc base kvs) base)))
+
+(defn- model-decision
+  "Run the broker decision for a model-call intent on model-id with
+  the given leases, usage, and instant (defaults: no usage consumed,
+  in-window instant)."
+  ([leases model-id] (model-decision leases model-id {}))
+  ([leases model-id usage] (model-decision leases model-id usage in-window))
+  ([leases model-id usage now]
+   (broker/authorize {:intent (intent/model-call
+                               session-id phenotype-p1 :node/planner
+                               cause-event-id
+                               {:model/id model-id
+                                :messages [{:role :user :content "hi"}]}
+                               budget)
+                      :normalized-request {:model/id model-id
+                                           :resource {:kind :model :id model-id}
+                                           :messages [{:role :user :content "hi"}]}
                       :leases leases
                       :usage usage
                       :now now})))
@@ -333,3 +380,73 @@
                   "an allow always comes from the covering lease")
               (is (allow-decision? full)
                   "adding leases back can never revoke an allow"))))))))
+
+;; ============================================================================
+;; Step 6 — S3: per-model and per-tool lease denial cases (roadmap S3)
+;; ============================================================================
+
+(deftest per-model-lease-denial
+  (testing "model A allowed / model B denied under an exact model lease"
+    (let [d-a (model-decision [(model-lease)] model-a-id)
+          d-b (model-decision [(model-lease)] model-b-id)]
+      (is (allow-decision? d-a))
+      (is (= model-cap-id (:lease-id d-a)))
+      (is (= :capability/scope-denied (:reason d-b))
+          "a lease for model A never grants model B")))
+  (testing "a wildcard model lease covers models inside the provider prefix, denies outside"
+    (let [wild (model-lease :resource {:kind :model :id "deepseek/*"})]
+      (is (allow-decision? (model-decision [wild] model-a-id)))
+      (is (= :capability/scope-denied (:reason (model-decision [wild] model-b-id)))
+          "a different provider is outside the wildcard prefix")))
+  (testing "a model lease never covers a tool resource, and vice versa (kind mismatch)"
+    (is (= :capability/scope-denied (:reason (decision [(model-lease)])))
+        "a model lease cannot authorize a tool call")
+    (is (= :capability/scope-denied (:reason (model-decision [(lease)] model-a-id)))
+        "a tool lease cannot authorize a model call")))
+
+(deftest per-tool-lease-denial
+  (testing "tool X allowed / tool Y denied under an exact tool lease"
+    (is (allow-decision? (decision [(lease)]))
+        "a lease for :fixture/echo allows :fixture/echo")
+    (let [path-intent (intent/tool-call session-id phenotype-p1 :node/tool
+                                        cause-event-id
+                                        {:tool/id :fixture/path-resolve
+                                         :args {:path "a"}}
+                                        budget)
+          path-request {:tool/id :fixture/path-resolve
+                        :resource {:kind :tool :id :fixture/path-resolve}
+                        :args {:path "a"}}]
+      (is (= :capability/scope-denied
+             (:reason (broker/authorize {:intent path-intent
+                                         :normalized-request path-request
+                                         :leases [(lease)]
+                                         :usage {}
+                                         :now in-window})))
+          "a lease for :fixture/echo never grants :fixture/path-resolve"))))
+
+(deftest window-expiry-denies-with-stable-code
+  (testing "a tool lease is valid at :issued-at and denies with :capability/expired at and after :expires-at"
+    (is (allow-decision? (decision [(lease)] {} issued-at)))
+    (is (= :capability/expired (:reason (decision [(lease)] {} expires-at))))
+    (is (= :capability/expired (:reason (decision [(lease)] {} after-expiry)))))
+  (testing "a model lease follows the same window contract"
+    (is (allow-decision? (model-decision [(model-lease)] model-a-id {} issued-at)))
+    (is (= :capability/expired (:reason (model-decision [(model-lease)] model-a-id {} expires-at))))
+    (is (= :capability/expired (:reason (model-decision [(model-lease)] model-a-id {} after-expiry))))))
+
+(deftest call-budget-edge-exactly-at-max
+  (testing "the tool lease admits the call AT max-1 and denies AT max with :capability/budget-exceeded"
+    (is (allow-decision? (decision [(lease :constraints {:max-calls 2})] {echo-cap-id 1})))
+    (is (= :capability/budget-exceeded
+           (:reason (decision [(lease :constraints {:max-calls 2})] {echo-cap-id 2}))))
+    (is (= :capability/budget-exceeded
+           (:reason (decision [(lease :constraints {:max-calls 2})] {echo-cap-id 3})))))
+  (testing "the model lease has the same exact edge"
+    (is (allow-decision? (model-decision [(model-lease :constraints {:max-calls 2})]
+                                         model-a-id {model-cap-id 1})))
+    (is (= :capability/budget-exceeded
+           (:reason (model-decision [(model-lease :constraints {:max-calls 2})]
+                                    model-a-id {model-cap-id 2}))))
+    (is (= :capability/budget-exceeded
+           (:reason (model-decision [(model-lease :constraints {:max-calls 2})]
+                                    model-a-id {model-cap-id 3}))))))

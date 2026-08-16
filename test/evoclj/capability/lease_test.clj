@@ -17,7 +17,11 @@
   traversal escaping to \"/etc\" is never covered. Step 4 asserts
   schema validation of the lease map itself: closed shape, every field
   required, a positive grant window, typed errors, and EDN-safety
-  (Global Constraint 22).
+  (Global Constraint 22). Step 5 asserts model resource coverage
+  (roadmap S3): an exact model lease covers model A and denies model
+  B, a wildcard \"<provider>/*\" lease covers only models inside the
+  provider prefix, and a model lease never covers a tool or
+  filesystem resource (kind mismatch fails closed).
 
   Provider-side normalization of user-facing requests is Task 4.3
   (evoclj.provider); the filesystem matcher here canonicalizes the pure
@@ -237,3 +241,42 @@
     (is (contains? (:error/data d) :explanation))
     (is (seq (:errors (:explanation (:error/data d)))))
     (is (= d (edn/read-string (pr-str d))))))
+
+;; ============================================================================
+;; Step 5 — model resource coverage (S3: per-model lease denial cases)
+;; ============================================================================
+
+(deftest model-resource-coverage
+  (testing "an exact model lease covers model A, never model B"
+    (let [model-lease (lease :resource {:kind :model :id "deepseek/deepseek-v4-flash"})]
+      (is (lease/resource-covers? model-lease
+                                  {:kind :model :id "deepseek/deepseek-v4-flash"}
+                                  :invoke))
+      (is (not (lease/resource-covers? model-lease
+                                       {:kind :model :id "anthropic/claude-sonnet-4-5"}
+                                       :invoke))
+          "a lease for model A never covers model B")))
+  (testing "a wildcard model lease covers models inside the provider prefix, never outside"
+    (let [wild (lease :resource {:kind :model :id "deepseek/*"})]
+      (is (lease/resource-covers? wild
+                                  {:kind :model :id "deepseek/deepseek-v4-flash"}
+                                  :invoke))
+      (is (lease/resource-covers? wild
+                                  {:kind :model :id "deepseek/other-v1"}
+                                  :invoke))
+      (is (not (lease/resource-covers? wild
+                                       {:kind :model :id "anthropic/claude-sonnet-4-5"}
+                                       :invoke))
+          "a different provider is outside the wildcard prefix")
+      (is (not (lease/resource-covers? wild
+                                       {:kind :model :id "deepseek"}
+                                       :invoke))
+          "a bare prefix without the separator is not covered")))
+  (testing "a model lease never covers a tool or filesystem resource, and vice versa"
+    (let [model-lease (lease :resource {:kind :model :id "deepseek/*"})]
+      (is (not (lease/resource-covers? model-lease {:kind :tool :id :fixture/echo} :invoke)))
+      (is (not (lease/resource-covers? model-lease {:kind :filesystem :path "/work"} :invoke))))
+    (is (not (lease/resource-covers? (lease)
+                                     {:kind :model :id "deepseek/deepseek-v4-flash"}
+                                     :invoke))
+        "a tool lease never covers a model resource")))
