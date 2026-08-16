@@ -66,6 +66,12 @@
   :evidence/id, so the artifact is self-provenancing back to the
   frozen evidence pack.
 
+  INPUT CONTEXT (Task A5): `build-context` assembles the compact EDN
+  summary the Diagnostician consumes alongside the frozen pack — the
+  candidate's BehaviorProfile (evoclj.analytics.behavior/profile-events
+  plus its stable sha256 fingerprint) — present only when evidence
+  events are available.
+
   NO GENOME ALTERATION: there is no API in this namespace that writes
   to genomes, generations, kernel source, or any evolution asset — the
   only store write is the CAS artifact + artifacts registry row above
@@ -81,7 +87,8 @@
   :diagnosis/invalid, :diagnosis/store-invalid, :diagnosis/id-mismatch.
   Invalid evidence packs are rejected with the Task 7.1
   :evidence/pack-invalid error; CAS/store errors propagate as-is."
-  (:require [evoclj.evolution.diagnosis-schema :as ds]
+  (:require [evoclj.analytics.behavior :as behavior]
+            [evoclj.evolution.diagnosis-schema :as ds]
             [evoclj.evolution.evidence-schema :as es]
             [evoclj.genome.hash :as hash]
             [evoclj.kernel.error :as err]
@@ -137,6 +144,43 @@
   diagnosis is a pure function of its evidence pack."
   [data]
   (UUID/nameUUIDFromBytes (utf8-bytes (pr-str (canonical data)))))
+
+;; --- the diagnose input context (Task A5) ------------------------------------
+
+(defn build-context
+  "Build the Diagnostician input context map from the candidate's
+  evidence events (Task A5).
+
+  The context is the compact EDN summary a Diagnostician consumes
+  alongside the frozen evidence pack. When `events` is a non-empty
+  sequential collection of evidence events (the F1 contract:
+  {:event/seq int? :event/type keyword? :metadata map?}), the context
+  carries
+
+      :context/behavior-profile
+      {:behavior/session-id ... :behavior/n-events ...
+       :behavior/intents {...} :behavior/failures [...]
+       :behavior/tool-seq [...] :behavior/status ...
+       :behavior/wall-ms ... :behavior/resource {...}
+       :behavior/fingerprint \"sha256:<64 hex>\"}
+
+  — the closed BehaviorProfile computed via
+  evoclj.analytics.behavior/profile-events with the profile's stable
+  sha256 fingerprint attached as :behavior/fingerprint. Without
+  evidence events (nil or an empty collection) the key is absent and
+  the context is {}.
+
+  Deterministic (Global Constraint 6): profile-events is a pure fold
+  over the events and fingerprint is a canonical content hash, so the
+  same events always yield the same profile and fingerprint. Any
+  malformed element inside `events` is rejected by the F1 error
+  contract (:analytics/events-invalid)."
+  [events]
+  (if (and (sequential? events) (seq events))
+    (let [profile (behavior/profile-events events)]
+      {:context/behavior-profile
+       (assoc profile :behavior/fingerprint (behavior/fingerprint profile))})
+    {}))
 
 ;; --- episode classification (same semantics as Task 7.1) ---------------------
 

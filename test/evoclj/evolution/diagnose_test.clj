@@ -53,6 +53,7 @@
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.analytics.behavior :as behavior]
             [evoclj.evolution.diagnose :as diag]
             [evoclj.evolution.diagnosis-schema :as ds]
             [evoclj.evolution.evidence :as evidence]
@@ -538,3 +539,69 @@
              (thrown-error-type #(diag/persist-diagnosis! {} diagnosis))))
       (is (= :diagnosis/store-invalid
              (thrown-error-type #(diag/persist-diagnosis! nil diagnosis)))))))
+
+;; ============================================================================
+;; Task A5 — behavior profiles into the diagnostician context (F1)
+;; ============================================================================
+
+(defn- evidence-events
+  "A small F1-contract evidence log (each event carries :event/seq int?,
+  :event/type keyword?, :metadata map?): two tool calls, two model
+  calls (one failing), an explicit completion, and wall times."
+  []
+  [{:event/seq 1 :event/type :session/created :session/id (uuid 1)
+    :metadata {:wall-ms 100}}
+   {:event/seq 2 :event/type :node/completed
+    :metadata {:intent/type :intent/tool-call :tool/id :fs-read
+               :model-input-tokens 10 :provider-calls 1}}
+   {:event/seq 3 :event/type :node/completed
+    :metadata {:intent/type :intent/tool-call :tool/id "db-write"
+               :model-output-tokens 20 :provider-calls 1}}
+   {:event/seq 4 :event/type :intent/model-call
+    :metadata {:duration-ms 40}}
+   {:event/seq 5 :event/type :node/failed
+    :metadata {:intent/type :intent/model-call
+               :error/type :provider/model-unavailable}}
+   {:event/seq 6 :event/type :session/completed
+    :metadata {:status :completed :wall-ms 200}}])
+
+(deftest a5-behavior-profile-in-diagnose-context
+  (testing "with evidence events the context carries the profile summary"
+    (let [context (diag/build-context (evidence-events))
+          profile (:context/behavior-profile context)]
+      (is (contains? context :context/behavior-profile))
+      (is (map? profile))
+      ;; intent counts: two tool calls (by-tool, stringified) + two model calls
+      (is (= {:count 2 :by-tool {"fs-read" 1 "db-write" 1}}
+             (:tool-call (:behavior/intents profile))))
+      (is (= 2 (get-in profile [:behavior/intents :model-call :count])))
+      ;; tool-call sequence, every invocation in event order
+      (is (= ["fs-read" "db-write"] (:behavior/tool-seq profile)))
+      ;; failures: the failing model call, classified + detailed
+      (is (= [{:event/seq 5 :failure/type :failure/model
+               :detail {:error/type :provider/model-unavailable
+                        :intent/type :intent/model-call}}]
+             (:behavior/failures profile)))
+      ;; wall-ms sums the first-present wall-ms/duration-ms (100+40+200)
+      (is (= 340 (:behavior/wall-ms profile)))
+      ;; a stable sha256 fingerprint
+      (is (re-matches #"^sha256:[0-9a-f]{64}$"
+                      (:behavior/fingerprint profile)))))
+  (testing "the context is deterministic across runs"
+    (let [a (diag/build-context (evidence-events))
+          b (diag/build-context (evidence-events))]
+      (is (= a b))
+      (is (= (:behavior/fingerprint (:context/behavior-profile a))
+             (:behavior/fingerprint (:context/behavior-profile b))))))
+  (testing "without evidence events the key is absent"
+    (doseq [no-events [nil [] ()]]
+      (let [context (diag/build-context no-events)]
+        (is (map? context))
+        (is (not (contains? context :context/behavior-profile))))))
+  (testing "the profile is exactly the F1 profile plus its fingerprint"
+    (let [events (evidence-events)
+          context (diag/build-context events)
+          expected (behavior/profile-events events)]
+      (is (= (assoc expected :behavior/fingerprint
+                    (behavior/fingerprint expected))
+             (:context/behavior-profile context))))))
