@@ -25,12 +25,23 @@
   op names, risk, metrics, and payload keys arrive as STRINGS and the
   adapter must coerce them into the keyword schema vocabulary."
   (:require [cheshire.core :as json]
-            [clojure.test :refer [deftest is testing]]
+            [clojure.edn :as edn]
+            [clojure.java.jdbc :as jdbc]
+            [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.capability.evolution-tools :as evo-tools]
             [evoclj.evolution.core :as core]
             [evoclj.evolution.llm-mutator :as llm]
             [evoclj.evolution.mutation :as mutation]
-            [evoclj.evolution.mutation-schema :as ms])
+            [evoclj.evolution.mutation-schema :as ms]
+            [evoclj.intent.core :as intent]
+            [evoclj.intent.dispatch :as dispatch]
+            [evoclj.provider.registry :as registry]
+            [evoclj.store.cas :as cas]
+            [evoclj.store.migrate :as migrate]
+            [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
+           (java.nio.file FileVisitOption Files LinkOption Paths)
+           (java.nio.file.attribute FileAttribute)
            (java.util UUID)))
 
 ;; --- shared fixture identity --------------------------------------------------
@@ -440,3 +451,479 @@
       (is (re-find #"Recent mutation history" user)))))
 
 
+
+;; ============================================================================
+;; Task E1 — :evolution/evidence and :evolution/history broker tools
+;;
+;; The two retrieval tools are READ-ONLY (Global Constraint 8: every
+;; external effect crosses the broker; these tools only READ the frozen
+;; evidence pack from the CAS and the durable lineage rows), and each is
+;; SUBJECT-BOUND: a tool-call intent carries the requesting phenotype's
+;; attribution (Global Constraint 20) and the broker authorizes it
+;; against a host-owned lease binding that exact phenotype (a sibling
+;; phenotype is denied with the standard deny codes).
+;;
+;; Fixture design mirrors the store tests: a migrated temp database
+;; seeded with the parent generation row, a temp CAS root, the pack
+;; body written to the CAS exactly as build-evidence-pack freezes it
+;; (canonical pr-str WITHOUT :evidence/id — the id IS the content
+;; address), and durable lineage rows inserted directly for the
+;; candidate/history paths.
+;; ============================================================================
+
+(def ^:private mutator-phenotype-id
+  "The deterministic content-addressed subject the evolution adapters
+  are attributed to (the same derivation as
+  evoclj.kernel.system/build-model-call: sha256 of the
+  \"evoclj/evolution\" prefix — here a fixed fixture digest)."
+  (str "sha256:" (apply str (repeat 64 "e"))))
+
+(def ^:private sibling-phenotype-id
+  "A different phenotype id — a sibling from the same Genome is a
+  different subject and must NOT match a lease for mutator-phenotype-id
+  (Global Constraint 9)."
+  (str "sha256:" (apply str (repeat 64 "f"))))
+
+(def ^:private session-id #uuid "11111111-1111-4111-8111-111111111111")
+(def ^:private issued-at (java.util.Date. 0))
+(def ^:private expires-at (java.util.Date. 4102444800000)) ; year 2100
+(def ^:private now (java.util.Date. 1700000000000))
+
+;; --- temp stores ----------------------------------------------------------
+
+(def ^:private temp-paths (atom []))
+
+(defn- temp-db-path
+  []
+  (let [p (str (Files/createTempFile "evoclj-mutator-tools-" ".db"
+                                     (make-array FileAttribute 0)))]
+    (swap! temp-paths conj p)
+    p))
+
+(defn- temp-cas-dir
+  []
+  (let [d (Files/createTempDirectory "evoclj-mutator-tools-cas-"
+                                     (make-array FileAttribute 0))]
+    (swap! temp-paths conj (str d))
+    d))
+
+(defn- delete-tree!
+  [path]
+  (when (Files/exists path (make-array LinkOption 0))
+    (with-open [stream (Files/walk path (make-array FileVisitOption 0))]
+      (doseq [p (reverse (iterator-seq (.iterator stream)))]
+        (Files/deleteIfExists p)))))
+
+(defn- cleanup!
+  []
+  (doseq [p @temp-paths]
+    (delete-tree! (Paths/get p (make-array String 0))))
+  (reset! temp-paths []))
+
+(use-fixtures :each (fn [f] (f) (cleanup!)))
+
+(defn- fresh-store
+  "A migrated temp database seeded with the parent generation row
+  (current = 1, Database Invariant 6) plus a temp CAS root. Returns the
+  executor :stores map {:sqlite ... :cas ...}."
+  []
+  (let [path (temp-db-path)
+        db (sqlite/spec path)
+        cas-root (temp-cas-dir)]
+    (migrate/migrate! db)
+    (sqlite/with-db [conn db]
+      (jdbc/insert! conn :generations
+                    {:id "generation-1"
+                     :genome_id placeholder-hash
+                     :resolution_id placeholder-hash
+                     :parent_id nil
+                     :state "active"
+                     :current 1
+                     :created_at "2025-01-01T00:00:00Z"}))
+    {:sqlite db :cas (cas/->cas cas-root)}))
+
+(defn- fixture-pack
+  "A schema-valid frozen EvidencePack (the shape build-evidence-pack
+  freezes): compact episode refs only — no trace payload bytes ever
+  cross into the pack (Global Constraint 21)."
+  []
+  {:evidence/id placeholder-hash
+   :generation/id "generation-1"
+   :cutoff-event-id 1
+   :episodes [{:episode/id (uuid-of 21)
+               :session/id (uuid-of 22)
+               :generation/id "generation-1"
+               :excerpt-ref placeholder-hash
+               :outcome {:status :completed}
+               :trace {:first-event 1 :last-event 1}
+               :usage {}}]
+   :summary {:selector {:recent 1 :include-successes 0
+                        :include-failures 0 :include-high-cost 0}
+             :seed nil
+             :eligible 1 :selected 1
+             :successes 1 :failures 0 :high-cost 0}})
+
+(defn- freeze-pack!
+  "Write the pack body to the CAS exactly as build-evidence-pack does —
+  the canonical pr-str WITHOUT :evidence/id — and return the pack with
+  the REAL content address (:evidence/id IS the content hash of the
+  stored body, so a get-bytes under the returned id resolves it)."
+  [store]
+  (let [pack (fixture-pack)
+        put (cas/put-bytes! (:cas store)
+                            (.getBytes (pr-str (dissoc pack :evidence/id))
+                                       StandardCharsets/UTF_8)
+                            {:media-type "application/edn"})]
+    (assoc pack :evidence/id (:artifact/id put))))
+
+(defn- insert-candidate!
+  "Insert the durable lineage rows (mutations + candidates) for a
+  candidate of generation-1 whose frozen evidence pack is
+  `evidence-id`; returns the candidate uuid."
+  [store evidence-id]
+  (let [mid (uuid-of 91)
+        cid (uuid-of 92)]
+    (sqlite/with-db [conn (:sqlite store)]
+      (jdbc/insert! conn :mutations
+                    {:id (str mid)
+                     :parent_genome_id placeholder-hash
+                     :hypothesis_id (str (uuid-of 7))
+                     :evidence_id evidence-id
+                     :risk "behavioral"
+                     :ops (pr-str [{:op :set-edn
+                                    :file skills-file
+                                    :path [:workflow :before-edit]
+                                    :expect/hash placeholder-hash
+                                    :value [:reproduce :localize]}])
+                     :expected_effect (pr-str {:primary-metric :task/success
+                                               :direction :increase})
+                     :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :candidates
+                    {:id (str cid)
+                     :parent_generation_id "generation-1"
+                     :parent_genome_id placeholder-hash
+                     :genome_id placeholder-hash
+                     :mutation_id (str mid)
+                     :evidence_id evidence-id
+                     :risk "behavioral"
+                     :state "materialized"
+                     :created_at "2025-01-01T00:00:00Z"}))
+    cid))
+
+(defn- insert-history-entry!
+  "Insert one REJECTED history entry (mutations + candidates +
+  eval_runs rows) for generation-1. `n` varies the mutation content and
+  the timestamps, so every entry has a distinct :mutation/hash and a
+  deterministic newest-first order."
+  [store n]
+  (let [mutation-id (str (uuid-of (+ 100 n)))
+        candidate-id (str (uuid-of (+ 200 n)))
+        eval-id (str (uuid-of (+ 300 n)))
+        ops (pr-str [{:op :set-edn
+                      :file skills-file
+                      :path [:workflow :before-edit]
+                      :expect/hash placeholder-hash
+                      :value [:entry n]}])
+        created-at (str (.plusSeconds (java.time.Instant/parse
+                                       "2025-01-01T00:00:00Z")
+                                      (* n 60)))]
+    (sqlite/with-db [conn (:sqlite store)]
+      (jdbc/insert! conn :mutations
+                    {:id mutation-id
+                     :parent_genome_id placeholder-hash
+                     :hypothesis_id (str (uuid-of 7))
+                     :evidence_id placeholder-hash
+                     :risk "behavioral"
+                     :ops ops
+                     :expected_effect (pr-str {:primary-metric :task/success
+                                               :direction :increase})
+                     :created_at created-at})
+      (jdbc/insert! conn :candidates
+                    {:id candidate-id
+                     :parent_generation_id "generation-1"
+                     :parent_genome_id placeholder-hash
+                     :genome_id placeholder-hash
+                     :mutation_id mutation-id
+                     :evidence_id placeholder-hash
+                     :risk "behavioral"
+                     :state "materialized"
+                     :created_at created-at})
+      (jdbc/insert! conn :eval_runs
+                    {:id eval-id
+                     :candidate_id candidate-id
+                     :parent_generation_id "generation-1"
+                     :profile_id "default-v1"
+                     :gates (pr-str [:g0-parse])
+                     :paired_results_ref nil
+                     :summary (pr-str {:utility {:task/success
+                                                 {:parent 0.5 :candidate 0.25}}})
+                     :eligibility (pr-str {:eligible? false
+                                           :reasons ["utility regression"]})
+                     :status "finalized"
+                     :created_at created-at}))))
+
+;; --- broker plumbing ------------------------------------------------------
+
+(defn- tool-intent
+  "A validated :intent/tool-call for one evolution retrieval tool,
+  attributed to `phenotype-id`."
+  [phenotype-id tool-id args]
+  (intent/tool-call session-id phenotype-id :node/evolution 0
+                    {:tool/id tool-id :args args}
+                    {:wall-ms 1000 :max-steps 1}))
+
+(defn- broker-context
+  "A dispatcher broker context over a fresh registry with the given
+  providers registered, the given leases, a fresh usage atom, and a
+  pinned decision clock."
+  [providers leases]
+  (let [reg (registry/create-registry)]
+    (doseq [p providers]
+      (registry/register! reg p))
+    (dispatch/make-broker-context
+     {:registry reg :leases leases :usage (atom {}) :now (constantly now)})))
+
+(defn- store-snapshot
+  "A plain-data snapshot of the store's writable surface: every CAS
+  body plus the row counts of the lineage tables. Two equal snapshots
+  prove a tool run mutated nothing."
+  [store]
+  (let [cas-root (Paths/get (str (:root (:cas store))) (make-array String 0))
+        bodies (with-open [stream (Files/walk cas-root
+                                              (make-array FileVisitOption 0))]
+                 (->> (iterator-seq (.iterator stream))
+                      (filter #(.endsWith (.toString %) "body"))
+                      (mapv (fn [p] (String. (Files/readAllBytes p)
+                                             StandardCharsets/UTF_8)))
+                      sort
+                      vec))
+        rows (into {}
+                   (map (fn [t]
+                          [t (count (sqlite/query (:sqlite store)
+                                                  [(str "SELECT 1 FROM " (name t))]))]))
+                   [:generations :mutations :candidates :eval_runs
+                    :episodes :events :sessions :promotions])]
+    {:cas-bodies bodies :rows rows}))
+
+;; --- :evolution/evidence ---------------------------------------------------
+
+(deftest evidence-tool-returns-pack-fields-by-evidence-id
+  (testing "a tool call through the broker resolves the frozen evidence
+            pack by :evidence/id and returns its scoped fields"
+    (let [store (fresh-store)
+          pack (freeze-pack! store)
+          ctx (broker-context
+               [(evo-tools/evidence-provider store)]
+               [(evo-tools/evolution-tool-lease
+                 mutator-phenotype-id :evolution/evidence
+                 {:issued-at issued-at :expires-at expires-at})])
+          result (dispatch/dispatch!
+                  ctx (tool-intent mutator-phenotype-id :evolution/evidence
+                                   {:evidence/id (:evidence/id pack)}))]
+      (is (= :ok (:result/status result)))
+      (is (= :allow (get-in result [:authorization :decision])))
+      (let [v (:value result)]
+        (is (= (:evidence/id pack) (:evidence/id v)))
+        (is (= "generation-1" (:generation/id v)))
+        (is (= 1 (:cutoff-event-id v)))
+        (is (= (:episodes pack) (:episodes v)))
+        (is (= (:summary pack) (:summary v)))))))
+
+(deftest evidence-tool-resolves-by-candidate-id
+  (testing "the pack is resolved by :candidate/id through the durable
+            candidates row's :evidence_id"
+    (let [store (fresh-store)
+          pack (freeze-pack! store)
+          cid (insert-candidate! store (:evidence/id pack))
+          ctx (broker-context
+               [(evo-tools/evidence-provider store)]
+               [(evo-tools/evolution-tool-lease
+                 mutator-phenotype-id :evolution/evidence
+                 {:issued-at issued-at :expires-at expires-at})])
+          result (dispatch/dispatch!
+                  ctx (tool-intent mutator-phenotype-id :evolution/evidence
+                                   {:candidate/id cid}))]
+      (is (= :ok (:result/status result)))
+      (is (= (:evidence/id pack) (get-in result [:value :evidence/id])))
+      (is (= (:episodes pack) (get-in result [:value :episodes]))))))
+
+(deftest evidence-tool-missing-candidate-is-a-typed-value
+  (testing "an unknown :candidate/id resolves to {:found false} — a
+            value, never a crash"
+    (let [store (fresh-store)
+          _ (freeze-pack! store)
+          ctx (broker-context
+               [(evo-tools/evidence-provider store)]
+               [(evo-tools/evolution-tool-lease
+                 mutator-phenotype-id :evolution/evidence
+                 {:issued-at issued-at :expires-at expires-at})])
+          result (dispatch/dispatch!
+                  ctx (tool-intent mutator-phenotype-id :evolution/evidence
+                                   {:candidate/id (uuid-of 99)}))]
+      (is (= :ok (:result/status result)))
+      (is (= {:found false :reason :candidate-not-found
+              :candidate/id (uuid-of 99)}
+             (:value result))))))
+
+;; --- :evolution/history ----------------------------------------------------
+
+(deftest history-tool-returns-rejection-window
+  (testing "the tool returns the rejection-history window for the
+            lineage, newest first, with verdicts and reasons"
+    (let [store (fresh-store)
+          _ (doseq [n (range 3)] (insert-history-entry! store n))
+          ctx (broker-context
+               [(evo-tools/history-provider store)]
+               [(evo-tools/evolution-tool-lease
+                 mutator-phenotype-id :evolution/history
+                 {:issued-at issued-at :expires-at expires-at})])
+          result (dispatch/dispatch!
+                  ctx (tool-intent mutator-phenotype-id :evolution/history
+                                   {:generation-lineage ["generation-1"]}))]
+      (is (= :ok (:result/status result)))
+      (let [entries (:value result)]
+        (is (= 3 (count entries)))
+        (is (= (str (uuid-of 102)) (str (get-in entries [0 :mutation/id]))))
+        (is (every? #(= :rejected (:state %)) entries))
+        (is (every? #(= ["utility regression"] (:reason %)) entries)))))
+    (testing "an explicit :limit bounds the window"
+      (let [store (fresh-store)
+            _ (doseq [n (range 3)] (insert-history-entry! store n))
+            ctx (broker-context
+                 [(evo-tools/history-provider store)]
+                 [(evo-tools/evolution-tool-lease
+                   mutator-phenotype-id :evolution/history
+                   {:issued-at issued-at :expires-at expires-at})])
+            result (dispatch/dispatch!
+                    ctx (tool-intent mutator-phenotype-id :evolution/history
+                                     {:generation-lineage ["generation-1"]
+                                      :limit 2}))]
+        (is (= :ok (:result/status result)))
+        (is (= 2 (count (:value result))))
+        (is (= (str (uuid-of 102)) (str (get-in result [:value 0 :mutation/id])))))))
+
+(deftest history-tool-window-default-50-and-max-500
+  (testing "the default window is 50 entries even when more history
+            exists"
+    (let [store (fresh-store)
+          _ (doseq [n (range 55)] (insert-history-entry! store n))
+          ctx (broker-context
+               [(evo-tools/history-provider store)]
+               [(evo-tools/evolution-tool-lease
+                 mutator-phenotype-id :evolution/history
+                 {:issued-at issued-at :expires-at expires-at})])
+          result (dispatch/dispatch!
+                  ctx (tool-intent mutator-phenotype-id :evolution/history
+                                   {:generation-lineage ["generation-1"]}))]
+      (is (= :ok (:result/status result)))
+      (is (= 50 (count (:value result))))))
+  (testing "a window over the 500 cap is rejected at the input gate
+            (:provider/input-invalid)"
+    (let [store (fresh-store)
+          ctx (broker-context
+               [(evo-tools/history-provider store)]
+               [(evo-tools/evolution-tool-lease
+                 mutator-phenotype-id :evolution/history
+                 {:issued-at issued-at :expires-at expires-at})])
+          result (dispatch/dispatch!
+                  ctx (tool-intent mutator-phenotype-id :evolution/history
+                                   {:generation-lineage ["generation-1"]
+                                    :limit 501}))]
+      (is (= :error (:result/status result)))
+      (is (= :provider/input-invalid (:error/type result))))))
+
+;; --- subject binding -------------------------------------------------------
+
+(deftest out-of-scope-subject-denied-with-standard-deny-codes
+  (testing "a lease binds ONE phenotype: a sibling phenotype is denied
+            with :capability/subject-mismatch and the provider never runs"
+    (let [store (fresh-store)
+          _ (freeze-pack! store)
+          ctx (broker-context
+               [(evo-tools/evidence-provider store)]
+               [(evo-tools/evolution-tool-lease
+                 mutator-phenotype-id :evolution/evidence
+                 {:issued-at issued-at :expires-at expires-at})])
+          result (dispatch/dispatch!
+                  ctx (tool-intent sibling-phenotype-id :evolution/evidence
+                                   {:evidence/id placeholder-hash}))]
+      (is (= :error (:result/status result)))
+      (is (= :capability/denied (:error/type result)))
+      (is (= :capability/subject-mismatch (get-in result [:error/data :reason])))))
+  (testing "no lease at all is denied with :capability/missing"
+    (let [store (fresh-store)
+          ctx (broker-context
+               [(evo-tools/history-provider store)]
+               [])
+          result (dispatch/dispatch!
+                  ctx (tool-intent mutator-phenotype-id :evolution/history
+                                   {:generation-lineage ["generation-1"]}))]
+      (is (= :error (:result/status result)))
+      (is (= :capability/denied (:error/type result)))
+      (is (= :capability/missing (get-in result [:error/data :reason]))))))
+
+;; --- read-only guarantee ---------------------------------------------------
+
+(deftest evolution-tools-are-read-only
+  (testing "both tools declare :effect :pure and never change the
+            store: CAS bodies and lineage row counts are identical
+            before and after"
+    (let [store (fresh-store)
+          pack (freeze-pack! store)
+          _ (insert-candidate! store (:evidence/id pack))
+          _ (doseq [n (range 2)] (insert-history-entry! store n))
+          ctx (broker-context
+               [(evo-tools/evidence-provider store)
+                (evo-tools/history-provider store)]
+               [(evo-tools/evolution-tool-lease
+                 mutator-phenotype-id :evolution/evidence
+                 {:issued-at issued-at :expires-at expires-at})
+                (evo-tools/evolution-tool-lease
+                 mutator-phenotype-id :evolution/history
+                 {:issued-at issued-at :expires-at expires-at})])
+          before (store-snapshot store)
+          _ (dispatch/dispatch!
+             ctx (tool-intent mutator-phenotype-id :evolution/evidence
+                              {:evidence/id (:evidence/id pack)}))
+          _ (dispatch/dispatch!
+             ctx (tool-intent mutator-phenotype-id :evolution/evidence
+                              {:candidate/id (uuid-of 92)}))
+          _ (dispatch/dispatch!
+             ctx (tool-intent mutator-phenotype-id :evolution/history
+                              {:generation-lineage ["generation-1"]}))
+          after (store-snapshot store)]
+      (is (= :pure (:effect evo-tools/evidence-tool-descriptor)))
+      (is (= :pure (:effect evo-tools/history-tool-descriptor)))
+      (is (= before after)))))
+
+;; --- the mutator's tool catalog --------------------------------------------
+
+(deftest mutator-tool-catalog-includes-evolution-tools
+  (testing "the mutator's tool catalog IS the two read-only evolution
+            retrieval tools, in the wire form the tool loop consumes"
+    (is (= evo-tools/mutator-tool-catalog llm/mutator-tool-catalog))
+    (is (= #{:evolution/evidence :evolution/history}
+           (set (map :tool llm/mutator-tool-catalog))))
+    (is (= ["evolution_evidence" "evolution_history"]
+           (mapv :name llm/mutator-tool-catalog))))
+  (testing "the model-call options declare the tool-loop round bound"
+    (let [[mc calls] (canned-call (value-with (mutation-text [(valid-mutation)])))
+          _ (propose {:model-call mc :model/id "m"})
+          opts (get-in (first @calls) [:options])]
+      (is (= 4 (:max-tool-rounds opts))))))
+
+(deftest unexecuted-tool-calls-fail-loud
+  (testing "a model response requesting tools that the host :model-call
+            closure did not execute is a typed response failure — the
+            adapter holds no broker and never guesses at unexecuted
+            tool calls"
+    (let [mc (fn [& _] {:value {:model/output {:text ""}
+                                :usage {:prompt-tokens 1 :completion-tokens 1}
+                                :tool-calls [{:tool/call-id "call-1"
+                                              :tool/name "evolution_evidence"
+                                              :tool/arguments {}}]}})
+          e (try (propose {:model-call mc :model/id "m"}) nil
+                 (catch clojure.lang.ExceptionInfo e e))
+          data (ex-data e)]
+      (is (= :mutation/llm-response-invalid (:error/type data)))
+      (is (= :tool-calls-unexecuted (:reason data))))))

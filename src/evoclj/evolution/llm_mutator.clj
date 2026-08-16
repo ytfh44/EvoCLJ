@@ -87,12 +87,35 @@
                                        mutations, or all-noise)"
   (:require [cheshire.core :as json]
             [clojure.string :as str]
+            [evoclj.capability.evolution-tools :as evolution-tools]
             [evoclj.evolution.core :refer [Mutator]]
             [evoclj.kernel.error :as err]
             [malli.core :as m]
             [malli.error :as me])
   (:import (java.nio.charset StandardCharsets)
            (java.util UUID)))
+
+(def ^:private default-max-tool-rounds
+  "The tool-calling loop bound the adapter declares in the model-call
+  options (the same option name and default the scheduler's
+  dispatch-with-tools! honors). A host :model-call closure that
+  implements the tool loop consumes it."
+  4)
+
+(def mutator-tool-catalog
+  "The tool catalog the LLM mutator declares: the two READ-ONLY
+  evolution retrieval tools (:evolution/evidence and
+  :evolution/history) — the Task E1 broker tools, defined in
+  evoclj.capability.evolution-tools. The entries are the wire form the
+  scheduler's tool loop consumes ({:name :description :parameters
+  :tool}); a host :model-call closure that implements the tool-calling
+  loop moves this catalog into the model-call payload :tools and
+  executes each requested call through the capability broker. The
+  adapter itself holds no broker (Global Constraint 8) and never
+  executes a tool call directly — a model response requesting tools
+  that the host closure did not execute is a typed failure
+  (:mutation/llm-response-invalid, :reason :tool-calls-unexecuted)."
+  evolution-tools/mutator-tool-catalog)
 
 ;; --- constructor config (closed map — Global Constraint 11) ------------------
 
@@ -525,7 +548,8 @@
       ;; 3. exactly ONE model call through the injected :model-call closure
       (let [result (try
                      (model-call model-id messages
-                                 {:temperature 0.2 :max-tokens 8192})
+                                 {:temperature 0.2 :max-tokens 8192
+                                  :max-tool-rounds default-max-tool-rounds})
                      (catch clojure.lang.ExceptionInfo e
                        (throw (err/error :mutation/llm-failed
                                          "model call failed during mutation proposal"
@@ -547,6 +571,16 @@
                                   {:result/status (:result/status result)
                                    :cause (dissoc result :value)})))
             value (:value result)
+            ;; the tool-calling loop is HOST-side (the scheduler / the
+            ;; host :model-call closure executes each requested tool
+            ;; through the broker); this adapter holds no broker and
+            ;; never guesses at an unexecuted tool call, so a response
+            ;; requesting tools is unusable (fail-loud).
+            _ (when (seq (:tool-calls value))
+                (throw (err/error :mutation/llm-response-invalid
+                                  "model requested tools the host :model-call closure did not execute (the tool-calling loop is host-side)"
+                                  {:reason :tool-calls-unexecuted
+                                   :tools (mapv :tool/name (:tool-calls value))})))
             text (output-text value)]
         (when-not (string? text)
           (throw (err/error :mutation/llm-response-invalid
@@ -626,7 +660,18 @@
   can never name a preimage it does not know. propose-mutations never
   fails silently: per-mutation noise is tolerated, but a model that
   produces nothing usable throws a typed error (LLM-NOISE TOLERANCE
-  POLICY)."
+  POLICY).
+
+  TOOL CATALOG (Task E1): the adapter's tool catalog
+  (mutator-tool-catalog) declares the two READ-ONLY evolution
+  retrieval tools (:evolution/evidence, :evolution/history) from
+  evoclj.capability.evolution-tools, and the model-call options carry
+  :max-tool-rounds (the loop bound). The tool-calling loop itself is
+  HOST-side — a host :model-call closure implements it by executing
+  each requested tool through the capability broker; this adapter
+  holds no broker, so a response whose tool calls were not executed is
+  a typed :mutation/llm-response-invalid failure
+  (:reason :tool-calls-unexecuted), never a silent guess."
   [config]
   (let [v (validate-llm-config config)]
     (->LlmMutator {:model-call (:model-call v)
