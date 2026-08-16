@@ -605,3 +605,124 @@
       (is (= (assoc expected :behavior/fingerprint
                     (behavior/fingerprint expected))
              (:context/behavior-profile context))))))
+
+;; ============================================================================
+;; Task E2 — hypothesis ranking with kernel re-validation (roadmap E2)
+;; ============================================================================
+
+(deftest e2-pattern-adapter-emits-numeric-confidence
+  (let [d (diag/pattern-diagnostician {:task/success-threshold 0.6})
+        p (pack [(ep {:id (uuid 1) :first 10 :last 12
+                      :outcome {:status :failed :score nil}})
+                 (ep {:id (uuid 2) :first 20 :last 22
+                      :outcome {:status :failed :score nil}})
+                 (ep {:id (uuid 3) :first 30 :last 33
+                      :outcome {:status :completed :score nil}})]
+                {:successes 1 :failures 2 :selected 3})
+        h (first (:hypotheses (diag/diagnose d p)))]
+    (testing "every pattern hypothesis carries a numeric :confidence in [0,1]"
+      (is (number? (:confidence h)))
+      (is (<= 0.0 (double (:confidence h)) 1.0)))
+    (testing "the confidence reflects the evidence strength (the failure
+              share of the pack episodes)"
+      (is (== 2/3 (:confidence h))))
+    (testing "the hypothesis stays schema-valid with :confidence present"
+      (is (= h (ds/validate-hypothesis h))))))
+
+(deftest e2-rank-hypotheses-orders-by-descending-confidence
+  (let [h-low (hypothesis {:confidence 0.2 :hypothesis/id (uuid 21)})
+        h-mid (hypothesis {:confidence 0.5 :hypothesis/id (uuid 22)})
+        h-high (hypothesis {:confidence 0.9 :hypothesis/id (uuid 23)})]
+    (testing "unordered input is adopted in validated descending order"
+      (is (= [h-high h-mid h-low]
+             (diag/rank-hypotheses [h-low h-high h-mid]))))
+    (testing "ranking is a pure function of the hypotheses — input order
+              does not matter"
+      (is (= (diag/rank-hypotheses [h-mid h-low h-high])
+             (diag/rank-hypotheses [h-low h-high h-mid]))))
+    (testing "stable across runs"
+      (is (= (diag/rank-hypotheses [h-low h-high h-mid])
+             (diag/rank-hypotheses [h-low h-high h-mid]))))))
+
+(deftest e2-rank-hypotheses-breaks-ties-deterministically
+  (let [h-a (hypothesis {:confidence 0.5 :hypothesis/id (uuid 30)})
+        h-b (hypothesis {:confidence 0.5 :hypothesis/id (uuid 31)})
+        h-c (hypothesis {:confidence 0.5 :hypothesis/id (uuid 32)})
+        ranked (diag/rank-hypotheses [h-c h-a h-b])]
+    (testing "equal confidence is ordered by the deterministic id key,
+              independent of input order"
+      (is (= (sort-by (comp str :hypothesis/id) [h-a h-b h-c])
+             ranked)))
+    (testing "stable across runs"
+      (is (= ranked (diag/rank-hypotheses [h-b h-c h-a]))))))
+
+(deftest e2-rank-hypotheses-rejects-malformed-confidence
+  (testing "missing or non-numeric confidence → typed :evolution/... error"
+    (is (= :evolution/hypothesis-confidence-invalid
+           (thrown-error-type #(diag/rank-hypotheses
+                                [(hypothesis {})]))))
+    (is (= :evolution/hypothesis-confidence-invalid
+           (thrown-error-type #(diag/rank-hypotheses
+                                [(hypothesis {:confidence "high"})]))))
+    (is (= :evolution/hypothesis-confidence-invalid
+           (thrown-error-type #(diag/rank-hypotheses
+                                [(hypothesis {:confidence :medium})])))))
+  (testing "out-of-range confidence (outside [0,1]) → typed :evolution/... error"
+    (is (= :evolution/hypothesis-confidence-invalid
+           (thrown-error-type #(diag/rank-hypotheses
+                                [(hypothesis {:confidence 1.5})]))))
+    (is (= :evolution/hypothesis-confidence-invalid
+           (thrown-error-type #(diag/rank-hypotheses
+                                [(hypothesis {:confidence -0.1})])))))
+  (testing "the error carries the offending confidence in its data"
+    (let [e (try (diag/rank-hypotheses [(hypothesis {:confidence "high"})])
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (= :evolution/hypothesis-confidence-invalid
+             (:error/type (ex-data e))))
+      (is (= "high" (:confidence (ex-data e)))))))
+
+(deftest e2-diagnosis-hypotheses-are-ranked-before-adoption
+  (testing "the pattern adapter's diagnosis carries hypotheses in validated
+            descending-confidence order"
+    (let [d (diag/pattern-diagnostician {:task/success-threshold 1.0})
+          p (pack [(ep {:id (uuid 1) :first 10 :last 12
+                        :outcome {:status :failed :score nil}})
+                   (ep {:id (uuid 2) :first 20 :last 22
+                        :outcome {:status :failed :score nil}})
+                   (ep {:id (uuid 3) :first 30 :last 33
+                        :outcome {:status :completed :score nil}
+                        :usage {:total-cost 55}})]
+                  {:successes 1 :failures 2 :selected 3 :high-cost 1})
+          diagnosis (diag/diagnose d p)
+          confidences (mapv :confidence (:hypotheses diagnosis))]
+      (is (= 2 (count (:hypotheses diagnosis))))
+      (is (apply >= confidences))
+      (is (= :task/success (:pattern (first (:hypotheses diagnosis)))))
+      (is (= :task/high-cost (:pattern (second (:hypotheses diagnosis))))))
+    (testing "re-ranking the diagnosis's hypotheses is idempotent"
+      (let [d (diag/pattern-diagnostician {:task/success-threshold 1.0})
+            p (pack [(ep {:id (uuid 1) :first 10 :last 12
+                          :outcome {:status :failed :score nil}})
+                     (ep {:id (uuid 2) :first 20 :last 22
+                          :outcome {:status :completed :score nil}
+                          :usage {:total-cost 55}})]
+                    {:successes 1 :failures 1 :selected 2 :high-cost 1})
+            diagnosis (diag/diagnose d p)]
+        (is (= (:hypotheses diagnosis)
+               (diag/rank-hypotheses (:hypotheses diagnosis))))))))
+
+(deftest e2-schema-accepts-confidence-and-rejects-malformed
+  (testing "a valid numeric :confidence within [0,1] validates unchanged"
+    (is (= 0.7 (:confidence (ds/validate-hypothesis
+                             (hypothesis {:confidence 0.7}))))))
+  (testing "the schema rejects a malformed :confidence at the trust boundary"
+    (is (= :diagnosis/hypothesis-invalid
+           (thrown-error-type #(ds/validate-hypothesis
+                                (hypothesis {:confidence "high"})))))
+    (is (= :diagnosis/hypothesis-invalid
+           (thrown-error-type #(ds/validate-hypothesis
+                                (hypothesis {:confidence 1.5})))))
+    (is (= :diagnosis/hypothesis-invalid
+           (thrown-error-type #(ds/validate-hypothesis
+                                (hypothesis {:confidence -0.1})))))))

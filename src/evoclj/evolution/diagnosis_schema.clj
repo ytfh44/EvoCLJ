@@ -19,13 +19,20 @@
          :counterevidence [{:episode/id ...}]
          :target {:kind :skill :id :debugging}
          :expected-effect {:metric :task/success :direction :increase}
+         :confidence 0.7            ; roadmap E2: numeric, [0,1], the ranking key
          :confidence-band :medium}]}
 
   Required by the task: :support, :target, and :expected-effect are
   REQUIRED hypothesis keys. A hypothesis with ZERO evidence references
   — an empty :support vector, or a support entry with an empty
   :event-ids vector — is REJECTED: an unsupported hypothesis is not a
-  hypothesis (Step 2). Closed maps everywhere: unknown keys at a trust
+  hypothesis (Step 2). :confidence (roadmap E2) is an OPTIONAL numeric
+  key in the closed interval [0,1] — the kernel ranking gate
+  (evoclj.evolution.diagnose/rank-hypotheses) requires and re-validates
+  it before adoption with the typed :evolution/hypothesis-confidence-invalid
+  error; when present it is validated here as well. The LLM adapter
+  path stamps :confidence-band only, so :confidence stays optional at
+  the schema boundary. Closed maps everywhere: unknown keys at a trust
   boundary are rejected (:diagnosis/hypothesis-invalid,
   :diagnosis/invalid, :diagnosis/config-invalid) with a humanized
   Malli explanation."
@@ -40,6 +47,14 @@
   (throw (err/error error-type
                     (str kind " does not satisfy the diagnosis contract")
                     {:errors (me/humanize expl)})))
+
+(defn confidence?
+  "A valid :confidence value (roadmap E2): a number within the closed
+  interval [0,1]. The interval check excludes NaN and infinities (no
+  ordering holds for them)."
+  [x]
+  (and (number? x)
+       (<= 0.0 (double x) 1.0)))
 
 (def ExpectedEffectSchema
   "The expected effect of acting on a hypothesis: a metric plus the
@@ -81,6 +96,7 @@
    [:counterevidence [:vector CounterevidenceRefSchema]]
    [:target TargetSchema]
    [:expected-effect ExpectedEffectSchema]
+   [:confidence {:optional true} [:fn confidence?]]
    [:confidence-band [:enum :low :medium :high]]])
 
 (def DiagnosisSchema

@@ -21,6 +21,7 @@
                      :counterevidence [{:episode/id ...}]
                      :target {:kind :workflow :id :task}
                      :expected-effect {:metric :task/success :direction :increase}
+                     :confidence 0.7        ; numeric, [0,1], the ranking key
                      :confidence-band :medium}]}
 
   THE DETERMINISTIC ADAPTER (Step 3): `pattern-diagnostician` is the
@@ -46,6 +47,18 @@
   :diagnosis/id is the sha256 content hash of the diagnosis body, so
   the same (config, pack) always yields the same diagnosis
   byte-for-byte. A future LLM adapter conforms to the same protocol.
+
+  HYPOTHESIS RANKING (roadmap E2): every pattern hypothesis carries a
+  numeric :confidence in [0,1] — the share of the pack's episodes that
+  substantiate the pattern (failure share for :task/success, costly
+  share for :task/high-cost). The diagnosis' hypotheses are the output
+  of `rank-hypotheses`, the kernel re-validation gate applied before
+  adoption: it re-validates every :confidence (malformed — missing,
+  non-numeric, or outside [0,1] — is rejected with the typed
+  :evolution/hypothesis-confidence-invalid error) and adopts unordered
+  input in validated DESCENDING-confidence order, breaking ties
+  deterministically by :hypothesis/id, so the same hypotheses always
+  adopt in the same order across runs (Global Constraint 6).
 
   EVOLUTION-SET EVIDENCE ONLY (Step 4, Global Constraint 11): the
   adapter's constructor receives ONLY a plain pattern-config map — no
@@ -84,7 +97,8 @@
 
   Error contract (Global Constraint 22 — plain serializable data):
   :diagnosis/config-invalid, :diagnosis/hypothesis-invalid,
-  :diagnosis/invalid, :diagnosis/store-invalid, :diagnosis/id-mismatch.
+  :diagnosis/invalid, :diagnosis/store-invalid, :diagnosis/id-mismatch,
+  :evolution/hypothesis-confidence-invalid (the kernel ranking gate).
   Invalid evidence packs are rejected with the Task 7.1
   :evidence/pack-invalid error; CAS/store errors propagate as-is."
   (:require [evoclj.analytics.behavior :as behavior]
@@ -231,6 +245,15 @@
   [episode]
   (select-keys episode [:episode/id]))
 
+(defn- confidence-share
+  "The numeric :confidence of a pattern hypothesis (roadmap E2): the
+  share of the pack's episodes that substantiate the pattern — a plain
+  Clojure number (ratio or integer) within [0,1] that grows with the
+  evidence strength, so the same (config, pack) always yields the same
+  confidence (Global Constraint 6)."
+  [supporting total]
+  (/ supporting (max 1 total)))
+
 ;; --- deterministic pattern rules ---------------------------------------------
 
 (defn- task-success-hypothesis
@@ -257,6 +280,8 @@
          :counterevidence (mapv counterevidence-ref successes-ep)
          :target {:kind :workflow :id :task}
          :expected-effect {:metric :task/success :direction :increase}
+         :confidence (confidence-share (count failures)
+                                       (count (:episodes pack)))
          :confidence-band confidence-band}))))
 
 (defn- task-high-cost-hypothesis
@@ -276,6 +301,7 @@
                               (filterv (complement high-cost?) episodes))
        :target {:kind :workflow :id :task}
        :expected-effect {:metric :task/cost :direction :decrease}
+       :confidence (confidence-share (count costly) (count episodes))
        :confidence-band confidence-band})))
 
 (defn- finalize-hypothesis
@@ -288,7 +314,8 @@
 (defn- pattern-hypotheses
   "The deterministic pattern hypotheses for the pack, in catalog order
   (:task/success, then :task/high-cost), bounded by
-  :max-hypotheses. Each hypothesis carries its deterministic id."
+  :max-hypotheses. Each hypothesis carries its deterministic id and a
+  numeric :confidence in [0,1] (roadmap E2)."
   [pack config]
   (let [threshold (:task/success-threshold config)
         confidence-band (:confidence-band config)
@@ -298,14 +325,50 @@
                            (task-high-cost-hypothesis pack confidence-band)])]
     (mapv finalize-hypothesis (take max-hypotheses candidates))))
 
+;; --- kernel ranking gate (roadmap E2) ---------------------------------------
+
+(defn- validate-confidence!
+  "Re-validate ONE hypothesis' :confidence at the kernel adoption gate
+  (roadmap E2): it MUST be present, numeric, and within the closed
+  interval [0,1]. Malformed confidence — missing, non-numeric, or
+  outside [0,1] (NaN and infinities included) — is rejected with the
+  typed :evolution/hypothesis-confidence-invalid error carrying the
+  offending value in its data (Global Constraint 22: plain
+  serializable error data). Returns the hypothesis unchanged."
+  [hypothesis]
+  (let [c (:confidence hypothesis)]
+    (when-not (and (number? c)
+                   (<= 0.0 (double c) 1.0))
+      (throw (err/error :evolution/hypothesis-confidence-invalid
+                        "hypothesis confidence must be a number within [0,1]"
+                        {:hypothesis/id (:hypothesis/id hypothesis)
+                         :confidence c})))
+    hypothesis))
+
+(defn rank-hypotheses
+  "The kernel re-validation step applied to hypotheses BEFORE adoption
+  (roadmap E2): validate every hypothesis' :confidence (malformed →
+  typed :evolution/hypothesis-confidence-invalid), then return the
+  hypotheses in DESCENDING :confidence order with ties broken
+  deterministically by :hypothesis/id (the content-addressed name in
+  its canonical string form). The result is a pure function of the
+  hypotheses: input order never matters and repeated runs are
+  byte-identical (Global Constraint 6)."
+  [hypotheses]
+  (let [validated (mapv validate-confidence! hypotheses)]
+    (vec (sort-by (fn [h] [(- (double (:confidence h)))
+                            (str (:hypothesis/id h))])
+                  validated))))
+
 ;; --- the deterministic adapter ------------------------------------------------
 
 (defrecord PatternDiagnostician [config]
   Diagnostician
   (diagnose [_ evidence-pack]
     (es/validate-pack evidence-pack)
-    (let [hypotheses (mapv ds/validate-hypothesis
-                           (pattern-hypotheses evidence-pack config))
+    (let [hypotheses (->> (pattern-hypotheses evidence-pack config)
+                          (mapv ds/validate-hypothesis)
+                          rank-hypotheses)
           data {:evidence/id (:evidence/id evidence-pack)
                 :hypotheses hypotheses}
           id (digest data)
