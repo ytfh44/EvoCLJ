@@ -51,8 +51,7 @@
   non-numeric metric value; :trigger/action-not-found — an unknown
   action id, surfaced ONLY as an :error ENTRY inside run-actions!
   results and never thrown by run-actions!."
-  (:require [clojure.edn :as edn]
-            [malli.core :as m]
+  (:require [malli.core :as m]
             [malli.error :as me]
             [evoclj.kernel.error :as err])
   (:import (java.time Instant)
