@@ -56,10 +56,20 @@
     :eval/judge-failed         — the :model-call execution failed (a
                                   thrown call or a non-ok dispatch result)
                                   OR the model text was not usable
-                                  (non-JSON / invalid / missing :equivalent)."
+                                  (non-JSON / invalid / missing :equivalent).
+
+  Task A6 (Foundation F3): this namespace also owns the judge-verdict
+  enrichment adapter. Per-case judge verdicts persist as versioned
+  enrichment records attached to the :evaluation entity (entity-kind
+  :evaluation, entity-id = the evaluation id, kind :judge-verdict,
+  payload in the CAS): the pure verdict→enrichment mapping
+  (verdict-record, verdict-payload) plus the isolated store adapter
+  (persist-verdict-enrichment!) that NEVER fails the evaluation — a
+  store failure is caught and returned as a :failed record."
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [evoclj.kernel.error :as err]
+            [evoclj.store.enrichment :as enrichment]
             [malli.core :as m]
             [malli.error :as me]))
 
@@ -253,3 +263,88 @@
                               {:reason :no-verdict
                                :excerpt (subs text 0 (min 200 (count text)))})))
           v)))))
+
+;; --- Task A6 — judge verdicts as enrichment records (Foundation F3) -----------
+
+(defn verdict-record
+  "ONE per-case judge verdict as a plain EDN map — the pure
+  verdict→enrichment mapping (Task A6):
+
+      {:case/id <keyword>            ; the selection case id
+       :repetition <pos-int>         ; the 1-based repetition
+       :pair/seed <string>           ; the pair's derived fixture seed
+       :expected-output <EDN>        ; the case oracle (kernel-side audit)
+       :outputs <vector EDN>         ; the judged side's actual outputs
+       :equivalent <boolean>         ; the judge's decision
+       :score <1.0|0.0>}             ; derived: 1.0 iff equivalent
+
+  Pure and deterministic: identical inputs always yield identical
+  records, so a verdict batch round-trips byte-identically through the
+  enrichment CAS (the payload body is pr-str EDN, Global Constraint
+  21)."
+  [case-id repetition pair-seed expected-output outputs equivalent]
+  {:case/id case-id
+   :repetition repetition
+   :pair/seed pair-seed
+   :expected-output expected-output
+   :outputs (vec outputs)
+   :equivalent (boolean equivalent)
+   :score (if equivalent 1.0 0.0)})
+
+(defn verdict-payload
+  "The Task A6 enrichment :payload for a verdict batch: a plain EDN map
+  {:verdicts <vector of verdict-record maps> :count n}. Pure — the
+  exact map stored in the CAS via
+  evoclj.store.enrichment/put-enrichment! (the row keeps only the
+  content-address :payload-ref, never the body)."
+  [verdicts]
+  {:verdicts (vec verdicts)
+   :count (count verdicts)})
+
+(defn persist-verdict-enrichment!
+  "Task A6 — the judge-verdict store adapter (Foundation F3). Persist a
+  verdict batch as a VERSIONED enrichment record attached to the
+  evaluation entity:
+
+      (persist-verdict-enrichment! store evaluation-id verdicts)
+      ;; => {:enrichment/status :ok :enrichment <Enrichment record>}
+      ;; or {:enrichment/status :failed
+      ;;     :error/type <keyword> :error/message <string>
+      ;;     :error/data <map or nil>}
+
+  The record is created with entity-kind :evaluation, entity-id =
+  (str evaluation-id), kind :judge-verdict, :payload = (verdict-payload
+  verdicts) (the body goes to the CAS; only its content-address
+  :payload-ref lands in SQLite — Global Constraint 21), and :cause =
+  the evaluation id as provenance. Each persisted batch allocates the
+  next version (max+1) for the (entity-kind, entity-id, kind) triple
+  inside the write transaction, so concurrent writers serialize.
+
+  FAILURE ISOLATION (Task A6 acceptance): enrichment persistence must
+  NEVER fail the evaluation. Every store failure — an invalid store
+  map, a CAS write failure, a DB failure — is caught and RETURNED as a
+  :failed record carrying the typed :error/type (preserved from an
+  ExceptionInfo's :error/type, else :eval/judge-enrichment-failed)
+  plus the serializable :error/message and :error/data. The function
+  never throws."
+  [store evaluation-id verdicts]
+  (try
+    (let [rec (enrichment/put-enrichment!
+               store
+               {:entity/kind :evaluation
+                :entity/id (str evaluation-id)
+                :kind :judge-verdict
+                :payload (verdict-payload verdicts)
+                :cause (str evaluation-id)})]
+      {:enrichment/status :ok
+       :enrichment rec})
+    (catch clojure.lang.ExceptionInfo e
+      {:enrichment/status :failed
+       :error/type (:error/type (ex-data e))
+       :error/message (.getMessage e)
+       :error/data (err/error-data e)})
+    (catch Throwable t
+      {:enrichment/status :failed
+       :error/type :eval/judge-enrichment-failed
+       :error/message (.getMessage t)
+       :error/data (err/error-data t)})))
