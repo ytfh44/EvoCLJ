@@ -264,3 +264,62 @@
   (testing "a non-string routing key is rejected"
     (is (= :promotion/routing-invalid
            (error-type #(canary/select-generation-for-new-session (deployment-state) 42))))))
+
+;; ============================================================================
+;; advance-allocation — the canary auto-rollout "advance one step" primitive
+;; ============================================================================
+
+(deftest advance-allocation-advances-one-rung
+  (testing "0.10 → 0.25 (one rung up the ladder)"
+    (let [ds (deployment-state)
+          advanced (canary/advance-allocation ds)]
+      (is (= 0.25 (get-in advanced [:canary :allocation])))
+      (testing "the ladder and every other field are unchanged"
+        (is (= [0.10 0.25 0.50 1.0] (get-in advanced [:canary :ladder])))
+        (is (= "v1" (get-in advanced [:canary :version])))
+        (is (= g43 (get-in advanced [:canary :generation])))
+        (is (= g42 (:current-generation advanced)))
+        (is (= true (:active? advanced))))))
+  (testing "the input state is not mutated (pure function)"
+    (let [ds (deployment-state)]
+      (canary/advance-allocation ds)
+      (is (= 0.10 (get-in ds [:canary :allocation]))))))
+
+(deftest advance-allocation-stays-at-full-allocation
+  (testing "already at the last rung (1.0) → returned unchanged"
+    (let [ds (deployment-state {:canary {:generation g43
+                                         :allocation 1.0
+                                         :ladder [0.10 0.25 0.50 1.0]
+                                         :version "v1"}})
+          advanced (canary/advance-allocation ds)]
+      (is (= 1.0 (get-in advanced [:canary :allocation])))
+      (is (identical? ds advanced)))))
+
+(deftest advance-allocation-returns-nil-state-unchanged
+  (testing "nil deployment state → nil"
+    (is (nil? (canary/advance-allocation nil)))))
+
+(deftest advance-allocation-returns-absent-canary-unchanged
+  (testing "no :canary config (nil) → returned unchanged"
+    (let [ds (deployment-state {:canary nil})
+          advanced (canary/advance-allocation ds)]
+      (is (= ds advanced))
+      (is (nil? (:canary advanced))))))
+
+(deftest advance-allocation-returns-inactive-unchanged
+  (testing ":active? false → returned unchanged"
+    (let [ds (deployment-state {:active? false})
+          advanced (canary/advance-allocation ds)]
+      (is (= ds advanced))
+      (is (= false (:active? advanced)))
+      (is (= 0.10 (get-in advanced [:canary :allocation]))))))
+
+(deftest advance-allocation-fails-soft-on-abnormal-allocation
+  (testing "allocation not present in the ladder → returned unchanged (fail-soft)"
+    (let [ds (deployment-state {:canary {:generation g43
+                                         :allocation 0.33
+                                         :ladder [0.10 0.25 0.50 1.0]
+                                         :version "v1"}})
+          advanced (canary/advance-allocation ds)]
+      (is (= ds advanced))
+      (is (= 0.33 (get-in advanced [:canary :allocation]))))))

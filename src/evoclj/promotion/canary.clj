@@ -208,3 +208,38 @@
                            :bucket bucket})]
             {:generation/id generation
              :routing routing})))))
+
+;; --- canary allocation advance -------------------------------------------------
+
+(defn advance-allocation
+  "Advance a canary rollout by one rung of its ladder (the canary
+  auto-rollout \"advance one step\" primitive).
+
+  Pure: it never mutates `deployment-state`, performs no IO, and has no
+  randomness — the same input always yields the same output.
+
+  Returns `deployment-state` unchanged (fail-soft) when any of:
+    • `deployment-state` is nil (no canary information to advance),
+    • `:canary` is nil (no rollout configured),
+    • `:active?` is false (canary traffic disabled),
+    • `:allocation` is already the last rung of `:ladder` (already 100%),
+    • `:allocation` is not present in `:ladder` (abnormal state).
+
+  Otherwise it returns a new deployment-state identical to the input except
+  `:canary/:allocation` is set to the next rung of `:ladder`.
+
+  Example: {:canary {:allocation 0.10 :ladder [0.10 0.25 0.50 1.0]}}
+           → {:canary {:allocation 0.25 :ladder [0.10 0.25 0.50 1.0]}}."
+  [deployment-state]
+  (if (or (nil? deployment-state)
+          (nil? (:canary deployment-state))
+          (not (:active? deployment-state)))
+    deployment-state
+    (let [canary (:canary deployment-state)
+          allocation (:allocation canary)
+          ladder (:ladder canary)
+          idx (.indexOf ladder allocation)]
+      (if (or (neg? idx)
+              (= idx (dec (count ladder))))
+        deployment-state
+        (update-in deployment-state [:canary :allocation] (fn [_] (nth ladder (inc idx))))))))
