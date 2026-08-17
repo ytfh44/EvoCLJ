@@ -5,7 +5,8 @@
   evaluator maps. This namespace establishes ONE envelope — a fixed set
   of top-level sections (`:config/version`, `:config/profiles`,
   `:config/model-routing`, `:config/budget`, `:config/judge`,
-  `:config/retention`) — with defaults and a single, consistent merge
+  `:config/retention`, `:config/evolution-loop`,
+  `:config/canary`) — with defaults and a single, consistent merge
   + validation path. The routing/budget/retention sections are
   intentionally OPEN (:map): their concrete keys arrive with their
   features. The :config/judge section (roadmap V5) is VALIDATED — its
@@ -75,7 +76,9 @@
    [:config/model-routing :map]
    [:config/budget :map]
    [:config/judge JudgeSectionSchema]
-   [:config/retention :map]])
+   [:config/retention :map]
+   [:config/evolution-loop :map]
+   [:config/canary :map]])
 
 (defn- default-config*
   "The base configuration: version 1 and every section empty. Returns a
@@ -84,15 +87,24 @@
   {:config/version 1
    :config/profiles {}
    :config/model-routing {}
-   :config/budget {}
+   :config/budget {:max-cost 0.0
+                  :max-tokens 0}
    :config/judge {}
-   :config/retention {}})
+   :config/retention {}
+   :config/evolution-loop {:max-generations 20
+                           :plateau-window 5
+                           :min-improvement 0.01
+                           :stop-on-regression? true}
+   :config/canary {:healthy-window 50}})
 
 (defn default-config
-  "The root configuration with every section at its default (empty) value:
+  "The root configuration with every section at its default value:
   `{:config/version 1 :config/profiles {} :config/model-routing {}
-  :config/budget {} :config/judge {} :config/retention {}}`. Always
-  validates against ConfigSchema."
+   :config/budget {:max-cost 0.0 :max-tokens 0} :config/judge {}
+   :config/retention {} :config/evolution-loop {:max-generations 20
+   :plateau-window 5 :min-improvement 0.01 :stop-on-regression? true}
+   :config/canary {:healthy-window 50}}`. Always validates against
+  ConfigSchema."
   []
   (default-config*))
 
@@ -100,7 +112,8 @@
 
 (def ^:private section-keys
   "The envelope sections over which a profile or input may override."
-  [:config/model-routing :config/budget :config/judge :config/retention])
+  [:config/model-routing :config/budget :config/judge :config/retention
+   :config/evolution-loop :config/canary])
 
 (defn- config-invalid!
   "Throw a :config/invalid typed error carrying `message` and optional
@@ -178,7 +191,13 @@
                               :config/judge (:config/judge m)))
         (assoc :config/retention
                (merge-section (:config/retention base)
-                              :config/retention (:config/retention m))))))
+                              :config/retention (:config/retention m)))
+        (assoc :config/evolution-loop
+               (merge-section (:config/evolution-loop base)
+                              :config/evolution-loop (:config/evolution-loop m)))
+        (assoc :config/canary
+               (merge-section (:config/canary base)
+                              :config/canary (:config/canary m))))))
 
 (defn validate-config!
   "Validate `config` against ConfigSchema. Returns `config` unchanged on
@@ -197,7 +216,8 @@
   top-level keys are rejected before merging so they cannot be silently
   discarded by the per-section merge."
   #{:config/version :config/profiles
-    :config/model-routing :config/budget :config/judge :config/retention})
+    :config/model-routing :config/budget :config/judge :config/retention
+    :config/evolution-loop :config/canary})
 
 (defn- reject-unknown-keys!
   "Throw :config/invalid when `m` carries a top-level key outside the

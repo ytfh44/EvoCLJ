@@ -28,7 +28,7 @@
     (is (= 1 (:config/version (cfg/default-config))))
     (is (= {} (:config/profiles (cfg/default-config))))
     (is (= {} (:config/model-routing (cfg/default-config))))
-    (is (= {} (:config/budget (cfg/default-config))))
+    (is (= {:max-cost 0.0 :max-tokens 0} (:config/budget (cfg/default-config))))
     (is (= {} (:config/judge (cfg/default-config))))
     (is (= {} (:config/retention (cfg/default-config))))))
 
@@ -47,7 +47,7 @@
     (testing "overrides applied per section"
       (is (= 2 (:config/version c)))
       (is (= {:default :fast :fallback :cheap} (:config/model-routing c)))
-      (is (= {:hard-cap 100} (:config/budget c))))
+      (is (= {:max-cost 0.0 :max-tokens 0 :hard-cap 100} (:config/budget c))))
     (testing "the loaded config itself validates"
       (is (nil? (m/explain cfg/ConfigSchema c))))))
 
@@ -59,7 +59,7 @@
       (is (= {} (:config/model-routing c)))
       (is (= {} (:config/retention c))))
     (testing "overrides applied"
-      (is (= {:soft-cap 50} (:config/budget c)))
+      (is (= {:max-cost 0.0 :max-tokens 0 :soft-cap 50} (:config/budget c)))
       (is (= {:model :critic} (:config/judge c))))))
 
 (deftest load-config-merges-profiles-keywise
@@ -118,7 +118,7 @@
         r (cfg/resolve-profile c :fast)]
     (testing "section overrides are applied on top of defaults"
       (is (= {:default :fast} (:config/model-routing r)))
-      (is (= {:hard-cap 200} (:config/budget r))))
+      (is (= {:max-cost 0.0 :max-tokens 0 :hard-cap 200} (:config/budget r))))
     (testing "non-overridden sections fall back to defaults"
       (is (= 1 (:config/version r)))
       (is (= {} (:config/judge r)))
@@ -139,7 +139,7 @@
   (let [c (cfg/load-config {:config/model-routing {:default {:provider :acme :model :probe}}
                             :config/budget {:hard-cap 100}})]
     (testing "direct path"
-      (is (= {:hard-cap 100} (cfg/config-value c [:config/budget]))))
+      (is (= {:max-cost 0.0 :max-tokens 0 :hard-cap 100} (cfg/config-value c [:config/budget]))))
     (testing "nested path"
       (is (= :probe (cfg/config-value c [:config/model-routing :default :model]))))
     (testing "absent path returns nil"
@@ -199,3 +199,62 @@
     (is (= :config/invalid-transition (:error/type (ex-data e))))
     (is (= :proposed (:policy/status (ex-data e))))
     (is (= :proposed (:new-status (ex-data e))))))
+
+;; ============================================================================
+;; evolution-loop / canary / budget-extension (Tasks A3/B3/E1)
+;; ============================================================================
+
+(deftest default-config-includes-new-sections
+  (let [c (cfg/default-config)]
+    (testing "evolution-loop defaults"
+      (is (= {:max-generations 20
+              :plateau-window 5
+              :min-improvement 0.01
+              :stop-on-regression? true}
+             (:config/evolution-loop c))))
+    (testing "canary defaults"
+      (is (= {:healthy-window 50} (:config/canary c))))
+    (testing "budget extension defaults"
+      (is (= {:max-cost 0.0 :max-tokens 0} (:config/budget c))))
+    (testing "the default config still validates (new sections included)"
+      (is (nil? (m/explain cfg/ConfigSchema c))))))
+
+(deftest load-config-overrides-partial-evolution-loop
+  (let [c (cfg/load-config {:config/evolution-loop {:max-generations 3}})]
+    (testing "overridden key takes the new value"
+      (is (= 3 (:max-generations (:config/evolution-loop c))))
+      (is (= 3 (cfg/config-value c [:config/evolution-loop :max-generations]))))
+    (testing "non-overridden keys fall back to defaults"
+      (is (= 5 (:plateau-window (:config/evolution-loop c))))
+      (is (= 0.01 (:min-improvement (:config/evolution-loop c))))
+      (is (= true (:stop-on-regression? (:config/evolution-loop c)))))
+    (testing "other new section defaults are untouched"
+      (is (= {:healthy-window 50} (:config/canary c))))
+    (testing "loaded config validates"
+      (is (nil? (m/explain cfg/ConfigSchema c))))))
+
+(deftest load-config-overrides-canary-and-budget
+  (let [c (cfg/load-config {:config/canary {:healthy-window 10}
+                            :config/budget {:max-cost 5.0 :max-tokens 100}})]
+    (testing "canary override applies"
+      (is (= 10 (:healthy-window (:config/canary c))))
+      (is (= 10 (cfg/config-value c [:config/canary :healthy-window]))))
+    (testing "budget extension override applies and coexists with prior keys"
+      (is (= 5.0 (:max-cost (:config/budget c))))
+      (is (= 100 (:max-tokens (:config/budget c)))))
+    (testing "loaded config validates"
+      (is (nil? (m/explain cfg/ConfigSchema c))))))
+
+(deftest load-config-budget-extension-default-and-override
+  (testing "budget extension defaults to 0.0 / 0 when absent"
+    (let [c (cfg/load-config {:config/budget {:hard-cap 100}})]
+      (is (= 0.0 (:max-cost (:config/budget c))))
+      (is (= 0 (:max-tokens (:config/budget c))))
+      (is (= 100 (:hard-cap (:config/budget c))))))
+  (testing "budget extension is overridable"
+    (let [c (cfg/load-config {:config/budget {:max-cost 2.5 :max-tokens 42}})]
+      (is (= 2.5 (:max-cost (:config/budget c))))
+      (is (= 42 (:max-tokens (:config/budget c))))))
+  (testing "canary is overridable and absent keys still fall back"
+    (let [c (cfg/load-config {:config/canary {:healthy-window 7}})]
+      (is (= 7 (:healthy-window (:config/canary c)))))))
