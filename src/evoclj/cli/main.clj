@@ -91,6 +91,7 @@
    ["eval"]                   {:fn evolution/eval! :arity 0}
    ["eval-inspect"]           {:fn eval-inspect/eval-inspect! :arity 1}
    ["cycle"]                  {:fn evolution/cycle! :arity 0}
+    ["loop"]                   {:fn evolution/loop! :arity 0}
    ["promote"]                {:fn promotion/promote! :arity 0}
    ["rollback"]               {:fn promotion/rollback! :arity 0}
    ["lineage"]                {:fn promotion/lineage! :arity 1}

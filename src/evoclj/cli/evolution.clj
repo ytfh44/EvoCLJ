@@ -22,7 +22,9 @@
             [evoclj.genome.load :as load]
             [evoclj.genome.path :as gpath]
             [evoclj.kernel.error :as err]
-            [evoclj.promotion.promote :as promote]
+            [evoclj.config :as config]
+             [evoclj.evolution.scheduler :as scheduler]
+             [evoclj.promotion.promote :as promote]
             [evoclj.store.cas :as cas]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
@@ -578,4 +580,155 @@
          :phases {:evolve evolve-report
                   :eval evals
                   :promote promotes}}))))
+
+;; --- loop: the long-horizon operator command (Task A2) ----------------------
+
+(defn- load-loop-config
+  "The F5 `:config/evolution-loop` section for `opts` — the loop-config
+  `run-cycles!` consults. Read from the SAME config envelope the host
+  builds (foundation F5: defaults deep-merged with the config source —
+  the `:config` map / EDN string or the EVOCLJ_CONFIG file — then the
+  selected profile resolved). The CLI's env scalar overrides and the
+  :demo profile only touch `:config/budget`, so `:config/evolution-loop`
+  is unaffected by them; this mirrors session/config-envelope's
+  resolution of the envelope without duplicating its private helpers."
+  [opts]
+  (let [env (or (:env opts) (System/getenv))
+        profile-key (some-> (or (:config/profile opts)
+                                (get env "EVOCLJ_PROFILE"))
+                            keyword)
+        source (or (:config opts)
+                   (when-let [f (get env "EVOCLJ_CONFIG")] (slurp f))
+                   {})
+        loaded (config/load-config source)
+        profiled (if profile-key
+                   (config/resolve-profile loaded profile-key)
+                   loaded)]
+    (:config/evolution-loop (config/validate-config! profiled))))
+
+(defn- build-loop-evaluator
+  "The evaluator value the scheduler runner reuses for EVERY candidate of
+  the CURRENT generation. Mirrors session/build-evaluator (which `cycle`
+  calls PER candidate) but folds all the generation's candidates into one
+  `:genome/roots` map — run-pipeline's resolve-root! needs the parent
+  generation root AND every candidate's root — so a single evaluator
+  value serves the whole generation."
+  [opts system generation-id]
+  (let [es (:eval/system system)
+        parent-genome-id (session/generation-genome-id system generation-id)
+        parent-root (session/resolve-bundle-root opts parent-genome-id)
+        cands (candidates-for-generation system generation-id)
+        roots (into {generation-id parent-root}
+                    (map (fn [c]
+                           [(str (:candidate/id c))
+                            (session/candidate-bundle-root opts (:candidate/genome-id c))])
+                         cands))]
+    {:store (:store es)
+     :provider/catalog (:provider/catalog es)
+     :kernel/abi (:kernel/abi es)
+     :profiles (:profiles es)
+     :genome/roots roots
+     :selection/cases (:selection/cases es)
+     :selection/fixtures (:selection/fixtures es)
+     :replay/cases (:replay/cases es)
+     :replay/fixtures (:replay/fixtures es)
+     :programs (fn [_loaded] [session/route-descriptor])}))
+
+(defn- build-loop-promotion-system
+  "The promotion-system value the scheduler runner reuses (mirrors the
+  per-candidate promotion-system `cycle` builds). Anchored to the
+  CURRENT generation's operator session; the resolution id is compiled
+  from the first candidate's bundle (a real loop promotes only when
+  candidates exist, so the first candidate is representative). With no
+  candidates yet a `:derive` placeholder is used — `promote!` is only
+  reached for passing candidates, which implies candidates exist."
+  [opts system generation-id]
+  (let [store (session/store-of system)
+        cands (candidates-for-generation system generation-id)
+        first-cand (first cands)]
+    (if first-cand
+      (let [op-session (session/operator-session! opts system generation-id)
+            candidate-root (session/candidate-bundle-root
+                            opts (:candidate/genome-id first-cand))]
+        {:store store
+         :resolution/id (compiled-resolution-id candidate-root)
+         :event/session-id op-session})
+      {:store store
+       :resolution/id nil
+       :event/session-id :derive})))
+
+(defn loop!
+  "evoclj loop [--max-cycles <n>] [--no-promote] [--profile <profile-id>]
+
+  The long-horizon operator command (Task A2): repeatedly walk the full
+  loop — evolve → eval → promote — through the EXISTING single-generation
+  public APIs, exactly as `cycle` does, but across MANY generations until
+  the loop policy (evoclj.evolution.loop-policy) stops it.
+
+  It reuses `cycle`'s host wiring — session/build-system, the F5 config
+  envelope, the provider catalog, and the session helpers — to construct
+  the production one-generation runner (scheduler/make-generation-runner)
+  and drives it with scheduler/run-cycles!. `cycle` is NOT modified: this
+  is additive wiring only.
+
+  Options:
+    --max-cycles <n>  hard safety cap on generations executed (default
+                      1000, the same default run-cycles! applies).
+    --no-promote      run evolve/eval but never move the CURRENT pointer;
+                      the scheduler runner records would-be promotions.
+    --profile <id>    evaluation profile id (default :default-v1).
+
+  loop-config is the F5 `:config/evolution-loop` section
+  (:max-generations :plateau-window :min-improvement :stop-on-regression?),
+  read from the config envelope.
+
+  Returns the scheduler's advisor map, printed as EDN by the CLI:
+    {:generations [...] :final-decision <kw> :stop-reason <str>
+     :cycles <int>}"
+  [opts]
+  (let [max-cycles (max-candidates-arg (get-in opts [:options :max-cycles]))
+        no-promote? (boolean (get-in opts [:options :no-promote]))
+        profile-id (or (some-> (get-in opts [:options :profile]) keyword)
+                       :default-v1)
+        system (session/build-system opts)
+        es (:evolution/system system)
+        ;; the CURRENT pointer read; nil when no generation is current
+        ;; (the runner then throws :scheduler/no-current)
+        current-id (fn [] (:generation/id (session/current-generation-info system)))
+        gen-id (current-id)
+        ;; the evolution-system's genome-loader resolves the CURRENT
+        ;; generation's parent genome at CALL time (the pointer moves
+        ;; between generations, so it reads live each step)
+        evolution-system (assoc es
+                                :genome-loader
+                                (fn []
+                                  (let [g (current-id)]
+                                    (when-not g
+                                      (throw (ex-info "no CURRENT generation to evolve"
+                                                      {:error/type :scheduler/no-current})))
+                                    (session/load-genome-for-execution
+                                     (session/resolve-bundle-root
+                                      opts (session/generation-genome-id system g))))))
+        ;; the per-generation subsystem handles (built once from the
+        ;; CURRENT generation present at command start; the live pointer
+        ;; is re-read by current-id / candidates-for-generation each step)
+        evaluator (when gen-id
+                    (build-loop-evaluator opts system gen-id))
+        promotion-system (when gen-id
+                           (build-loop-promotion-system opts system gen-id))
+        candidates-for-generation (fn [gid] (candidates-for-generation system gid))
+        ctx {:evolution-system evolution-system
+             :evaluator evaluator
+             :promotion-system promotion-system
+             :profile-id profile-id
+             :current-generation-id current-id
+             :candidates-for-generation candidates-for-generation
+             :evidence-selector {:recent 3 :include-successes 1
+                                 :include-failures 2 :include-high-cost 1}
+             :max-candidates 3
+             :no-promote? no-promote?}
+        loop-config (load-loop-config opts)
+        run-generation (scheduler/make-generation-runner ctx)]
+    (scheduler/run-cycles! run-generation loop-config
+                           :max-cycles (or max-cycles 1000))))
 

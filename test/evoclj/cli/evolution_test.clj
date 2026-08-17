@@ -26,7 +26,9 @@
             [evoclj.cli.main :as main]
             [evoclj.genome.load :as load]
             [evoclj.store.migrate :as migrate]
-            [evoclj.store.sqlite :as sqlite])
+            [evoclj.config :as config]
+             [evoclj.evolution.scheduler :as scheduler]
+             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file FileVisitOption Files LinkOption OpenOption Paths)
            (java.nio.file.attribute FileAttribute)
@@ -333,3 +335,102 @@
         (is (not (contains? data :diff/files)))
         (is (not (contains? data :diff/identical?)))
         (is (= (UUID/fromString (:candidate-id ctx)) (:candidate/id data)))))))
+
+;; ============================================================================
+;; the CLI wiring — loop command (Task A2) through main/run / execute
+;; ============================================================================
+
+(defn- provision-loop-store!
+  "A minimal temp state dir: migrated db + state layout, NO generation
+  (so the loop command's ctx builds the evaluator/promotion-system as
+  nil placeholders — exactly what a loop with no CURRENT observes before
+  run-cycles! is invoked)."
+  []
+  (let [dir (temp-dir "evoclj-loop-state-")
+        _ (Files/createDirectories (Paths/get (str dir "/db") (make-array String 0))
+                                   (make-array FileAttribute 0))
+        db (sqlite/spec (str dir "/db/evoclj.db"))]
+    (migrate/migrate! db)
+    dir))
+
+(deftest loop-subcommand-dispatches-and-passes-ctx-and-loop-config
+  (let [dir (provision-loop-store!)
+        captured-ctx (atom nil)
+        captured (atom nil)
+        fake {:generations []
+              :final-decision :stop-max-gen
+              :stop-reason "reached hard safety cap max-cycles 0"
+              :cycles 0}]
+    (testing "the command is parsed, run-cycles! receives the ctx + loop-config,
+              and the summary is returned as EDN"
+      (with-redefs [scheduler/make-generation-runner
+                    (fn [ctx] (reset! captured-ctx ctx)
+                      (fn [] {:generation/id "g" :utility 0.0}))
+                    scheduler/run-cycles!
+                    (fn [_rg lc & {:keys [max-cycles]}]
+                      (reset! captured {:loop-config lc :max-cycles max-cycles})
+                      fake)]
+        (let [{:keys [exit data]} (main/execute ["loop"] {:state-dir dir})]
+          (is (= 0 exit))
+          (is (= fake data))
+          (testing "the output is the advisor map shape"
+            (is (= :stop-max-gen (:final-decision data)))
+            (is (contains? data :generations))
+            (is (contains? data :stop-reason))
+            (is (contains? data :cycles)))
+          (testing "loop-config is the F5 :config/evolution-loop section"
+            (is (= (:config/evolution-loop (config/default-config))
+                   (:loop-config @captured))))
+          (testing "ctx carries the production wiring keys"
+            (let [ctx @captured-ctx]
+              (is (fn? (:current-generation-id ctx)))
+              (is (fn? (:candidates-for-generation ctx)))
+              (is (map? (:evolution-system ctx)))
+              (is (false? (:no-promote? ctx)))
+              (is (= :default-v1 (:profile-id ctx))))))))))
+
+(deftest loop-subcommand-passes-no-promote-to-runner
+  (let [dir (provision-loop-store!)
+        captured-ctx (atom nil)
+        fake {:generations [] :final-decision :stop-max-gen
+              :stop-reason "x" :cycles 0}]
+    (with-redefs [scheduler/make-generation-runner
+                  (fn [ctx] (reset! captured-ctx ctx)
+                    (fn [] {:generation/id "g" :utility 0.0}))
+                  scheduler/run-cycles! (fn [& _] fake)]
+      (main/execute ["loop" "--no-promote"] {:state-dir dir})
+      (is (true? (:no-promote? @captured-ctx))))))
+
+(deftest loop-subcommand-passes-max-cycles-and-default
+  (let [dir (provision-loop-store!)
+        captured (atom nil)
+        fake {:generations [] :final-decision :stop-max-gen
+              :stop-reason "x" :cycles 0}]
+    (with-redefs [scheduler/make-generation-runner
+                  (fn [_] (fn [] {:generation/id "g" :utility 0.0}))
+                  scheduler/run-cycles!
+                  (fn [_ _ & {:keys [max-cycles]}]
+                    (reset! captured max-cycles) fake)]
+      (testing "the default --max-cycles is 1000"
+        (main/execute ["loop"] {:state-dir dir})
+        (is (= 1000 @captured)))
+      (testing "--max-cycles <n> is forwarded"
+        (main/execute ["loop" "--max-cycles" "7"] {:state-dir dir})
+        (is (= 7 @captured))))))
+
+(deftest loop-subcommand-output-is-edn
+  (let [dir (provision-loop-store!)
+        fake {:generations [{:generation/id "generation-1"
+                              :utility 0.5 :parent/utility 0.0}]
+              :final-decision :stop-plateau
+              :stop-reason "plateau reached"
+              :cycles 3}]
+    (with-redefs [scheduler/make-generation-runner
+                  (fn [_] (fn [] {:generation/id "g" :utility 0.0}))
+                  scheduler/run-cycles! (fn [& _] fake)]
+      (let [{:keys [exit data]} (main/execute ["loop"] {:state-dir dir})]
+        (is (= 0 exit))
+        (is (= fake data))
+        (is (= :stop-plateau (:final-decision data)))
+        (is (= 3 (:cycles data)))
+        (is (= 1 (count (:generations data))))))))
