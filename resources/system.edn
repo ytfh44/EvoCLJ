@@ -29,13 +29,31 @@
  {:root "cas"
   :verify false}
 
- ;; The kernel-owned provider registry (Global Constraint 19): the
- ;; :providers catalog names concrete adapters by :provider/type; the
- ;; host constructs and registers them at startup (fail-closed).
- :provider/registry
- {:providers [{:provider/type :fixture/echo}
-              {:provider/type :fixture/non-idempotent}
-             {:provider/type :memory/kv}]}
+  ;; The kernel-owned provider registry (Global Constraint 19): the
+  ;; :providers catalog names concrete adapters by :provider/type; the
+  ;; host constructs and registers them at startup (fail-closed).
+  ;;
+  ;; Available provider types:
+  ;;
+  ;;   :fixture/echo          - pure echo tool (seed Genome)
+  ;;   :fixture/non-idempotent - non-idempotent echo tool
+  ;;   :memory/kv             - kernel-owned episodic memory (requires store)
+  ;;   :mcp/bridge            - remote MCP server tool (requires :tool/mcp-name)
+  ;;
+  ;; MCP bridge example (uncomment to enable):
+  ;;
+  ;;   {:provider/type :mcp/bridge
+  ;;    :tool/id :my/remote-tool
+  ;;    :tool/mcp-name "server-tool-name"
+  ;;    :input-schema [:map [:arg :string]]
+  ;;    :output-schema [:map [:result :string]]
+  ;;    :transport-config {:type :stdio
+  ;;                       :command "npx"
+  ;;                       :args ["-y" "@modelcontextprotocol/server-example"]}}
+  :provider/registry
+  {:providers [{:provider/type :fixture/echo}
+               {:provider/type :fixture/non-idempotent}
+               {:provider/type :memory/kv}]}
 
  :capability/broker
  {:registry #ig/ref :provider/registry

@@ -86,6 +86,7 @@
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
             [evoclj.provider.fixture :as fixture]
+            [evoclj.provider.mcp-bridge :as mcp-bridge]
             [evoclj.provider.memory :as memory]
             [evoclj.provider.model-registry :as model-registry]
             [evoclj.provider.modelsdev :as modelsdev]
@@ -245,6 +246,8 @@
       ;; :memory/kv closes over the SQLite spec so its store handle never
       ;; crosses the Provider protocol boundary (feature R1).
       :memory/kv (memory/memory-provider (assoc opts :store store))
+      ;; MCP bridge: remote tool provider, no store injection needed.
+      :mcp/bridge (mcp-bridge/mcp-provider opts)
       (throw (err/error :provider/catalog-invalid
                         (str "unknown :provider/type " type)
                         {:provider/type type

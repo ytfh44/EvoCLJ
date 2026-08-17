@@ -1,14 +1,15 @@
 {:paths ["src" "resources"]
- :deps {org.clojure/clojure {:mvn/version "1.12.5"}
-        metosin/malli {:mvn/version "0.20.1"}
-        integrant/integrant {:mvn/version "1.0.1"}
-        org.babashka/sci {:mvn/version "0.15.58"}
-        rewrite-clj/rewrite-clj {:mvn/version "1.2.55"}
-        org.xerial/sqlite-jdbc {:mvn/version "3.49.1.0"}
-        org.clojure/java.jdbc {:mvn/version "0.7.12"}
-        com.openai/openai-java {:mvn/version "4.50.0"}
-        com.anthropic/anthropic-java {:mvn/version "2.54.0"}
-        cheshire/cheshire {:mvn/version "5.13.0"}}
+  :deps {org.clojure/clojure {:mvn/version "1.12.5"}
+         metosin/malli {:mvn/version "0.20.1"}
+         integrant/integrant {:mvn/version "1.0.1"}
+         org.babashka/sci {:mvn/version "0.15.58"}
+         rewrite-clj/rewrite-clj {:mvn/version "1.2.55"}
+         org.xerial/sqlite-jdbc {:mvn/version "3.49.1.0"}
+         org.clojure/java.jdbc {:mvn/version "0.7.12"}
+         com.openai/openai-java {:mvn/version "4.50.0"}
+         com.anthropic/anthropic-java {:mvn/version "2.54.0"}
+         cheshire/cheshire {:mvn/version "5.13.0"}
+         io.modelcontextprotocol.sdk/mcp {:mvn/version "2.0.0"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner

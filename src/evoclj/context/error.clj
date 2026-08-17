@@ -46,8 +46,9 @@
 
 (def ^:const crosscheck-mismatch
   "`:context/crosscheck-mismatch` — The envelope's structured fields
-  disagree with the todo/goal tools, and the disagreement is NOT
-  auto-correctable. Requires manual intervention."
+  disagree with the registered structured-field source of truth, and
+  the disagreement is NOT auto-correctable. Requires manual
+  intervention."
   :context/crosscheck-mismatch)
 
 (def ^:const idempotency-violation

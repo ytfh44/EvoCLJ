@@ -1,17 +1,16 @@
 (ns evoclj.context.residue
   "Residue manager — the non-structured, load-bearing memory of the
-  context-compression subsystem.
+   context-compression subsystem.
 
-  A residue entry captures the kind of thing structured tools (todo,
-  goal trackers) CANNOT cover: user constraints, rejected方案 with
-  reasons, discovered file paths / API shapes / dependency facts,
-  open questions, and temporary bad states. It is the agent's
-  autobiography.
+   A residue entry captures the kind of thing structured tools CANNOT
+   cover: user constraints, rejected方案 with reasons, discovered file
+   paths / API shapes / dependency facts, open questions, and
+   temporary bad states. It is the agent's autobiography.
 
-  Every residue entry carries a stable identity key (:residue/text):
-  two entries with the same text are the same entry, regardless of
-  kind. This makes deduplication cheap and enforces that a constraint
-  restated is still the same constraint."
+   Every residue entry carries a stable identity key (:residue/text):
+   two entries with the same text are the same entry, regardless of
+   kind. This makes deduplication cheap and enforces that a constraint
+   restated is still the same constraint."
   (:require [evoclj.context.error :as err]))
 
 ;; ----------------------------------------------------------------------
