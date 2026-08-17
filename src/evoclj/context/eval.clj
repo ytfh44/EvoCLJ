@@ -122,15 +122,16 @@
    (eval-record eval-retention score (classify :retention score) details)))
 
 (defn eval-regression-score
-  "Score regression for `envelope` against `original-context` and `todo`.
+  "Score regression for `envelope` against `original-context`.
 
-  In v0 this is a stub. The host should fill this in by running
-  crosscheck against the original todo and checking for mismatches.
+   In v0 this is a stub. The host should fill this in by checking
+   whether the envelope's structured fields are consistent with the
+   original context.
 
-  Returns an eval record map."
-  ([envelope original-context todo score]
-   (eval-regression-score envelope original-context todo score nil))
-  ([envelope original-context todo score details]
+   Returns an eval record map."
+  ([envelope original-context score]
+   (eval-regression-score envelope original-context score nil))
+  ([envelope original-context score details]
    (envelope/validate-envelope envelope)
    (when-not (number? score)
      (throw (err/error :context/compression-invalid
@@ -141,6 +142,21 @@
                        "score must be between 0.0 and 1.0"
                        {:score score})))
    (eval-record eval-regression score (classify :regression score) details)))
+
+;; ---------------------------------------------------------------------------
+;; Deprecated backward-compatible wrappers
+;; ---------------------------------------------------------------------------
+
+(defn eval-regression-score-deprecated
+  "DEPRECATED: use `eval-regression-score` (2-arg) instead.
+
+   The `todo` parameter is ignored; regression scoring no longer
+   depends on a specific todo tool. Kept for backward compatibility
+   during migration."
+  ([envelope original-context todo score]
+   (eval-regression-score envelope original-context score nil))
+  ([envelope original-context todo score details]
+   (eval-regression-score envelope original-context score details)))
 
 (defn eval-hallucination-score
   "Score hallucination for `envelope` against `original-context`.

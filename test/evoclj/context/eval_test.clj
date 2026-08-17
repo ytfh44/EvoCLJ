@@ -58,14 +58,14 @@
 ;; ---------------------------------------------------------------------------
 
 (t/deftest regression-score-within-bounds
-  (let [record (ev/eval-regression-score (sample-envelope) "ctx" {} 0.95)]
+  (let [record (ev/eval-regression-score (sample-envelope) "ctx" 0.95)]
     (t/is (= :eval/regression (:eval/class record)))
     (t/is (= 0.95 (:eval/score record)))
     (t/is (= :status/pass (:eval/status record)))))
 
 (t/deftest regression-score-throws-on-non-number
   (try
-    (ev/eval-regression-score (sample-envelope) "ctx" {} nil)
+    (ev/eval-regression-score (sample-envelope) "ctx" nil)
     (t/is false "should have thrown")
     (catch Exception e
       (t/is (= :context/compression-invalid (:error/type (ex-data e)))))))
@@ -90,7 +90,7 @@
 
 (t/deftest eval-summary-worst-status-wins
   (let [records [(ev/eval-retention-score (sample-envelope) "ctx" 0.9)
-                 (ev/eval-regression-score (sample-envelope) "ctx" {} 0.3)
+                 (ev/eval-regression-score (sample-envelope) "ctx" 0.3)
                  (ev/eval-hallucination-score (sample-envelope) "ctx" 0.8)]
         summary (ev/eval-summary records)]
     (t/is (= :status/fail (:eval/overall-status summary)))
@@ -98,7 +98,7 @@
 
 (t/deftest eval-summary-all-pass
   (let [records [(ev/eval-retention-score (sample-envelope) "ctx" 0.9)
-                 (ev/eval-regression-score (sample-envelope) "ctx" {} 0.95)
+                 (ev/eval-regression-score (sample-envelope) "ctx" 0.95)
                  (ev/eval-hallucination-score (sample-envelope) "ctx" 0.9)]
         summary (ev/eval-summary records)]
     (t/is (= :status/pass (:eval/overall-status summary)))))
