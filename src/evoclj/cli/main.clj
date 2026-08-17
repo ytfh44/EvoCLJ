@@ -31,6 +31,7 @@
   (:require [clojure.pprint :as pprint]
             [clojure.string :as str]
             [evoclj.cli.cost :as cost]
+            [evoclj.cli.deploy :as deploy]
             [evoclj.cli.eval-inspect :as eval-inspect]
             [evoclj.cli.evolution :as evolution]
             [evoclj.cli.genome :as genome]
@@ -92,6 +93,7 @@
    ["eval-inspect"]           {:fn eval-inspect/eval-inspect! :arity 1}
    ["cycle"]                  {:fn evolution/cycle! :arity 0}
     ["loop"]                   {:fn evolution/loop! :arity 0}
+    ["deploy"]                 {:fn deploy/deploy! :arity 0}
    ["promote"]                {:fn promotion/promote! :arity 0}
    ["rollback"]               {:fn promotion/rollback! :arity 0}
    ["lineage"]                {:fn promotion/lineage! :arity 1}
