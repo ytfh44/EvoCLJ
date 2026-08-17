@@ -91,6 +91,7 @@
   :eval/paired-case-not-found, :eval/paired-case-invalid,
   :eval/paired-equiv-unknown, :eval/paired-result-contaminated."
   (:require [evoclj.eval.runner :as runner]
+             [evoclj.eval.leakage :as leakage]
             [evoclj.genome.hash :as hash]
             [evoclj.kernel.error :as err]
             [evoclj.runtime.usage :as usage])
@@ -342,6 +343,92 @@
     (> parent-score candidate-score) :parent-wins
     (zero? parent-score) :both-failed
     :else :tie))
+
+;; --- leakage red-light guard (exam-leakage red-light check) -----------------
+
+(defn guard-leakage
+  "Pure red-light guard run BEFORE scoring a candidate on a selection
+  case. `candidate-program-text` is the candidate genome's
+  program/source text; `case-text` is the case's text (problem
+  statement / expected output / identifiers). Missing text is treated
+  as \"\".
+
+  Returns:
+
+      {:contaminated? true  :reason \"candidate text embeds case keywords\"}
+          when (leakage/contaminated? candidate-program-text case-text)
+          is true — i.e. the candidate appears to have memorised the
+          case's own keywords;
+
+      {:contaminated? false}
+          otherwise — no red-light, proceed with normal evaluation.
+
+  Pure and deterministic; a thin wrapper around evoclj.eval.leakage so
+  the paired pipeline has a single, named integration point."
+  [candidate-program-text case-text]
+  (if (leakage/contaminated? (str candidate-program-text) (str case-text))
+    {:contaminated? true
+     :reason "candidate text embeds case keywords"}
+    {:contaminated? false}))
+
+(defn evaluate-case-with-guard
+  "Single-case evaluation entry that applies the leakage red-light guard.
+
+  `candidate-program-text` and `case-text` are strings (the candidate
+  genome's program/source text and the case's text respectively);
+  `evaluate` is a 0-arg fn returning the NORMAL case result map, which
+  must carry at least `:status` and `:utility`.
+
+  If the candidate text embeds the case keywords (`guard-leakage`
+  returns `:contaminated?` true), the case is flagged and the normal
+  evaluation is NOT run:
+
+      {:status :contaminated :utility 0.0 :reason \"leakage red-light\"}
+
+  A contaminated case therefore neither adds to nor subtracts from the
+  utility sum — it is merely marked and is meant to be counted under a
+  separate `:contaminated-count` by the aggregator (see
+  `summarize-utility`). Otherwise `evaluate` runs unchanged (the string
+  \"分文未动\" — not a single character touched).
+
+  NOTE ON THE MAIN LOOP: `run-paired-selection!` evaluates genome
+  bundles through the SCI runner and resolves the candidate program
+  text out of its bundle on demand; callers that want the guard inside
+  that loop should extract the candidate's program text and wrap the
+  per-case evaluation in this entry. The function itself is pure aside
+  from the supplied `evaluate`."
+  [candidate-program-text case-text evaluate]
+  (let [guard (guard-leakage candidate-program-text case-text)]
+    (if (:contaminated? guard)
+      {:status :contaminated
+       :utility 0.0
+       :reason "leakage red-light"}
+      (evaluate))))
+
+(defn summarize-utility
+  "Aggregate a sequence of per-case result maps (as produced by
+  `evaluate-case-with-guard` and the normal evaluator) into a utility
+  summary.
+
+  Contaminated cases (`:status :contaminated`) carry `:utility 0.0` and
+  are NOT added to the normal utility sum — they are only flagged and
+  counted under `:contaminated-count`. Returns:
+
+      {:utility n :contaminated-count k :cases m}
+
+  where `:utility` is the sum of `:utility` over NON-contaminated cases,
+  `:contaminated-count` is how many cases tripped the red-light, and
+  `:cases` is the total number of cases."
+  [case-results]
+  (let [results (vec case-results)
+        contaminated (filter #(= :contaminated (:status %)) results)]
+    {:utility (reduce + 0.0
+                     (keep (fn [r]
+                             (when-not (= :contaminated (:status r))
+                               (:utility r)))
+                           results))
+     :contaminated-count (count contaminated)
+     :cases (count results)}))
 
 (defn- build-pair
   "One pair record: the derived persisted seed (Step 1), the
