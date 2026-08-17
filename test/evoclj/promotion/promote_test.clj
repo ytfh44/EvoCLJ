@@ -217,7 +217,7 @@
   The single-candidate convenience keys (:candidate/id :evaluation/id
   :candidate/genome-id :event/session-id) point at the first candidate."
   ([] (promotion-fixture {}))
-  ([{:keys [n-candidates eligibility parent-generation]}]
+  ([{:keys [n-candidates eligibility parent-generation genome-body]}]
    (let [db (fresh-db)
          cas-root (temp-cas-root)
          cas (cas/->cas cas-root)
@@ -233,7 +233,7 @@
                              genome-id (:artifact/id
                                         (cas/put-bytes!
                                          cas
-                                         (.getBytes (str "candidate genome body " i)
+                                         (.getBytes (or genome-body (str "candidate genome body " i))
                                                     StandardCharsets/UTF_8)
                                          {}))
                              sid (operator-session! db)]
@@ -552,3 +552,48 @@
              (-> (tx-error #(promote/promote! (dissoc (promotion-system fx) :store)
                                               (promote-request fx)))
                  ex-data :error/type))))))
+
+;; ============================================================================
+;; SCI sandbox static recheck gate (Task: promote-gate heuristic)
+;; ============================================================================
+
+(deftest sci-sandbox-gate-rejects-dangerous-and-allows-safe-source
+  (testing "a candidate program with dangerous interop is rejected by the gate"
+    (let [r (promote/sci-sandbox-gate "(System/exit 0)")]
+      (is (false? (:passed? r)))
+      (is (seq (:violations r)))))
+  (testing "a pure-function candidate program passes the gate"
+    (let [r (promote/sci-sandbox-gate "(defn f [x] (+ x 1))")]
+      (is (true? (:passed? r)))
+      (is (empty? (:violations r)))))
+  (testing "a multi-file genome fails when ANY program hits a red light"
+    (let [r (promote/sci-sandbox-gate ["(defn f [x] (+ x 1))" "(Thread/sleep 0)"])]
+      (is (false? (:passed? r)))
+      (is (seq (:violations r)))))
+  (testing "a multi-file genome passes only when EVERY program is safe"
+    (let [r (promote/sci-sandbox-gate ["(defn f [x] (+ x 1))" "(defn g [y] (* y 2))"])]
+      (is (true? (:passed? r)))
+      (is (empty? (:violations r))))))
+
+(deftest sci-sandbox-gate-blocks-promotion-of-dangerous-candidate
+  (let [fx (promotion-fixture {:genome-body "(System/exit 0)"})
+        db (:db fx)
+        e (tx-error #(promote/promote! (promotion-system fx) (promote-request fx)))]
+    (testing "the promotion is rejected with a typed sci-sandbox error"
+      (is (= :promotion/sci-sandbox-failed (:error/type (ex-data e))))
+      (is (= "sci sandbox recheck failed" (:reason (ex-data e))))
+      (is (seq (:violations (ex-data e)))))
+    (testing "CURRENT is untouched and nothing was written"
+      (let [rows (current-rows db)]
+        (is (= 1 (count rows)))
+        (is (= seed-gen (:id (first rows)))))
+      (is (empty? (promotion-rows db)))
+      (is (= "eligible" (:state (candidate-row db (:candidate/id fx))))))))
+
+(deftest sci-sandbox-gate-allows-safe-candidate-to-promote
+  (let [fx (promotion-fixture {:genome-body "(defn f [x] (+ x 1))"})
+        result (promote/promote! (promotion-system fx) (promote-request fx))]
+    (testing "the safe candidate promotes normally; the gate does not interrupt"
+      (is (= :promoted (:status result)))
+      (is (= (:generation/id fx) (:from result)))
+      (is (string? (:to result))))))

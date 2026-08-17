@@ -138,10 +138,12 @@
             [evoclj.kernel.error :as err]
             [evoclj.promotion.current :as current]
             [evoclj.promotion.state :as state]
+             [evoclj.security.sci-recheck :as recheck]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.sqlite :as sqlite])
-  (:import (java.time Instant)
+  (:import (java.nio.charset StandardCharsets)
+            (java.time Instant)
            (java.time.format DateTimeFormatter)
            (java.util Date UUID)))
 
@@ -340,9 +342,11 @@
   a missing body (:store/cas-missing) or corrupted body
   (:store/cas-corrupt) fails loudly before any write."
   [cas-config genome-id]
-  (let [root (if (map? cas-config) (:root cas-config) cas-config)]
-    (cas/get-bytes (cas/->cas root {:verify true}) genome-id))
-  nil)
+  (let [root (if (map? cas-config) (:root cas-config) cas-config)
+        bytes (cas/get-bytes (cas/->cas root {:verify true}) genome-id)]
+    ;; the verified body IS the candidate's evolvable SCI program source;
+    ;; return it so the promote flow can run the SCI sandbox recheck gate
+    (String. ^bytes bytes StandardCharsets/UTF_8)))
 
 (defn- read-event-anchor!
   "Validate the :promotion/* event anchor INSIDE the transaction (so a
@@ -369,6 +373,33 @@
       sess)))
 
 ;; --- the stale path ------------------------------------------------------------
+
+(defn sci-sandbox-gate
+  "Pure red-light gate run BEFORE promotion (Task: promote-gate
+  heuristic). The candidate's evolvable SCI program source — a single
+  string, or a collection of strings for multi-file genomes — is scanned
+  by evoclj.security.sci-recheck/recheck-candidate. ANY hit across ANY
+  program fails the gate (fail-closed); only when EVERY program is safe
+  does the gate pass.
+
+  Returns {:passed? <bool> :violations [{:pattern :match} ...]},
+  where :passed? is true exactly when every program rechecks safe
+  ((:safe? r) true for all). Pure function: no IO, no randomness,
+  deterministic over the source text."
+  [program-source]
+  (let [programs (cond
+                  (nil? program-source) []
+                  (string? program-source) [program-source]
+                  (sequential? program-source) (mapv str program-source)
+                  :else [program-source])
+        violations
+        (->> programs
+             (mapcat (fn [src]
+                       (:violations (recheck/recheck-candidate src))))
+             (keep identity)
+             vec)]
+    {:passed? (empty? violations)
+     :violations violations}))
 
 (defn- record-stale!
   "The CAS-loser path (Task 9.1: :evaluated → :stale, the sibling that
@@ -554,7 +585,18 @@
                                        :to-generation new-gen}]
                            ;; Database Invariant 7: the Genome exists and
                            ;; re-hashes before activation
-                           (verify-genome-integrity! cas-config (:genome_id candidate))
+                           ;; Database Invariant 7: the Genome exists and
+                            ;; re-hashes before activation; its verified
+                            ;; body IS the candidate's evolvable SCI program
+                            ;; source, which we run through the SCI sandbox
+                            ;; static recheck gate BEFORE any write (fail-closed).
+                            (let [source (verify-genome-integrity! cas-config (:genome_id candidate))
+                                  gate (sci-sandbox-gate source)]
+                              (when-not (:passed? gate)
+                                (throw (err/error :promotion/sci-sandbox-failed
+                                                  "sci sandbox recheck failed"
+                                                  {:reason "sci sandbox recheck failed"
+                                                   :violations (:violations gate)}))))
                            ;; mark new generation → active FIRST: the
                            ;; promotions.to_generation_id FK requires the
                            ;; target row to pre-exist (documented reorder,
