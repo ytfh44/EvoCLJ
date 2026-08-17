@@ -1,5 +1,27 @@
+# Normalize every text file to LF on commit and check out as LF.
+# This keeps the repository free of CRLF noise across platforms.
 * text=auto eol=lf
-*.edn text eol=lf
-*.clj text eol=lf
-*.cljc text eol=lf
-*.md text eol=lf
+
+# Explicit source and config types (defensive; text=auto already covers
+# text files, but naming them removes any ambiguity and protects against
+# future extensions that text=auto might mis-classify).
+*.clj   text eol=lf
+*.cljc  text eol=lf
+*.cljs  text eol=lf
+*.edn   text eol=lf
+*.md    text eol=lf
+*.sql   text eol=lf
+*.json  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.sh    text eol=lf
+*.csv   text eol=lf
+*.txt   text eol=lf
+
+# Binary assets must never be line-ending normalized or diffed as text.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.pdf  binary
+*.zip  binary
