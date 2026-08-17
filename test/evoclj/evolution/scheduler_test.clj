@@ -44,6 +44,71 @@
              {:generation/id (str "generation-" @calls)
               :utility (double (nth xs i))}))}))
 
+
+;; --- cost-guard wiring (Task E3) ---------------------------------------------
+
+(defn- cost-run-generation
+  "A mock `run-generation` that returns `:utility` and `:cost` from
+  `values` in order (repeating the last value past the end), recording
+  the call count in `:calls`."
+  [values]
+  (let [xs (vec values)
+        calls (atom 0)]
+    {:calls calls
+     :fn (fn []
+           (swap! calls inc)
+           (let [i (min (dec @calls) (dec (count xs)))]
+             {:generation/id (str "generation-" @calls)
+              :utility (double (nth xs i))
+              :cost (double (nth xs i))}))}))
+
+(deftest test-run-cycles-stops-on-cost
+  (testing "loop terminates with :stop-cost when cumulative cost exceeds threshold"
+    ;; utilities always improve so policy does not stop first; cumulative
+    ;; cost after 3 generations (0.3 + 0.5 + 0.7 = 1.5) exceeds 1.0.
+    (let [rg (cost-run-generation [0.3 0.5 0.7])
+          result (scheduler/run-cycles!
+                   (:fn rg)
+                   {:max-generations 20}
+                   :cost-guard {:threshold 1.0})]
+      (is (= :stop-cost (:final-decision result)))
+      (is (= 3 (:cycles result)))
+      (is (= 3 (count (:generations result))))
+      (is (re-find #"exceeds threshold" (:stop-reason result))))))
+
+(deftest test-run-cycles-continues-when-cost-below-threshold
+  (testing "loop continues to max-cycles when cost stays below threshold"
+    ;; max-generations is high so policy never stops; max-cycles is 2 so
+    ;; the safety cap terminates after two generations with cumulative
+    ;; cost 0.3 still below the 1.0 threshold.
+    (let [rg (cost-run-generation [0.1 0.2])
+          result (scheduler/run-cycles!
+                   (:fn rg)
+                   {:max-generations 100}
+                   :max-cycles 2
+                   :cost-guard {:threshold 1.0})]
+      (is (= :stop-max-cycles (:final-decision result)))
+      (is (= 2 (:cycles result))))))
+
+(deftest test-run-cycles-cost-guard-no-threshold-is-ignored
+  (testing "a cost-guard map without :threshold does not stop the loop"
+    (let [rg (cost-run-generation [0.5 0.6 0.7])
+          result (scheduler/run-cycles!
+                   (:fn rg)
+                   {:max-generations 3}
+                   :cost-guard {})]
+      (is (= :stop-max-gen (:final-decision result)))
+      (is (= 3 (:cycles result))))))
+
+(deftest test-run-cycles-no-cost-guard-unchanged
+  (testing "without :cost-guard the loop follows policy and cap only"
+    (let [rg (counting-run-generation [0.50 0.60 0.70])
+          result (scheduler/run-cycles!
+                   (:fn rg)
+                   {:max-generations 3})]
+      (is (= :stop-max-gen (:final-decision result)))
+      (is (= 3 (:cycles result)))
+      (is (= 3 (count (:generations result)))))))
 ;; --- loop termination integration --------------------------------------------
 
 (deftest test-run-cycles-stops-at-max-gen

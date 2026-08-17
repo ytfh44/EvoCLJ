@@ -32,9 +32,10 @@
   side effects and introduces no global state — every IO it triggers
   lives inside the injected `run-generation` step."
   (:require [evoclj.evolution.core :as evolution]
-            [evoclj.eval.core :as eval-core]
-            [evoclj.evolution.loop-policy :as lp]
-            [evoclj.promotion.promote :as promote]))
+             [evoclj.eval.core :as eval-core]
+             [evoclj.eval.cost-guard :as cost-guard]
+             [evoclj.evolution.loop-policy :as lp]
+             [evoclj.promotion.promote :as promote]))
 
 ;; --- helpers ----------------------------------------------------------------
 
@@ -94,6 +95,13 @@
                   (and `:parent/utility`); the first new generation's
                   `:parent/utility` is taken from the last seeded entry's
                   `:utility`.
+    :cost-guard — optional cost hard-stop map `{:threshold <number>}`.
+                  When present, cumulative cost (taken from each
+                  generation summary's `:cost` key, defaulting to 0.0
+                  when absent) is checked after each generation via
+                  `evoclj.eval.cost-guard/should-stop?`. A strict
+                  exceed triggers `:final-decision :stop-cost` and
+                  returns immediately.
 
   Loop (per the spec): run one generation → build its summary → conj onto
   `history` → call `decide-continue?` → if the `:decision` starts with
@@ -102,17 +110,19 @@
   Returns the advisor map:
     {:generations [summary ...]  ; newest LAST, each fully populated
      :final-decision <kw>        ; the loop-policy :decision (or
-                                  ; :stop-max-cycles for the safety cap)
+                                  ; :stop-max-cycles for the safety cap,
+                                  ; :stop-cost for the budget hard-stop)
      :stop-reason <str>
      :cycles <int>}              ; number of generations executed
 
   The controller introduces no global state and no new side effects: it
   only calls the injected `run-generation` (which performs the IO) and
   the pure policy."
-  [run-generation loop-config & {:keys [max-cycles history]
+  [run-generation loop-config & {:keys [max-cycles history cost-guard]
                                  :or {max-cycles 1000}}]
   (loop [hist (vec history)
-         cycles 0]
+         cycles 0
+         cumulative-cost 0.0]
     (if (>= cycles max-cycles)
       {:generations hist
        :final-decision :stop-max-cycles
@@ -120,13 +130,23 @@
        :cycles cycles}
       (let [summary (summarize-generation (run-generation) hist)
             hist' (conj hist summary)
+            step-cost (if (map? summary) (double (or (:cost summary) 0.0)) 0.0)
+            cumulative-cost' (+ cumulative-cost step-cost)
             {:keys [decision reason]} (lp/decide-continue? hist' loop-config)]
         (if (stop-decision? decision)
           {:generations hist'
            :final-decision decision
            :stop-reason reason
            :cycles (inc cycles)}
-          (recur hist' (inc cycles)))))))
+          (if (and cost-guard
+                   (:threshold cost-guard)
+                   (= :stop (cost-guard/should-stop? cumulative-cost' (:threshold cost-guard))))
+            {:generations hist'
+             :final-decision :stop-cost
+             :stop-reason (str "cumulative cost " cumulative-cost'
+                               " exceeds threshold " (:threshold cost-guard))
+             :cycles (inc cycles)}
+            (recur hist' (inc cycles) cumulative-cost')))))))
 
 ;; --- production one-generation wiring (reuses the public APIs) ----------------
 
@@ -175,20 +195,22 @@
   them from CLI opts — it calls the public entry points only.
 
   Returned fn: (fn [] -> summary-map). It:
-    1. reads the CURRENT generation id (throws `:scheduler/no-current`
-       when none);
-    2. `propose-candidates!` over it;
-    3. evaluates every `:evaluation-pending` candidate of the generation
-       under `:profile-id`;
-    4. `promote!` every candidate whose evaluation `:eligible?` is true
-       (skipping the pointer move when `:no-promote?`);
-    5. returns `{:generation/id <new-or-current id> :utility <double>}`
-       where `:utility` is the max candidate utility drawn from the
-       evaluated summaries'
-       `[:summary :utility :task/success :candidate]` rate (0.0 when no
-       evaluation completed — a real score requires a completed eval).
-       `:parent/utility` is intentionally omitted: `run-cycles!` fills it
-       from the previous generation's `:utility`."
+     1. reads the CURRENT generation id (throws `:scheduler/no-current`
+        when none);
+     2. `propose-candidates!` over it;
+     3. evaluates every `:evaluation-pending` candidate of the generation
+        under `:profile-id`;
+     4. `promote!` every candidate whose evaluation `:eligible?` is true
+        (skipping the pointer move when `:no-promote?`);
+     5. returns `{:generation/id <new-or-current id> :utility <double>
+        :cost <double>}` where `:utility` is the max candidate utility
+        drawn from the evaluated summaries'
+        `[:summary :utility :task/success :candidate]` rate (0.0 when no
+        evaluation completed — a real score requires a completed eval).
+        `:cost` is the sum of `:cost` across evaluated candidates (0.0
+        when none report cost). `:parent/utility` is intentionally
+        omitted: `run-cycles!` fills it from the previous generation's
+        `:utility`."
   [ctx]
   (let [evolution-system (:evolution-system ctx)
         evaluator (:evaluator ctx)
@@ -251,9 +273,11 @@
                                                  :task/success :candidate])
                                      scored))
                         0.0)
+              cost (reduce + 0.0 (keep :cost scored))
               new-id (or (some #(when (= :promoted (:status %))
                                   (:to %))
                                 promoted)
                          gen-id)]
           {:generation/id new-id
-           :utility (double utility)})))))
+           :utility (double utility)
+           :cost (double cost)})))))
