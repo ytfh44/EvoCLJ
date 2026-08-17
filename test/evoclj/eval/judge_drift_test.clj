@@ -1,6 +1,6 @@
 (ns evoclj.eval.judge-drift-test
   (:require [clojure.test :refer :all]
-            [evoclj.eval.judge-drift :refer [drift-score baseline]]))
+            [evoclj.eval.judge-drift :refer [drift-score baseline drift-alert]]))
 
 (defn approx=
   "Assert that `actual` and `expected` scalars are within `tol` (default 1e-9)
@@ -61,3 +61,27 @@
           cur {:not-equivalent 1.0}]
       (is (map-approx= (baseline hist) {:equivalent 1.0}))
       (is (approx= (drift-score hist cur) 2.0)))))
+
+(deftest test-drift-alert-below-threshold
+  (testing "drift 0.1, threshold 0.3 => no alert, action nil."
+    (let [r (drift-alert 0.1 0.3)]
+      (is (false? (:alert? r)))
+      (is (nil? (:action r)))
+      (is (= 0.1 (:drift r)))
+      (is (= 0.3 (:threshold r))))))
+
+(deftest test-drift-alert-above-threshold
+  (testing "drift 0.8, threshold 0.3 => alert true, action :recalibrate."
+    (let [r (drift-alert 0.8 0.3)]
+      (is (true? (:alert? r)))
+      (is (= :recalibrate (:action r)))
+      (is (= 0.8 (:drift r)))
+      (is (= 0.3 (:threshold r))))))
+
+(deftest test-drift-alert-at-threshold-boundary
+  (testing "drift equals threshold (0.3 vs 0.3) => not an alert (strict >)."
+    (let [r (drift-alert 0.3 0.3)]
+      (is (false? (:alert? r)))
+      (is (nil? (:action r)))
+      (is (= 0.3 (:drift r)))
+      (is (= 0.3 (:threshold r))))))

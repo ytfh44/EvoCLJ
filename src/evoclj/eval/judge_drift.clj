@@ -69,3 +69,26 @@
                             (double (get current k 0.0))))))
       0.0
       keys)))
+
+(defn drift-alert
+  "Decide whether a drift score warrants a recalibration alert.
+
+  `drift-score` is a numeric drift value (typically produced by `drift-score`,
+  or any pre-computed value). `threshold` is the alert threshold (numeric, e.g.
+  0.3).
+
+  Returns a map:
+    {:alert?    <bool>        ; true iff drift-score > threshold (strict)
+     :drift     <number>      ; the supplied drift-score
+     :threshold <number>      ; the supplied threshold
+     :action    <kw-or-nil>} ; :recalibrate when alerting, nil otherwise
+
+  This is a pure function (no IO, no randomness, fully deterministic). The
+  returned map is intended to be the data source that a later invoker records as
+  an `:eval/judge-drift` event; this function itself performs no such write."
+  [drift-score threshold]
+  (let [alert? (> drift-score threshold)]
+    {:alert?    alert?
+     :drift     drift-score
+     :threshold threshold
+     :action    (when alert? :recalibrate)}))
