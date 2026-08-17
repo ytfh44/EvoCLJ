@@ -4,8 +4,7 @@
             [clojure.edn :as edn]
             [evoclj.context.error :as err]
             [evoclj.context.envelope :as envelope]
-            [evoclj.context.trigger :as trigger]
-            [evoclj.context.compressor :as compressor]
+            [evoclj.context.compacter :as compacter]
             [evoclj.context.apply :as apply]
             [evoclj.context.eval :as eval]))
 
@@ -71,47 +70,48 @@
             marker (:marker options)
             model (:model options)
             run-eval? (:eval options)
-            context-str (read-context input)]
+            context-str (read-context input)
+            comp (compacter/->DefaultCompacter
+                   (fn [_]
+                     (pr-str {:task {:task/id "cli-task" :task/status :in-progress
+                                     :task/description "CLI compression"}
+                              :subgoals []
+                              :residue []
+                              :evidence []})))]
         (when (str/blank? context-str)
           (println "Error: input file is empty or missing")
           (System/exit 1))
-        (let [trigger-result (trigger/should-compress? context-str
-                                                        {:trigger/token-threshold threshold
-                                                         :trigger/marker marker})]
-          (if-not (:trigger/compressed? trigger-result)
-            (do
-              (println (str "No compression needed. Reason: "
-                            (:trigger/reason trigger-result)
-                            ", tokens: " (:trigger/token-count trigger-result)))
-              (System/exit 0))
-            (let [summary {:task {:task/id "cli-task" :task/status :in-progress
-                                  :task/description "CLI compression"}
-                           :subgoals []
-                           :residue []
-                           :evidence []}
-                  mock-call (fn [_] (pr-str summary))
-                  env (compressor/compress summary mock-call :model model
-                                           :tokens-before (:trigger/token-count trigger-result))
-                  applied (apply/apply-envelope env context-str)]
-              (write-context output applied)
-              (println (str "Compressed context written to " output))
-              (println (str "Tokens before: " (:envelope/tokens-before env)))
-              (println (str "Tokens after:  " (:envelope/tokens-after env)))
-              (when run-eval?
-                (let [eval-records [(eval/eval-retention-score env context-str 0.9)
-                                    (eval/eval-regression-score env context-str {} 0.9)
-                                    (eval/eval-hallucination-score env context-str 0.9)]
-                      eval-summary (eval/eval-summary eval-records)]
-                  (println "\n=== Eval ===")
-                  (println (str "Overall: " (:eval/overall-status eval-summary)))
-                  (doseq [r (:eval/records eval-summary)]
-                    (println (str "  " (:eval/class r) ": " (:eval/score r) " [" (:eval/status r) "]")))))
-              0)))))
-    (catch Exception e
-      (let [ed (ex-data e)]
-        (println "Error:" (or (:error/message ed) (.getMessage e))
-                 (when-let [t (:error/type ed)] (str "[" t "]")))
-        (System/exit 1)))))
+        (let [result (compacter/run context-str comp
+                                    {:model model
+                                     :token-threshold threshold
+                                     :marker marker
+                                     :eval? run-eval?})
+              env (:envelope result)
+              footer (:footer result)
+              applied (str (apply/envelope-prefix env)
+                           "\n\n"
+                           footer
+                           "\n\n"
+                           context-str)]
+          (write-context output applied)
+          (println (str "Compressed context written to " output))
+          (println (str "Tokens before: " (:envelope/tokens-before env)))
+          (println (str "Tokens after:  " (:envelope/tokens-after env)))
+          (when run-eval?
+            (let [eval-records [(eval/eval-retention-score env context-str 0.9)
+                                (eval/eval-regression-score env context-str 0.9)
+                                (eval/eval-hallucination-score env context-str 0.9)]
+                  eval-summary (eval/eval-summary eval-records)]
+              (println "\n=== Eval ===")
+              (println (str "Overall: " (:eval/overall-status eval-summary)))
+              (doseq [r (:eval/records eval-summary)]
+                (println (str "  " (:eval/class r) ": " (:eval/score r) " [" (:eval/status r) "]")))))
+          0)))
+     (catch Exception e
+       (let [ed (ex-data e)]
+         (println "Error:" (or (:error/message ed) (.getMessage e))
+                  (when-let [t (:error/type ed)] (str "[" t "]")))
+         (System/exit 1)))))
 
 (defn inspect-command [args]
   (try
