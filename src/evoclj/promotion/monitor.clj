@@ -82,6 +82,7 @@
             [malli.error :as me]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
+             [evoclj.promotion.canary :as canary]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.session :as session]
@@ -450,3 +451,114 @@
      :metrics/artifact artifact
      :running/actions running-actions
      :routing {:canary-active? false}}))
+
+;; --- the advance path (healthy-window auto-rollout) ---------------------------
+
+(def AdvanceThresholdsSchema
+  "The advance path's threshold contract (closed): `:healthy-window` is
+  the consecutive-observation count required before an auto-rollout may
+  advance; the remaining keys are the per-guardrail soft limits checked
+  (aggregates, exactly as `decide`) over the window."
+  [:map {:closed true}
+   [:healthy-window [:and int? [:fn (fn [x] (pos? x))]]]
+   [:min-samples [:and int? [:fn (fn [x] (pos? x))]]]
+   [:failure-rate fraction?]
+   [:cost-per-task nonneg-number?]
+   [:latency-per-task nonneg-number?]
+   [:provider-denial-rate fraction?]
+   [:operator-escalation-rate fraction?]])
+
+(def AdvanceSystemSchema
+  "The advance-canary! system contract (closed): the store (SQLite + CAS),
+  the operator session anchoring the :promotion/canary-advanced event
+  (its pinned generation becomes the event's :generation/id, mirroring
+  stop-canary! and promote!), and the advanced canary generation."
+  [:map {:closed true}
+   [:store [:map {:closed true}
+            [:sqlite any?]
+            [:cas any?]]]
+   [:event/session-id [:fn types/session-id?]]
+   [:canary/generation string?]])
+
+(defn- validate-advance-thresholds!
+  [thresholds]
+  (when-let [expl (m/explain AdvanceThresholdsSchema thresholds)]
+    (monitor-error! "thresholds" expl))
+  thresholds)
+
+(defn- validate-advance-system!
+  [system]
+  (when-let [expl (m/explain AdvanceSystemSchema system)]
+    (throw (err/error :promotion/system-invalid
+                      "advance system does not satisfy the online monitor contract"
+                      {:errors (me/humanize expl)})))
+  system)
+
+(defn- window-healthy?
+  "True iff the window observations are continuously healthy: NO hard
+  violations in any window observation, AND every soft aggregate
+  (failure-rate, cost-per-task, latency-per-task, provider-denial-rate,
+  operator-escalation-rate) is STRICTLY BELOW its threshold — exactly
+  the `decide` soft semantics, evaluated over the window aggregates."
+  [window thresholds]
+  (and (nil? (hard-violation window))
+       (every? (fn [guardrail]
+                 (let [observed (double (get (aggregates window) guardrail))
+                       limit (double (get thresholds guardrail))]
+                   (< observed limit)))
+               soft-order)))
+
+(defn advance-canary!
+  "When the canary has been healthy for `:healthy-window` consecutive
+  observations, advance its allocation by one ladder rung (via
+  `canary/advance-allocation`) and record a :promotion/canary-advanced
+  event on the operator session.
+
+  Returns {:deployment-state <updated-state> :event <event-map>}.
+
+  Throws the same error types as stop-canary! for malformed inputs:
+  :promotion/monitor-invalid, :promotion/system-invalid."
+  [system deployment-state observations thresholds]
+  (validate-advance-system! system)
+  (validate-advance-thresholds! thresholds)
+  (let [db (get-in system [:store :sqlite])
+        cas-config (get-in system [:store :cas])
+        session-key (str (:event/session-id system))
+        canary-gen (:canary/generation system)
+        n (:healthy-window thresholds)
+        obs (mapv (comp normalize-observation
+                      (fn [o] (validate-observation! o)))
+                  observations)]
+    (if (< (count obs) n)
+      ;; Not enough observations in hand — clean no-op: deployment-state
+      ;; is returned unchanged and no event is recorded.
+      {:deployment-state deployment-state :event nil}
+      (let [window (take-last n obs)
+            window-aggs (aggregates window)]
+        (if (window-healthy? window thresholds)
+          (let [updated (canary/advance-allocation deployment-state)
+                new-allocation (get-in updated [:canary :allocation])
+                ;; the health evidence pack (rows reference bodies — Global
+                ;; Constraint 21): the window observations plus aggregates
+                artifact (cas/put-bytes! cas-config
+                                         (.getBytes (pr-str {:health/observations window
+                                                             :health/aggregates window-aggs
+                                                             :healthy-window n})
+                                                    StandardCharsets/UTF_8)
+                                         {:media-type "application/edn"})
+                artifact-id (:artifact/id artifact)
+                anchor (read-event-anchor! db session-key)
+                advance-event (event/append-event! db
+                                                   {:session/id (types/session-id session-key)
+                                                    :generation/id (:generation/id anchor)
+                                                    :phenotype/id (:phenotype/id anchor)
+                                                    :event/type :promotion/canary-advanced
+                                                    :cause/event-id (:cause/event-id anchor)
+                                                    :payload-ref artifact-id
+                                                    :metadata {:canary/generation canary-gen
+                                                               :allocation new-allocation
+                                                               :healthy-window n
+                                                               :metrics-ref artifact-id}})]
+            {:deployment-state updated :event advance-event})
+          ;; Window not healthy — clean no-op.
+          {:deployment-state deployment-state :event nil})))))

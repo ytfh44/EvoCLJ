@@ -222,6 +222,13 @@
    :canary/generation g43
    :running/session-ids running-sids})
 
+(defn- advance-system
+  "The advance-canary! system contract for the operator session."
+  [db cas-root operator-sid]
+  {:store {:sqlite db :cas cas-root}
+   :event/session-id operator-sid
+   :canary/generation g43})
+
 (defn- error-type
   "The :error/type of the ExceptionInfo thrown by f, or nil."
   [f]
@@ -471,3 +478,124 @@
              (error-type #(monitor/stop-canary!
                            (stop-system db cas-root operator-sid [])
                            (hard-stop-decision) :nuke)))))))
+
+;; ============================================================================
+;; Task B2 — the advance path: healthy-window auto-rollout of the canary
+;; ============================================================================
+
+(deftest advance-triggers-after-healthy-window
+  (let [db (fresh-db)
+        cas-root (temp-cas-root)
+        _ (seed-generations! db)
+        operator-sid (operator-session! db)
+        hw 50
+        obs (n-observations hw)
+        ds (deployment-state)
+        result (monitor/advance-canary!
+                (advance-system db cas-root operator-sid)
+                ds
+                obs
+                (thresholds {:healthy-window hw}))]
+    (testing "allocation advances by one ladder rung"
+      (is (= 0.25 (get-in (:deployment-state result) [:canary :allocation]))))
+    (testing "a :promotion/canary-advanced event is recorded"
+      (let [event (:event result)]
+        (is (some? event))
+        (is (= :promotion/canary-advanced (:event/type event)))
+        (testing "the event metadata carries the generation, new allocation, and window"
+          (is (= g43 (:canary/generation (:metadata event))))
+          (is (= 0.25 (:allocation (:metadata event))))
+          (is (= hw (:healthy-window (:metadata event)))))
+        (testing "the event references the metrics artifact"
+          (is (= (:metrics-ref (:metadata event)) (:payload-ref event)))
+          (is (str/starts-with? (:payload-ref event) "sha256:")))))))
+
+(deftest advance-does-not-trigger-below-healthy-window
+  (let [db (fresh-db)
+        cas-root (temp-cas-root)
+        _ (seed-generations! db)
+        operator-sid (operator-session! db)
+        hw 50
+        obs (n-observations (dec hw)) ; one short of the window
+        ds (deployment-state)
+        result (monitor/advance-canary!
+                (advance-system db cas-root operator-sid)
+                ds
+                obs
+                (thresholds {:healthy-window hw}))]
+    (testing "deployment-state is returned unchanged"
+      (is (= ds (:deployment-state result))))
+    (testing "no event is returned or recorded"
+      (is (nil? (:event result)))
+      (is (empty? (event/events-by-type db operator-sid
+                                        :promotion/canary-advanced))))))
+
+(deftest advance-does-not-trigger-when-soft-threshold-exceeded-in-window
+  (let [db (fresh-db)
+        cas-root (temp-cas-root)
+        _ (seed-generations! db)
+        operator-sid (operator-session! db)
+        hw 50
+        ;; one observation with cost/task well above threshold; the rest healthy
+        high-cost (observation (java.util.UUID/randomUUID) {:cost/task 10.0})
+        obs (conj (n-observations (dec hw)) high-cost)
+        ds (deployment-state)
+        result (monitor/advance-canary!
+                (advance-system db cas-root operator-sid)
+                ds obs
+                (thresholds {:healthy-window hw}))]
+    (testing "no advance occurs"
+      (is (= ds (:deployment-state result)))
+      (is (nil? (:event result)))
+      (is (empty? (event/events-by-type db operator-sid
+                                        :promotion/canary-advanced))))))
+
+(deftest advance-does-not-trigger-when-hard-violation-in-window
+  (let [db (fresh-db)
+        cas-root (temp-cas-root)
+        _ (seed-generations! db)
+        operator-sid (operator-session! db)
+        hw 50
+        violation (observation (java.util.UUID/randomUUID)
+                               {:hard-violations [{:rule :policy/pii-leak
+                                                   :detail "candidate leaked"}]})
+        obs (conj (n-observations (dec hw)) violation)
+        ds (deployment-state)
+        result (monitor/advance-canary!
+                (advance-system db cas-root operator-sid)
+                ds obs
+                (thresholds {:healthy-window hw}))]
+    (testing "no advance occurs"
+      (is (= ds (:deployment-state result)))
+      (is (nil? (:event result)))
+      (is (empty? (event/events-by-type db operator-sid
+                                        :promotion/canary-advanced))))))
+
+(deftest advance-records-metrics-artifact
+  (let [db (fresh-db)
+        cas-root (temp-cas-root)
+        _ (seed-generations! db)
+        operator-sid (operator-session! db)
+        hw 50
+        obs (n-observations hw)
+        result (monitor/advance-canary!
+                (advance-system db cas-root operator-sid)
+                (deployment-state)
+                obs
+                (thresholds {:healthy-window hw}))]
+    (testing "the event references a metrics artifact"
+      (let [event (:event result)
+            ref (:metrics-ref (:metadata event))]
+        (is (some? ref))
+        (testing "the CAS artifact body holds the health evidence pack"
+          (let [body (cas/get-bytes cas-root ref)
+                pack (edn/read-string (String. body StandardCharsets/UTF_8))]
+            (is (= hw (:healthy-window pack)))
+            (is (= hw (count (:health/observations pack))))
+            (let [aggs (:health/aggregates pack)]
+              (is (= hw (:samples aggs)))
+              (is (= 0.0 (:failure-rate aggs)))
+              (is (<= (Math/abs (- 0.01 (:cost-per-task aggs))) 1e-10))
+              (is (= 100.0 (:latency-per-task aggs)))
+              (is (= 0.0 (:provider-denial-rate aggs)))
+              (is (= 0.0 (:operator-escalation-rate aggs))))))))))
