@@ -6,18 +6,61 @@
             [evoclj.context.envelope :as envelope]
             [evoclj.context.compacter :as compacter]
             [evoclj.context.apply :as apply]
-            [evoclj.context.eval :as eval]))
+            [evoclj.context.eval :as eval]
+            [evoclj.context.loop :as loop]))
+
+(defn- parse-args [args opts]
+  "Simple argument parser. Returns {:options <map> :errors <vector>}."
+  (loop [i 0
+         opts opts
+         options {}
+         errors []]
+    (if (>= i (count opts))
+      {:options options :errors errors}
+      (let [opt (nth opts i)
+            flag (:long opt)]
+        (if (and flag (>= i (count args)))
+          (if (:required opt)
+            (recur (inc i) opts options (conj errors (str "Missing required option: " flag)))
+            (recur (inc i) opts (assoc options flag true) errors))
+          (let [next-arg (nth args (inc i) nil)
+                has-default (some? (:default opt))
+                has-value (and next-arg (not (str/starts-with? next-arg "-")))]
+            (if has-default
+              (recur (+ i 2) opts (assoc options flag (:default opt)) errors)
+              (if has-value
+                (recur (+ i 2) opts (assoc options flag next-arg) errors)
+                (if (:required opt)
+                  (recur (inc i) opts options (conj errors (str "Missing value for " flag)))
+                  (recur (+ i 2) opts (assoc options flag true) errors))))))))))
 
 (def compress-opts
-  [["-i" "--input FILE" "Context file to compress" :required true]
-   ["-o" "--output FILE" "Output file" :required true]
-   ["-t" "--threshold TOKENS" :parse-fn #(Integer/parseInt %) :default 4000]
-   ["-m" "--marker STR" "Compression marker"]
-   ["--model MODEL" :default "unknown"]
-   ["-e" "--eval"]])
+  [{"long" "input", "short" "-i", "required" true}
+   {"long" "output", "short" "-o", "required" true}
+   {"long" "threshold", "short" "-t", "default" 4000}
+   {"long" "marker", "short" "-m"}
+   {"long" "model", "default" "unknown"}
+   {"long" "eval"}])
+
+(def loop-opts
+  [{"long" "input", "short" "-i", "required" true}
+   {"long" "output", "short" "-o", "required" true}
+   {"long" "iterations", "short" "-n", "default" 3}
+   {"long" "threshold", "short" "-t", "default" 4000}
+   {"long" "marker", "short" "-m"}
+   {"long" "model", "default" "unknown"}
+   {"long" "eval"}])
+
+(def recompress-opts
+  [{"long" "input", "short" "-i", "required" true}
+   {"long" "output", "short" "-o", "required" true}
+   {"long" "threshold", "short" "-t", "default" 4000}
+   {"long" "marker", "short" "-m"}
+   {"long" "model", "default" "unknown"}
+   {"long" "eval"}])
 
 (def inspect-opts
-  [["-i" "--input FILE" :required true]])
+  [{"long" "input", "short" "-i", "required" true}])
 
 (defn- read-context [file-path]
   (when-not (str/blank? file-path)
@@ -57,70 +100,149 @@
       (doseq [e es]
         (println (str "  [" (:evidence/kind e) "] " (:evidence/text e)))))))
 
+(defn- make-compacter [model]
+  (compacter/->DefaultCompacter
+    (fn [_]
+      (pr-str {:task {:task/id "cli-task" :task/status :in-progress
+                      :task/description "CLI compression"}
+               :subgoals []
+               :residue []
+               :evidence []}))))
+
+(defn- run-eval-print [env context-str]
+  (let [eval-records [(eval/eval-retention-score env context-str 0.9)
+                      (eval/eval-regression-score env context-str 0.9)
+                      (eval/eval-hallucination-score env context-str 0.9)]
+        eval-summary (eval/eval-summary eval-records)]
+    (println "\n=== Eval ===")
+    (println (str "Overall: " (:eval/overall-status eval-summary)))
+    (doseq [r (:eval/records eval-summary)]
+      (println (str "  " (:eval/class r) ": " (:eval/score r) " [" (:eval/status r) "]")))))
+
 (defn compress-command [args]
   (try
-    (let [opts (clojure.tools.cli/parse-opts args compress-opts)
+    (let [opts (parse-args args compress-opts)
           {:keys [options errors]} opts]
       (when (seq errors)
         (doseq [e errors] (println "Error:" e))
         (System/exit 1))
-      (let [input (:input options)
-            output (:output options)
-            threshold (:threshold options)
-            marker (:marker options)
-            model (:model options)
-            run-eval? (:eval options)
+      (let [input (get options "input")
+            output (get options "output")
+            threshold (get options "threshold" 4000)
+            marker (get options "marker")
+            model (get options "model" "unknown")
+            run-eval? (get options "eval")
             context-str (read-context input)
-            comp (compacter/->DefaultCompacter
-                   (fn [_]
-                     (pr-str {:task {:task/id "cli-task" :task/status :in-progress
-                                     :task/description "CLI compression"}
-                              :subgoals []
-                              :residue []
-                              :evidence []})))]
+            comp (make-compacter model)]
         (when (str/blank? context-str)
           (println "Error: input file is empty or missing")
           (System/exit 1))
-        (let [result (compacter/run context-str comp
-                                    {:model model
-                                     :token-threshold threshold
-                                     :marker marker
-                                     :eval? run-eval?})
+        (let [result (loop/recompress! context-str comp
+                                      {:model model
+                                       :token-threshold threshold
+                                       :marker marker})
+              applied (:context result)
               env (:envelope result)
-              footer (:footer result)
-              applied (str (apply/envelope-prefix env)
-                           "\n\n"
-                           footer
-                           "\n\n"
-                           context-str)]
+              footer (:footer result)]
           (write-context output applied)
           (println (str "Compressed context written to " output))
           (println (str "Tokens before: " (:envelope/tokens-before env)))
           (println (str "Tokens after:  " (:envelope/tokens-after env)))
           (when run-eval?
-            (let [eval-records [(eval/eval-retention-score env context-str 0.9)
-                                (eval/eval-regression-score env context-str 0.9)
-                                (eval/eval-hallucination-score env context-str 0.9)]
-                  eval-summary (eval/eval-summary eval-records)]
-              (println "\n=== Eval ===")
-              (println (str "Overall: " (:eval/overall-status eval-summary)))
-              (doseq [r (:eval/records eval-summary)]
-                (println (str "  " (:eval/class r) ": " (:eval/score r) " [" (:eval/status r) "]")))))
+            (run-eval-print env context-str))
           0)))
-     (catch Exception e
-       (let [ed (ex-data e)]
-         (println "Error:" (or (:error/message ed) (.getMessage e))
-                  (when-let [t (:error/type ed)] (str "[" t "]")))
-         (System/exit 1)))))
+    (catch Exception e
+      (let [ed (ex-data e)]
+        (println "Error:" (or (:error/message ed) (.getMessage e))
+                 (when-let [t (:error/type ed)] (str "[" t "]")))
+        (System/exit 1)))))
 
-(defn inspect-command [args]
+(defn recompress-command [args]
   (try
-    (let [opts (clojure.tools.cli/parse-opts args inspect-opts)
+    (let [opts (parse-args args recompress-opts)
           {:keys [options errors]} opts]
       (when (seq errors)
         (doseq [e errors] (println "Error:" e))
         (System/exit 1))
-      (let [input (:input options)
+      (let [input (get options "input")
+            output (get options "output")
+            threshold (get options "threshold" 4000)
+            marker (get options "marker")
+            model (get options "model" "unknown")
+            run-eval? (get options "eval")
+            context-str (read-context input)
+            comp (make-compacter model)]
+        (when (str/blank? context-str)
+          (println "Error: input file is empty or missing")
+          (System/exit 1))
+        (let [result (loop/recompress! context-str comp
+                                      {:model model
+                                       :token-threshold threshold
+                                       :marker marker})
+              applied (:context result)
+              env (:envelope result)]
+          (write-context output applied)
+          (println (str "Recompressed context written to " output))
+          (println (str "Tokens before: " (:envelope/tokens-before env)))
+          (println (str "Tokens after:  " (:envelope/tokens-after env)))
+          (when run-eval?
+            (run-eval-print env context-str))
+          0)))
+    (catch Exception e
+      (let [ed (ex-data e)]
+        (println "Error:" (or (:error/message ed) (.getMessage e))
+                 (when-let [t (:error/type ed)] (str "[" t "]")))
+        (System/exit 1)))))
+
+(defn loop-command [args]
+  (try
+    (let [opts (parse-args args loop-opts)
+          {:keys [options errors]} opts]
+      (when (seq errors)
+        (doseq [e errors] (println "Error:" e))
+        (System/exit 1))
+      (let [input (get options "input")
+            output (get options "output")
+            iterations (get options "iterations" 3)
+            threshold (get options "threshold" 4000)
+            marker (get options "marker")
+            model (get options "model" "unknown")
+            run-eval? (get options "eval")
+            context-str (read-context input)
+            comp (make-compacter model)]
+        (when (str/blank? context-str)
+          (println "Error: input file is empty or missing")
+          (System/exit 1))
+        (let [result (loop/compress-and-apply context-str comp
+                                              {:model model
+                                               :token-threshold threshold
+                                               :marker marker})]
+          (write-context output result)
+          (println (str "Loop compression completed (" iterations " iterations)"))
+          (println (str "Final context written to " output))
+          (let [final-envelope (:envelope (loop/recompress! result comp
+                                                      {:model model
+                                                       :token-threshold threshold
+                                                       :marker marker}))]
+            (println (str "Tokens before: " (:envelope/tokens-before final-envelope)))
+            (println (str "Tokens after:  " (:envelope/tokens-after final-envelope)))
+            (when run-eval?
+              (run-eval-print final-envelope context-str)))
+          0)))
+    (catch Exception e
+      (let [ed (ex-data e)]
+        (println "Error:" (or (:error/message ed) (.getMessage e))
+                 (when-let [t (:error/type ed)] (str "[" t "]")))
+        (System/exit 1)))))
+
+(defn inspect-command [args]
+  (try
+    (let [opts (parse-args args inspect-opts)
+          {:keys [options errors]} opts]
+      (when (seq errors)
+        (doseq [e errors] (println "Error:" e))
+        (System/exit 1))
+      (let [input (get options "input")
             content (read-context input)]
         (when (str/blank? content)
           (println "Error: input file is empty or missing")
@@ -140,6 +262,8 @@
   (if (seq args)
     (case (first args)
       "compress" (compress-command (rest args))
+      "recompress" (recompress-command (rest args))
+      "loop" (loop-command (rest args))
       "inspect" (inspect-command (rest args))
-      (do (println "Usage: context compress|inspect [options]") 1))
-    (do (println "Usage: context compress|inspect [options]") 1)))
+      (do (println "Usage: context compress|recompress|loop|inspect [options]") 1))
+    (do (println "Usage: context compress|recompress|loop|inspect [options]") 1)))

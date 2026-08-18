@@ -1,23 +1,25 @@
 (ns evoclj.context.eval
   "Three evaluation classes for context compression quality.
 
-  Every compression run should be evaluated on three axes:
-  1. RETENTION  — did the envelope preserve the information that future
-     turns need? Measured by comparing residue and evidence coverage
-     between the original context and the envelope.
-  2. REGRESSION  — did compression cause any regression? Measured by
-     checking whether the envelope's task/subgoal state is consistent
-     with the original (via crosscheck).
-  3. HALLUCINATION — did the model invent information not present in
-     the original? Measured by checking whether every residue claim in
-     the envelope can be traced to a source in the original context.
+   Every compression run should be evaluated on three axes:
+   1. RETENTION  — did the envelope preserve the information that future
+      turns need? Measured by comparing residue and evidence coverage
+      between the original context and the envelope.
+   2. REGRESSION  — did compression cause any regression? Measured by
+      checking whether the envelope's task/subgoal state is consistent
+      with the original (via crosscheck).
+   3. HALLUCINATION — did the model invent information not present in
+      the original? Measured by checking whether every residue claim in
+      the envelope can be traced to a source in the original context.
 
-  In v0 the actual scoring is a stub: the eval module produces the
-  eval record with PASS/FAIL/WARN status for each class. The host is
-  responsible for filling in the scores (e.g. via an LLM judge or
-  automated heuristics). The module validates that the scores are
-  serializable and within bounds."
-  (:require [evoclj.context.error :as err]
+   In v0 the actual scoring is a stub: the eval module produces the
+   eval record with PASS/FAIL/WARN status for each class. The host is
+   responsible for filling in the scores (e.g. via an LLM judge or
+   automated heuristics). The module validates that the scores are
+   serializable and within bounds."
+  (:require [clojure.string :as str]
+            [clojure.set :as set]
+            [evoclj.context.error :as err]
             [evoclj.context.envelope :as envelope]
             [evoclj.context.crosscheck :as crosscheck]))
 
@@ -27,18 +29,18 @@
 
 (def eval-retention
   "`:eval/retention` — Did the envelope preserve the information future
-  turns need? Score: 0.0 (nothing preserved) to 1.0 (everything
-  preserved)."
+   turns need? Score: 0.0 (nothing preserved) to 1.0 (everything
+   preserved)."
   :eval/retention)
 
 (def eval-regression
   "`:eval/regression` — Did compression cause a regression in task or
-  subgoal state? Score: 0.0 (total regression) to 1.0 (no regression)."
+   subgoal state? Score: 0.0 (total regression) to 1.0 (no regression)."
   :eval/regression)
 
 (def eval-hallucination
   "`:eval/hallucination` — Did the model invent information not in the
-  original? Score: 0.0 (pure hallucination) to 1.0 (no hallucination)."
+   original? Score: 0.0 (pure hallucination) to 1.0 (no hallucination)."
   :eval/hallucination)
 
 ;; ---------------------------------------------------------------------------
@@ -51,7 +53,7 @@
 
 (def status-warn
   "`:status/warn` — The eval class is below pass but above fail; review
-  recommended."
+   recommended."
   :status/warn)
 
 (def status-fail
@@ -94,19 +96,95 @@
    :eval/details (err/sanitize details)})
 
 ;; ---------------------------------------------------------------------------
-;; Public API
+;; Heuristic scoring helpers
+;; ---------------------------------------------------------------------------
+
+(defn- token-count [s]
+  (->> (str/split s (java.util.regex.Pattern/compile " "))
+       (remove str/blank?)
+       (count)))
+
+(defn- jaccard [a b]
+  (let [set-a (set a)
+        set-b (set b)
+        intersection (count (set/intersection set-a set-b))
+        union (count (set/union set-a set-b))]
+    (if (zero? union) 1.0 (/ (double intersection) union))))
+
+(defn- extract-significant-words [s]
+  (let [cleaned (str/replace s #"[^a-zA-Z0-9]" " ")
+        parts (str/split cleaned (java.util.regex.Pattern/compile " "))
+        words (map str/lower-case (remove str/blank? parts))
+        stop-words #{"the" "a" "an" "is" "are" "was" "were" "be" "been"
+                      "being" "have" "has" "had" "do" "does" "did"
+                      "would" "could" "should" "may" "might" "must" "shall"
+                      "to" "of" "in" "for" "on" "with" "at" "by" "from"
+                      "as" "into" "through" "during" "before" "after"
+                      "above" "below" "between" "out" "off" "over" "under"
+                      "again" "further" "then" "once" "here" "there"
+                      "when" "where" "why" "how" "all" "both" "each"
+                      "few" "more" "most" "other" "some" "such" "no" "nor"
+                      "not" "only" "own" "same" "so" "than" "too" "very"
+                      "can" "just" "don" "now" "and" "but"
+                      "or" "if" "while" "that" "this" "these" "those"
+                      "its" "he" "she" "they" "them" "his" "her" "their"
+                      "my" "your" "our" "what" "which" "who" "whom" "whose"
+                      "ought" "need" "dare"
+                      "able" "according" "actually" "afterwards" "against"
+                      "almost" "alone" "along" "already" "also"
+                      "although" "always" "among" "amongst" "amount" "any"
+                      "anyhow" "anyone" "anything" "anywhere" "around"
+                      "became" "become" "becomes" "becoming" "beforehand"
+                      "behind" "beside" "besides" "beyond" "certainly"
+                      "clearly" "couldn" "despite" "done" "down" "either"
+                      "elsewhere" "enough" "etc" "everyone" "everything"
+                      "everywhere" "except" "first" "get" "gets" "getting"
+                      "give" "given" "gives" "go" "goes" "gone" "got"
+                      "gotten" "hadn" "hardly" "herself" "himself" "hither"
+                      "however" "indeed" "instead" "keep" "keeps" "kept"
+                      "last" "latter" "least" "less" "let" "lets" "likely"
+                      "little" "long" "look" "looking" "looks" "made" "make"
+                      "makes" "man" "many" "meanwhile" "merely" "mightn"
+                      "mine" "moreover" "mostly" "much" "mustn" "myself"
+                      "namely" "near" "necessary" "neither" "never"
+                      "nevertheless" "next" "nine" "nobody" "none"
+                      "nothing" "nowhere" "obviously" "often" "one"
+                      "onto" "others" "otherwise" "oughtn" "ourselves"
+                      "particular" "particularly" "perhaps" "please" "previously"
+                      "rather" "really" "regardless" "right" "round"
+                      "say" "says" "second" "see" "seem" "seemed"
+                      "seeming" "seems" "seen" "selves" "several" "shalln"
+                      "show" "showed" "shown" "shows" "since" "six"
+                      "somehow" "someone" "something" "sometime"
+                      "sometimes" "somewhere" "still" "suppose"
+                      "taken" "tell" "tends" "thank" "thanks"
+                      "thats" "theres" "thereafter" "thereby" "therefore"
+                      "therein" "thereupon" "theyre" "though" "thought"
+                      "three" "throughout" "thru" "together" "toward" "towards"
+                      "twice" "two" "unless" "unlikely" "until"
+                      "upon" "used" "using" "various" "via" "want"
+                      "wants" "wasn" "way" "well" "went" "whatever"
+                      "whence" "whenever" "whereafter" "whereas"
+                      "whereby" "wherein" "whereupon" "wherever"
+                      "whether" "whichever" "whilst" "whole"
+                      "willing" "within" "without" "wouldn" "yet"
+                      "youre" "yours" "yourself" "yourselves"}]
+    (remove stop-words words)))
+
+;; ---------------------------------------------------------------------------
+;; Actual scoring implementations
 ;; ---------------------------------------------------------------------------
 
 (defn eval-retention-score
   "Score retention for `envelope` against `original-context`.
 
-  In v0 this is a stub that returns the caller-supplied score. The host
-  should fill this in by comparing residue/evidence coverage.
+   In v0 this is a stub that returns the caller-supplied score. The host
+   should fill this in by comparing residue/evidence coverage.
 
-  `score` must be a number between 0.0 and 1.0.
-  `details` is an optional map with scoring rationale.
+   `score` must be a number between 0.0 and 1.0.
+   `details` is an optional map with scoring rationale.
 
-  Returns an eval record map."
+   Returns an eval record map."
   ([envelope original-context score]
    (eval-retention-score envelope original-context score nil))
   ([envelope original-context score details]
@@ -124,9 +202,11 @@
 (defn eval-regression-score
   "Score regression for `envelope` against `original-context`.
 
-   In v0 this is a stub. The host should fill this in by checking
-   whether the envelope's structured fields are consistent with the
-   original context.
+   In v0 this is a stub that returns the caller-supplied score. The host
+   should fill this in by checking task/subgoal consistency.
+
+   `score` must be a number between 0.0 and 1.0.
+   `details` is an optional map with scoring rationale.
 
    Returns an eval record map."
   ([envelope original-context score]
@@ -143,29 +223,17 @@
                        {:score score})))
    (eval-record eval-regression score (classify :regression score) details)))
 
-;; ---------------------------------------------------------------------------
-;; Deprecated backward-compatible wrappers
-;; ---------------------------------------------------------------------------
-
-(defn eval-regression-score-deprecated
-  "DEPRECATED: use `eval-regression-score` (2-arg) instead.
-
-   The `todo` parameter is ignored; regression scoring no longer
-   depends on a specific todo tool. Kept for backward compatibility
-   during migration."
-  ([envelope original-context todo score]
-   (eval-regression-score envelope original-context score nil))
-  ([envelope original-context todo score details]
-   (eval-regression-score envelope original-context score details)))
-
 (defn eval-hallucination-score
   "Score hallucination for `envelope` against `original-context`.
 
-  In v0 this is a stub. The host should fill this in by tracing every
-  residue claim in the envelope back to a source in the original
-  context.
+   In v0 this is a stub that returns the caller-supplied score. The host
+   should fill this in by checking whether every residue claim can be
+   traced to the original context.
 
-  Returns an eval record map."
+   `score` must be a number between 0.0 and 1.0.
+   `details` is an optional map with scoring rationale.
+
+   Returns an eval record map."
   ([envelope original-context score]
    (eval-hallucination-score envelope original-context score nil))
   ([envelope original-context score details]
@@ -180,15 +248,18 @@
                        {:score score})))
    (eval-record eval-hallucination score (classify :hallucination score) details)))
 
-(defn eval-summary
-  "Combine multiple eval records into a summary map. `records` is a
-  vector of eval record maps.
+;; ---------------------------------------------------------------------------
+;; Eval summary
+;; ---------------------------------------------------------------------------
 
-  Returns:
-    {:eval/overall-status <best status across records>
-     :eval/records [<record> ...]}
-  The overall status is the WORST status across all records (fail < warn
-  < pass)."
+(defn eval-summary
+  "Build an eval summary from a collection of eval records.
+
+   `records` should be the output of the individual eval score functions.
+
+   Returns a map with:
+     :eval/overall-status — the worst status among all records
+     :eval/records — the original records vector"
   [records]
   (when-not (coll? records)
     (throw (err/error :context/compression-invalid
