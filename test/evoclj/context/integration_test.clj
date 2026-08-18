@@ -37,8 +37,13 @@
                   :token-threshold 10
                   :marker "[CONTEXT COMPRESSION]"})
         applied (:context result)
-        env (:envelope result)]
-    (t/is (str/includes? applied "[CONTEXT COMPRESSION]"))
+        env (:envelope result)
+        footer (:footer result)]
+    ;; Applied context is envelope + fresh tail (no footer)
+    (t/is (str/starts-with? applied "#:envelope{"))
+    ;; Footer contains the compression marker
+    (t/is (str/includes? footer "[CONTEXT COMPRESSION]"))
+    ;; Envelope shows compression happened
     (t/is (pos? (:envelope/tokens-before env)))
     (t/is (< (:envelope/tokens-after env) (:envelope/tokens-before env)))))
 
@@ -55,9 +60,11 @@
                     :token-threshold 10
                     :marker "[CONTEXT COMPRESSION]"})
         applied2 (:context result2)]
-    ;; Both should contain the compression marker and envelope
-    (t/is (str/includes? applied1 "[CONTEXT COMPRESSION]"))
-    (t/is (str/includes? applied2 "[CONTEXT COMPRESSION]"))
+    ;; Both should start with envelope and have footer with marker
+    (t/is (str/starts-with? applied1 "#:envelope{"))
+    (t/is (str/starts-with? applied2 "#:envelope{"))
+    (t/is (str/includes? (:footer result1) "[CONTEXT COMPRESSION]"))
+    (t/is (str/includes? (:footer result2) "[CONTEXT COMPRESSION]"))
     ;; The second compression should not grow unboundedly
     (t/is (< (count applied2) (* 2 (count applied1))))))
 
@@ -69,7 +76,7 @@
                   :token-threshold 10
                   :marker "[CONTEXT COMPRESSION]"})]
     (t/is (string? result))
-    (t/is (str/includes? result "[CONTEXT COMPRESSION]"))))
+    (t/is (str/starts-with? result "#:envelope{"))))
 
 (t/deftest eval-scores-on-compressed-context
   (let [context (make-context 100)
@@ -97,9 +104,13 @@
                  {:model "test-model"
                   :token-threshold 10
                   :marker "[CONTEXT COMPRESSION]"})
-        applied (:context result)]
-    (t/is (str/includes? applied "[TOOL ARCHIVES]"))
-    (t/is (str/includes? applied "Todo list snapshot"))
+        applied (:context result)
+        footer (:footer result)]
+    ;; Applied context is just envelope + fresh tail
+    (t/is (str/starts-with? applied "#:envelope{"))
+    ;; Archiver reports are in the footer
+    (t/is (str/includes? footer "[TOOL ARCHIVES]"))
+    (t/is (str/includes? footer "Todo list snapshot"))
     (registry/clear-registry!)))
 
 (t/deftest multiple-iterations-complete
@@ -111,7 +122,7 @@
                   :marker "[CONTEXT COMPRESSION]"
                   :iterations 3})]
     (t/is (string? result))
-    (t/is (str/includes? result "[CONTEXT COMPRESSION]"))))
+    (t/is (str/starts-with? result "#:envelope{"))))
 
 (t/deftest context-can-be-read-back
   (let [context (make-context 20)
@@ -147,7 +158,9 @@
                   :marker "[CONTEXT COMPRESSION]"})
         applied (:context result)
         footer (:footer result)]
-    (t/is (str/includes? applied "[CONTEXT COMPRESSION]"))
+    ;; Applied context is envelope + fresh tail (no footer marker)
+    (t/is (str/starts-with? applied "#:envelope{"))
+    ;; Footer contains the compression marker
     (t/is (str/includes? footer "[CONTEXT COMPRESSION]"))))
 
 (t/deftest compression-loop-with-eval
@@ -164,6 +177,8 @@
         summary (eval/eval-summary eval-records)]
     (t/is (= 3 (count eval-records)))
     (t/is (keyword? (:eval/overall-status summary)))
-    (t/is (str/includes? (:context result) "[CONTEXT COMPRESSION]"))))
+    ;; Context is envelope + fresh tail; footer has marker
+    (t/is (str/starts-with? (:context result) "#:envelope{"))
+    (t/is (str/includes? (:footer result) "[CONTEXT COMPRESSION]"))))
 
 (t/run-tests)

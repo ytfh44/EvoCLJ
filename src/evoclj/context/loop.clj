@@ -101,6 +101,14 @@
            :subgoal/description (:subgoal/description sg)}
     (some? (:subgoal/parent sg)) (assoc :subgoal/parent (:subgoal/parent sg))))
 
+(defn- noop-envelope?
+  "True when `envelope` represents a noop compression (no actual
+  compression happened). Detected by the task id being \"noop\" or
+  tokens-before equaling tokens-after."
+  [envelope]
+  (or (= (:envelope/task envelope) "noop")
+      (= (:envelope/tokens-before envelope) (:envelope/tokens-after envelope))))
+
 (defn recompress!
   ([context-str compacter]
    (recompress! context-str compacter {}))
@@ -122,14 +130,18 @@
              merged-envelope (idempotency/idempotent-merge old-envelope new-envelope)
              footer-opts (assoc opts :archiver-reports (registry/archiver-reports))
              f (footer/build-footer merged-envelope footer-opts)
-             new-context (apply/apply-envelope merged-envelope f)]
+             new-context (if (noop-envelope? merged-envelope)
+                           context-str
+                           (apply/apply-envelope merged-envelope fresh-tail))]
          {:envelope merged-envelope
           :footer f
           :context new-context})
        (let [result (compacter/compress compacter context-str opts)
              env (:envelope result)
              f (:footer result)
-             new-context (apply/apply-envelope env f)]
+             new-context (if (noop-envelope? env)
+                           context-str
+                           (apply/apply-envelope env fresh-tail))]
          {:envelope env
           :footer f
           :context new-context})))))
@@ -139,5 +151,3 @@
    (compress-and-apply context-str compacter {}))
   ([context-str compacter opts]
    (:context (recompress! context-str compacter opts))))
-
-

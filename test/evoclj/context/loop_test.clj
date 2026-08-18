@@ -98,12 +98,14 @@
 (t/deftest recompress-compresses-fresh-context
   (let [c (compacter/->DefaultCompacter mock-call)
         context-str "some fresh context that needs compression"
-        result (loop/recompress! context-str c {:token-threshold 10})]
+        result (loop/recompress! context-str c {:token-threshold 1})]
     (t/is (map? (:envelope result)))
     (t/is (string? (:footer result)))
     (t/is (string? (:context result)))
+    ;; Applied context is envelope + fresh tail (no footer marker)
     (t/is (str/starts-with? (:context result) "#:envelope{"))
-    (t/is (str/includes? (:context result) "[CONTEXT COMPRESSION]"))))
+    ;; Footer contains the compression marker
+    (t/is (str/includes? (:footer result) "[CONTEXT COMPRESSION]"))))
 
 (t/deftest recompress-preserves-previous-envelope-on-second-pass
   (let [c (compacter/->DefaultCompacter mock-call)
@@ -133,7 +135,8 @@
         context-str "some context"
         result (loop/compress-and-apply context-str c {:token-threshold 10})]
     (t/is (string? result))
-    (t/is (str/starts-with? result "#:envelope{"))))
+    ;; When no compression needed, returns original context unchanged
+    (t/is (= "some context" result))))
 
 (t/deftest loop-roundtrip-preserves-residue
   (let [c (compacter/->DefaultCompacter mock-call)
