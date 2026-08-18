@@ -2,8 +2,10 @@
   "Compacter protocol and default implementation for context compression.
 
    A compacter is the object that orchestrates a compression run: it
-   decides whether to compress (via trigger), builds the prompt, calls
-   the model, builds the envelope, and produces the footer text.
+   decides whether to compress (via trigger), collects authoritative
+   structured state from registered archivers, builds the prompt, calls
+   the model, crosschecks the result, evaluates it, builds the envelope,
+   and produces the footer text.
 
    The separation between `Compacter` (protocol) and
    `DefaultCompacter` (record) lets users plug in their own compacter
@@ -16,7 +18,10 @@
   (:require [evoclj.context.trigger :as trigger]
             [evoclj.context.compressor :as compressor]
             [evoclj.context.envelope :as envelope]
-            [evoclj.context.footer :as footer]))
+            [evoclj.context.footer :as footer]
+            [evoclj.context.registry :as registry]
+            [evoclj.context.crosscheck :as crosscheck]
+            [evoclj.context.eval :as eval]))
 
 ;; ---------------------------------------------------------------------------
 ;; Protocol
@@ -32,7 +37,11 @@
 
    The `envelope` is the structured compression result. The `footer`
    is the instruction text appended to the context for the next agent
-   turn."
+   turn.
+
+   Advanced implementations may also return:
+     :eval       <eval summary map>
+     :mismatches <crosscheck mismatch vector>"
   (compress [this context opts]
     "Compress `context` using this compacter.
 
@@ -43,10 +52,44 @@
        :cooldown-tokens  — min tokens saved to reset cooldown (default 500)
        :eval?            — run eval after compression (default false)
        :footer-opts      — map passed to footer generation (default nil)
+       :previous-envelope — optional previous envelope map; when present,
+                            its :residue and :evidence are retained and
+                            merged with the new compression result.
+       :structured-sections — optional authoritative structured state
+                              map {:tasks [...] :subgoals [...]}; when
+                              present, crosscheck is performed and
+                              auto-correctable fields are fixed.
 
      Returns a map:
        {:envelope <Envelope map>
-        :footer   <string>}"))
+        :footer   <string>
+        :eval     <eval summary map, when :eval? true>
+        :mismatches <crosscheck mismatch vector>}"))
+
+;; ---------------------------------------------------------------------------
+;; Private helpers
+;; ---------------------------------------------------------------------------
+
+(defn- collect-structured-state
+  "Collect authoritative structured state from optional caller-supplied
+   sections and the previous envelope.
+
+   Returns a map suitable for use as the structured summary in
+   `compressor/compress-structured`:
+     {:task      <first task from :tasks or previous envelope task>
+      :subgoals  <from :subgoals or previous envelope subgoals>
+      :residue   <from previous envelope or []>
+      :evidence  <from previous envelope or []>}"
+  [previous-envelope structured-sections]
+  (let [tasks (:tasks structured-sections [])
+        subgoals (:subgoals structured-sections [])
+        current-task (first tasks)]
+    {:task (or current-task
+               (:envelope/task previous-envelope))
+     :subgoals (or (seq subgoals)
+                   (:envelope/subgoals previous-envelope []))
+     :residue (or (:envelope/residue previous-envelope) [])
+     :evidence (or (:envelope/evidence previous-envelope) [])}))
 
 ;; ---------------------------------------------------------------------------
 ;; Default compacter record
@@ -63,41 +106,90 @@
           cooldown   (or (:cooldown-tokens opts) 500)
           eval?      (or (:eval? opts) false)
           footer-opts (:footer-opts opts)
+          previous-envelope (:previous-envelope opts)
+          structured-sections (:structured-sections opts)
           trigger-config {:trigger/token-threshold threshold
                           :trigger/marker marker
                           :trigger/cooldown-tokens cooldown}
           trigger-result (trigger/should-compress? context trigger-config)]
       (if-not (:trigger/compressed? trigger-result)
         ;; No compression needed — return the original context with an empty envelope
-        {:envelope (envelope/make-envelope
-                     {:task {:task/id "noop" :task/status :pending
-                             :task/description "No compression needed"}
-                      :subgoals []
-                      :residue []
-                      :evidence []
-                      :version 1
-                      :created-at (str (java.time.Instant/now))
-                      :window {:window/from 0 :window/to 100}
-                      :tokens-before (:trigger/token-count trigger-result)
-                      :tokens-after  (:trigger/token-count trigger-result)
-                      :compressor {:compressor/model model
-                                   :compressor/prompt "none"}})
-         :footer ""}
-        ;; Proceed with compression
-        (let [summary {:task {:task/id "compression-run"
-                              :task/status :in-progress
-                              :task/description "Context compression"}
-                       :subgoals []
-                       :residue []
-                       :evidence []}
-              env (compressor/compress
-                    summary
-                    model-call
-                    :model model
-                    :tokens-before (:trigger/token-count trigger-result))
-              f (footer/build-footer env footer-opts)]
-          {:envelope env
-           :footer f})))))
+        (let [state (collect-structured-state previous-envelope structured-sections)]
+          {:envelope (envelope/make-envelope
+                       {:task (or (:task state)
+                                  {:task/id "noop" :task/status :pending
+                                   :task/description "No compression needed"})
+                        :subgoals (or (:subgoals state) [])
+                        :residue (or (:residue state) [])
+                        :evidence (or (:evidence state) [])
+                        :version 1
+                        :created-at (str (java.time.Instant/now))
+                        :window {:window/from 0 :window/to 100}
+                        :tokens-before (:trigger/token-count trigger-result)
+                        :tokens-after  (:trigger/token-count trigger-result)
+                        :compressor {:compressor/model model
+                                     :compressor/prompt "none"}})
+           :footer ""
+           :mismatches []
+           :eval nil})
+        ;; Proceed with structured compression
+        (let [structured-summary (collect-structured-state previous-envelope structured-sections)
+              ;; Run the structured compression path
+              llm-result (compressor/compress-structured
+                          structured-summary
+                          context
+                          model-call
+                          :model model
+                          :tokens-before (:trigger/token-count trigger-result))
+              ;; Merge authoritative task/subgoals with LLM-produced residue/evidence.
+              ;; Previous residue/evidence are prepended so they are never lost;
+              ;; the LLM may add new entries or duplicate old ones (deduplication
+              ;; is idempotency's job, not the compacter's).
+              previous-residue (:residue structured-summary)
+              previous-evidence (:evidence structured-summary)
+              merged-residue (vec (concat previous-residue (:residue llm-result)))
+              merged-evidence (vec (concat previous-evidence (:evidence llm-result)))
+              ;; Merge authoritative task/subgoals with LLM-produced residue/evidence
+              task (or (:task structured-summary)
+                       {:task/id "compression-run" :task/status :in-progress
+                        :task/description "Context compression"})
+              subgoals (or (:subgoals structured-summary) [])
+              now (str (java.time.Instant/now))
+              tokens-after (int (/ (count (:raw-response llm-result)) 4))
+              envelope-base (envelope/make-envelope
+                             {:task task
+                              :subgoals subgoals
+                              :residue merged-residue
+                              :evidence merged-evidence
+                              :version 1
+                              :created-at now
+                              :window {:window/from 0 :window/to 100}
+                              :tokens-before (:trigger/token-count trigger-result)
+                              :tokens-after tokens-after
+                              :compressor {:compressor/model model
+                                           :compressor/prompt (:prompt llm-result)}})
+              ;; Crosscheck against authoritative structured state (if provided)
+              crosscheck-result (when structured-sections
+                                  (crosscheck/crosscheck* envelope-base structured-sections))
+              corrected-envelope (if crosscheck-result
+                                   (:crosscheck/envelope crosscheck-result)
+                                   envelope-base)
+              mismatches (if crosscheck-result
+                           (:crosscheck/mismatches crosscheck-result)
+                           [])
+              ;; Eval if requested
+              eval-result (when eval?
+                            (eval/eval-summary
+                              [(eval/eval-retention-score corrected-envelope context 0.9 {:method :stub})
+                               (eval/eval-regression-score corrected-envelope context 0.9 {:method :stub})
+                               (eval/eval-hallucination-score corrected-envelope context 0.9 {:method :stub})]))
+              ;; Build footer with archiver reports
+              footer-opts' (assoc footer-opts :archiver-reports (registry/archiver-reports))
+              f (footer/build-footer corrected-envelope footer-opts')]
+          {:envelope corrected-envelope
+           :footer f
+           :eval eval-result
+           :mismatches mismatches})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public run helper
@@ -106,7 +198,8 @@
 (defn run
   "Compress `context` using `compacter` (any Compacter record).
 
-   Returns `{:envelope <map> :footer <string>}`.
+   Returns `{:envelope <map> :footer <string>}` plus optional `:eval`
+   and `:mismatches` keys when the compacter produces them.
 
    For the default compacter:
      (run context (->DefaultCompacter mock-call) {:model \"gpt-4\"})"

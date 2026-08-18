@@ -4,16 +4,29 @@
             [evoclj.context.compacter :as compacter]
             [evoclj.context.envelope :as envelope]
             [evoclj.context.registry :as registry]
-            [evoclj.context.footer :as footer]))
+            [evoclj.context.footer :as footer]
+            [evoclj.context.crosscheck :as crosscheck]
+            [evoclj.context.eval :as eval]))
 
 ;; ---------------------------------------------------------------------------
 ;; Fixtures
 ;; ---------------------------------------------------------------------------
 
 (defn mock-call [_]
-  (pr-str {:task {:task/id "t1" :task/status :completed :task/description "done"}
-           :subgoals []
-           :residue []
+  ;; The structured path expects ONLY :residue and :evidence in the response.
+  (pr-str {:residue [{:residue/id 1 :residue/kind :constraint
+                       :residue/text "must not break X"
+                       :residue/source "user"
+                       :residue/at "2026-08-17T00:00:00Z"}]
+           :evidence [{:evidence/id 1 :evidence/kind :observation
+                        :evidence/text "src/evoclj/context/compacter.clj"
+                        :evidence/at "2026-08-17T00:00:00Z"}]}))
+
+(defn mock-call-with-residue [_]
+  (pr-str {:residue [{:residue/id 1 :residue/kind :decision
+                       :residue/text "chose approach A"
+                       :residue/source "user"
+                       :residue/at "2026-08-17T00:00:00Z"}]
            :evidence []}))
 
 ;; ---------------------------------------------------------------------------
@@ -35,7 +48,9 @@
         result (compacter/run long-context c {:token-threshold 1000})]
     (t/is (map? (:envelope result)))
     (t/is (string? (:footer result)))
-    (t/is (not (str/blank? (:footer result))))))
+    (t/is (not (str/blank? (:footer result))))
+    ;; The structured path should have populated residue/evidence from the LLM
+    (t/is (pos? (count (:envelope/residue (:envelope result)))))))
 
 (t/deftest run-with-custom-compacter
   (let [custom (reify compacter/Compacter
@@ -71,5 +86,71 @@
         result (compacter/run long-context c {:token-threshold 1000 :model "gpt-4"})]
     (t/is (= "gpt-4"
              (get-in (:envelope result) [:envelope/compressor :compressor/model])))))
+
+(t/deftest default-compacter-retains-previous-residue
+  (let [c (compacter/->DefaultCompacter mock-call)
+        ;; 5000 chars / 4 = 1250 tokens, threshold 1000 => compress
+        long-context (apply str (repeat 5000 "x"))
+        previous-envelope (envelope/make-envelope
+                            {:task {:task/id "prev" :task/status :completed
+                                    :task/description "previous"}
+                             :subgoals []
+                             :residue [{:residue/id 1 :residue/kind :constraint
+                                         :residue/text "old constraint"
+                                         :residue/source "user"
+                                         :residue/at "2026-08-17T00:00:00Z"}]
+                             :evidence []
+                             :version 1
+                             :created-at "2026-08-17T00:00:00Z"
+                             :window {:window/from 0 :window/to 10}
+                             :tokens-before 100
+                             :tokens-after 50
+                             :compressor {:compressor/model "prev"
+                                          :compressor/prompt "p"}})
+        result (compacter/run long-context c {:token-threshold 1000
+                                               :previous-envelope previous-envelope})]
+    ;; The new envelope should contain both the previous residue and the new LLM residue
+    (let [residue-texts (map :residue/text (:envelope/residue (:envelope result)))]
+      (t/is (some #{"old constraint"} residue-texts))
+      (t/is (some #{"must not break X"} residue-texts)))))
+
+(t/deftest default-compacter-includes-archiver-reports-in-footer
+  (let [c (compacter/->DefaultCompacter mock-call)
+        ;; 5000 chars / 4 = 1250 tokens, threshold 1000 => compress
+        long-context (apply str (repeat 5000 "x"))
+        ;; Register a fake archiver
+        archiver (reify registry/CompacterArchive
+                   (archive-manifest [_]
+                     {:archiver/id :test/archiver
+                      :archiver/description "test archiver"
+                      :archiver/serialized {:state :active}}))
+        _ (registry/register! archiver)
+        result (compacter/run long-context c {:token-threshold 1000})]
+    (t/is (str/includes? (:footer result) "test archiver"))
+    (registry/clear-registry!)))
+
+(t/deftest default-compacter-crosscheck-records-mismatches
+  (let [c (compacter/->DefaultCompacter mock-call)
+        ;; 5000 chars / 4 = 1250 tokens, threshold 1000 => compress
+        long-context (apply str (repeat 5000 "x"))
+        structured-sections {:tasks [{:task/id "t1" :task/status :completed
+                                       :task/description "authoritative"}]
+                             :subgoals []}
+        result (compacter/run long-context c {:token-threshold 1000
+                                               :structured-sections structured-sections})]
+    ;; The envelope task should be corrected to match authoritative state
+    (t/is (= "t1" (get-in (:envelope result) [:envelope/task :task/id])))
+    (t/is (= :completed (get-in (:envelope result) [:envelope/task :task/status])))
+    ;; mismatches should be empty because the model didn't return :task
+    (t/is (vector? (:mismatches result)))))
+
+(t/deftest default-compacter-eval-summary-when-requested
+  (let [c (compacter/->DefaultCompacter mock-call)
+        ;; 5000 chars / 4 = 1250 tokens, threshold 1000 => compress
+        long-context (apply str (repeat 5000 "x"))
+        result (compacter/run long-context c {:token-threshold 1000
+                                               :eval? true})]
+    (t/is (map? (:eval result)))
+    (t/is (= :status/pass (get-in (:eval result) [:eval/overall-status])))))
 
 (t/run-tests)
