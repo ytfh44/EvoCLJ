@@ -43,7 +43,8 @@
 
    Advanced implementations may also return:
      :eval       <eval summary map>
-     :mismatches <crosscheck mismatch vector>"
+     :mismatches <crosscheck mismatch vector>
+     :trigger    <trigger result map>"
   (compress [this context opts]
     "Compress `context` using this compacter.
 
@@ -62,12 +63,14 @@
                              present, crosscheck is performed and
                              auto-correctable fields are fixed.
        :token-estimator  — optional TokenEstimator instance (default char-count)
+       :trigger/last-savings — optional last compression savings in tokens
 
      Returns a map:
        {:envelope <Envelope map>
         :footer   <string>
         :eval     <eval summary map, when :eval? true>
-        :mismatches <crosscheck mismatch vector>}"))
+        :mismatches <crosscheck mismatch vector>
+        :trigger  <trigger result map>}"))
 
 ;; ---------------------------------------------------------------------------
 ;; Private helpers
@@ -112,10 +115,12 @@
           previous-envelope (:previous-envelope opts)
           structured-sections (:structured-sections opts)
           estimator (or (:token-estimator opts) token-estimator/default-char-count-estimator)
+          last-savings (:trigger/last-savings opts)
           trigger-config {:trigger/token-threshold threshold
                           :trigger/marker marker
                           :trigger/cooldown-tokens cooldown
-                          :trigger/token-estimator estimator}
+                          :trigger/token-estimator estimator
+                          :trigger/last-savings last-savings}
           trigger-result (trigger/should-compress? context trigger-config)]
       (if-not (:trigger/compressed? trigger-result)
         ;; No compression needed — return the original context with an empty envelope
@@ -137,7 +142,8 @@
                                      :compressor/prompt "none"}})
            :footer ""
            :mismatches []
-           :eval nil})
+           :eval nil
+           :trigger trigger-result})
         ;; Proceed with structured compression
         (let [structured-summary (collect-structured-state previous-envelope structured-sections)
               ;; Run the structured compression path
@@ -185,16 +191,17 @@
               ;; Eval if requested
               eval-result (when eval?
                             (eval/eval-summary
-                              [(eval/eval-retention-score corrected-envelope context 0.9 {:method :stub})
-                               (eval/eval-regression-score corrected-envelope context 0.9 {:method :stub})
-                               (eval/eval-hallucination-score corrected-envelope context 0.9 {:method :stub})]))
+                              [(eval/eval-retention-score corrected-envelope context)
+                               (eval/eval-regression-score corrected-envelope context)
+                               (eval/eval-hallucination-score corrected-envelope context)]))
               ;; Build footer with archiver reports
               footer-opts' (assoc footer-opts :archiver-reports (registry/archiver-reports))
               f (footer/build-footer corrected-envelope footer-opts')]
           {:envelope corrected-envelope
            :footer f
            :eval eval-result
-           :mismatches mismatches})))))
+           :mismatches mismatches
+           :trigger trigger-result})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public run helper

@@ -109,6 +109,12 @@
   (or (= (:envelope/task envelope) "noop")
       (= (:envelope/tokens-before envelope) (:envelope/tokens-after envelope))))
 
+(defn- compute-savings
+  "Compute token savings from an envelope: tokens-before minus tokens-after."
+  [envelope]
+  (max 0 (- (:envelope/tokens-before envelope 0)
+            (:envelope/tokens-after envelope 0)))) 
+
 (defn recompress!
   ([context-str compacter]
    (recompress! context-str compacter {}))
@@ -130,21 +136,31 @@
              merged-envelope (idempotency/idempotent-merge old-envelope new-envelope)
              footer-opts (assoc opts :archiver-reports (registry/archiver-reports))
              f (footer/build-footer merged-envelope footer-opts)
+             trigger-result (:trigger result)
+             last-savings (or (when trigger-result
+                                (:trigger/last-savings trigger-result))
+                              (compute-savings merged-envelope))
              new-context (if (noop-envelope? merged-envelope)
                            context-str
                            (apply/apply-envelope merged-envelope fresh-tail))]
          {:envelope merged-envelope
           :footer f
-          :context new-context})
+          :context new-context
+          :trigger/last-savings last-savings})
        (let [result (compacter/compress compacter context-str opts)
              env (:envelope result)
              f (:footer result)
+             trigger-result (:trigger result)
+             last-savings (or (when trigger-result
+                                (:trigger/last-savings trigger-result))
+                              (compute-savings env))
              new-context (if (noop-envelope? env)
                            context-str
                            (apply/apply-envelope env fresh-tail))]
          {:envelope env
           :footer f
-          :context new-context})))))
+          :context new-context
+          :trigger/last-savings last-savings})))))
 
 (defn compress-and-apply
   ([context-str compacter]

@@ -53,6 +53,13 @@
     (catch Exception e
       (t/is (= :context/compression-invalid (:error/type (ex-data e)))))))
 
+(t/deftest retention-score-heuristic-2-arity
+  (let [record (ev/eval-retention-score (sample-envelope) "some context with done task")]
+    (t/is (= :eval/retention (:eval/class record)))
+    (t/is (number? (:eval/score record)))
+    (t/is (keyword? (:eval/status record)))
+    (t/is (map? (:eval/details record)))))
+
 ;; ---------------------------------------------------------------------------
 ;; eval-regression-score
 ;; ---------------------------------------------------------------------------
@@ -70,6 +77,13 @@
     (catch Exception e
       (t/is (= :context/compression-invalid (:error/type (ex-data e)))))))
 
+(t/deftest regression-score-heuristic-2-arity
+  (let [record (ev/eval-regression-score (sample-envelope) "some context")]
+    (t/is (= :eval/regression (:eval/class record)))
+    (t/is (number? (:eval/score record)))
+    (t/is (keyword? (:eval/status record)))
+    (t/is (map? (:eval/details record)))))
+
 ;; ---------------------------------------------------------------------------
 ;; eval-hallucination-score
 ;; ---------------------------------------------------------------------------
@@ -83,6 +97,13 @@
 (t/deftest hallucination-score-below-fail
   (let [record (ev/eval-hallucination-score (sample-envelope) "ctx" 0.2)]
     (t/is (= :status/fail (:eval/status record)))))
+
+(t/deftest hallucination-score-heuristic-2-arity
+  (let [record (ev/eval-hallucination-score (sample-envelope) "some context with done task")]
+    (t/is (= :eval/hallucination (:eval/class record)))
+    (t/is (number? (:eval/score record)))
+    (t/is (keyword? (:eval/status record)))
+    (t/is (map? (:eval/details record)))))
 
 ;; ---------------------------------------------------------------------------
 ;; eval-summary
@@ -117,5 +138,9 @@
     (t/is false "should have thrown")
     (catch Exception e
       (t/is (= :context/compression-invalid (:error/type (ex-data e)))))))
+
+(t/deftest eval-heuristic-method-recorded-in-details
+  (let [record (ev/eval-retention-score (sample-envelope) "some context with done task")]
+    (t/is (= :heuristic (get-in record [:eval/details :method])))))
 
 (t/run-tests)

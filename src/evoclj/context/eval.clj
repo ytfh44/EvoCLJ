@@ -12,11 +12,8 @@
       the original? Measured by checking whether every residue claim in
       the envelope can be traced to a source in the original context.
 
-   In v0 the actual scoring is a stub: the eval module produces the
-   eval record with PASS/FAIL/WARN status for each class. The host is
-   responsible for filling in the scores (e.g. via an LLM judge or
-   automated heuristics). The module validates that the scores are
-   serializable and within bounds."
+   In v0 the actual scoring has heuristic defaults. Callers may still
+   override by passing an explicit `score` and optional `details`."
   (:require [clojure.string :as str]
             [clojure.set :as set]
             [evoclj.context.error :as err]
@@ -171,6 +168,44 @@
                       "youre" "yours" "yourself" "yourselves"}]
     (remove stop-words words)))
 
+(defn- text-from-envelope [envelope]
+  (str (pr-str (:envelope/task envelope))
+       " "
+       (pr-str (:envelope/subgoals envelope))
+       " "
+       (pr-str (:envelope/residue envelope))
+       " "
+       (pr-str (:envelope/evidence envelope))))
+
+(defn- heuristic-retention [envelope original-context]
+  (let [env-words (extract-significant-words (text-from-envelope envelope))
+        ctx-words (extract-significant-words original-context)
+        score (jaccard env-words ctx-words)]
+    {:score score
+     :details {:method :heuristic
+               :env-word-count (count env-words)
+               :ctx-word-count (count ctx-words)
+               :jaccard score}}))
+
+(defn- heuristic-regression [envelope original-context]
+  (let [cc (crosscheck/crosscheck* envelope {:tasks [] :subgoals []})
+        mismatches (if cc (count (:crosscheck/mismatches cc)) 0)
+        score (max 0.0 (min 1.0 (- 1.0 (* mismatches 0.1))))]
+    {:score score
+     :details {:method :heuristic
+               :mismatches mismatches
+               :crosscheck (if cc (:crosscheck/envelope cc) nil)}}))
+
+(defn- heuristic-hallucination [envelope original-context]
+  (let [residue-words (extract-significant-words (pr-str (:envelope/residue envelope)))
+        ctx-words (extract-significant-words original-context)
+        score (jaccard residue-words ctx-words)]
+    {:score score
+     :details {:method :heuristic
+               :residue-word-count (count residue-words)
+               :ctx-word-count (count ctx-words)
+               :jaccard score}}))
+
 ;; ---------------------------------------------------------------------------
 ;; Actual scoring implementations
 ;; ---------------------------------------------------------------------------
@@ -178,13 +213,21 @@
 (defn eval-retention-score
   "Score retention for `envelope` against `original-context`.
 
-   In v0 this is a stub that returns the caller-supplied score. The host
-   should fill this in by comparing residue/evidence coverage.
+   When called with 2 args, uses heuristic Jaccard similarity of
+   significant words between envelope and original context.
+
+   When called with 3 args, uses caller-supplied `score` (host/judge
+   override).
 
    `score` must be a number between 0.0 and 1.0.
    `details` is an optional map with scoring rationale.
 
    Returns an eval record map."
+  ([envelope original-context]
+   (let [heuristic (heuristic-retention envelope original-context)
+         score (:score heuristic)
+         details (:details heuristic)]
+     (eval-record eval-retention score (classify :retention score) details)))
   ([envelope original-context score]
    (eval-retention-score envelope original-context score nil))
   ([envelope original-context score details]
@@ -202,13 +245,20 @@
 (defn eval-regression-score
   "Score regression for `envelope` against `original-context`.
 
-   In v0 this is a stub that returns the caller-supplied score. The host
-   should fill this in by checking task/subgoal consistency.
+   When called with 2 args, uses heuristic based on crosscheck mismatches.
+
+   When called with 3 args, uses caller-supplied `score` (host/judge
+   override).
 
    `score` must be a number between 0.0 and 1.0.
    `details` is an optional map with scoring rationale.
 
    Returns an eval record map."
+  ([envelope original-context]
+   (let [heuristic (heuristic-regression envelope original-context)
+         score (:score heuristic)
+         details (:details heuristic)]
+     (eval-record eval-regression score (classify :regression score) details)))
   ([envelope original-context score]
    (eval-regression-score envelope original-context score nil))
   ([envelope original-context score details]
@@ -226,14 +276,21 @@
 (defn eval-hallucination-score
   "Score hallucination for `envelope` against `original-context`.
 
-   In v0 this is a stub that returns the caller-supplied score. The host
-   should fill this in by checking whether every residue claim can be
-   traced to the original context.
+   When called with 2 args, uses heuristic Jaccard similarity of
+   significant words between residue claims and original context.
+
+   When called with 3 args, uses caller-supplied `score` (host/judge
+   override).
 
    `score` must be a number between 0.0 and 1.0.
    `details` is an optional map with scoring rationale.
 
    Returns an eval record map."
+  ([envelope original-context]
+   (let [heuristic (heuristic-hallucination envelope original-context)
+         score (:score heuristic)
+         details (:details heuristic)]
+     (eval-record eval-hallucination score (classify :hallucination score) details)))
   ([envelope original-context score]
    (eval-hallucination-score envelope original-context score nil))
   ([envelope original-context score details]
