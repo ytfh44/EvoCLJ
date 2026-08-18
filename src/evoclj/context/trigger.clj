@@ -1,33 +1,30 @@
 (ns evoclj.context.trigger
   "Determines WHEN to compress context.
 
-  Two signals can trigger compression:
-  1. Token count exceeds a configurable threshold.
-  2. An explicit marker string is found in the context text.
+   Two signals can trigger compression:
+   1. Token count exceeds a configurable threshold.
+   2. An explicit marker string is found in the context text.
 
-  The decision is fully deterministic: the same context + config always
-  produces the same trigger record. No randomness, no mutable state.
+   The decision is fully deterministic: the same context + config always
+   produces the same trigger record. No randomness, no mutable state.
 
-  A cooldown mechanism prevents re-triggering too aggressively: if the
-  last compression saved fewer than `:trigger/cooldown-tokens` tokens,
-  the trigger returns :cooldown even if the threshold is exceeded again.
-  This prevents thrashing near the boundary."
-  (:require [evoclj.context.error :as err]))
+   A cooldown mechanism prevents re-triggering too aggressively: if the
+   last compression saved fewer than `:trigger/cooldown-tokens` tokens,
+   the trigger returns :cooldown even if the threshold is exceeded again.
+   This prevents thrashing near the boundary."
+  (:require [evoclj.context.error :as err]
+            [evoclj.context.token-estimator :as token-estimator]))
 
 ;; ---------------------------------------------------------------------------
-;; Token estimation (character-count proxy)
+;; Token estimation
 ;; ---------------------------------------------------------------------------
 
-;; In v0 we use a simple character-count proxy for token estimation.
-;; A real implementation would use the model's tokenizer, but that
-;; requires a model-specific dependency we don't want here. The proxy
-;; is intentionally rough: it only needs to be CONSISTENT, not exact.
-;; Ratio: ~4 characters per token for mixed English/Clojure text.
-
-(def ^:private ^:const chars-per-token 4)
+(def ^:private default-estimator
+  "Default token estimator: character-count proxy with ~4 chars per token."
+  token-estimator/default-char-count-estimator)
 
 (defn- estimate-tokens [s]
-  (int (Math/ceil (/ (count s) chars-per-token))))
+  (token-estimator/estimate-tokens default-estimator s))
 
 ;; ---------------------------------------------------------------------------
 ;; Trigger reasons
@@ -79,6 +76,7 @@
     :trigger/token-threshold  — max estimated tokens before compression (default 4000)
     :trigger/marker           — explicit compression marker string (default nil)
     :trigger/cooldown-tokens  — minimum tokens saved to reset cooldown (default 500)
+    :trigger/token-estimator  — optional TokenEstimator instance (default char-count)
 
   Returns a map with :trigger/compressed? boolean and :trigger/reason
   keyword. Throws :context/trigger-invalid when config is malformed."
@@ -95,7 +93,8 @@
         marker    (:trigger/marker config)
         cooldown  (int (or (:trigger/cooldown-tokens config) 500))
         last-savings (:trigger/last-savings config)
-        token-count (estimate-tokens context-str)
+        estimator (or (:trigger/token-estimator config) default-estimator)
+        token-count (token-estimator/estimate-tokens estimator context-str)
         marker-found? (and marker (clojure.string/includes? context-str marker))
         in-cooldown?  (and (some? last-savings) (< (int last-savings) cooldown))
         threshold-hit? (>= token-count threshold)]
@@ -124,5 +123,7 @@
 
 (defn token-count
   "Estimated token count for `context-str` under the current estimator."
-  [context-str]
-  (estimate-tokens context-str))
+  ([context-str]
+   (token-count context-str nil))
+  ([context-str estimator]
+   (token-estimator/estimate-tokens (or estimator default-estimator) context-str)))

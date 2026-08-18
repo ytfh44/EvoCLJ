@@ -16,6 +16,7 @@
    - `->DefaultCompacter` — built-in compacter record
    - `run` — execute a compacter against a context string"
   (:require [evoclj.context.trigger :as trigger]
+            [evoclj.context.token-estimator :as token-estimator]
             [evoclj.context.compressor :as compressor]
             [evoclj.context.envelope :as envelope]
             [evoclj.context.footer :as footer]
@@ -57,9 +58,10 @@
                             its :residue and :evidence are retained and
                             merged with the new compression result.
        :structured-sections — optional authoritative structured state
-                              map {:tasks [...] :subgoals [...]}; when
-                              present, crosscheck is performed and
-                              auto-correctable fields are fixed.
+                             map {:tasks [...] :subgoals [...]}; when
+                             present, crosscheck is performed and
+                             auto-correctable fields are fixed.
+       :token-estimator  — optional TokenEstimator instance (default char-count)
 
      Returns a map:
        {:envelope <Envelope map>
@@ -109,13 +111,16 @@
           footer-opts (:footer-opts opts)
           previous-envelope (:previous-envelope opts)
           structured-sections (:structured-sections opts)
+          estimator (or (:token-estimator opts) token-estimator/default-char-count-estimator)
           trigger-config {:trigger/token-threshold threshold
                           :trigger/marker marker
-                          :trigger/cooldown-tokens cooldown}
+                          :trigger/cooldown-tokens cooldown
+                          :trigger/token-estimator estimator}
           trigger-result (trigger/should-compress? context trigger-config)]
       (if-not (:trigger/compressed? trigger-result)
         ;; No compression needed — return the original context with an empty envelope
-        (let [state (collect-structured-state previous-envelope structured-sections)]
+        (let [state (collect-structured-state previous-envelope structured-sections)
+              token-count (:trigger/token-count trigger-result)]
           {:envelope (envelope/make-envelope
                        {:task (or (:task state)
                                   {:task/id "noop" :task/status :pending
@@ -125,9 +130,9 @@
                         :evidence (or (:evidence state) [])
                         :version 1
                         :created-at (str (java.time.Instant/now))
-                        :window {:window/from 0 :window/to 100}
-                        :tokens-before (:trigger/token-count trigger-result)
-                        :tokens-after  (:trigger/token-count trigger-result)
+                        :window {:window/from 0 :window/to token-count}
+                        :tokens-before token-count
+                        :tokens-after  token-count
                         :compressor {:compressor/model model
                                      :compressor/prompt "none"}})
            :footer ""
@@ -155,7 +160,7 @@
                         :task/description "Context compression"})
               subgoals (or (:subgoals structured-summary) [])
               now (str (java.time.Instant/now))
-              tokens-after (int (/ (count (:raw-response llm-result)) 4))
+              tokens-after (token-estimator/estimate-tokens estimator (:raw-response llm-result))
               envelope-base (envelope/make-envelope
                              {:task task
                               :subgoals subgoals
@@ -163,7 +168,7 @@
                               :evidence merged-evidence
                               :version 1
                               :created-at now
-                              :window {:window/from 0 :window/to 100}
+                              :window {:window/from 0 :window/to (:trigger/token-count trigger-result)}
                               :tokens-before (:trigger/token-count trigger-result)
                               :tokens-after tokens-after
                               :compressor {:compressor/model model
