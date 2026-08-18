@@ -22,7 +22,12 @@
    2. **Legacy compression** (`compress`) — retained for backward
       compatibility. Builds a prompt from a summary map and asks the
       model to fill all four sections. New callers should prefer
-      `compress-structured`."
+      `compress-structured`.
+
+   `model-call` may return either a plain string (backward compatible) or
+   a map with `:text` or `:raw-response` (string) and an optional
+   `:usage` map shaped `{:input-tokens <int> :output-tokens <int>}`.
+   The `:usage` map is included in both return values when present."
   (:require [evoclj.context.error :as err]
             [evoclj.context.envelope :as envelope]
             [evoclj.context.residue :as residue]
@@ -150,6 +155,45 @@
     (format structured-prompt-template structured-str raw-str)))
 
 ;; ---------------------------------------------------------------------------
+;; Model call normalization helpers
+;; ---------------------------------------------------------------------------
+
+(defn- model-response-text
+  "Extract the raw response string from a model-call return value.
+
+   Accepts:
+   - a plain string (backward compatible)
+   - a map with :text or :raw-response containing the response string
+
+   Returns the string, or throws :context/compression-invalid if the
+   value is not a string and does not contain :text or :raw-response."
+  [raw-response]
+  (cond
+    (string? raw-response)
+    raw-response
+
+    (and (map? raw-response) (string? (:text raw-response)))
+    (:text raw-response)
+
+    (and (map? raw-response) (string? (:raw-response raw-response)))
+    (:raw-response raw-response)
+
+    :else
+    (throw (err/error :context/compression-invalid
+                      "model-call must return a string or a map with :text or :raw-response"
+                      {:value (err/sanitize raw-response)}))))
+
+(defn- model-usage
+  "Extract the optional :usage map from a model-call return value.
+
+   Returns nil when the return is a plain string or when :usage is absent.
+   Returns the :usage map when present on a map return value."
+  [raw-response]
+  (when (map? raw-response)
+    (when (map? (:usage raw-response))
+      (:usage raw-response))))
+
+;; ---------------------------------------------------------------------------
 ;; Model call wrappers
 ;; ---------------------------------------------------------------------------
 
@@ -161,11 +205,15 @@
    :evidence).
 
    `model-call` is a function of one argument (the prompt string) that
-   returns the raw model response string.
+   returns either:
+   - a plain string (backward compatible), OR
+   - a map with `:text` or `:raw-response` (string) and an optional
+     `:usage` map shaped `{:input-tokens <int> :output-tokens <int>}`.
 
    Returns a full envelope map (validated against EnvelopeSchema) with
    compression metadata (:envelope/version, :envelope/created-at,
-   :envelope/compressor, :envelope/tokens-before, :envelope/tokens-after).
+   :envelope/compressor, :envelope/tokens-before, :envelope/tokens-after,
+   :envelope/usage when the model-call supplied it).
 
    Throws :context/compression-invalid if the model response cannot be
    parsed into a valid envelope."
@@ -173,16 +221,18 @@
                          :or {model "unknown" prompt-version 1}}]
   (let [prompt (build-prompt summary)
         raw-response (model-call prompt)
+        response-text (model-response-text raw-response)
+        usage (model-usage raw-response)
         parsed (try
-                 (clojure.edn/read-string raw-response)
+                 (clojure.edn/read-string response-text)
                  (catch Exception e
                    (throw (err/error :context/compression-invalid
                                      (str "model response is not valid EDN: "
                                           (.getMessage e))
-                                     {:raw (err/sanitize raw-response)
+                                     {:raw (err/sanitize response-text)
                                       :cause (err/sanitize (.getMessage e))}))))
         now (str (java.time.Instant/now))
-        tokens-after (int (/ (count raw-response) 4))
+        tokens-after (int (/ (count response-text) 4))
         envelope-base (envelope/make-envelope
                        {:task (:task parsed)
                         :subgoals (:subgoals parsed [])
@@ -194,7 +244,8 @@
                         :tokens-before (int (or tokens-before 0))
                         :tokens-after tokens-after
                         :compressor {:compressor/model model
-                                     :compressor/prompt prompt}})]
+                                     :compressor/prompt prompt}
+                        :usage usage})]
     (envelope/validate-envelope envelope-base)
     envelope-base))
 
@@ -209,12 +260,16 @@
    `structured-summary` — map with at least :task and :subgoals, plus
    optional :residue/:evidence from the previous envelope.
    `raw-context` — the verbatim conversation/event log text.
-   `model-call` — function of one argument (prompt string) returning the
-   raw model response string.
+   `model-call` — function of one argument (prompt string) returning
+   either:
+   - a plain string (backward compatible), OR
+   - a map with `:text` or `:raw-response` (string) and an optional
+     `:usage` map shaped `{:input-tokens <int> :output-tokens <int>}`.
 
    Returns a partial envelope map containing ONLY :residue and :evidence
-   (no compression metadata). The caller is responsible for merging this
-   with the authoritative task/subgoal state and adding metadata.
+   (no compression metadata), plus `:usage` when the model-call supplied
+   it. The caller is responsible for merging this with the authoritative
+   task/subgoal state and adding metadata.
 
    Throws :context/compression-invalid if the model response cannot be
    parsed or does not contain :residue and :evidence."
@@ -222,24 +277,28 @@
                                                  :or {model "unknown" prompt-version 1}}]
   (let [prompt (build-structured-prompt structured-summary raw-context)
         raw-response (model-call prompt)
+        response-text (model-response-text raw-response)
+        usage (model-usage raw-response)
         parsed (try
-                 (clojure.edn/read-string raw-response)
+                 (clojure.edn/read-string response-text)
                  (catch Exception e
                    (throw (err/error :context/compression-invalid
                                      (str "model response is not valid EDN: "
                                           (.getMessage e))
-                                     {:raw (err/sanitize raw-response)
+                                     {:raw (err/sanitize response-text)
                                       :cause (err/sanitize (.getMessage e))}))))]
     ;; Validate the parsed map has the expected keys
     (when-not (map? parsed)
       (throw (err/error :context/compression-invalid
                         "model response is not a map"
-                        {:raw (err/sanitize raw-response)})))
+                        {:raw (err/sanitize response-text)})))
     ;; The model MUST return :residue and :evidence; other keys are ignored
-    {:residue (vec (or (:residue parsed) []))
-     :evidence (vec (or (:evidence parsed) []))
-     :raw-response raw-response
-     :prompt prompt}))
+    (cond-> {:residue (vec (or (:residue parsed) []))
+             :evidence (vec (or (:evidence parsed) []))
+             :raw-response response-text
+             :prompt prompt}
+      usage
+      (assoc :usage usage))))
 
 ;; ---------------------------------------------------------------------------
 ;; Mock caller (for testing)
