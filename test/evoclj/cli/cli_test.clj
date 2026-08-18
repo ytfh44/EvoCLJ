@@ -724,7 +724,30 @@
         (is (= 1 exit))
         (is (= :evolution/generation-not-found (:error/type data)))))))
 
-;; ============================================================================
+(deftest cli-context-commands-are-registered
+  (let [dir (temp-dir "evoclj-cli-context-")]
+    (testing "context compress without input exits 1 with :cli/usage-invalid"
+      (let [{:keys [exit data]} (main/execute ["context" "compress"] {:state-dir dir})]
+        (is (= 1 exit))
+        (is (= :cli/usage-invalid (:error/type data)))))
+    (testing "context recompress without input exits 1 with :cli/usage-invalid"
+      (let [{:keys [exit data]} (main/execute ["context" "recompress"] {:state-dir dir})]
+        (is (= 1 exit))
+        (is (= :cli/usage-invalid (:error/type data)))))
+    (testing "context loop without input exits 1 with :cli/usage-invalid"
+      (let [{:keys [exit data]} (main/execute ["context" "loop"] {:state-dir dir})]
+        (is (= 1 exit))
+        (is (= :cli/usage-invalid (:error/type data)))))
+    (testing "context inspect without input exits 1 with :cli/usage-invalid"
+      (let [{:keys [exit data]} (main/execute ["context" "inspect"] {:state-dir dir})]
+        (is (= 1 exit))
+        (is (= :cli/usage-invalid (:error/type data)))))
+    (testing "an unknown context subcommand exits 1 with :cli/unknown-command"
+      (let [{:keys [exit data]} (main/execute ["context" "foo"] {:state-dir dir})]
+        (is (= 1 exit))
+        (is (= :cli/unknown-command (:error/type data)))))))
+
+;; ===========================================================================
 ;; STEP 2 (end to end) — evolve → eval → promote → rollback through the CLI
 ;; ============================================================================
 

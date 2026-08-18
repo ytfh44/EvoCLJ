@@ -30,6 +30,7 @@
     evoclj.cli.promotion promote, rollback, lineage"
   (:require [clojure.pprint :as pprint]
             [clojure.string :as str]
+            [evoclj.cli.context :as context]
             [evoclj.cli.cost :as cost]
             [evoclj.cli.deploy :as deploy]
             [evoclj.cli.eval-inspect :as eval-inspect]
@@ -98,7 +99,11 @@
    ["rollback"]               {:fn promotion/rollback! :arity 0}
    ["lineage"]                {:fn promotion/lineage! :arity 1}
    ["cost"]                   {:fn cost/cost-report! :arity 0}
-   ["recovery"]               {:fn recovery/recovery-scan! :arity 0}})
+   ["recovery"]               {:fn recovery/recovery-scan! :arity 0}
+   ["context" "compress"]     {:fn context/compress! :arity 0}
+   ["context" "recompress"]   {:fn context/recompress! :arity 0}
+   ["context" "loop"]         {:fn context/loop! :arity 0}
+   ["context" "inspect"]      {:fn context/inspect! :arity 0}})
 
 (defn- command-for
   "The command entry for a positional vector, or nil."

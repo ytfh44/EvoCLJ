@@ -9,6 +9,13 @@
             [evoclj.context.eval :as eval]
             [evoclj.context.loop :as loop]))
 
+(def ^:dynamic *exit*
+  "The exit function used by the context CLI. Throws an ExceptionInfo
+  carrying the exit code so the main CLI can catch it and return a
+  typed error map."
+  (fn [code]
+    (throw (ex-info "context-cli-exit" {:exit code}))))
+
 (defn- parse-args [args opts]
   "Simple argument parser. Returns {:options <map> :errors <vector>}."
   (loop [i 0
@@ -125,7 +132,7 @@
           {:keys [options errors]} opts]
       (when (seq errors)
         (doseq [e errors] (println "Error:" e))
-        (System/exit 1))
+        (*exit* 1))
       (let [input (get options "input")
             output (get options "output")
             threshold (get options "threshold" 4000)
@@ -136,7 +143,7 @@
             comp (make-compacter model)]
         (when (str/blank? context-str)
           (println "Error: input file is empty or missing")
-          (System/exit 1))
+          (*exit* 1))
         (let [result (loop/recompress! context-str comp
                                       {:model model
                                        :token-threshold threshold
@@ -155,7 +162,7 @@
       (let [ed (ex-data e)]
         (println "Error:" (or (:error/message ed) (.getMessage e))
                  (when-let [t (:error/type ed)] (str "[" t "]")))
-        (System/exit 1)))))
+        (*exit* 1)))))
 
 (defn recompress-command [args]
   (try
@@ -163,7 +170,7 @@
           {:keys [options errors]} opts]
       (when (seq errors)
         (doseq [e errors] (println "Error:" e))
-        (System/exit 1))
+        (*exit* 1))
       (let [input (get options "input")
             output (get options "output")
             threshold (get options "threshold" 4000)
@@ -174,7 +181,7 @@
             comp (make-compacter model)]
         (when (str/blank? context-str)
           (println "Error: input file is empty or missing")
-          (System/exit 1))
+          (*exit* 1))
         (let [result (loop/recompress! context-str comp
                                       {:model model
                                        :token-threshold threshold
@@ -192,7 +199,7 @@
       (let [ed (ex-data e)]
         (println "Error:" (or (:error/message ed) (.getMessage e))
                  (when-let [t (:error/type ed)] (str "[" t "]")))
-        (System/exit 1)))))
+        (*exit* 1)))))
 
 (defn loop-command [args]
   (try
@@ -200,7 +207,7 @@
           {:keys [options errors]} opts]
       (when (seq errors)
         (doseq [e errors] (println "Error:" e))
-        (System/exit 1))
+        (*exit* 1))
       (let [input (get options "input")
             output (get options "output")
             iterations (get options "iterations" 3)
@@ -212,7 +219,7 @@
             comp (make-compacter model)]
         (when (str/blank? context-str)
           (println "Error: input file is empty or missing")
-          (System/exit 1))
+          (*exit* 1))
         (let [result (loop/compress-and-apply context-str comp
                                               {:model model
                                                :token-threshold threshold
@@ -233,7 +240,7 @@
       (let [ed (ex-data e)]
         (println "Error:" (or (:error/message ed) (.getMessage e))
                  (when-let [t (:error/type ed)] (str "[" t "]")))
-        (System/exit 1)))))
+        (*exit* 1)))))
 
 (defn inspect-command [args]
   (try
@@ -241,22 +248,22 @@
           {:keys [options errors]} opts]
       (when (seq errors)
         (doseq [e errors] (println "Error:" e))
-        (System/exit 1))
+        (*exit* 1))
       (let [input (get options "input")
             content (read-context input)]
         (when (str/blank? content)
           (println "Error: input file is empty or missing")
-          (System/exit 1))
+          (*exit* 1))
         (let [envelope-str (first (str/split content #"\n\n" 2))
               parsed (try (edn/read-string envelope-str) (catch Exception _ nil))]
           (if (and (map? parsed) (:envelope/version parsed))
             (do (print-envelope parsed) 0)
-            (do (println "Could not find a valid envelope.") (System/exit 1))))))
+            (do (println "Could not find a valid envelope.") (*exit* 1))))))
     (catch Exception e
       (let [ed (ex-data e)]
         (println "Error:" (or (:error/message ed) (.getMessage e))
                  (when-let [t (:error/type ed)] (str "[" t "]")))
-        (System/exit 1)))))
+        (*exit* 1)))))
 
 (defn -main [& args]
   (if (seq args)
