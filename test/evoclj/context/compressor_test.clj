@@ -97,4 +97,103 @@
         response (caller "hello")]
     (t/is (clojure.string/starts-with? response "RESPONSE TO:"))))
 
+;; ---------------------------------------------------------------------------
+;; build-structured-prompt
+;; ---------------------------------------------------------------------------
+
+(t/deftest build-structured-prompt-returns-string
+  (t/is (string? (comp/build-structured-prompt (sample-summary) "raw context"))))
+
+(t/deftest build-structured-prompt-embeds-structured-summary
+  (let [prompt (comp/build-structured-prompt (sample-summary) "raw context")
+        structured-str (pr-str (sample-summary))]
+    (t/is (clojure.string/includes? prompt structured-str))))
+
+(t/deftest build-structured-prompt-embeds-raw-context
+  (let [raw "some raw conversation text"
+        prompt (comp/build-structured-prompt (sample-summary) raw)]
+    (t/is (clojure.string/includes? prompt raw))))
+
+(t/deftest build-structured-prompt-throws-on-non-map-summary
+  (try
+    (comp/build-structured-prompt "not a map" "raw")
+    (t/is false "should have thrown")
+    (catch Exception e
+      (t/is (= :context/compression-invalid (:error/type (ex-data e)))))))
+
+(t/deftest build-structured-prompt-throws-on-non-string-raw-context
+  (try
+    (comp/build-structured-prompt (sample-summary) 42)
+    (t/is false "should have thrown")
+    (catch Exception e
+      (t/is (= :context/compression-invalid (:error/type (ex-data e)))))))
+
+;; ---------------------------------------------------------------------------
+;; compress-structured with mock caller
+;; ---------------------------------------------------------------------------
+
+(t/deftest compress-structured-returns-residue-and-evidence
+  (let [model-response {:residue [{:residue/id 1 :residue/kind :constraint
+                                    :residue/text "must not break X"
+                                    :residue/source "user"
+                                    :residue/at "2026-08-17T00:00:00Z"}]
+                               :evidence [{:evidence/id 1 :evidence/kind :observation
+                                            :evidence/text "src/evoclj/context/compressor.clj"
+                                            :evidence/at "2026-08-17T00:00:00Z"}]}
+        result (comp/compress-structured (sample-summary)
+                                         "raw context"
+                                         (comp/mock-call (fn [_] (pr-str model-response)))
+                                         :model "test-model")]
+    (t/is (vector? (:residue result)))
+    (t/is (vector? (:evidence result)))
+    (t/is (= 1 (count (:residue result))))
+    (t/is (= 1 (count (:evidence result))))
+    (t/is (= "must not break X" (get-in (:residue result) [0 :residue/text])))))
+
+(t/deftest compress-structured-ignores-task-and-subgoals-in-model-output
+  ;; The model might try to return :task/:subgoals, but compress-structured
+  ;; should only extract :residue and :evidence.
+  (let [model-response {:task {:task/id "fake" :task/status :completed
+                                :task/description "should be ignored"}
+                        :subgoals []
+                        :residue []
+                        :evidence [{:evidence/id 1 :evidence/kind :observation
+                                    :evidence/text "real evidence"
+                                    :evidence/at "2026-08-17T00:00:00Z"}]}
+        result (comp/compress-structured (sample-summary)
+                                         "raw context"
+                                         (comp/mock-call (fn [_] (pr-str model-response)))
+                                         :model "test-model")]
+    (t/is (= 0 (count (:residue result))))
+    (t/is (= 1 (count (:evidence result))))
+    (t/is (= "real evidence" (get-in (:evidence result) [0 :evidence/text])))))
+
+(t/deftest compress-structured-throws-on-malformed-model-response
+  (try
+    (comp/compress-structured (sample-summary)
+                              "raw context"
+                              (comp/mock-call (fn [_] "not valid edn")))
+    (t/is false "should have thrown")
+    (catch Exception e
+      (t/is (= :context/compression-invalid (:error/type (ex-data e)))))))
+
+(t/deftest compress-structured-throws-on-non-map-model-response
+  (try
+    (comp/compress-structured (sample-summary)
+                              "raw context"
+                              (comp/mock-call (fn [_] "\"a string\"")))
+    (t/is false "should have thrown")
+    (catch Exception e
+      (t/is (= :context/compression-invalid (:error/type (ex-data e)))))))
+
+(t/deftest compress-structured-prompt-mentions-raw-context
+  (let [raw "specific raw conversation text"
+        prompt (comp/build-structured-prompt (sample-summary) raw)]
+    (t/is (clojure.string/includes? prompt raw))))
+
+(t/deftest compress-structured-prompt-mentions-do-not-override-task
+  (let [prompt (comp/build-structured-prompt (sample-summary) "raw")]
+    (t/is (clojure.string/includes? prompt "DO NOT OVERRIDE"))
+    (t/is (clojure.string/includes? prompt ":task"))))
+
 (t/run-tests)
