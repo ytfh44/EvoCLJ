@@ -21,7 +21,8 @@
             [evoclj.context.footer :as footer]
             [evoclj.context.registry :as registry]
             [evoclj.context.crosscheck :as crosscheck]
-            [evoclj.context.eval :as eval]))
+            [evoclj.context.eval :as eval]
+            [evoclj.context.residue :as residue]))
 
 ;; ---------------------------------------------------------------------------
 ;; Protocol
@@ -142,12 +143,11 @@
                           :model model
                           :tokens-before (:trigger/token-count trigger-result))
               ;; Merge authoritative task/subgoals with LLM-produced residue/evidence.
-              ;; Previous residue/evidence are prepended so they are never lost;
-              ;; the LLM may add new entries or duplicate old ones (deduplication
-              ;; is idempotency's job, not the compacter's).
+              ;; Previous residue is deduplicated via residue-merge so that repeated
+              ;; compressions do not accumulate duplicates.
               previous-residue (:residue structured-summary)
               previous-evidence (:evidence structured-summary)
-              merged-residue (vec (concat previous-residue (:residue llm-result)))
+              merged-residue (residue/residue-merge previous-residue (:residue llm-result))
               merged-evidence (vec (concat previous-evidence (:evidence llm-result)))
               ;; Merge authoritative task/subgoals with LLM-produced residue/evidence
               task (or (:task structured-summary)
