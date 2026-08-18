@@ -7,7 +7,9 @@
             [evoclj.context.loop :as loop]
             [evoclj.context.eval :as eval]
             [evoclj.context.archivers :as archivers]
-            [evoclj.context.registry :as registry]))
+            [evoclj.context.registry :as registry]
+            [evoclj.context.token-estimator :as token-estimator]
+            [evoclj.context.trigger :as trigger]))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers
@@ -180,5 +182,41 @@
     ;; Context is envelope + fresh tail; footer has marker
     (t/is (str/starts-with? (:context result) "#:envelope{"))
     (t/is (str/includes? (:footer result) "[CONTEXT COMPRESSION]"))))
+
+(t/deftest cooldown-prevents-recompression
+  (let [context (make-context 50)
+        comp (make-compacter)
+        result1 (loop/recompress! context comp
+                  {:model "test-model"
+                   :token-threshold 10
+                   :cooldown-tokens 1000
+                   :marker "[CONTEXT COMPRESSION]"})
+        savings (or (get-in result1 [:trigger/last-savings])
+                    (- (count context) (count (:context result1))))
+        result2 (loop/recompress! (:context result1) comp
+                  {:model "test-model"
+                   :token-threshold 10
+                   :cooldown-tokens 1000
+                   :trigger/last-savings savings
+                   :marker "[CONTEXT COMPRESSION]"})]
+    ;; Second compression should be noop because savings < cooldown-tokens
+    (t/is (= (:context result1) (:context result2)))))
+
+(t/deftest custom-token-estimator-affects-trigger
+  (let [context (str (apply str (repeat 100 "abc ")))
+        ;; With char-count estimator (4 chars/token): 400 chars / 4 = 100 tokens
+        ;; With word-count estimator: 100 words = 100 tokens
+        char-est (token-estimator/char-count-estimator 4)
+        word-est (token-estimator/cl100k-estimator)
+        trigger-config-char {:trigger/token-threshold 50
+                             :trigger/token-estimator char-est}
+        trigger-config-word {:trigger/token-threshold 50
+                             :trigger/token-estimator word-est}
+        result-char (trigger/should-compress? context trigger-config-char)
+        result-word (trigger/should-compress? context trigger-config-word)]
+    (t/is (= (:trigger/token-count result-char) 100))
+    (t/is (= (:trigger/token-count result-word) 100))
+    (t/is (:trigger/compressed? result-char))
+    (t/is (:trigger/compressed? result-word))))
 
 (t/run-tests)
