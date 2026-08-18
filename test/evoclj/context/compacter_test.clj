@@ -156,4 +156,15 @@
     (t/is (map? (:eval result)))
     (t/is (keyword? (get-in (:eval result) [:eval/overall-status])))))
 
+(t/deftest default-compacter-uses-service-usage-tokens
+  (let [c (compacter/->DefaultCompacter
+            (fn [_]
+              {:text (pr-str {:residue [] :evidence []})
+               :usage {:input-tokens 123 :output-tokens 456}}))
+        ;; 50 chars => 13 tokens (> 10 threshold) so compression is triggered
+        short-context (apply str (repeat 50 "a"))
+        result (compacter/run short-context c {:token-threshold 10})]
+    (t/is (= 456 (:envelope/tokens-after (:envelope result))))
+    (t/is (= {:input-tokens 123 :output-tokens 456} (:usage result)))))
+
 (t/run-tests)

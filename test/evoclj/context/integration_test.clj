@@ -219,4 +219,16 @@
     (t/is (:trigger/compressed? result-char))
     (t/is (:trigger/compressed? result-word))))
 
+(t/deftest service-usage-affects-tokens-after
+  (let [comp (compacter/->DefaultCompacter
+               (fn [_]
+                 {:text (pr-str {:residue [] :evidence []})
+                  :usage {:input-tokens 123 :output-tokens 456}}))
+        context (make-context 100)
+        result (loop/recompress! context comp
+                 {:model "test-model"
+                  :token-threshold 10
+                  :marker "[CONTEXT COMPRESSION]"})]
+    (t/is (= 456 (:envelope/tokens-after (:envelope result))))))
+
 (t/run-tests)
