@@ -146,7 +146,8 @@
   or :none interleaved dialect extracts no reasoning.
 
   Returns {:model/output {:text <str> :reasoning <str or absent>}
-           :usage {:input-tokens <int> :output-tokens <int>}}.
+           :usage {:input-tokens <int> :output-tokens <int>
+                   :reasoning-tokens <int or absent>}}.
   Throws :provider/output-invalid when the response has no choices
   or the first choice has no message."
   [dialect response]
@@ -169,7 +170,9 @@
                                                  (get-in tc [:function :arguments]))}))
                            raw-tools))
         tool-calls (seq tool-calls)
-        usage (:usage response)]
+        usage (:usage response)
+        reasoning-tokens (get-in usage [:completion_tokens_details
+                                        :reasoning_tokens])]
     (when-not (and (vector? choices) (seq choices) (map? message))
       (throw (ex-info "openai response has no usable first choice"
                       {:error/type :provider/output-invalid
@@ -178,7 +181,8 @@
                               (and reasoning (not (str/blank? (str reasoning))))
                               (assoc :reasoning (str reasoning)))
              :usage {:input-tokens (get-in usage [:prompt_tokens] 0)
-                     :output-tokens (get-in usage [:completion_tokens] 0)}}
+                     :output-tokens (get-in usage [:completion_tokens] 0)
+                     :reasoning-tokens (or reasoning-tokens 0)}}
       tool-calls (assoc :tool-calls (vec tool-calls))
       (map? usage) (assoc :model/raw-usage (select-keys usage
                                                  [:prompt_tokens
@@ -222,21 +226,22 @@
 (defn estimate-cost
   "Estimate USD cost units for one call from the models.dev pricing
   table {:input <rate> :output <rate> :reasoning <rate or nil>}:
-  input_tokens * input rate + output_tokens * output rate. The
-  :reasoning rate is ignored in v1 because OpenAI-compatible chat
-  responses do not report the reasoning-token split; it becomes
-  usable once providers expose it (TODO: completion_tokens_details
-  reasoning_tokens). Returns a plain number; nil pricing yields nil
-  (unknown cost)."
+  input_tokens * input rate + output_tokens * output rate +
+  reasoning_tokens * reasoning rate (when the rate is present and
+  providers expose completion_tokens_details.reasoning_tokens).
+  Returns a plain number; nil pricing yields nil (unknown cost)."
   [pricing usage]
   (when (and (map? pricing) (map? usage))
     (let [input-rate (:input pricing)
           output-rate (:output pricing)
+          reasoning-rate (:reasoning pricing)
           input-tokens (or (:input-tokens usage) 0)
-          output-tokens (or (:output-tokens usage) 0)]
-      (when (or input-rate output-rate)
+          output-tokens (or (:output-tokens usage) 0)
+          reasoning-tokens (or (:reasoning-tokens usage) 0)]
+      (when (or input-rate output-rate reasoning-rate)
         (+ (* input-tokens (double (or input-rate 0)))
-           (* output-tokens (double (or output-rate 0))))))))
+           (* output-tokens (double (or output-rate 0)))
+           (* reasoning-tokens (double (or reasoning-rate 0))))))))
 
 (defn provider-result
   "Assemble the canonical provider result map for a model call:
@@ -245,5 +250,6 @@
   [output usage cost]
   (cond-> {:model/output output
            :usage {:model-input-tokens (get usage :input-tokens 0)
-                   :model-output-tokens (get usage :output-tokens 0)}}
+                   :model-output-tokens (get usage :output-tokens 0)
+                   :model-reasoning-tokens (get usage :reasoning-tokens 0)}}
     (some? cost) (assoc :model-cost-units (double cost))))

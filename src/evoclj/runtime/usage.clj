@@ -53,6 +53,7 @@
   #{:wall-ms
     :model-input-tokens
     :model-output-tokens
+    :model-reasoning-tokens
     :model-cost-units
     :provider-reported-cost
     :provider-calls

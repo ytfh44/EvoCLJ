@@ -83,7 +83,8 @@
           parsed (d/parse-openai-response deepseek-dialect resp)]
       (is (= {:text "final answer" :reasoning "think step by step"}
              (:model/output parsed)))
-      (is (= {:input-tokens 12 :output-tokens 8} (:usage parsed))))
+      (is (= {:input-tokens 12 :output-tokens 8, :reasoning-tokens 0}
+             (:usage parsed))))
   (testing "no interleaved dialect keeps reasoning out of the output"
     (let [resp {:choices [{:message {:content "plain"}}]}
           parsed (d/parse-openai-response {:interleaved :none} resp)]

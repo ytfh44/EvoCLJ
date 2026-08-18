@@ -94,7 +94,8 @@
               [:tool/arguments :map]]]]
    [:usage [:map {:closed true}
             [:model-input-tokens :int]
-            [:model-output-tokens :int]]]
+            [:model-output-tokens :int]
+            [:model-reasoning-tokens {:optional true} :int]]]]
    [:model-cost-units {:optional true} double?]])
 
 (defn- descriptor-for
