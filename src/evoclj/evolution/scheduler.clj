@@ -255,18 +255,21 @@
                                   :reason :no-promote
                                   :eligible? true})
                                passing)
-                         (mapv (fn [e]
-                                 (try
-                                   (promote/promote!
-                                    promotion-system
-                                    {:candidate-id (:candidate/id e)
-                                     :evaluation-id (:evaluation/id e)
-                                     :expected-parent-generation
-                                     (:parent/generation-id e)})
-                                   (catch Throwable t
-                                     {:candidate/id (:candidate/id e)
-                                      :error (ex-data t)})))
-                               passing))
+                         (let [ps (if (fn? promotion-system)
+                                    (promotion-system)
+                                    promotion-system)]
+                           (mapv (fn [e]
+                                   (try
+                                     (promote/promote!
+                                      ps
+                                      {:candidate-id (:candidate/id e)
+                                       :evaluation-id (:evaluation/id e)
+                                       :expected-parent-generation
+                                       (:parent/generation-id e)})
+                                     (catch Throwable t
+                                       {:candidate/id (:candidate/id e)
+                                        :error (ex-data t)})))
+                                 passing)))
               utility (if (seq scored)
                         (apply max
                                (keep #(get-in % [:summary :utility

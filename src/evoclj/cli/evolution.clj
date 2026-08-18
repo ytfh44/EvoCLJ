@@ -638,10 +638,9 @@
   "The promotion-system value the scheduler runner reuses (mirrors the
   per-candidate promotion-system `cycle` builds). Anchored to the
   CURRENT generation's operator session; the resolution id is compiled
-  from the first candidate's bundle (a real loop promotes only when
-  candidates exist, so the first candidate is representative). With no
-  candidates yet a `:derive` placeholder is used — `promote!` is only
-  reached for passing candidates, which implies candidates exist."
+  from the first candidate's bundle. Throws :evolution/no-candidates
+  when the generation has no candidates yet — the loop runner should
+  record a skip rather than call `promote!` with an invalid system."
   [opts system generation-id]
   (let [store (session/store-of system)
         cands (candidates-for-generation system generation-id)
@@ -653,9 +652,10 @@
         {:store store
          :resolution/id (compiled-resolution-id candidate-root)
          :event/session-id op-session})
-      {:store store
-       :resolution/id nil
-       :event/session-id :derive})))
+      (throw (err/error :evolution/no-candidates
+                        "no candidates available for promotion"
+                        {:generation/id generation-id
+                         :candidate-count (count cands)})))))
 
 (defn loop!
   "evoclj loop [--max-cycles <n>] [--no-promote] [--profile <profile-id>]
@@ -715,7 +715,8 @@
         evaluator (when gen-id
                     (build-loop-evaluator opts system gen-id))
         promotion-system (when gen-id
-                           (build-loop-promotion-system opts system gen-id))
+                           (fn []
+                             (build-loop-promotion-system opts system gen-id)))
         candidates-for-generation (fn [gid] (candidates-for-generation system gid))
         ctx {:evolution-system evolution-system
              :evaluator evaluator
