@@ -143,7 +143,8 @@
            :footer ""
            :mismatches []
            :eval nil
-           :trigger trigger-result})
+           :trigger trigger-result
+           :usage nil})
         ;; Proceed with structured compression
         (let [structured-summary (collect-structured-state previous-envelope structured-sections)
               ;; Run the structured compression path
@@ -166,7 +167,10 @@
                         :task/description "Context compression"})
               subgoals (or (:subgoals structured-summary) [])
               now (str (java.time.Instant/now))
-              tokens-after (token-estimator/estimate-tokens estimator (:raw-response llm-result))
+              usage (:usage llm-result)
+              tokens-after (if usage
+                              (:output-tokens usage)
+                              (token-estimator/estimate-tokens estimator (:raw-response llm-result)))
               envelope-base (envelope/make-envelope
                              {:task task
                               :subgoals subgoals
@@ -201,7 +205,8 @@
            :footer f
            :eval eval-result
            :mismatches mismatches
-           :trigger trigger-result})))))
+           :trigger trigger-result
+           :usage usage})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public run helper
