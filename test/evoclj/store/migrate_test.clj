@@ -195,14 +195,14 @@
 
 (deftest fresh-database-applies-all-migrations
   (let [db (sqlite/spec (temp-db-path))]
-    (is (= {:status :applied :version 3} (migrate/migrate! db)))
-    (is (= 3 (migrate/current-version db)))
+    (is (= {:status :applied :version 4} (migrate/migrate! db)))
+    (is (= 4 (migrate/current-version db)))
     (testing "all 15 normative tables exist"
       (is (every? (table-names db) expected-tables)))
     (testing "schema version and applied migrations are recorded in meta"
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
-      (is (= "3" (meta-value db "schema_version")))
-      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql"
+      (is (= "4" (meta-value db "schema_version")))
+      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql"
              (meta-value db "applied_migrations"))))
     (testing "003-routing.sql added the session routing audit columns"
       (let [cols (set (map :name (sqlite/query db
@@ -217,10 +217,10 @@
 (deftest second-apply-is-a-safe-noop
   (let [db (fresh-db)
         tables-before (table-names db)]
-    (is (= {:status :noop :version 3} (migrate/migrate! db)))
+    (is (= {:status :noop :version 4} (migrate/migrate! db)))
     (testing "no duplicate/schema damage"
       (is (= tables-before (table-names db)))
-      (is (= "3" (meta-value db "schema_version")))
+      (is (= "4" (meta-value db "schema_version")))
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
       ;; the migrated schema still works
       (insert-generation! db g1 {})
@@ -384,6 +384,9 @@
         ;; 004-enrichment.sql effects are rewound too (Foundation F3): a
         ;; v1 database predates the enrichments table entirely
         _ (sqlite/exec! db ["DROP TABLE enrichments"])
+        ;; 005-deploy.sql effects are rewound too (S1-3): a v1 database
+        ;; predates the deployment_decisions table entirely
+        _ (sqlite/exec! db ["DROP TABLE IF EXISTS deployment_decisions"])
         _ (sqlite/exec! db ["UPDATE meta SET value = '1' WHERE key = 'schema_version'"])
         _ (sqlite/exec! db ["UPDATE meta SET value = '001-init.sql'
                             WHERE key = 'applied_migrations'"])
@@ -400,12 +403,12 @@
                                      'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
                                      'created', '2025-01-01T00:00:00Z')"])
         result (migrate/migrate! db)]
-    (testing "only the pending migration runs; the version moves to 3"
-      (is (= {:status :applied :version 3} result)))
+    (testing "only the pending migration runs; the version moves to 4"
+      (is (= {:status :applied :version 4} result)))
     (testing "the old session row survives untouched with NULL routing columns"
       (let [row (first (sqlite/query db ["SELECT routing_deployment_version, routing_bucket
                                           FROM sessions WHERE id = 'old-session'"]))]
         (is (nil? (:routing_deployment_version row)))
         (is (nil? (:routing_bucket row)))))
     (testing "a third apply is a verified no-op"
-      (is (= {:status :noop :version 3} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 4} (migrate/migrate! db))))))
