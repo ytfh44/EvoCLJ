@@ -39,7 +39,7 @@
         prefix (subs s 0 end-idx)
         rest-str (subs s end-idx)]
     (try
-      (let [parsed (read-string prefix)]
+      (let [parsed (clojure.edn/read-string prefix)]
         (if (map? parsed)
           {:envelope parsed
            :rest rest-str}

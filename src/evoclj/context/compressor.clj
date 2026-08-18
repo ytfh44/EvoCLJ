@@ -174,7 +174,7 @@
   (let [prompt (build-prompt summary)
         raw-response (model-call prompt)
         parsed (try
-                 (read-string raw-response)
+                 (clojure.edn/read-string raw-response)
                  (catch Exception e
                    (throw (err/error :context/compression-invalid
                                      (str "model response is not valid EDN: "
@@ -223,7 +223,7 @@
   (let [prompt (build-structured-prompt structured-summary raw-context)
         raw-response (model-call prompt)
         parsed (try
-                 (read-string raw-response)
+                 (clojure.edn/read-string raw-response)
                  (catch Exception e
                    (throw (err/error :context/compression-invalid
                                      (str "model response is not valid EDN: "
