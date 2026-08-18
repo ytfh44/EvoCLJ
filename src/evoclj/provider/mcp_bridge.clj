@@ -41,8 +41,7 @@
                :input-schema    input-schema
                :output-schema   output-schema
                :required-action :invoke}
-        retry-safe? (assoc :retry {:safe? true})
-        mcp-name    (assoc :mcp/tool-name mcp-name)))))
+        retry-safe? (assoc :retry {:safe? true})))))
 
 ;; ---------------------------------------------------------------------------
 ;; content-block result -> plain Clojure

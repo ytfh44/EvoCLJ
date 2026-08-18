@@ -54,6 +54,8 @@
             [evoclj.kernel.system :as kernel]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.genome.load :as load]
+            [evoclj.provider.mcp-bridge :as mcp-bridge]
+            [evoclj.provider.registry :as registry]
             [evoclj.runtime.episode :as episode]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
@@ -370,14 +372,73 @@
                              (make-array FileAttribute 0)))
   opts)
 
+;; ============================================================================
+;; MCP provider config + registration
+;; ============================================================================
+
+(defn- validate-mcp-provider-config!
+  "Validate one MCP provider config map. Throws :provider/config-invalid
+  when required keys are missing or of the wrong type."
+  [cfg]
+  (when-not (map? cfg)
+    (throw (err/error :provider/config-invalid
+                      "MCP provider config must be a map"
+                      {:value (err/sanitize cfg)})))
+  (when-not (contains? cfg :tool/id)
+    (throw (err/error :provider/config-invalid
+                      "MCP provider config requires :tool/id"
+                      {:value (err/sanitize cfg)})))
+  (when-not (keyword? (:tool/id cfg))
+    (throw (err/error :provider/config-invalid
+                      "MCP provider :tool/id must be a keyword"
+                      {:value (err/sanitize cfg)})))
+  (when-not (contains? cfg :tool/mcp-name)
+    (throw (err/error :provider/config-invalid
+                      "MCP provider config requires :tool/mcp-name"
+                      {:value (err/sanitize cfg)})))
+  (when-not (string? (:tool/mcp-name cfg))
+    (throw (err/error :provider/config-invalid
+                      "MCP provider :tool/mcp-name must be a string"
+                      {:value (err/sanitize cfg)})))
+  cfg)
+
+(defn register-mcp-providers!
+  "Register MCP-backed providers from `mcp-provider-cfgs` (a collection
+  of config maps) into the system's :provider/registry. Each config map
+  must contain at least :tool/id and :tool/mcp-name, plus any other
+  keys consumed by mcp-bridge/mcp-provider (e.g.
+  :transport-config). Throws :provider/config-invalid on bad config;
+  :provider/duplicate-tool-id from registry/register! propagates."
+  [system mcp-provider-cfgs]
+  (doseq [cfg mcp-provider-cfgs
+          :let [validated (validate-mcp-provider-config! cfg)]]
+    (registry/register! (:provider/registry system)
+                        (mcp-bridge/mcp-provider validated)))
+  system)
+
+(defn mcp-providers-from-config
+  "Read the optional MCP provider configs from the assembled CLI config.
+  Returns the collection at [:provider/registry :mcp-providers], or nil
+  when the config does not carry MCP providers."
+  [config]
+  (get-in config [:provider/registry :mcp-providers]))
+
 (defn build-system
   "Build (and return) the CLI host system for `opts`: the config
   assembled by build-config, the state-dir layout created, then
   kernel.system/init (ig/init + schema migration + catalog provider
-  registration). The CLI only READS the system and calls public APIs."
+  registration). The CLI only READS the system and calls public APIs.
+
+  When the config carries [:provider/registry :mcp-providers], each
+  entry is validated and registered into the system's :provider/registry
+  before the system is returned (opt-in MCP bridge integration)."
   [opts]
   (ensure-state-dirs! opts)
-  (kernel/init (build-config opts)))
+  (let [cfg (build-config opts)
+        sys (kernel/init cfg)]
+    (when-let [mcp-cfgs (mcp-providers-from-config cfg)]
+      (register-mcp-providers! sys mcp-cfgs))
+    sys))
 
 (defn db-of [system] (:store/sqlite system))
 (defn cas-of [system] (:store/cas system))
