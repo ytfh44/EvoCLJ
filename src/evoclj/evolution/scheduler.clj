@@ -255,9 +255,9 @@
                                   :reason :no-promote
                                   :eligible? true})
                                passing)
-                         (let [ps (if (fn? promotion-system)
-                                    (promotion-system)
-                                    promotion-system)]
+                         (when-let [ps (if (fn? promotion-system)
+                                         (promotion-system)
+                                         promotion-system)]
                            (mapv (fn [e]
                                    (try
                                      (promote/promote!

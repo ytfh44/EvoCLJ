@@ -48,6 +48,7 @@
             [evoclj.config :as config]
             [evoclj.eval.profile :as profile]
             [evoclj.evolution.core :as evolution]
+            [evoclj.evolution.default-mutator :as default-mutator]
             [evoclj.evolution.demo-mutator :as demo-mutator]
             [evoclj.kernel.error :as err]
             [evoclj.kernel.system :as kernel]
@@ -307,7 +308,7 @@
                :diagnostician {:task/success-threshold 1.0
                                :max-hypotheses 3
                                :confidence-band :medium}
-               :mutator :none
+               :mutator (default-mutator/default-mutator)
                :budget-profile (merge {:max-candidates 3}
                                       (config/config-value envelope [:config/budget]))
                :programs-registry [route-descriptor]}

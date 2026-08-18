@@ -643,19 +643,15 @@
   record a skip rather than call `promote!` with an invalid system."
   [opts system generation-id]
   (let [store (session/store-of system)
-        cands (candidates-for-generation system generation-id)
-        first-cand (first cands)]
-    (if first-cand
+        cands (candidates-for-generation system generation-id)]
+    (when (seq cands)
       (let [op-session (session/operator-session! opts system generation-id)
+            first-cand (first cands)
             candidate-root (session/candidate-bundle-root
                             opts (:candidate/genome-id first-cand))]
         {:store store
          :resolution/id (compiled-resolution-id candidate-root)
-         :event/session-id op-session})
-      (throw (err/error :evolution/no-candidates
-                        "no candidates available for promotion"
-                        {:generation/id generation-id
-                         :candidate-count (count cands)})))))
+         :event/session-id op-session}))))
 
 (defn loop!
   "evoclj loop [--max-cycles <n>] [--no-promote] [--profile <profile-id>]
