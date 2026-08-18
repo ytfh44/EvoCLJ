@@ -75,3 +75,25 @@
   "Create a Cl100kEstimator instance."
   []
   (->Cl100kEstimator))
+
+;; ---------------------------------------------------------------------------
+;; Model-usage estimator (wraps actual LLM usage data)
+;; ---------------------------------------------------------------------------
+
+(defrecord ModelUsageEstimator [usage-map]
+  TokenEstimator
+  (estimate-tokens [_ _]
+    (if (pos? (:output-tokens usage-map 0))
+      (:output-tokens usage-map)
+      (:input-tokens usage-map 0)))
+  (token-count [_ s]
+    (estimate-tokens _ s)))
+
+(defn model-usage-estimator
+  "Create a ModelUsageEstimator from a usage map shaped
+   `{:input-tokens <int> :output-tokens <int>}`.
+
+   Returns nil if `usage-map` is nil."
+  [usage-map]
+  (when (map? usage-map)
+    (->ModelUsageEstimator usage-map)))

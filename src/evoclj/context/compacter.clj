@@ -168,8 +168,10 @@
               subgoals (or (:subgoals structured-summary) [])
               now (str (java.time.Instant/now))
               usage (:usage llm-result)
-              tokens-after (if usage
-                              (:output-tokens usage)
+              usage-estimator (when usage
+                                 (token-estimator/model-usage-estimator usage))
+              tokens-after (if usage-estimator
+                              (token-estimator/estimate-tokens usage-estimator (:raw-response llm-result))
                               (token-estimator/estimate-tokens estimator (:raw-response llm-result)))
               envelope-base (envelope/make-envelope
                              {:task task
