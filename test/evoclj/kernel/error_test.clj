@@ -91,3 +91,15 @@
       (is (= "[REDACTED]" (get-in result [:env :api-key])))
       (is (= "[REDACTED]" (get-in result [:env :password])))
       (is (= "ok" (get-in result [:env :normal]))))))
+
+(deftest sanitize-redacts-string-key-secrets
+  (testing "string-key headers like \"Authorization\" are also redacted"
+    (let [cfg {"Authorization" "Bearer sk-secret"
+               "X-Api-Key" "abc"
+               "Content-Type" "application/json"
+               :safe-key "keep"}
+          result (err/sanitize cfg)]
+      (is (= "[REDACTED]" (get result "Authorization")))
+      (is (= "[REDACTED]" (get result "X-Api-Key")))
+      (is (= "application/json" (get result "Content-Type")))
+      (is (= "keep" (:safe-key result))))))

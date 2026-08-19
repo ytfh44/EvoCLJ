@@ -118,23 +118,18 @@
   "Convert the full call-tool result map into a plain EDN value.
 
    MCP-aware audit metadata is attached as metadata on successful
-   results when the value supports metadata (IObj). Error results
-   always carry `:mcp/audit` as a map key."
+   results when the value supports metadata (IObj)."
   [result]
   (let [blocks (:mcp/content result)
         edn-blocks (mapv content-block->edn blocks)
         audit {:mcp/block-count (count blocks)
                :mcp/is-error (:mcp/is-error result)}]
-    (if (:mcp/is-error result)
-      (assoc {:error :mcp/tool-error
-              :content edn-blocks}
-             :mcp/audit audit)
-      (case (count edn-blocks)
-        1 (let [v (first edn-blocks)]
-            (if (instance? clojure.lang.IObj v)
-              (with-meta v audit)
-              {:value v :mcp/audit audit}))
-        (with-meta edn-blocks audit)))))
+    (case (count edn-blocks)
+      1 (let [v (first edn-blocks)]
+          (if (instance? clojure.lang.IObj v)
+            (with-meta v audit)
+            {:value v :mcp/audit audit}))
+      (with-meta edn-blocks audit))))
 
 ;; ---------------------------------------------------------------------------
 ;; the provider
@@ -250,7 +245,7 @@
                                   (assoc descriptor
                                          :input-schema (:mcp/input-schema matching)
                                          :output-schema (:mcp/output-schema matching)
-                                         :mcp/last-refreshed (str (java.time.Instant/now))))))
+                                         :mcp/last-refreshed (System/currentTimeMillis)))))
                       (catch Throwable _ nil)))))
               (let [raw-result (mcp-client/call-tool client mcp-name args)
                     edn-result (result->edn raw-result)

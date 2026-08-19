@@ -38,8 +38,10 @@
 
 (defn- secret-key?
   [k]
-  (and (keyword? k)
-       (contains? secret-keys k)))
+  (if (keyword? k)
+    (contains? secret-keys k)
+    (and (string? k)
+         (contains? secret-keys (keyword (clojure.string/lower-case k))))))
 
 (declare sanitize*)
 
