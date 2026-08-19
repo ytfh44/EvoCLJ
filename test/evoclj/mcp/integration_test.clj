@@ -36,7 +36,7 @@
     (when (sequential-thinking-available?)
       (mcp-client/with-client (integration-transport-config)
         (fn [managed]
-          (let [tools (mcp-client/list-tools (:client managed))]
+          (let [tools (:tools (mcp-client/list-tools (:client managed)))]
             (is (pos? (count tools)) "server should return at least one tool")
             (is (some #(= "sequentialthinking" (:mcp/name %)) tools)
                 "server should expose sequentialthinking tool")))))))

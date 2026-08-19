@@ -99,7 +99,7 @@
     (let [m (fake-managed {:closed? true
                             :transport-config {:type :stdio :command "echo" :args []}})]
       (with-redefs [evoclj.mcp.client/build-client
-                    (fn [_]
+                    (fn [_ _]
                       (throw (ex-info "forced reopen failure" {})))]
         (let [e (atom nil)]
           (try
@@ -144,7 +144,7 @@
 (deftest open!-carries-transport-metadata
   (testing "open! returns transport metadata and zeroed counters"
     (with-redefs [evoclj.mcp.client/build-client
-                  (fn [_]
+                  (fn [_ _]
                     {:fake-client true})]
       (let [m (client/open! {:type :stdio :command "echo" :args []})]
         (is (= :stdio (:transport-type m)))

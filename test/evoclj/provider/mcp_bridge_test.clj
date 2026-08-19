@@ -173,6 +173,45 @@
       (is (nil? (mcp-bridge/refresh-provider! p))))))
 
 ;; ---------------------------------------------------------------------------
+;; json-schema->malli
+;; ---------------------------------------------------------------------------
+
+(deftest json-schema->malli-basic-types
+  (testing "string, integer, number, boolean map to correct Malli types"
+    (let [f (find-var 'evoclj.provider.mcp-bridge/json-schema->malli)]
+      (is (= :string (f {:type "string"})))
+      (is (= :int (f {:type "integer"})))
+      (is (= :num (f {:type "number"})))
+      (is (= :boolean (f {:type "boolean"}))))))
+
+(deftest json-schema->malli-object
+  (testing "object with required and optional properties"
+    (let [f (find-var 'evoclj.provider.mcp-bridge/json-schema->malli)
+          schema {:type "object"
+                  :required ["name"]
+                  :properties {"name" {:type "string"}
+                               "age" {:type "integer"}}}]
+      (is (= [:map ["name" :string] [:optional "age" :int]]
+             (f schema))))))
+
+(deftest json-schema->malli-array
+  (testing "array with map items and without items"
+    (let [f (find-var 'evoclj.provider.mcp-bridge/json-schema->malli)]
+      (is (= [:vector [:map [:optional "x" :int]]]
+             (f {:type "array" :items {:type "object"
+                                       :properties {"x" {:type "integer"}}}})))
+      (is (= [:vector :any]
+             (f {:type "array"}))))))
+
+(deftest json-schema->malli-edge-cases
+  (testing "empty schema, nil, and non-map input return :any"
+    (let [f (find-var 'evoclj.provider.mcp-bridge/json-schema->malli)]
+      (is (= :any (f {})))
+      (is (= :any (f nil)))
+      (is (= :any (f "not-a-map")))
+      (is (= :any (f {:type "unknown"}))))))
+
+;; ---------------------------------------------------------------------------
 ;; content-block sandboxing and result audit metadata
 ;; ---------------------------------------------------------------------------
 

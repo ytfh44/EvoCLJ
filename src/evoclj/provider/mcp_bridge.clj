@@ -27,6 +27,50 @@
             [malli.core :as m]))
 
 ;; ---------------------------------------------------------------------------
+;; JSON Schema -> Malli conversion
+;; ---------------------------------------------------------------------------
+
+(defn- json-schema->malli
+  "Convert a simple JSON Schema map to an equivalent Malli schema.
+   v0 handles object, string, integer, boolean, array, and nested
+   properties recursively."
+  [schema]
+  (cond
+    (not (map? schema))
+    :any
+
+    (= "object" (:type schema))
+    (let [props (:properties schema)
+          required (set (:required schema []))]
+      (into [:map]
+            (map (fn [[k v]]
+                   (if (required k)
+                     [k (json-schema->malli v)]
+                     [:optional k (json-schema->malli v)])))
+            props))
+
+    (= "string" (:type schema))
+    :string
+
+    (= "integer" (:type schema))
+    :int
+
+    (= "number" (:type schema))
+    :num
+
+    (= "boolean" (:type schema))
+    :boolean
+
+    (= "array" (:type schema))
+    (let [items (:items schema)]
+      (if (map? items)
+        [:vector (json-schema->malli items)]
+        [:vector :any]))
+
+    :else
+    :any))
+
+;; ---------------------------------------------------------------------------
 ;; connection pool
 ;; ---------------------------------------------------------------------------
 
@@ -209,10 +253,7 @@
     :connection/id    - keyword; providers sharing this id share a single
                         underlying McpSyncClient (connection pooling).
     :mcp/server-id    - string; isolates this tool within a server
-                        namespace for multi-server setups.
-    :discovery/auto-register? - boolean, when true the descriptor is
-                        refreshed from the remote server on each call
-                        (default false)."
+                        namespace for multi-server setups."
   [opts]
   (when-not (contains? opts :transport-config)
     (throw (err/error :provider/config-invalid
@@ -293,13 +334,13 @@
                     (when (or (nil? last-refreshed)
                               (>= (- now last-refreshed) (long refresh-ms)))
                       (try
-                        (let [tools (mcp-client/list-tools client)
+                        (let [tools (mcp-client/list-all-tools client)
                               matching (some #(when (= mcp-name (:mcp/name %)) %) tools)]
                           (when matching
                             (reset! descriptor-atom
                                     (assoc descriptor
-                                           :input-schema (:mcp/input-schema matching)
-                                           :output-schema (:mcp/output-schema matching)
+                                           :input-schema (json-schema->malli (:mcp/input-schema matching))
+                                           :output-schema (json-schema->malli (:mcp/output-schema matching))
                                            :mcp/last-refreshed (System/currentTimeMillis)))))
                         (catch Throwable _ nil)))))
                 (let [raw-result (mcp-client/call-tool client mcp-name args)

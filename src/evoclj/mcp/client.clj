@@ -47,11 +47,21 @@
 
 (defn- build-client
   "Build and initialize a McpSyncClient from a transport config map.
-   Returns the live client, or throws :mcp/initialize-failed."
-  [transport-config]
+   Returns the live client, or throws :mcp/initialize-failed.
+
+   `tools-change-consumer` is an optional zero-arg fn that the client
+   will invoke when the server notifies of a tools list change."
+  [transport-config tools-change-consumer]
   (let [t (transport/transport-for transport-config)
-        client (McpClient/sync ^McpClientTransport t)
-        ^McpSyncClient sync-client (.build ^McpClient client)]
+        spec (McpClient/sync ^McpClientTransport t)
+        spec (if tools-change-consumer
+               (.toolsChangeConsumer
+                 spec
+                 (reify java.util.function.Consumer
+                   (accept [_ _]
+                     (tools-change-consumer))))
+               spec)
+        ^McpSyncClient sync-client (.build ^McpClient spec)]
     (try
       (.initialize sync-client)
       sync-client
@@ -84,18 +94,24 @@
 
    The caller should hand the record to call-tool / list-tools, then
    to close! when done. Throws :mcp/initialize-failed when
-   initialize() itself throws."
-  [transport-config]
-  (let [client (build-client transport-config)]
-    {:client client
-     :closed? false
-     :last-error nil
-     :open-count 1
-     :transport-config transport-config
-     :transport-type (or (some-> transport-config :type keyword) :unknown)
-     :opened-at (now-iso)
-     :call-count 0
-     :last-latency-ms nil}))
+   initialize() itself throws.
+
+   `tools-change-consumer` is an optional zero-arg fn that will be
+   invoked on the underlying McpSyncClient when the server notifies
+   of a tools list change."
+  ([transport-config]
+   (open! transport-config nil))
+  ([transport-config tools-change-consumer]
+   (let [client (build-client transport-config tools-change-consumer)]
+     {:client client
+      :closed? false
+      :last-error nil
+      :open-count 1
+      :transport-config transport-config
+      :transport-type (or (some-> transport-config :type keyword) :unknown)
+      :opened-at (now-iso)
+      :call-count 0
+      :last-latency-ms nil})))
 
 (defn close!
   "Close the managed client record gracefully. Idempotent — calling
@@ -148,8 +164,13 @@
 ;; --- tool discovery ----------------------------------------------------------
 
 (defn list-tools
-  "Return a seq of plain Clojure tool-descriptor maps from the live
-   client. Each descriptor carries:
+  "Return a paginated result map from the live client:
+
+     {:tools [<tool-descriptor-map> ...]
+      :next-cursor <string?>
+      :has-more? <boolean?>}
+
+   Each descriptor carries:
 
      {:mcp/name        <string>        ; the server-side tool name
       :mcp/title       <string?>       ; human title, or nil
@@ -164,35 +185,57 @@
 
    All values are plain EDN-safe data (Global Constraint 22).
 
+   `cursor` is an optional opaque string from a previous
+   :next-cursor. Throws :mcp/list-tools-failed on transport failure."
+  ([^McpSyncClient client]
+   (list-tools client nil))
+  ([^McpSyncClient client cursor]
+   (try
+     (let [now (now-iso)
+           ^McpSchema$ListToolsResult result (if cursor
+                                               (.listTools client ^String cursor)
+                                               (.listTools client))
+           tools (.tools result)
+           next-cursor (.nextCursor result)]
+       {:tools (mapv (fn [^McpSchema$Tool t]
+                       (let [schema (or (.inputSchema ^McpSchema$JsonSchema t) {})
+                             output-schema (or (.outputSchema ^McpSchema$JsonSchema t) :any)]
+                         (cond-> {:mcp/name        (.name t)
+                                  :mcp/title       (.title t)
+                                  :mcp/description (.description t)
+                                  :mcp/input-schema (cond
+                                                      (map? schema) schema
+                                                      (vector? schema) schema
+                                                      :else {})
+                                  :mcp/output-schema output-schema
+                                  :mcp/retry-safe? (boolean
+                                                     (some-> t .annotations
+                                                             .idempotentHint
+                                                             boolean))
+                                  :mcp/last-refreshed now}
+                           (map? output-schema) (assoc :mcp/output-schema-kind :json-schema)
+                           (vector? output-schema) (assoc :mcp/output-schema-kind :malli))))
+                     tools)
+        :next-cursor next-cursor
+        :has-more? (some? next-cursor)})
+     (catch Throwable ex
+       (throw (err/error :mcp/list-tools-failed
+                         "MCP listTools failed"
+                         {:cause (err/sanitize ex)}))))))
+
+(defn list-all-tools
+  "Return a single vector of all plain Clojure tool-descriptor maps by
+   following :next-cursor pagination until exhausted.
+
    Throws :mcp/list-tools-failed on transport failure."
   [^McpSyncClient client]
-  (try
-    (let [now (now-iso)
-          ^McpSchema$ListToolsResult result (.listTools client)
-          tools (.tools result)]
-      (mapv (fn [^McpSchema$Tool t]
-              (let [schema (or (.inputSchema ^McpSchema$JsonSchema t) {})
-                    output-schema (or (.outputSchema ^McpSchema$JsonSchema t) :any)]
-                (cond-> {:mcp/name        (.name t)
-                         :mcp/title       (.title t)
-                         :mcp/description (.description t)
-                         :mcp/input-schema (cond
-                                             (map? schema) schema
-                                             (vector? schema) schema
-                                             :else {})
-                         :mcp/output-schema output-schema
-                         :mcp/retry-safe? (boolean
-                                            (some-> t .annotations
-                                                    .idempotentHint
-                                                    boolean))
-                         :mcp/last-refreshed now}
-                  (map? output-schema) (assoc :mcp/output-schema-kind :json-schema)
-                  (vector? output-schema) (assoc :mcp/output-schema-kind :malli))))
-            tools))
-    (catch Throwable ex
-      (throw (err/error :mcp/list-tools-failed
-                        "MCP listTools failed"
-                        {:cause (err/sanitize ex)})))))
+  (loop [acc []
+         cursor nil]
+    (let [result (list-tools client cursor)
+          tools (:tools result)]
+      (if (:has-more? result)
+        (recur (into acc tools) (:next-cursor result))
+        (into acc tools)))))
 
 ;; --- tool invocation ---------------------------------------------------------
 
@@ -370,7 +413,7 @@
                       {:open-count (or (:open-count managed) 0)}))
     (let [client (:client (ensure-open managed default-max-reopen-attempts))]
       (try
-        (count (list-tools client))
+        (count (list-all-tools client))
         (catch Throwable ex
           (throw (err/error :mcp/ping-failed
                             "MCP ping failed"

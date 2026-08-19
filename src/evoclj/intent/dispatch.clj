@@ -367,7 +367,8 @@
                     (str "no provider registered for tool " tool-id)
                     {:tool/id tool-id}
                     nil @usage-atom)
-      (let [{descriptor :descriptor provider :provider} entry
+      (let [provider (:provider entry)
+            descriptor (proto/describe provider)
             normalized-step (normalize-request! broker-context provider intent)]
         (if-let [error-result (:error-result normalized-step)]
           error-result
