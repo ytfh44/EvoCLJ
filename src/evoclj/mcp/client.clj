@@ -126,7 +126,7 @@
    error."
   [managed max-attempts]
   (let [transport-config (:transport-config managed)]
-    (letfn [(attempt [attempt]
+    (letfn [(attempt [n]
               (try
                 (let [next (open! transport-config)]
                   (assoc next :open-count (inc (or (:open-count managed) 0))
@@ -134,13 +134,13 @@
                              :transport-config transport-config
                              :transport-type (or (some-> transport-config :type keyword) :unknown)))
                 (catch Throwable ex
-                  (if (< attempt max-attempts)
+                  (if (< n max-attempts)
                     (do
                       (Thread/sleep 100)
-                      (attempt (inc attempt)))
+                      (attempt (inc n)))
                     (throw (err/error :mcp/reopen-failed
                                       "MCP client reopen failed"
-                                      {:attempt attempt
+                                      {:attempt n
                                        :max-attempts max-attempts
                                        :cause (err/sanitize ex)}))))))]
       (attempt 1))))
@@ -307,14 +307,14 @@
       (finally
         (close! managed)))))
 
-(defn- ensure-open
+(defn ensure-open
   "Return a live McpSyncClient from `managed`. If the managed record is
    closed or broken, attempt to reopen it (up to max-attempts).
    Throws :mcp/reopen-failed when all attempts fail."
   [managed max-attempts]
   (cond
     (nil? managed)
-    (reopen! managed max-attempts)
+    nil
 
     (:closed? managed)
     (reopen! managed max-attempts)
@@ -336,11 +336,11 @@
   ([managed tool-name args]
    (call-tool-managed managed tool-name args default-max-reopen-attempts))
   ([managed tool-name args max-attempts]
-   (when (closed? managed)
-     (throw (err/error :mcp/client-closed
-                       "MCP managed client is closed"
-                       {:open-count (or (:open-count managed) 0)})))
    (let [managed (ensure-open managed max-attempts)]
+     (when (closed? managed)
+       (throw (err/error :mcp/client-closed
+                         "MCP managed client is closed"
+                         {:open-count (or (:open-count managed) 0)})))
      (try
        (let [start (System/currentTimeMillis)
              result (call-tool (:client managed) tool-name args)

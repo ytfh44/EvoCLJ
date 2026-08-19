@@ -94,16 +94,24 @@
 ;; call-tool-managed rejects closed client
 ;; ---------------------------------------------------------------------------
 
-(deftest call-tool-managed-rejects-closed
-  (testing "call-tool-managed throws :mcp/client-closed on closed record"
-    (let [m {:client :fake :closed? true :last-error nil :open-count 1}]
-      (let [e (atom nil)]
-        (try
-          (reset! e (client/call-tool-managed m "foo" {}))
-          (is false "expected exception")
-          (catch Throwable t
-            (reset! e t)))
-        (is (= :mcp/client-closed (:error/type (ex-data @e))))))))
+(deftest call-tool-managed-attempts-reopen-on-closed
+  (testing "call-tool-managed tries to reopen a closed record; throws :mcp/reopen-failed when reopen fails"
+    (let [m (fake-managed {:closed? true
+                            :transport-config {:type :stdio :command "echo" :args []}})]
+      (with-redefs [evoclj.mcp.client/build-client
+                    (fn [_]
+                      (throw (ex-info "forced reopen failure" {})))]
+        (let [e (atom nil)]
+          (try
+            (reset! e (client/call-tool-managed m "foo" {}))
+            (is false "expected exception")
+            (catch Throwable t
+              (reset! e t)))
+          (is (= :mcp/reopen-failed (:error/type (ex-data @e)))))))))
+
+(deftest ensure-open-returns-nil-for-nil
+  (testing "ensure-open returns nil for nil managed record"
+    (is (nil? (client/ensure-open nil 2)))))
 
 ;; ---------------------------------------------------------------------------
 ;; connection pool behavior (via mcp-bridge integration)
