@@ -29,7 +29,10 @@
             McpSchema$ListToolsResult
             McpSchema$Tool
             McpSchema$JsonSchema
-            McpSchema$Content]))
+            McpSchema$Content
+            McpSchema$ProgressNotification]
+           [io.modelcontextprotocol.json.jackson3 JacksonMcpJsonMapperSupplier]
+           [io.modelcontextprotocol.json McpJsonMapperSupplier]))
 
 ;; --- lifecycle ---------------------------------------------------------------
 
@@ -45,13 +48,54 @@
   [start end]
   (long (- end start)))
 
+(def ^:private json-mapper
+  "Shared Jackson JSON mapper for serializing MCP content blocks to bytes."
+  (let [^McpJsonMapperSupplier supplier (JacksonMcpJsonMapperSupplier.)]
+    (.get supplier)))
+
+(defn- edn->json-compatible
+  "Recursively convert Clojure keyword keys to strings so the MCP JSON
+   mapper can serialize them correctly."
+  [v]
+  (cond
+    (map? v)
+    (into (empty v)
+          (map (fn [[k v]] [(if (keyword? k) (name k) k) (edn->json-compatible v)]))
+          v)
+
+    (vector? v)
+    (mapv edn->json-compatible v)
+
+    (seq? v)
+    (map edn->json-compatible v)
+
+    :else v))
+
+(defn- content-block->json-bytes
+  "Serialize a single MCP content-block map to JSON bytes using the
+   shared Jackson mapper. Returns nil when the block cannot be
+   serialized.
+
+   Clojure keyword keys are converted to strings before serialization
+   so Jackson produces standard JSON object keys."
+  [block]
+  (try
+    (.writeValueAsBytes json-mapper (edn->json-compatible block))
+    (catch Throwable _ nil)))
+
 (defn- build-client
   "Build and initialize a McpSyncClient from a transport config map.
    Returns the live client, or throws :mcp/initialize-failed.
 
    `tools-change-consumer` is an optional zero-arg fn that the client
-   will invoke when the server notifies of a tools list change."
-  [transport-config tools-change-consumer]
+   will invoke when the server notifies of a tools list change.
+
+   `progress-consumer` is an optional one-arg fn that the client will
+   invoke when the server sends a progress notification. The fn is
+   called with a single progress notification map."
+  ([transport-config tools-change-consumer]
+   (build-client transport-config tools-change-consumer nil))
+  ([transport-config tools-change-consumer progress-consumer]
   (let [t (transport/transport-for transport-config)
         spec (McpClient/sync ^McpClientTransport t)
         spec (if tools-change-consumer
@@ -61,6 +105,18 @@
                    (accept [_ _]
                      (tools-change-consumer))))
                spec)
+        spec (if progress-consumer
+               (.progressConsumer
+                 spec
+                 (reify java.util.function.Consumer
+                   (accept [_ p]
+                     (progress-consumer
+                       {:progress/token (.token ^McpSchema$ProgressNotification p)
+                        :progress/current (.current ^McpSchema$ProgressNotification p)
+                        :progress/total (.total ^McpSchema$ProgressNotification p)
+                        :progress/percent (when (and (.total ^McpSchema$ProgressNotification p) (pos? (.total ^McpSchema$ProgressNotification p)))
+                                            (double (/ (.current ^McpSchema$ProgressNotification p) (.total ^McpSchema$ProgressNotification p))))}))))
+               spec)
         ^McpSyncClient sync-client (.build ^McpClient spec)]
     (try
       (.initialize sync-client)
@@ -68,7 +124,7 @@
       (catch Throwable ex
         (throw (err/error :mcp/initialize-failed
                           "MCP client initialize failed"
-                          {:cause (err/sanitize ex)}))))))
+                          {:cause (err/sanitize ex)})))))))
 
 (defn- safe-close
   "Close a McpSyncClient gracefully. Swallows close errors."
@@ -90,7 +146,9 @@
       :transport-type <keyword>
       :opened-at <ISO-8601 string>
       :call-count 0
-      :last-latency-ms nil}
+      :last-latency-ms nil
+      :tools-change-consumer <fn?>
+      :progress-consumer <fn?>}
 
    The caller should hand the record to call-tool / list-tools, then
    to close! when done. Throws :mcp/initialize-failed when
@@ -98,11 +156,19 @@
 
    `tools-change-consumer` is an optional zero-arg fn that will be
    invoked on the underlying McpSyncClient when the server notifies
-   of a tools list change."
+   of a tools list change.
+
+   `progress-consumer` is an optional one-arg fn that will be invoked
+   when the server sends a progress notification. It receives a
+   single progress notification map."
   ([transport-config]
-   (open! transport-config nil))
+   (open! transport-config nil nil))
   ([transport-config tools-change-consumer]
-   (let [client (build-client transport-config tools-change-consumer)]
+   (open! transport-config tools-change-consumer nil))
+  ([transport-config tools-change-consumer progress-consumer]
+   (let [client (if progress-consumer
+                  (build-client transport-config tools-change-consumer progress-consumer)
+                  (build-client transport-config tools-change-consumer))]
      {:client client
       :closed? false
       :last-error nil
@@ -111,7 +177,9 @@
       :transport-type (or (some-> transport-config :type keyword) :unknown)
       :opened-at (now-iso)
       :call-count 0
-      :last-latency-ms nil})))
+      :last-latency-ms nil
+      :tools-change-consumer tools-change-consumer
+      :progress-consumer progress-consumer})))
 
 (defn close!
   "Close the managed client record gracefully. Idempotent — calling
@@ -141,10 +209,12 @@
    max-attempts times. Returns the reopened record, or throws the last
    error."
   [managed max-attempts]
-  (let [transport-config (:transport-config managed)]
+  (let [transport-config (:transport-config managed)
+        tools-change-consumer (:tools-change-consumer managed)
+        progress-consumer (:progress-consumer managed)]
     (letfn [(attempt [n]
               (try
-                (let [next (open! transport-config)]
+                (let [next (open! transport-config tools-change-consumer progress-consumer)]
                   (assoc next :open-count (inc (or (:open-count managed) 0))
                              :last-error nil
                              :transport-config transport-config
@@ -294,15 +364,22 @@
                       "image" {:content/type :image
                                :content/data (.data c)
                                :content/mime-type (some-> c .mimeType .toString)}
+                      "audio" {:content/type :audio
+                               :content/data (.data c)
+                               :content/mime-type (some-> c .mimeType .toString)}
                       "resource" {:content/type :resource
                                   :content/uri (some-> c .uri .toString)
                                   :content/mime-type (some-> c .mimeType .toString)
                                   :content/text (some-> c .text .toString)}
+                      "resource_link" {:content/type :resource-link
+                                       :content/uri (some-> c .uri .toString)
+                                       :content/mime-type (some-> c .mimeType .toString)}
                       {:content/type :unknown
                        :content/raw (str c)}))
                   (.content result))
             is-error (.isError result)
-            raw-size (long (reduce + 0 (map #(.length (str %)) (.content result))))]
+            structured-content (.structuredContent result)
+            raw-size (long (reduce + 0 (map #(.length (content-block->json-bytes %)) content-block-maps)))]
         (if is-error
           (throw (err/error :mcp/tool-error
                             (str "MCP tool " tool-name " returned isError=true")
@@ -310,6 +387,7 @@
                              :content (vec content-block-maps)}))
           (cond-> {:mcp/content content-block-maps
                    :mcp/is-error false}
+            (some? structured-content) (assoc :mcp/structured-content structured-content)
             (pos? raw-size) (assoc :mcp/raw-size-bytes raw-size))))
       (catch Throwable ex
         (if (= :mcp/tool-error (:error/type (ex-data ex)))
