@@ -130,3 +130,44 @@
           (catch Throwable t
             (reset! e t)))
         (is (= :provider/request-invalid (:error/type (ex-data @e))))))))
+
+;; ---------------------------------------------------------------------------
+;; server-id and refresh
+;; ---------------------------------------------------------------------------
+
+(deftest describe-includes-server-id-when-provided
+  (testing ":mcp/server-id adds :mcp/server-id to descriptor"
+    (let [p (mcp-bridge/mcp-provider
+             {:transport-config {:type :stdio :command "echo" :args []}
+              :tool/id           :mcp/echo
+              :tool/mcp-name     "echo"
+              :input-schema      [:map [:text :string]]
+              :output-schema     [:map [:text :string]]
+              :mcp/server-id     "server-1"})
+          d (proto/describe p)]
+      (is (= "server-1" (:mcp/server-id d))))))
+
+(deftest refresh-provider-resets-last-refreshed
+  (testing "refresh-provider! resets :mcp/last-refreshed to nil"
+    (let [p (mcp-bridge/mcp-provider
+             {:transport-config {:type :stdio :command "echo" :args []}
+              :tool/id           :mcp/echo
+              :tool/mcp-name     "echo"
+              :input-schema      [:map [:text :string]]
+              :output-schema     [:map [:text :string]]
+              :schema/refresh-interval-ms 60000})
+          d1 (proto/describe p)
+          _ (mcp-bridge/refresh-provider! p)
+          d2 (proto/describe p)]
+      (is (some? (:mcp/last-refreshed d1)))
+      (is (nil? (:mcp/last-refreshed d2))))))
+
+(deftest refresh-provider-noop-when-not-mcp
+  (testing "refresh-provider! on non-MCP provider is a no-op"
+    (let [p (mcp-bridge/mcp-provider
+             {:transport-config {:type :stdio :command "echo" :args []}
+              :tool/id           :mcp/echo/no-refresh
+              :tool/mcp-name     "echo"
+              :input-schema      [:map [:text :string]]
+              :output-schema     [:map [:text :string]]})]
+      (is (nil? (mcp-bridge/refresh-provider! p))))))

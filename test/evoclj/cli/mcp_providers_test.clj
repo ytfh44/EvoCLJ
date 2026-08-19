@@ -118,3 +118,28 @@
             (clojure.java.io/delete-file
              (str (java.nio.file.Paths/get dir (make-array String 0)))
              true)))))))
+
+(deftest mcp-refresh-providers-refreshes-mcp-tools
+  (testing "mcp-refresh-providers! returns descriptors for MCP tools"
+    (let [dir (str (java.nio.file.Files/createTempDirectory
+                     "evoclj-cli-mcp-" (make-array java.nio.file.attribute.FileAttribute 0))
+                   "/state")]
+      (try
+        (let [cfg {:state-dir dir
+                    :overrides
+                    {:provider/registry
+                     {:providers [{:provider/type :fixture/echo}
+                                  {:provider/type :fixture/non-idempotent}]
+                      :mcp-providers [(dummy-mcp-cfg)]}
+                     :evolution/system {:mutator :none}}}
+              system (cli-session/build-system cfg)
+              result (cli-session/mcp-refresh-providers! cfg)]
+          (is (map? result))
+          (is (contains? result :test/mcp-tool))
+          (is (map? (get result :test/mcp-tool))))
+        (finally
+          (when (java.nio.file.Files/exists (java.nio.file.Paths/get dir (make-array String 0))
+                                            (make-array java.nio.file.LinkOption 0))
+            (clojure.java.io/delete-file
+             (str (java.nio.file.Paths/get dir (make-array String 0)))
+             true)))))))

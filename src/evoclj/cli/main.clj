@@ -103,7 +103,8 @@
    ["context" "compress"]     {:fn context/compress! :arity 0}
    ["context" "recompress"]   {:fn context/recompress! :arity 0}
    ["context" "loop"]         {:fn context/loop! :arity 0}
-   ["context" "inspect"]      {:fn context/inspect! :arity 0}})
+   ["context" "inspect"]      {:fn context/inspect! :arity 0}
+   ["mcp" "refresh-providers"] {:fn session/mcp-refresh-providers! :arity 0}})
 
 (defn- command-for
   "The command entry for a positional vector, or nil."

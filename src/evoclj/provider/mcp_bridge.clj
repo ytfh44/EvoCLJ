@@ -27,6 +27,10 @@
   "Global atom mapping :connection/id -> managed client record."
   (atom {}))
 
+(def ^:private provider-refresh-fns
+  "Global atom mapping :tool/id -> {:refresh-fn <fn> :descriptor-atom <atom>}."
+  (atom {}))
+
 (defn- pool-get
   "Look up a managed client by connection-id. Returns nil when absent
    or closed."
@@ -65,14 +69,17 @@
     (let [input-schema  (:input-schema opts)
           output-schema (:output-schema opts)
           retry-safe?   (or (:retry-safe? opts) false)
-          connection-id (:connection/id opts)]
+          connection-id (:connection/id opts)
+          server-id     (:mcp/server-id opts)]
       (cond-> {:tool/id         tool-id
                :effect          :remote
                :input-schema    input-schema
                :output-schema   output-schema
-               :required-action :invoke}
+               :required-action :invoke
+               :version         1}
         retry-safe? (assoc :retry {:safe? true})
-        connection-id (assoc :mcp/connection-id connection-id)))))
+        connection-id (assoc :mcp/connection-id connection-id)
+        server-id (assoc :mcp/server-id server-id)))))
 
 ;; ---------------------------------------------------------------------------
 ;; content-block result -> plain Clojure
@@ -103,6 +110,15 @@
 ;; the provider
 ;; ---------------------------------------------------------------------------
 
+(defn- build-refresh-fn
+  "Build a no-arg fn that forces this provider's descriptor to refresh
+   from the remote MCP server on the next call (by resetting the cached
+   :mcp/last-refreshed timestamp to nil)."
+  [descriptor-atom]
+  (fn []
+    (reset! descriptor-atom
+            (assoc @descriptor-atom :mcp/last-refreshed nil))))
+
 (defn mcp-provider
   "Build an MCP-backed provider.
 
@@ -116,7 +132,12 @@
   Optional:
     :retry-safe?      - boolean, true when the tool is idempotent (default false)
     :connection/id    - keyword; providers sharing this id share a single
-                        underlying McpSyncClient (connection pooling)."
+                        underlying McpSyncClient (connection pooling).
+    :mcp/server-id    - string; isolates this tool within a server
+                        namespace for multi-server setups.
+    :discovery/auto-register? - boolean, when true the descriptor is
+                        refreshed from the remote server on each call
+                        (default false)."
   [opts]
   (when-not (contains? opts :transport-config)
     (throw (err/error :provider/config-invalid
@@ -137,8 +158,14 @@
         connection-id (:connection/id opts)
         shared?       (some? connection-id)
         refresh-ms    (:schema/refresh-interval-ms opts)
+        descriptor    (if refresh-ms
+                        (assoc descriptor :mcp/last-refreshed (str (java.time.Instant/now)))
+                        descriptor)
         descriptor-atom (atom descriptor)
-        client-atom   (atom nil)]
+        client-atom   (atom nil)
+        refresh-fn    (build-refresh-fn descriptor-atom)]
+    (swap! provider-refresh-fns assoc tool-id {:refresh-fn refresh-fn
+                                               :descriptor-atom descriptor-atom})
     (reify proto/Provider
       (describe [_]
         @descriptor-atom)
@@ -199,3 +226,26 @@
                                 "MCP provider call-tool failed"
                                 {:tool-name mcp-name
                                  :cause (err/sanitize ex)})))))))))
+
+(defn refresh-provider!
+  "Force a schema refresh for an MCP-backed provider by resetting its
+  cached :mcp/last-refreshed timestamp. The next call to describe or
+  execute-request! will re-fetch the descriptor from the remote server
+  (when :schema/refresh-interval-ms is configured). Returns nil."
+  [provider]
+  (let [tool-id (-> provider proto/describe :tool/id)
+        entry (get @provider-refresh-fns tool-id)]
+    (when-let [refresh-fn (-> entry :refresh-fn)]
+      (refresh-fn)
+      nil)))
+
+(defn refresh-all-mcp-providers!
+  "Force a schema refresh for all registered MCP providers. Returns a
+  map of tool ids to their current descriptors."
+  []
+  (reduce-kv (fn [acc tool-id {:keys [refresh-fn descriptor-atom]}]
+               (when refresh-fn
+                 (refresh-fn))
+               (assoc acc tool-id @descriptor-atom))
+             {}
+             @provider-refresh-fns))

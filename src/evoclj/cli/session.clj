@@ -55,6 +55,7 @@
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.genome.load :as load]
             [evoclj.provider.mcp-bridge :as mcp-bridge]
+            [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.episode :as episode]
             [evoclj.runtime.phenotype :as phenotype]
@@ -876,3 +877,17 @@
      :capabilities/denied
      (mapv #(select-keys (:metadata %) [:intent/id :intent/type :reason])
            (filter #(= :intent/denied (:event/type %)) events))}))
+
+(defn mcp-refresh-providers!
+  "evoclj mcp refresh-providers
+
+  Force a schema refresh for all registered MCP providers in the
+  current host config. Each MCP bridge provider's cached
+  :mcp/last-refreshed timestamp is reset, so the next describe or
+  execute-request! re-fetches the descriptor from the remote server
+  (when :schema/refresh-interval-ms is configured).
+
+  Returns a map of refreshed tool ids to their current descriptors."
+  [opts]
+  (let [system (build-system opts)]
+    (mcp-bridge/refresh-all-mcp-providers!)))
