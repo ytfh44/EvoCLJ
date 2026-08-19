@@ -34,6 +34,7 @@
   (:require [evoclj.evolution.core :as evolution]
              [evoclj.eval.core :as eval-core]
              [evoclj.eval.cost-guard :as cost-guard]
+             [evoclj.eval.workers :as workers]
              [evoclj.evolution.loop-policy :as lp]
              [evoclj.evolution.pareto :as pareto]
              [evoclj.evolution.population :as population]
@@ -246,14 +247,28 @@
         ;; 2. EVAL — every :evaluation-pending candidate of the generation.
         (let [pending (filter #(= :evaluation-pending (:state %))
                               (candidates-for-generation gen-id))
-              evals (mapv (fn [c]
-                            (try
-                              (eval-core/evaluate-candidate!
-                               evaluator (:candidate/id c) profile-id)
-                              (catch Throwable t
-                                {:candidate/id (:candidate/id c)
-                                 :error (ex-data t)})))
-                          pending)
+              transport (:worker-transport ctx)
+              evals (if transport
+                      (let [tasks (mapv (fn [c] {:task/id (:candidate/id c)}) pending)
+                            batch-result (workers/run-batch-with-transport!
+                                          transport tasks {:concurrency 4})]
+                        (vec (concat
+                              (mapv :task/result (:batch/completed batch-result))
+                              (mapv (fn [entry]
+                                      {:candidate/id (:task/id entry)
+                                       :error (select-keys entry
+                                                           [:error/type
+                                                            :error/message
+                                                            :error/data])})
+                                    (:batch/failed batch-result)))))
+                      (mapv (fn [c]
+                              (try
+                                (eval-core/evaluate-candidate!
+                                 evaluator (:candidate/id c) profile-id)
+                                (catch Throwable t
+                                  {:candidate/id (:candidate/id c)
+                                   :error (ex-data t)})))
+                            pending))
               scored (filter :summary evals)
               ;; 3. PROMOTE — every eligible evaluation (or record a skip).
               passing (filterv #(get-in % [:eligibility :eligible?]) scored)
