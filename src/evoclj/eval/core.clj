@@ -67,6 +67,12 @@
        ;   :model/registry is present; default {:kind :model :id
        ;   \"*/*\"} (matches no concrete id — fail-closed). See
        ;   evoclj.eval.runner.
+       :marathon-runner (fn [evaluator model-id messages n]) ; OPTIONAL —
+       ;   a timing harness for real model calls (evoclj.eval.marathon).
+       ;   When present it is callable as (marathon-runner evaluator
+       ;   model-id messages n) and returns aggregate latency and token
+       ;   statistics for the given model over n trials. Absent → no
+       ;   marathon telemetry is recorded.
        :programs <resolver fn | vector>                ; OPTIONAL
        :equivalence/by-keyword <kw -> fn>              ; OPTIONAL
        :artifact/root <dir>                            ; OPTIONAL — G5
