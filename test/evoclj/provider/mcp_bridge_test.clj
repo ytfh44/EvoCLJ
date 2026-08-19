@@ -209,13 +209,16 @@
         (is (= 2 (:mcp/block-count audit)))
         (is (false? (:mcp/is-error audit)))))))
 
-(deftest result->edn-string-block-has-no-meta
-  (testing "single :text block is a plain string without metadata attachment"
+(deftest result->edn-string-block-carries-audit-via-wrapper
+  (testing "single :text block is wrapped so audit metadata is preserved"
     (let [result {:mcp/content [{:content/type :text :content/text "hello"}]
                   :mcp/is-error false}
           edn ((find-var 'evoclj.provider.mcp-bridge/result->edn) result)]
-      (is (string? edn))
-      (is (nil? (meta edn))))))
+      (is (map? edn))
+      (is (= "hello" (:value edn)))
+      (let [audit (:mcp/audit edn)]
+        (is (= 1 (:mcp/block-count audit)))
+        (is (false? (:mcp/is-error audit)))))))
 
 (deftest result->edn-multi-block-success-carries-audit-metadata
   (testing "successful multi-block result carries :mcp/audit in metadata"

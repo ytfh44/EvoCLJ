@@ -133,7 +133,7 @@
         1 (let [v (first edn-blocks)]
             (if (instance? clojure.lang.IObj v)
               (with-meta v audit)
-              v))
+              {:value v :mcp/audit audit}))
         (with-meta edn-blocks audit)))))
 
 ;; ---------------------------------------------------------------------------
@@ -260,13 +260,15 @@
                   (assoc edn-result :mcp/audit (merge (:mcp/audit edn-result) audit))
                   (with-meta edn-result (merge (meta edn-result) {:mcp/audit audit})))))
             (catch Throwable ex
-              (throw (err/error :provider/transient-error
-                                "MCP provider call-tool failed"
-                                {:tool-name mcp-name
-                                 :mcp/connection-id connection-id
-                                 :mcp/server-id server-id
-                                 :mcp/transport-config (err/sanitize transport-cfg)
-                                 :cause (err/sanitize ex)})))))))))
+              (if (= :mcp/tool-error (:error/type (ex-data ex)))
+                (throw ex)
+                (throw (err/error :provider/transient-error
+                                  "MCP provider call-tool failed"
+                                  {:tool-name mcp-name
+                                   :mcp/connection-id connection-id
+                                   :mcp/server-id server-id
+                                   :mcp/transport-config (err/sanitize transport-cfg)
+                                   :cause (err/sanitize ex)}))))))))))
 
 (defn refresh-provider!
   "Force a schema refresh for an MCP-backed provider by resetting its
