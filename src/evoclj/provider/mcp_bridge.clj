@@ -136,13 +136,16 @@
         tool-id       (:tool/id descriptor)
         connection-id (:connection/id opts)
         shared?       (some? connection-id)
+        refresh-ms    (:schema/refresh-interval-ms opts)
+        descriptor-atom (atom descriptor)
         client-atom   (atom nil)]
     (reify proto/Provider
       (describe [_]
-        descriptor)
+        @descriptor-atom)
 
       (normalize-request [_ intent]
-        (let [payload (:payload intent)]
+        (let [descriptor @descriptor-atom
+              payload (:payload intent)]
           (when-not (boundary/edn-safe? payload)
             (throw (err/error :provider/input-invalid
                               "MCP provider input must be plain EDN-safe data"
@@ -173,7 +176,23 @@
                                 (let [m (mcp-client/open! transport-cfg)]
                                   (reset! client-atom m)
                                   m)))
-                  client  (:client managed)]
+                  client (:client managed)]
+              (when refresh-ms
+                (let [descriptor @descriptor-atom
+                      last-refreshed (some-> descriptor :mcp/last-refreshed .getTime)
+                      now (System/currentTimeMillis)]
+                  (when (or (nil? last-refreshed)
+                            (>= (- now last-refreshed) (long refresh-ms)))
+                    (try
+                      (let [tools (mcp-client/list-tools client)
+                            matching (some #(when (= mcp-name (:mcp/name %)) %) tools)]
+                        (when matching
+                          (reset! descriptor-atom
+                                  (assoc descriptor
+                                         :input-schema (:mcp/input-schema matching)
+                                         :output-schema (:mcp/output-schema matching)
+                                         :mcp/last-refreshed (str (java.time.Instant/now))))))
+                      (catch Throwable _ nil)))))
               (result->edn (mcp-client/call-tool client mcp-name args managed)))
             (catch Throwable ex
               (throw (err/error :provider/transient-error

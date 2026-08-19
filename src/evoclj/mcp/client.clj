@@ -13,7 +13,10 @@
    Phase 1 (connection lifecycle): open! returns a managed client
    record; call-tool auto-reconnects on transient failures; with-client
    guarantees open!/close! pairing; :connection/id enables connection
-   pooling across providers."
+   pooling across providers.
+
+   Phase 2 (client capabilities): list-tools timestamps descriptors;
+   call-tool reports raw size; call-tool-streaming placeholder."
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.transport :as transport])
   (:import [io.modelcontextprotocol.client McpClient McpSyncClient]
@@ -120,6 +123,11 @@
                         :expected (:expected p)})
                      (or (:problems malli-explanation) []))}))
 
+(defn- now-iso
+  "Return the current instant as an ISO-8601 string."
+  []
+  (str (java.time.Instant/now)))
+
 (defn list-tools
   "Return a seq of plain Clojure tool-descriptor maps from the live
    client. Each descriptor carries:
@@ -128,30 +136,39 @@
       :mcp/title       <string?>       ; human title, or nil
       :mcp/description <string?>       ; description, or nil
       :mcp/input-schema <malli schema> ; JSON Schema converted to Malli
-      :mcp/output-schema :any          ; MCP output is content-blocks
+      :mcp/output-schema <any>         ; remote outputSchema when present,
+                                       ; otherwise :any
       :mcp/retry-safe? <boolean?>      ; true when the schema carries
                                        ; <nil> when absent
+      :mcp/last-refreshed <string?>    ; ISO-8601 timestamp of this
+                                       ; listTools call, or nil
+
    All values are plain EDN-safe data (Global Constraint 22).
 
    Throws :mcp/list-tools-failed on transport failure."
   [^McpSyncClient client]
   (try
-    (let [^McpSchema$ListToolsResult result (.listTools client)
+    (let [now (now-iso)
+          ^McpSchema$ListToolsResult result (.listTools client)
           tools (.tools result)]
       (mapv (fn [^McpSchema$Tool t]
-              (let [schema (or (.inputSchema ^McpSchema$JsonSchema t) {})]
-                {:mcp/name        (.name t)
-                 :mcp/title       (.title t)
-                 :mcp/description (.description t)
-                 :mcp/input-schema (cond
-                                     (map? schema) schema
-                                     (vector? schema) schema
-                                     :else {})
-                 :mcp/output-schema :any
-                 :mcp/retry-safe? (boolean
-                                    (some-> t .annotations
-                                            .retryPolicy
-                                            .isIdempotent))}))
+              (let [schema (or (.inputSchema ^McpSchema$JsonSchema t) {})
+                    output-schema (or (.outputSchema ^McpSchema$JsonSchema t) :any)]
+                (cond-> {:mcp/name        (.name t)
+                         :mcp/title       (.title t)
+                         :mcp/description (.description t)
+                         :mcp/input-schema (cond
+                                             (map? schema) schema
+                                             (vector? schema) schema
+                                             :else {})
+                         :mcp/output-schema output-schema
+                         :mcp/retry-safe? (boolean
+                                            (some-> t .annotations
+                                                    .retryPolicy
+                                                    .isIdempotent))
+                         :mcp/last-refreshed now}
+                  (map? output-schema) (assoc :mcp/output-schema-kind :json-schema)
+                  (vector? output-schema) (assoc :mcp/output-schema-kind :malli))))
             tools))
     (catch Throwable ex
       (throw (err/error :mcp/list-tools-failed
@@ -165,7 +182,10 @@
    data). Returns the parsed result value:
 
      {:mcp/content [<content-block-maps>]
-      :mcp/is-error <boolean?>}
+      :mcp/is-error <boolean?>
+      :mcp/raw-size-bytes <int?>        ; total serialized size of the
+                                       ; response content blocks in bytes,
+                                       ; or nil when unknown}
 
    The caller is responsible for interpreting content blocks. Throws
    :mcp/call-tool-failed on transport failure and
@@ -205,14 +225,16 @@
                     {:content/type :unknown
                      :content/raw (str c)}))
                 (.content result))
-          is-error (.isError result)]
+          is-error (.isError result)
+          raw-size (long (reduce + 0 (map #(.length (str %)) (.content result))))]
       (if is-error
         (throw (err/error :mcp/tool-error
                           (str "MCP tool " tool-name " returned isError=true")
                           {:tool-name tool-name
                            :content (vec content-block-maps)}))
-        {:mcp/content content-block-maps
-         :mcp/is-error false}))
+        (cond-> {:mcp/content content-block-maps
+                 :mcp/is-error false}
+          (pos? raw-size) (assoc :mcp/raw-size-bytes raw-size))))
     (catch Throwable ex
       (if (= :mcp/tool-error (:error/type (ex-data ex)))
         (throw ex)
@@ -221,6 +243,22 @@
                           {:tool-name tool-name
                            :args (err/sanitize args)
                            :cause (err/sanitize ex)}))))))
+
+(defn call-tool-streaming
+  "Placeholder for streaming tool calls. The current MCP Java SDK does
+   not expose a streaming call-tool API, so this falls back to
+   call-tool and returns the whole result as a single-element
+   reducible collection.
+
+   Returns a reducible of content-block maps (the same maps
+   call-tool returns inside :mcp/content). Throws the same errors as
+   call-tool."
+  [client tool-name args]
+  (reify clojure.lang.IReduceInit
+    (reduce [_ f init]
+      (let [result (call-tool client tool-name args)
+            blocks (:mcp/content result)]
+        (reduce f init blocks)))))
 
 ;; --- managed client helpers --------------------------------------------------
 
