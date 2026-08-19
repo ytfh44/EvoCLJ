@@ -90,7 +90,7 @@
           intent {:payload {:text "hello"}}
           nr (proto/normalize-request p intent)]
       (is (= :mcp/echo (:tool/id nr)))
-      (is (= {:kind :mcp-tool :id "echo"} (:resource nr)))
+      (is (= {:kind :tool :id :mcp/echo} (:resource nr)))
       (is (= {:text "hello"} (:args nr))))))
 
 (deftest normalize-request-rejects-non-edn-safe
@@ -180,7 +180,7 @@
   (testing ":image blocks return a safe placeholder without binary data"
     (let [block {:content/type :image
                  :content/data "base64blob"
-                 :mimeType "image/png"}
+                 :content/mime-type "image/png"}
           result ((find-var 'evoclj.provider.mcp-bridge/content-block->edn) block)]
       (is (= :image (:mcp/content-type result)))
       (is (true? (:mcp/sandboxed result)))
@@ -190,15 +190,13 @@
 (deftest content-block-sandboxes-resource
   (testing ":resource blocks return only safe metadata keys"
     (let [block {:content/type :resource
-                 :content/resource {:uri "file:///tmp/x"
-                                     :mimeType "text/plain"
-                                     :text "secret data"
-                                     :blob "base64blob"}}
+                 :content/uri "file:///tmp/x"
+                 :content/mime-type "text/plain"
+                 :content/text "secret data"}
           result ((find-var 'evoclj.provider.mcp-bridge/content-block->edn) block)]
       (is (= "file:///tmp/x" (:uri result)))
       (is (= "text/plain" (:mimeType result)))
-      (is (nil? (:text result)))
-      (is (nil? (:blob result))))))
+      (is (nil? (:text result))))))
 
 (deftest result->edn-success-carries-audit-metadata
   (testing "successful multi-block result carries :mcp/audit in metadata"

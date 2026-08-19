@@ -42,9 +42,10 @@
   "The v0 tool descriptor contract (normative, Task 4.3): a closed
   map of the five required fields plus optional :retry and :version
   blocks. The top level is closed — no field may be missing, renamed,
-  or extended beyond these. :input-schema and :output-schema are only
-  required to be present here; they are separately validated as Malli
-  schema VALUES by validate-descriptor."
+  or extended beyond these, except for optional :mcp/* extension
+  fields consumed by the MCP provider bridge. :input-schema and
+  :output-schema are only required to be present here; they are
+  separately validated as Malli schema VALUES by validate-descriptor."
   [:map {:closed true}
    [:tool/id keyword?]
    [:effect keyword?]
@@ -52,7 +53,10 @@
    [:output-schema any?]
    [:required-action keyword?]
    [:retry {:optional true} [:map {:closed true} [:safe? boolean?]]]
-   [:version {:optional true} number?]])
+   [:version {:optional true} number?]
+   [:mcp/connection-id {:optional true} keyword?]
+   [:mcp/server-id {:optional true} string?]
+   [:mcp/last-refreshed {:optional true} any?]])
 
 (defn- ensure-schema-value!
   "Throw :provider/descriptor-invalid when s is not a valid Malli

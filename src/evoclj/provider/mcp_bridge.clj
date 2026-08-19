@@ -104,12 +104,14 @@
     :text (:content/text block)
     :image {:mcp/content-type :image
             :mcp/sandboxed true
-            :mime-type (:mimeType block)}
-    :resource (let [r (:content/resource block)]
-                (if (map? r)
-                  (select-keys r [:uri :mimeType])
-                  {:mcp/content-type :resource
-                   :mcp/sandboxed true}))
+            :mime-type (:content/mime-type block)}
+    :resource (let [uri (:content/uri block)
+                    mime (:content/mime-type block)]
+                (cond
+                  (and uri mime) {:uri uri :mimeType mime}
+                  uri {:uri uri}
+                  :else {:mcp/content-type :resource
+                         :mcp/sandboxed true}))
     (:content/raw block)))
 
 (defn- result->edn
@@ -188,7 +190,7 @@
         server-id     (:mcp/server-id opts)
         refresh-ms    (:schema/refresh-interval-ms opts)
         descriptor    (if refresh-ms
-                        (assoc descriptor :mcp/last-refreshed (str (java.time.Instant/now)))
+                        (assoc descriptor :mcp/last-refreshed (System/currentTimeMillis))
                         descriptor)
         descriptor-atom (atom descriptor)
         client-atom   (atom nil)
@@ -212,7 +214,7 @@
                               {:value (err/sanitize payload)
                                :explanation (err/sanitize (m/explain (:input-schema descriptor) payload))})))
           {:tool/id    tool-id
-           :resource   {:kind :mcp-tool :id mcp-name}
+           :resource   {:kind :tool :id tool-id}
            :args       payload}))
 
       (execute-request! [_ authorized-request]
@@ -235,7 +237,7 @@
                   client (:client managed)]
               (when refresh-ms
                 (let [descriptor @descriptor-atom
-                      last-refreshed (some-> descriptor :mcp/last-refreshed .getTime)
+                      last-refreshed (:mcp/last-refreshed descriptor)
                       now (System/currentTimeMillis)]
                   (when (or (nil? last-refreshed)
                             (>= (- now last-refreshed) (long refresh-ms)))
@@ -249,7 +251,7 @@
                                          :output-schema (:mcp/output-schema matching)
                                          :mcp/last-refreshed (str (java.time.Instant/now))))))
                       (catch Throwable _ nil)))))
-              (let [raw-result (mcp-client/call-tool client mcp-name args managed)
+              (let [raw-result (mcp-client/call-tool client mcp-name args)
                     edn-result (result->edn raw-result)
                     audit {:mcp/tool-name mcp-name
                            :mcp/connection-id connection-id
