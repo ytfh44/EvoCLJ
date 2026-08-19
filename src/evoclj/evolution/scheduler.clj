@@ -35,6 +35,8 @@
              [evoclj.eval.core :as eval-core]
              [evoclj.eval.cost-guard :as cost-guard]
              [evoclj.evolution.loop-policy :as lp]
+             [evoclj.evolution.pareto :as pareto]
+             [evoclj.evolution.population :as population]
              [evoclj.promotion.promote :as promote]))
 
 ;; --- helpers ----------------------------------------------------------------
@@ -189,6 +191,13 @@
                                 (the would-be promotions are recorded as
                                 `:skipped` in the step's report, mirroring
                                 the `cycle` CLI command).
+    :population               — (optional) a population map (S3-1); when
+                                present, evaluated candidates are added after
+                                eval and the mutator context receives
+                                `:population` and `:breeding-candidates`.
+    :pareto-archive           — (optional) a Pareto archive vector (S3-1);
+                                when present, evaluated candidates' summaries
+                                are added to the archive after eval.
 
   The runner reuses the SAME evolve→eval→promote shape as the `cycle` CLI
   command, but takes the subsystem maps directly instead of reconstructing
@@ -270,6 +279,23 @@
                                        {:candidate/id (:candidate/id e)
                                         :error (ex-data t)})))
                                  passing)))
+              ;; --- S3-1: update pareto archive with evaluated candidates
+              _ (when-let [archive (:pareto-archive ctx)]
+                  (doseq [e scored]
+                    (when-let [scores (:summary e)]
+                      (pareto/add-candidate! archive scores))))
+              ;; --- S3-1: update population with eval summaries and select
+              ;;     breeding candidates for the NEXT generation's proposals
+              _ (when-let [pop (:population ctx)]
+                  (doseq [e scored]
+                    (when-let [candidate-id (:candidate/id e)]
+                      (population/add-candidate! pop
+                                                 {:candidate/id candidate-id}
+                                                 e)))
+                  ;; the mutator context in the NEXT propose-candidates!
+                  ;; call will see the updated :population and its
+                  ;; :breeding-candidates via the system map
+                  nil)
               utility (if (seq scored)
                         (apply max
                                (keep #(get-in % [:summary :utility

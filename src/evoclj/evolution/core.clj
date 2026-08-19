@@ -282,6 +282,16 @@
       (system-error! :phase-hook-invalid
                      ":phase-hook must be a function (fn [phase]) or nil"
                      {:value (err/sanitize hook)})))
+  (when-let [pop (:population system)]
+    (when-not (map? pop)
+      (system-error! :population-invalid
+                     ":population must be a population map"
+                     {:value (err/sanitize pop)})))
+  (when-let [archive (:pareto-archive system)]
+    (when-not (vector? archive)
+      (system-error! :pareto-archive-invalid
+                     ":pareto-archive must be a vector (Pareto archive)"
+                     {:value (err/sanitize archive)})))
   system)
 
 ;; --- store glue: lineage, evidence boundary, parent integrity -----------------
