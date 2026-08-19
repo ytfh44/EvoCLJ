@@ -203,19 +203,20 @@
 
       (normalize-request [_ intent]
         (let [descriptor @descriptor-atom
-              payload (:payload intent)]
-          (when-not (boundary/edn-safe? payload)
+              payload (:payload intent)
+              args (:args payload)]
+          (when-not (boundary/edn-safe? args)
             (throw (err/error :provider/input-invalid
                               "MCP provider input must be plain EDN-safe data"
-                              {:value (err/sanitize payload)})))
-          (when-not (m/validate (:input-schema descriptor) payload)
+                              {:value (err/sanitize args)})))
+          (when-not (m/validate (:input-schema descriptor) args)
             (throw (err/error :provider/input-invalid
                               "MCP provider input failed input-schema validation"
-                              {:value (err/sanitize payload)
-                               :explanation (err/sanitize (m/explain (:input-schema descriptor) payload))})))
+                              {:value (err/sanitize args)
+                               :explanation (err/sanitize (m/explain (:input-schema descriptor) args))})))
           {:tool/id    tool-id
            :resource   {:kind :tool :id tool-id}
-           :args       payload}))
+           :args       args}))
 
       (execute-request! [_ authorized-request]
         (when-not (and (map? authorized-request)

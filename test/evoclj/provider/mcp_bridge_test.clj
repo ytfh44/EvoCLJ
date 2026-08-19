@@ -87,7 +87,7 @@
               :tool/mcp-name    "echo"
               :input-schema     [:map [:text :string]]
               :output-schema    [:map [:text :string]]})
-          intent {:payload {:text "hello"}}
+          intent {:payload {:tool/id :mcp/echo :args {:text "hello"}}}
           nr (proto/normalize-request p intent)]
       (is (= :mcp/echo (:tool/id nr)))
       (is (= {:kind :tool :id :mcp/echo} (:resource nr)))
@@ -101,7 +101,7 @@
               :tool/mcp-name    "echo"
               :input-schema     [:map [:text :string]]
               :output-schema    [:map [:text :string]]})
-          intent {:payload #{"set" "literal"}}]
+          intent {:payload {:tool/id :mcp/echo :args #{"set" "literal"}}}]
       (let [e (atom nil)]
         (try
           (reset! e (proto/normalize-request p intent))
