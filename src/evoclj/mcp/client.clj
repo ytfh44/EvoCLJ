@@ -30,9 +30,7 @@
             McpSchema$Tool
             McpSchema$JsonSchema
             McpSchema$Content
-            McpSchema$ProgressNotification]
-           [io.modelcontextprotocol.json.jackson3 JacksonMcpJsonMapperSupplier]
-           [io.modelcontextprotocol.json McpJsonMapperSupplier]))
+            McpSchema$ProgressNotification]))
 
 ;; --- lifecycle ---------------------------------------------------------------
 
@@ -47,41 +45,6 @@
   "Return the elapsed milliseconds between two epoch millis values."
   [start end]
   (long (- end start)))
-
-(def ^:private json-mapper
-  "Shared Jackson JSON mapper for serializing MCP content blocks to bytes."
-  (let [^McpJsonMapperSupplier supplier (JacksonMcpJsonMapperSupplier.)]
-    (.get supplier)))
-
-(defn- edn->json-compatible
-  "Recursively convert Clojure keyword keys to strings so the MCP JSON
-   mapper can serialize them correctly."
-  [v]
-  (cond
-    (map? v)
-    (into (empty v)
-          (map (fn [[k v]] [(if (keyword? k) (name k) k) (edn->json-compatible v)]))
-          v)
-
-    (vector? v)
-    (mapv edn->json-compatible v)
-
-    (seq? v)
-    (map edn->json-compatible v)
-
-    :else v))
-
-(defn- content-block->json-bytes
-  "Serialize a single MCP content-block map to JSON bytes using the
-   shared Jackson mapper. Returns nil when the block cannot be
-   serialized.
-
-   Clojure keyword keys are converted to strings before serialization
-   so Jackson produces standard JSON object keys."
-  [block]
-  (try
-    (.writeValueAsBytes json-mapper (edn->json-compatible block))
-    (catch Throwable _ nil)))
 
 (defn- build-client
   "Build and initialize a McpSyncClient from a transport config map.
@@ -379,7 +342,7 @@
                   (.content result))
             is-error (.isError result)
             structured-content (.structuredContent result)
-            raw-size (long (reduce + 0 (map #(.length (content-block->json-bytes %)) content-block-maps)))]
+            raw-size (long (reduce + 0 (map #(.length (str %)) content-block-maps)))]
         (if is-error
           (throw (err/error :mcp/tool-error
                             (str "MCP tool " tool-name " returned isError=true")
@@ -398,15 +361,41 @@
                              :args (err/sanitize args)
                              :cause (err/sanitize ex)})))))))
 
-(defn call-tool-streaming
-  "Placeholder for streaming tool calls. The current MCP Java SDK does
-   not expose a streaming call-tool API, so this falls back to
-   call-tool and returns the whole result as a single-element
-   reducible collection.
+;; --- observability ------------------------------------------------------------
 
-   Returns a reducible of content-block maps (the same maps
-   call-tool returns inside :mcp/content). Throws the same errors as
-   call-tool."
+(defn- categorize-error
+  "Classify a Throwable into a more specific :error/type keyword.
+
+   Transport/IO failures become :mcp/transport-error.
+   Protocol/JSON parsing failures become :mcp/protocol-error.
+   Tool-reported business errors remain :mcp/tool-error.
+   Anything else is classified as :mcp/unknown-error."
+  [^Throwable ex]
+  (let [class-name (.getName (.getClass ex))
+        message (or (.getMessage ex) "")]
+    (cond
+      (re-find #"(?i)(io|transport|connect|socket|timeout|stream)" class-name)
+      :mcp/transport-error
+
+      (re-find #"(?i)(json|parse|protocol|decode|serialize|deserialize)" class-name)
+      :mcp/protocol-error
+
+      (re-find #"(?i)(tool|iserror|result)" message)
+      :mcp/tool-error
+
+      :else
+      :mcp/unknown-error)))
+
+(defn classify-mcp-error
+  "Return a sanitized error map with an enriched :error/type for the
+   given Throwable. Wraps the throwable's class, message, and cause
+   chain without leaking Java objects across the Agent boundary."
+  [^Throwable ex]
+  (err/sanitize
+    (assoc (err/error-data ex)
+           :error/type (categorize-error ex))))
+
+(defn call-tool-streaming
   [client tool-name args]
   (reify clojure.lang.IReduceInit
     (reduce [_ f init]
@@ -465,20 +454,26 @@
      (try
        (let [start (System/currentTimeMillis)
              result (call-tool (:client managed) tool-name args)
-             latency (elapsed-ms start (System/currentTimeMillis))]
+             latency (elapsed-ms start (System/currentTimeMillis))
+             updated (assoc managed
+                            :call-count (inc (or (:call-count managed) 0))
+                            :last-latency-ms latency
+                            :last-error nil)]
          (assoc result
-                :mcp/call-count (inc (or (:call-count managed) 0))
+                :mcp/call-count (:call-count updated)
                 :mcp/last-latency-ms latency
-                :mcp/transport-type (:transport-type managed)
-                :mcp/transport-config (err/sanitize (:transport-config managed))))
+                :mcp/transport-type (:transport-type updated)
+                :mcp/transport-config (err/sanitize (:transport-config updated))))
        (catch Throwable ex
-         (if (= :mcp/tool-error (:error/type (ex-data ex)))
-           (throw ex)
+         (let [updated (assoc managed
+                              :last-error (err/error-data ex))]
            (throw (err/error :mcp/call-tool-failed
                              (str "MCP callTool " tool-name " failed")
                              {:tool-name tool-name
                               :args (err/sanitize args)
-                              :cause (err/sanitize ex)}))))))))
+                              :cause (err/sanitize ex)
+                              :managed updated
+                              :open-count (or (:open-count managed) 0)}))))))))
 
 (defn ping!
   "Validate liveness of a managed MCP client by calling list-tools and

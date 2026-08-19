@@ -93,8 +93,11 @@
 
 (defn sse-transport
   "Build an HttpClientSseClientTransport for the given SSE endpoint URL
-   (e.g. \"http://localhost:3000/sse\"). The core mcp module ships
-   HttpClientSseClientTransport in mcp-core.
+   (e.g. \"http://localhost:3000/sse\").
+
+   DEPRECATED: HTTP+SSE is deprecated in MCP 2025-03-26 and later.
+   Prefer `streamable-http-transport` for new deployments. SSE is
+   retained only for backward compatibility with legacy servers.
 
    Accepts optional :headers and :tls-context from the config map.
 
