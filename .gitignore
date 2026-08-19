@@ -9,3 +9,5 @@ target/
 .nrepl-port
 .DS_Store
 evoclj-state/
+node_modules/
+docs/codebase/
