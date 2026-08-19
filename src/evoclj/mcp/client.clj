@@ -126,12 +126,24 @@
    error."
   [managed max-attempts]
   (let [transport-config (:transport-config managed)]
-    (loop [attempt 1]
-      (let [next (open! transport-config)]
-        (assoc next :open-count (inc (or (:open-count managed) 0))
-                   :last-error nil
-                   :transport-config transport-config
-                   :transport-type (or (some-> transport-config :type keyword) :unknown))))))
+    (letfn [(attempt [attempt]
+              (try
+                (let [next (open! transport-config)]
+                  (assoc next :open-count (inc (or (:open-count managed) 0))
+                             :last-error nil
+                             :transport-config transport-config
+                             :transport-type (or (some-> transport-config :type keyword) :unknown)))
+                (catch Throwable ex
+                  (if (< attempt max-attempts)
+                    (do
+                      (Thread/sleep 100)
+                      (attempt (inc attempt)))
+                    (throw (err/error :mcp/reopen-failed
+                                      "MCP client reopen failed"
+                                      {:attempt attempt
+                                       :max-attempts max-attempts
+                                       :cause (err/sanitize ex)}))))))]
+      (attempt 1))))
 
 ;; --- tool discovery ----------------------------------------------------------
 

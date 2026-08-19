@@ -20,7 +20,8 @@
            [io.modelcontextprotocol.json
             McpJsonMapperSupplier]
            [java.nio.file Files Paths]
-           [java.util Map]))
+           [java.util Map]
+           [javax.net.ssl SSLContext]))
 
 ;; --- stdio -------------------------------------------------------------------
 
@@ -69,21 +70,47 @@
 
 ;; --- SSE ---------------------------------------------------------------------
 
+(defn- apply-http-options
+  "Apply optional :headers and :tls-context to an HTTP client transport
+   builder. Returns the builder. :headers is a map of string -> string;
+   :tls-context is either a javax.net.ssl.SSLContext or a map with
+   :trust-managers."
+  [builder headers tls-context]
+  (let [builder (cond
+                  (and (map? headers) (seq headers))
+                  (.headers builder ^java.util.Map (doto (java.util.HashMap.)
+                                                     (.putAll ^java.util.Map (java.util.HashMap. headers))))
+                  :else builder)]
+    (cond
+      (instance? javax.net.ssl.SSLContext tls-context)
+      (.tlsContext builder ^javax.net.ssl.SSLContext tls-context)
+      (and (map? tls-context) (seq (:trust-managers tls-context)))
+      (let [tm-array (.toArray ^java.util.Collection (:trust-managers tls-context))
+            ctx (javax.net.ssl.SSLContext/getInstance "TLS")]
+        (.init ctx nil tm-array (java.security.SecureRandom.))
+        (.tlsContext builder ctx))
+      :else builder)))
+
 (defn sse-transport
   "Build an HttpClientSseClientTransport for the given SSE endpoint URL
    (e.g. \"http://localhost:3000/sse\"). The core mcp module ships
    HttpClientSseClientTransport in mcp-core.
 
-   Uses the builder pattern: builder(baseUri).build() returns the
-   transport with sensible defaults (HTTP 1.1, default SSE endpoint
-   path)."
-  [url]
-  (when-not (string? url)
-    (throw (ex-info "MCP SSE transport requires a URL string"
-                    {:error/type :mcp/transport-invalid
-                     :transport/type :sse
-                     :url (pr-str url)})))
-  (.build (HttpClientSseClientTransport/builder ^String url)))
+   Accepts optional :headers and :tls-context from the config map.
+
+   Uses the builder pattern: builder(baseUri).headers(map).tlsContext(ctx)
+   .build() returns the transport."
+  ([url]
+   (sse-transport url nil nil))
+  ([url headers tls-context]
+   (when-not (string? url)
+     (throw (ex-info "MCP SSE transport requires a URL string"
+                     {:error/type :mcp/transport-invalid
+                      :transport/type :sse
+                      :url (pr-str url)})))
+   (let [b (HttpClientSseClientTransport/builder ^String url)]
+     (apply-http-options b headers tls-context)
+     (.build b))))
 
 ;; --- Streamable HTTP ---------------------------------------------------------
 
@@ -92,10 +119,15 @@
    optional endpoint path (default \"/mcp\"). Requires the
    mcp-json-jackson3 artifact on the classpath.
 
-   Uses the builder pattern: builder(url).endpoint(path).build()."
+   Accepts optional :headers and :tls-context from the config map.
+
+   Uses the builder pattern: builder(url).endpoint(path).headers(map)
+   .tlsContext(ctx).build()."
   ([url]
-   (streamable-http-transport url "/mcp"))
+   (streamable-http-transport url "/mcp" nil nil))
   ([url endpoint]
+   (streamable-http-transport url endpoint nil nil))
+  ([url endpoint headers tls-context]
    (when-not (string? url)
      (throw (ex-info "MCP streamable HTTP transport requires a URL string"
                      {:error/type :mcp/transport-invalid
@@ -103,6 +135,7 @@
                       :url (pr-str url)})))
     (let [b (HttpClientStreamableHttpTransport/builder ^String url)]
       (.endpoint b ^String (or endpoint "/mcp"))
+      (apply-http-options b headers tls-context)
       (.build b))))
 
 ;; --- transport factory -------------------------------------------------------
@@ -119,8 +152,8 @@
   [{:keys [type] :as config}]
   (case type
     :stdio (stdio-transport config)
-    :sse   (sse-transport (:url config))
-    :http  (streamable-http-transport (:url config) (:endpoint config))
+    :sse   (sse-transport (:url config) (:headers config) (:tls-context config))
+    :http  (streamable-http-transport (:url config) (:endpoint config) (:headers config) (:tls-context config))
     (throw (ex-info (str "unknown MCP transport type: " type)
                     {:error/type :mcp/transport-invalid
                      :transport/type type
