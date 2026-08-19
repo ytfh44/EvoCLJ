@@ -16,7 +16,10 @@
    pooling across providers.
 
    Phase 2 (client capabilities): list-tools timestamps descriptors;
-   call-tool reports raw size; call-tool-streaming placeholder."
+   call-tool reports raw size; call-tool-streaming placeholder.
+
+   Phase 6 (observability): managed records carry transport metadata
+   and monotonic call/latency counters; ping! validates liveness."
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.transport :as transport])
   (:import [io.modelcontextprotocol.client McpClient McpSyncClient]
@@ -31,6 +34,16 @@
 ;; --- lifecycle ---------------------------------------------------------------
 
 (def ^:private default-max-reopen-attempts 2)
+
+(defn- now-iso
+  "Return the current instant as an ISO-8601 string."
+  []
+  (str (java.time.Instant/now)))
+
+(defn- elapsed-ms
+  "Return the elapsed milliseconds between two epoch millis values."
+  [start end]
+  (long (- end start)))
 
 (defn- build-client
   "Build and initialize a McpSyncClient from a transport config map.
@@ -62,7 +75,12 @@
      {:client <McpSyncClient>
       :closed? false
       :last-error nil
-      :open-count 1}
+      :open-count 1
+      :transport-config <map>
+      :transport-type <keyword>
+      :opened-at <ISO-8601 string>
+      :call-count 0
+      :last-latency-ms nil}
 
    The caller should hand the record to call-tool / list-tools, then
    to close! when done. Throws :mcp/initialize-failed when
@@ -72,7 +90,12 @@
     {:client client
      :closed? false
      :last-error nil
-     :open-count 1}))
+     :open-count 1
+     :transport-config transport-config
+     :transport-type (or (some-> transport-config :type keyword) :unknown)
+     :opened-at (now-iso)
+     :call-count 0
+     :last-latency-ms nil}))
 
 (defn close!
   "Close the managed client record gracefully. Idempotent — calling
@@ -106,27 +129,11 @@
     (loop [attempt 1]
       (let [next (open! transport-config)]
         (assoc next :open-count (inc (or (:open-count managed) 0))
-                   :last-error nil)))))
+                   :last-error nil
+                   :transport-config transport-config
+                   :transport-type (or (some-> transport-config :type keyword) :unknown))))))
 
 ;; --- tool discovery ----------------------------------------------------------
-
-(defn- explain->data
-  "Extract the tool name and a serializable explanation map from a
-   m/explain result, or nil when the validate passes."
-  [malli-explanation]
-  (when (map? malli-explanation)
-    {:type (:type malli-explanation)
-     :problems (mapv (fn [p]
-                       {:path (:path p)
-                        :schema (:schema p)
-                        :value (:value p)
-                        :expected (:expected p)})
-                     (or (:problems malli-explanation) []))}))
-
-(defn- now-iso
-  "Return the current instant as an ISO-8601 string."
-  []
-  (str (java.time.Instant/now)))
 
 (defn list-tools
   "Return a seq of plain Clojure tool-descriptor maps from the live
@@ -164,8 +171,8 @@
                          :mcp/output-schema output-schema
                          :mcp/retry-safe? (boolean
                                             (some-> t .annotations
-                                                    .retryPolicy
-                                                    .isIdempotent))
+                                                    .idempotentHint
+                                                    boolean))
                          :mcp/last-refreshed now}
                   (map? output-schema) (assoc :mcp/output-schema-kind :json-schema)
                   (vector? output-schema) (assoc :mcp/output-schema-kind :malli))))
@@ -176,6 +183,24 @@
                         {:cause (err/sanitize ex)})))))
 
 ;; --- tool invocation ---------------------------------------------------------
+
+(defn- edn->json-compatible
+  "Recursively convert Clojure keyword keys to strings so the MCP JSON
+   mapper can serialize them correctly."
+  [v]
+  (cond
+    (map? v)
+    (into (empty v)
+          (map (fn [[k v]] [(if (keyword? k) (name k) k) (edn->json-compatible v)]))
+          v)
+
+    (vector? v)
+    (mapv edn->json-compatible v)
+
+    (seq? v)
+    (map edn->json-compatible v)
+
+    :else v))
 
 (defn call-tool
   "Call a single MCP tool by name with the given args map (plain EDN
@@ -189,7 +214,10 @@
 
    The caller is responsible for interpreting content blocks. Throws
    :mcp/call-tool-failed on transport failure and
-   :mcp/tool-error when the server returns isError=true."
+   :mcp/tool-error when the server returns isError=true.
+
+   Clojure keyword keys in `args` are converted to strings before
+   serialization so the MCP JSON mapper can encode them."
   [^McpSyncClient client tool-name args]
   (when-not (string? tool-name)
     (throw (err/error :mcp/call-invalid
@@ -199,50 +227,43 @@
     (throw (err/error :mcp/call-invalid
                       "MCP tool args must be a plain map"
                       {:args (pr-str args)})))
-  (try
-    (let [^McpSchema$CallToolResult result
-          (.callTool client (McpSchema$CallToolRequest. ^String tool-name
-                                                      (into-array Object [args])))
-          content-block-maps
-          (mapv (fn [^McpSchema$Content c]
-                  (cond
-                    (.isText c)
-                    {:content/type :text
-                     :content/text (.text c)}
-
-                    (.isImage c)
-                    {:content/type :image
-                     :content/data (str "base64:" (.data c))
-                     :content/mime-type (some-> c .mimeType .toString)}
-
-                    (.isResource c)
-                    {:content/type :resource
-                     :content/uri  (some-> c .resource .uri .toString)
-                     :content/mime-type (some-> c .resource .mimeType .toString)
-                     :content/text (some-> c .resource .text .toString)}
-
-                    :else
-                    {:content/type :unknown
-                     :content/raw (str c)}))
-                (.content result))
-          is-error (.isError result)
-          raw-size (long (reduce + 0 (map #(.length (str %)) (.content result))))]
-      (if is-error
-        (throw (err/error :mcp/tool-error
-                          (str "MCP tool " tool-name " returned isError=true")
-                          {:tool-name tool-name
-                           :content (vec content-block-maps)}))
-        (cond-> {:mcp/content content-block-maps
-                 :mcp/is-error false}
-          (pos? raw-size) (assoc :mcp/raw-size-bytes raw-size))))
-    (catch Throwable ex
-      (if (= :mcp/tool-error (:error/type (ex-data ex)))
-        (throw ex)
-        (throw (err/error :mcp/call-tool-failed
-                          (str "MCP callTool " tool-name " failed")
-                          {:tool-name tool-name
-                           :args (err/sanitize args)
-                           :cause (err/sanitize ex)}))))))
+  (let [args (edn->json-compatible args)]
+    (try
+      (let [^McpSchema$CallToolResult result
+            (.callTool client (McpSchema$CallToolRequest. ^String tool-name args))
+            content-block-maps
+            (mapv (fn [^McpSchema$Content c]
+                    (case (.type c)
+                      "text" {:content/type :text
+                              :content/text (.text c)}
+                      "image" {:content/type :image
+                               :content/data (.data c)
+                               :content/mime-type (some-> c .mimeType .toString)}
+                      "resource" {:content/type :resource
+                                  :content/uri (some-> c .uri .toString)
+                                  :content/mime-type (some-> c .mimeType .toString)
+                                  :content/text (some-> c .text .toString)}
+                      {:content/type :unknown
+                       :content/raw (str c)}))
+                  (.content result))
+            is-error (.isError result)
+            raw-size (long (reduce + 0 (map #(.length (str %)) (.content result))))]
+        (if is-error
+          (throw (err/error :mcp/tool-error
+                            (str "MCP tool " tool-name " returned isError=true")
+                            {:tool-name tool-name
+                             :content (vec content-block-maps)}))
+          (cond-> {:mcp/content content-block-maps
+                   :mcp/is-error false}
+            (pos? raw-size) (assoc :mcp/raw-size-bytes raw-size))))
+      (catch Throwable ex
+        (if (= :mcp/tool-error (:error/type (ex-data ex)))
+          (throw ex)
+          (throw (err/error :mcp/call-tool-failed
+                            (str "MCP callTool " tool-name " failed")
+                            {:tool-name tool-name
+                             :args (err/sanitize args)
+                             :cause (err/sanitize ex)})))))))
 
 (defn call-tool-streaming
   "Placeholder for streaming tool calls. The current MCP Java SDK does
@@ -296,7 +317,10 @@
    max-attempts times before failing.
 
    Returns the same shape as call-tool. Throws :mcp/call-tool-failed
-   or :mcp/tool-error."
+   or :mcp/tool-error.
+
+   Updates the managed record's :call-count and :last-latency-ms on
+   success for observability."
   ([managed tool-name args]
    (call-tool-managed managed tool-name args default-max-reopen-attempts))
   ([managed tool-name args max-attempts]
@@ -306,7 +330,14 @@
                        {:open-count (or (:open-count managed) 0)})))
    (let [managed (ensure-open managed max-attempts)]
      (try
-       (call-tool (:client managed) tool-name args)
+       (let [start (System/currentTimeMillis)
+             result (call-tool (:client managed) tool-name args)
+             latency (elapsed-ms start (System/currentTimeMillis))]
+         (assoc result
+                :mcp/call-count (inc (or (:call-count managed) 0))
+                :mcp/last-latency-ms latency
+                :mcp/transport-type (:transport-type managed)
+                :mcp/transport-config (err/sanitize (:transport-config managed))))
        (catch Throwable ex
          (if (= :mcp/tool-error (:error/type (ex-data ex)))
            (throw ex)
@@ -315,3 +346,20 @@
                              {:tool-name tool-name
                               :args (err/sanitize args)
                               :cause (err/sanitize ex)}))))))))
+
+(defn ping!
+  "Validate liveness of a managed MCP client by calling list-tools and
+   returning the tool count. Throws :mcp/ping-failed when the client
+   is closed or listTools throws."
+  [managed]
+  (if (closed? managed)
+    (throw (err/error :mcp/ping-failed
+                      "MCP client is closed"
+                      {:open-count (or (:open-count managed) 0)}))
+    (let [client (:client (ensure-open managed default-max-reopen-attempts))]
+      (try
+        (count (list-tools client))
+        (catch Throwable ex
+          (throw (err/error :mcp/ping-failed
+                            "MCP ping failed"
+                            {:cause (err/sanitize ex)})))))))

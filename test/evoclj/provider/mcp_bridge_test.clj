@@ -171,3 +171,72 @@
               :input-schema      [:map [:text :string]]
               :output-schema     [:map [:text :string]]})]
       (is (nil? (mcp-bridge/refresh-provider! p))))))
+
+;; ---------------------------------------------------------------------------
+;; content-block sandboxing and result audit metadata
+;; ---------------------------------------------------------------------------
+
+(deftest content-block-sandboxes-image
+  (testing ":image blocks return a safe placeholder without binary data"
+    (let [block {:content/type :image
+                 :content/data "base64blob"
+                 :mimeType "image/png"}
+          result ((find-var 'evoclj.provider.mcp-bridge/content-block->edn) block)]
+      (is (= :image (:mcp/content-type result)))
+      (is (true? (:mcp/sandboxed result)))
+      (is (nil? (:content/data result)))
+      (is (= "image/png" (:mime-type result))))))
+
+(deftest content-block-sandboxes-resource
+  (testing ":resource blocks return only safe metadata keys"
+    (let [block {:content/type :resource
+                 :content/resource {:uri "file:///tmp/x"
+                                     :mimeType "text/plain"
+                                     :text "secret data"
+                                     :blob "base64blob"}}
+          result ((find-var 'evoclj.provider.mcp-bridge/content-block->edn) block)]
+      (is (= "file:///tmp/x" (:uri result)))
+      (is (= "text/plain" (:mimeType result)))
+      (is (nil? (:text result)))
+      (is (nil? (:blob result))))))
+
+(deftest result->edn-success-carries-audit-metadata
+  (testing "successful multi-block result carries :mcp/audit in metadata"
+    (let [result {:mcp/content [{:content/type :text :content/text "a"}
+                                {:content/type :text :content/text "b"}]
+                  :mcp/is-error false}
+          edn ((find-var 'evoclj.provider.mcp-bridge/result->edn) result)]
+      (is (= ["a" "b"] edn))
+      (let [audit (meta edn)]
+        (is (= 2 (:mcp/block-count audit)))
+        (is (false? (:mcp/is-error audit)))))))
+
+(deftest result->edn-string-block-has-no-meta
+  (testing "single :text block is a plain string without metadata attachment"
+    (let [result {:mcp/content [{:content/type :text :content/text "hello"}]
+                  :mcp/is-error false}
+          edn ((find-var 'evoclj.provider.mcp-bridge/result->edn) result)]
+      (is (string? edn))
+      (is (nil? (meta edn))))))
+
+(deftest result->edn-multi-block-success-carries-audit-metadata
+  (testing "successful multi-block result carries :mcp/audit in metadata"
+    (let [result {:mcp/content [{:content/type :text :content/text "a"}
+                                {:content/type :text :content/text "b"}]
+                  :mcp/is-error false}
+          edn ((find-var 'evoclj.provider.mcp-bridge/result->edn) result)]
+      (is (= ["a" "b"] edn))
+      (let [audit (meta edn)]
+        (is (= 2 (:mcp/block-count audit)))
+        (is (false? (:mcp/is-error audit)))))))
+
+(deftest result->edn-error-carries-audit-metadata
+  (testing "error result includes :mcp/audit map with block count"
+    (let [result {:mcp/content [{:content/type :text :content/text "err"}]
+                  :mcp/is-error true}
+          edn ((find-var 'evoclj.provider.mcp-bridge/result->edn) result)]
+      (is (= :mcp/tool-error (:error edn)))
+      (is (= 1 (count (:content edn))))
+      (let [audit (:mcp/audit edn)]
+        (is (= 1 (:mcp/block-count audit)))
+        (is (true? (:mcp/is-error audit)))))))

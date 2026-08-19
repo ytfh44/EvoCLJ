@@ -63,3 +63,31 @@
     (is (= "boom" (:error/message d)))
     (is (= "java.lang.IllegalStateException" (:error/class d)))
     (is (= d (edn/read-string (pr-str d))))))
+
+(deftest sanitize-redacts-secret-keys
+  (testing "known secret keys are replaced with [REDACTED]"
+    (let [data {:api-key "sk-123"
+                :password "hunter2"
+                :token "bearer abc"
+                :safe "keep-me"
+                :nested {:apiKey "secret" :host "localhost"}}
+          result (err/sanitize data)]
+      (is (= "[REDACTED]" (:api-key result)))
+      (is (= "[REDACTED]" (:password result)))
+      (is (= "[REDACTED]" (:token result)))
+      (is (= "keep-me" (:safe result)))
+      (is (= "[REDACTED]" (get-in result [:nested :apiKey])))
+      (is (= "localhost" (get-in result [:nested :host]))))))
+
+(deftest sanitize-redacts-transport-config-secrets
+  (testing "MCP transport-config secrets in maps are redacted"
+    (let [cfg {:type :stdio
+               :command "server"
+               :env {:api-key "sk-123"
+                     :password "hunter2"
+                     :normal "ok"}}
+          result (err/sanitize cfg)]
+      (is (= "server" (:command result)))
+      (is (= "[REDACTED]" (get-in result [:env :api-key])))
+      (is (= "[REDACTED]" (get-in result [:env :password])))
+      (is (= "ok" (get-in result [:env :normal]))))))

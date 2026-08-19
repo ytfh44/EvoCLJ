@@ -5,6 +5,20 @@
             [evoclj.provider.mcp-bridge :as mcp-bridge]
             [evoclj.provider.protocol :as proto]))
 
+(defn- fake-managed
+  "Build a fake managed record for tests that do not touch a live client."
+  [& [overrides]]
+  (merge {:client nil
+          :closed? false
+          :last-error nil
+          :open-count 1
+          :transport-config {:type :stdio :command "echo" :args []}
+          :transport-type :stdio
+          :opened-at "2025-01-01T00:00:00Z"
+          :call-count 0
+          :last-latency-ms nil}
+         overrides))
+
 ;; ---------------------------------------------------------------------------
 ;; call-tool validation (these run without a live client)
 ;; ---------------------------------------------------------------------------
@@ -114,3 +128,40 @@
       ;; Both descriptors should carry the same connection id
       (is (= :shared/stdio (:mcp/connection-id (proto/describe p1))))
       (is (= :shared/stdio (:mcp/connection-id (proto/describe p2)))))))
+
+;; ---------------------------------------------------------------------------
+;; observability: open! metadata and ping!
+;; ---------------------------------------------------------------------------
+
+(deftest open!-carries-transport-metadata
+  (testing "open! returns transport metadata and zeroed counters"
+    (with-redefs [evoclj.mcp.client/build-client
+                  (fn [_]
+                    {:fake-client true})]
+      (let [m (client/open! {:type :stdio :command "echo" :args []})]
+        (is (= :stdio (:transport-type m)))
+        (is (string? (:opened-at m)))
+        (is (= 0 (:call-count m)))
+        (is (nil? (:last-latency-ms m)))
+        (is (= {:type :stdio :command "echo" :args []} (:transport-config m)))))))
+
+(deftest ping!-rejects-closed-managed
+  (testing "ping! throws :mcp/ping-failed on closed record"
+    (let [m (fake-managed {:closed? true})]
+      (let [e (atom nil)]
+        (try
+          (reset! e (client/ping! m))
+          (is false "expected exception")
+          (catch Throwable t
+            (reset! e t)))
+        (is (= :mcp/ping-failed (:error/type (ex-data @e))))))))
+
+(deftest ping!-rejects-nil-managed
+  (testing "ping! throws :mcp/ping-failed on nil"
+    (let [e (atom nil)]
+      (try
+        (reset! e (client/ping! nil))
+        (is false "expected exception")
+        (catch Throwable t
+          (reset! e t)))
+      (is (= :mcp/ping-failed (:error/type (ex-data @e)))))))

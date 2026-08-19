@@ -23,6 +23,24 @@
 (def ^:private ^:const max-depth 32)
 (def ^:private ^:const max-collection-size 1024)
 
+(def ^:private secret-keys
+  "Keywords whose values are treated as secrets during sanitization.
+   Used by `sanitize-map` to redact transport-config and similar maps
+   before they cross serialization boundaries."
+  #{:api-key :apiKey :api_secret :apikey
+    :token :access-token :accessToken :refresh-token :refreshToken
+    :password :passwd :pwd :secret
+    :authorization :authorization-header :bearer
+    :cookie
+    :private-key :privateKey :private_key
+    :client-secret :clientSecret
+    :x-api-key :x-api-secret})
+
+(defn- secret-key?
+  [k]
+  (and (keyword? k)
+       (contains? secret-keys k)))
+
 (declare sanitize*)
 
 (defn- sanitize-throwable
@@ -41,7 +59,11 @@
 
 (defn- sanitize-map [m depth]
   (into {}
-        (map (fn [[k v]] [(sanitize* k (inc depth)) (sanitize* v (inc depth))]))
+        (map (fn [[k v]]
+               [(sanitize* k (inc depth))
+                (if (secret-key? k)
+                  "[REDACTED]"
+                  (sanitize* v (inc depth)))]))
         (take max-collection-size m)))
 
 (defn- sanitize-set [s depth]

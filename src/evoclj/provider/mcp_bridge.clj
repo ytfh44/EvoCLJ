@@ -12,7 +12,14 @@
    records with auto-reconnect. When `:connection/id` is provided,
    providers with the same id share a single underlying McpSyncClient
    (connection pooling). All values crossing the protocol boundary are
-   plain validated Clojure data (Global Constraint 22)."
+   plain validated Clojure data (Global Constraint 22).
+
+   Phase 5 (security boundaries): content-block output is sandboxed so
+   binary image data and opaque resource blobs never surface as EDN;
+   instead safe placeholder metadata is returned. Error data and
+   successful results carry MCP-aware audit metadata (tool name,
+   connection id, server id) attached as metadata on success and as a
+   map key on error."
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.client :as mcp-client]
             [evoclj.provider.protocol :as proto]
@@ -86,25 +93,46 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- content-block->edn
-  "Convert one MCP content-block map into a plain EDN value."
+  "Convert one MCP content-block map into a plain EDN value.
+
+   Output sandboxing: `:image` blocks are replaced with a safe
+   placeholder so base64 binary data never reaches the EDN layer;
+   `:resource` blocks are reduced to safe metadata keys only
+   (`:uri`, `:mimeType`). `:text` blocks pass through as strings."
   [block]
   (case (:content/type block)
     :text (:content/text block)
-    :image (with-meta block {:mcp/content-type :image})
-    :resource (with-meta block {:mcp/content-type :resource})
+    :image {:mcp/content-type :image
+            :mcp/sandboxed true
+            :mime-type (:mimeType block)}
+    :resource (let [r (:content/resource block)]
+                (if (map? r)
+                  (select-keys r [:uri :mimeType])
+                  {:mcp/content-type :resource
+                   :mcp/sandboxed true}))
     (:content/raw block)))
 
 (defn- result->edn
-  "Convert the full call-tool result map into a plain EDN value."
+  "Convert the full call-tool result map into a plain EDN value.
+
+   MCP-aware audit metadata is attached as metadata on successful
+   results when the value supports metadata (IObj). Error results
+   always carry `:mcp/audit` as a map key."
   [result]
   (let [blocks (:mcp/content result)
-        edn-blocks (mapv content-block->edn blocks)]
+        edn-blocks (mapv content-block->edn blocks)
+        audit {:mcp/block-count (count blocks)
+               :mcp/is-error (:mcp/is-error result)}]
     (if (:mcp/is-error result)
-      {:error :mcp/tool-error
-       :content edn-blocks}
+      (assoc {:error :mcp/tool-error
+              :content edn-blocks}
+             :mcp/audit audit)
       (case (count edn-blocks)
-        1 (first edn-blocks)
-        edn-blocks))))
+        1 (let [v (first edn-blocks)]
+            (if (instance? clojure.lang.IObj v)
+              (with-meta v audit)
+              v))
+        (with-meta edn-blocks audit)))))
 
 ;; ---------------------------------------------------------------------------
 ;; the provider
@@ -157,6 +185,7 @@
         tool-id       (:tool/id descriptor)
         connection-id (:connection/id opts)
         shared?       (some? connection-id)
+        server-id     (:mcp/server-id opts)
         refresh-ms    (:schema/refresh-interval-ms opts)
         descriptor    (if refresh-ms
                         (assoc descriptor :mcp/last-refreshed (str (java.time.Instant/now)))
@@ -220,11 +249,21 @@
                                          :output-schema (:mcp/output-schema matching)
                                          :mcp/last-refreshed (str (java.time.Instant/now))))))
                       (catch Throwable _ nil)))))
-              (result->edn (mcp-client/call-tool client mcp-name args managed)))
+              (let [raw-result (mcp-client/call-tool client mcp-name args managed)
+                    edn-result (result->edn raw-result)
+                    audit {:mcp/tool-name mcp-name
+                           :mcp/connection-id connection-id
+                           :mcp/server-id server-id}]
+                (if (:mcp/is-error raw-result)
+                  (assoc edn-result :mcp/audit (merge (:mcp/audit edn-result) audit))
+                  (with-meta edn-result (merge (meta edn-result) {:mcp/audit audit})))))
             (catch Throwable ex
               (throw (err/error :provider/transient-error
                                 "MCP provider call-tool failed"
                                 {:tool-name mcp-name
+                                 :mcp/connection-id connection-id
+                                 :mcp/server-id server-id
+                                 :mcp/transport-config (err/sanitize transport-cfg)
                                  :cause (err/sanitize ex)})))))))))
 
 (defn refresh-provider!
