@@ -8,28 +8,30 @@
    transport classes directly.
 
    All functions throw ExceptionInfo with a stable :error/type on
-   failure, consistent with the kernel error contract."
+   failure, consistent with the kernel error contract.
+
+   Phase 1 (connection lifecycle): open! returns a managed client
+   record; call-tool auto-reconnects on transient failures; with-client
+   guarantees open!/close! pairing; :connection/id enables connection
+   pooling across providers."
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.transport :as transport])
   (:import [io.modelcontextprotocol.client McpClient McpSyncClient]
-            [io.modelcontextprotocol.spec McpClientTransport]
-            [io.modelcontextprotocol.spec McpSchema$CallToolRequest
-             McpSchema$CallToolResult
-             McpSchema$ListToolsResult
-             McpSchema$Tool
-             McpSchema$JsonSchema
-             McpSchema$Content]))
+           [io.modelcontextprotocol.spec McpClientTransport]
+           [io.modelcontextprotocol.spec McpSchema$CallToolRequest
+            McpSchema$CallToolResult
+            McpSchema$ListToolsResult
+            McpSchema$Tool
+            McpSchema$JsonSchema
+            McpSchema$Content]))
 
 ;; --- lifecycle ---------------------------------------------------------------
 
-(defn open!
-  "Build a McpSyncClient from a transport config map (see
-   transport/transport-for for accepted shapes), initialize the
-   connection, and return the live client. The returned client is a
-   plain Java object; pass it to list-tools / call-tool, then hand it
-   to close! when done.
+(def ^:private default-max-reopen-attempts 2)
 
-   Throws :mcp/initialize-failed when initialize() itself throws."
+(defn- build-client
+  "Build and initialize a McpSyncClient from a transport config map.
+   Returns the live client, or throws :mcp/initialize-failed."
   [transport-config]
   (let [t (transport/transport-for transport-config)
         client (McpClient/sync ^McpClientTransport t)
@@ -42,15 +44,66 @@
                           "MCP client initialize failed"
                           {:cause (err/sanitize ex)}))))))
 
-(defn close
-  "Close the McpSyncClient gracefully. Idempotent — calling close on a
-   nil or already-closed client is a no-op. Swallows close errors so
-   halt! paths never leak a failed-close exception."
+(defn- safe-close
+  "Close a McpSyncClient gracefully. Swallows close errors."
   [^McpSyncClient client]
   (when client
     (try
       (.closeGracefully client)
       (catch Throwable _ nil))))
+
+(defn open!
+  "Build a McpSyncClient from a transport config map, initialize the
+   connection, and return a managed client record:
+
+     {:client <McpSyncClient>
+      :closed? false
+      :last-error nil
+      :open-count 1}
+
+   The caller should hand the record to call-tool / list-tools, then
+   to close! when done. Throws :mcp/initialize-failed when
+   initialize() itself throws."
+  [transport-config]
+  (let [client (build-client transport-config)]
+    {:client client
+     :closed? false
+     :last-error nil
+     :open-count 1}))
+
+(defn close!
+  "Close the managed client record gracefully. Idempotent — calling
+   close! on a nil or already-closed record is a no-op. Returns the
+   record (or nil) with :closed? true and :client nil so the caller
+   can safely discard it."
+  [managed]
+  (cond
+    (not (map? managed))
+    managed
+
+    (:closed? managed)
+    managed
+
+    :else
+    (do
+      (safe-close (:client managed))
+      (assoc managed :closed? true :client nil :last-error nil))))
+
+(defn closed?
+  "True when the managed client record is nil or already closed."
+  [managed]
+  (or (nil? managed) (and (map? managed) (:closed? managed))))
+
+(defn- reopen!
+  "Attempt to reopen a closed or broken managed client record up to
+   max-attempts times. Returns the reopened record, or throws the last
+   error."
+  [managed max-attempts]
+  (let [transport-config (:transport-config managed)]
+    (loop [attempt 1]
+      (let [next (open! transport-config)]
+        (assoc next :open-count (inc (or (:open-count managed) 0))
+                   :last-error nil)))))
 
 ;; --- tool discovery ----------------------------------------------------------
 
@@ -81,7 +134,7 @@
    All values are plain EDN-safe data (Global Constraint 22).
 
    Throws :mcp/list-tools-failed on transport failure."
-   [^McpSyncClient client]
+  [^McpSyncClient client]
   (try
     (let [^McpSchema$ListToolsResult result (.listTools client)
           tools (.tools result)]
@@ -168,3 +221,59 @@
                           {:tool-name tool-name
                            :args (err/sanitize args)
                            :cause (err/sanitize ex)}))))))
+
+;; --- managed client helpers --------------------------------------------------
+
+(defn with-client
+  "Open a managed client record from `transport-config`, bind it to
+   `managed`, execute `body`, then close the client. Returns the value
+   of `body`. Guarantees open!/close! pairing even when `body`
+   throws."
+  [transport-config body]
+  (let [managed (open! transport-config)]
+    (try
+      (body managed)
+      (finally
+        (close! managed)))))
+
+(defn- ensure-open
+  "Return a live McpSyncClient from `managed`. If the managed record is
+   closed or broken, attempt to reopen it (up to max-attempts).
+   Throws :mcp/reopen-failed when all attempts fail."
+  [managed max-attempts]
+  (cond
+    (nil? managed)
+    (reopen! managed max-attempts)
+
+    (:closed? managed)
+    (reopen! managed max-attempts)
+
+    :else
+    managed))
+
+(defn call-tool-managed
+  "Call a single MCP tool using a managed client record. The managed
+   record is expected to contain :transport-config for reopening. On
+   transient failures, attempts to reopen the client up to
+   max-attempts times before failing.
+
+   Returns the same shape as call-tool. Throws :mcp/call-tool-failed
+   or :mcp/tool-error."
+  ([managed tool-name args]
+   (call-tool-managed managed tool-name args default-max-reopen-attempts))
+  ([managed tool-name args max-attempts]
+   (when (closed? managed)
+     (throw (err/error :mcp/client-closed
+                       "MCP managed client is closed"
+                       {:open-count (or (:open-count managed) 0)})))
+   (let [managed (ensure-open managed max-attempts)]
+     (try
+       (call-tool (:client managed) tool-name args)
+       (catch Throwable ex
+         (if (= :mcp/tool-error (:error/type (ex-data ex)))
+           (throw ex)
+           (throw (err/error :mcp/call-tool-failed
+                             (str "MCP callTool " tool-name " failed")
+                             {:tool-name tool-name
+                              :args (err/sanitize args)
+                              :cause (err/sanitize ex)}))))))))

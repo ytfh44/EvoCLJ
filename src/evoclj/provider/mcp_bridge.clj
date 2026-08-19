@@ -3,18 +3,47 @@
    kernel's Provider protocol.
 
    The bridge owns ONE MCP connection (an `evoclj.mcp.client/open!`
-   client). It is constructed from a transport config plus a
+   managed record). It is constructed from a transport config plus a
    `:tool/mcp-name` (the server-side tool name). The bridge translates
    between EvoCLJ intents and MCP `callTool` requests, and between MCP
    content-block results and plain Clojure EDN.
 
-   All values crossing the protocol boundary are plain validated Clojure
-   data (Global Constraint 22)."
+   Phase 1 (connection lifecycle): the bridge uses managed client
+   records with auto-reconnect. When `:connection/id` is provided,
+   providers with the same id share a single underlying McpSyncClient
+   (connection pooling). All values crossing the protocol boundary are
+   plain validated Clojure data (Global Constraint 22)."
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.client :as mcp-client]
             [evoclj.provider.protocol :as proto]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m]))
+
+;; ---------------------------------------------------------------------------
+;; connection pool
+;; ---------------------------------------------------------------------------
+
+(def ^:private connection-pool
+  "Global atom mapping :connection/id -> managed client record."
+  (atom {}))
+
+(defn- pool-get
+  "Look up a managed client by connection-id. Returns nil when absent
+   or closed."
+  [connection-id]
+  (let [entry (get @connection-pool connection-id)]
+    (when (and (map? entry) (not (:closed? entry)))
+      entry)))
+
+(defn- pool-put!
+  "Store a managed client under connection-id in the pool."
+  [connection-id managed]
+  (swap! connection-pool assoc connection-id managed))
+
+(defn- pool-remove!
+  "Remove a connection-id from the pool (used on explicit close)."
+  [connection-id]
+  (swap! connection-pool dissoc connection-id))
 
 ;; ---------------------------------------------------------------------------
 ;; descriptor helper
@@ -35,13 +64,15 @@
                         {:value (err/sanitize opts)})))
     (let [input-schema  (:input-schema opts)
           output-schema (:output-schema opts)
-          retry-safe?   (or (:retry-safe? opts) false)]
+          retry-safe?   (or (:retry-safe? opts) false)
+          connection-id (:connection/id opts)]
       (cond-> {:tool/id         tool-id
                :effect          :remote
                :input-schema    input-schema
                :output-schema   output-schema
                :required-action :invoke}
-        retry-safe? (assoc :retry {:safe? true})))))
+        retry-safe? (assoc :retry {:safe? true})
+        connection-id (assoc :mcp/connection-id connection-id)))))
 
 ;; ---------------------------------------------------------------------------
 ;; content-block result -> plain Clojure
@@ -83,7 +114,9 @@
     :output-schema    - Malli schema for result value
 
   Optional:
-    :retry-safe?      - boolean, true when the tool is idempotent (default false)"
+    :retry-safe?      - boolean, true when the tool is idempotent (default false)
+    :connection/id    - keyword; providers sharing this id share a single
+                        underlying McpSyncClient (connection pooling)."
   [opts]
   (when-not (contains? opts :transport-config)
     (throw (err/error :provider/config-invalid
@@ -101,6 +134,8 @@
         transport-cfg (:transport-config opts)
         mcp-name      (:tool/mcp-name opts)
         tool-id       (:tool/id descriptor)
+        connection-id (:connection/id opts)
+        shared?       (some? connection-id)
         client-atom   (atom nil)]
     (reify proto/Provider
       (describe [_]
@@ -129,14 +164,19 @@
                             {:value (err/sanitize authorized-request)})))
         (let [args (:args authorized-request)]
           (try
-            (let [client (or @client-atom
-                             (let [c (mcp-client/open! transport-cfg)]
-                               (reset! client-atom c)
-                               c))]
-              (result->edn (mcp-client/call-tool client mcp-name args)))
+            (let [managed (if shared?
+                            (or (pool-get connection-id)
+                                (let [m (mcp-client/open! transport-cfg)]
+                                  (pool-put! connection-id m)
+                                  m))
+                            (or @client-atom
+                                (let [m (mcp-client/open! transport-cfg)]
+                                  (reset! client-atom m)
+                                  m)))
+                  client  (:client managed)]
+              (result->edn (mcp-client/call-tool client mcp-name args managed)))
             (catch Throwable ex
               (throw (err/error :provider/transient-error
                                 "MCP provider call-tool failed"
                                 {:tool-name mcp-name
-                                 :cause (err/sanitize ex)}))))))))
-)
+                                 :cause (err/sanitize ex)})))))))))

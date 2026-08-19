@@ -35,6 +35,18 @@
           d (proto/describe p)]
       (is (= {:safe? true} (:retry d))))))
 
+(deftest describe-includes-connection-id-when-provided
+  (testing ":connection/id adds :mcp/connection-id to descriptor"
+    (let [p (mcp-bridge/mcp-provider
+             {:transport-config  {:type :stdio :command "echo" :args []}
+              :tool/id           :mcp/echo
+              :tool/mcp-name     "echo"
+              :input-schema      [:map [:text :string]]
+              :output-schema     [:map [:text :string]]
+              :connection/id     :shared/stdio})
+          d (proto/describe p)]
+      (is (= :shared/stdio (:mcp/connection-id d))))))
+
 (deftest describe-rejects-missing-tool-id
   (testing "missing :tool/id throws :provider/config-invalid"
     (let [e (atom nil)]
