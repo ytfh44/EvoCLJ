@@ -308,24 +308,6 @@
 
 ;; --- tool invocation ---------------------------------------------------------
 
-(defn- edn->json-compatible
-  "Recursively convert Clojure keyword keys to strings so the MCP JSON
-   mapper can serialize them correctly."
-  [v]
-  (cond
-    (map? v)
-    (into (empty v)
-          (map (fn [[k v]] [(if (keyword? k) (name k) k) (edn->json-compatible v)]))
-          v)
-
-    (vector? v)
-    (mapv edn->json-compatible v)
-
-    (seq? v)
-    (map edn->json-compatible v)
-
-    :else v))
-
 (defn call-tool
   "Call a single MCP tool by name with the given args map (plain EDN
    data). Returns the parsed result value:
