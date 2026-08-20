@@ -196,6 +196,32 @@
 
 ;; --- tool discovery ----------------------------------------------------------
 
+(defn- java-schema->clj
+  "Recursively convert a remote JSON Schema (a java.util.Map with STRING
+   keys, as returned by the MCP Java SDK 2.0 `Tool.inputSchema()` /
+   `outputSchema()`) into a plain persistent Clojure map with STRING keys.
+   Nested java.util.Map and java.util.List values are converted the same
+   way. Keys are intentionally kept as STRINGS (never keywordized) because
+   JSON property names are strings and the downstream Malli converter and
+   JSON-Schema validator both read string keys."
+  [v]
+  (cond
+    (instance? java.util.Map v)
+    (into {} (map (fn [[k val]] [(if (keyword? k) (name k) (str k))
+                                 (java-schema->clj val)])
+                  v))
+
+    (instance? java.util.List v)
+    (mapv java-schema->clj v)
+
+    (instance? java.util.Set v)
+    (into #{} (map java-schema->clj v))
+
+    (instance? java.util.Collection v)
+    (mapv java-schema->clj v)
+
+    :else v))
+
 (defn list-tools
   "Return a paginated result map from the live client:
 
@@ -208,9 +234,15 @@
      {:mcp/name        <string>        ; the server-side tool name
       :mcp/title       <string?>       ; human title, or nil
       :mcp/description <string?>       ; description, or nil
-      :mcp/input-schema <malli schema> ; JSON Schema converted to Malli
-      :mcp/output-schema <any>         ; remote outputSchema when present,
-                                       ; otherwise :any
+      :mcp/input-schema <map>          ; normalized remote inputSchema as
+                                       ; a plain string-keyed Clojure map
+                                       ; (or {} when absent); the bridge's
+                                       ; json-schema->malli converts it
+      :mcp/output-schema <map|vector|  ; normalized remote outputSchema,
+                            :any>       ; :any when absent, or a vector
+                                       ; Malli schema (legacy 2025-11-25)
+      :mcp/output-schema-kind <kw?>    ; :json-schema when output-schema is
+                                       ; a map, :malli when a vector
       :mcp/retry-safe? <boolean?>      ; true when the schema carries
                                        ; <nil> when absent
       :mcp/last-refreshed <string?>    ; ISO-8601 timestamp of this
@@ -232,22 +264,26 @@
            next-cursor (.nextCursor result)]
        {:tools (mapv (fn [^McpSchema$Tool t]
                        (let [schema (or (.inputSchema ^McpSchema$JsonSchema t) {})
-                             output-schema (or (.outputSchema ^McpSchema$JsonSchema t) :any)]
+                             output-schema (or (.outputSchema ^McpSchema$JsonSchema t) :any)
+                             input-schema (if (instance? java.util.Map schema)
+                                           (java-schema->clj schema)
+                                           {})
+                             out-schema (cond
+                                          (instance? java.util.Map output-schema)
+                                          (java-schema->clj output-schema)
+                                          :else output-schema)]
                          (cond-> {:mcp/name        (.name t)
                                   :mcp/title       (.title t)
                                   :mcp/description (.description t)
-                                  :mcp/input-schema (cond
-                                                      (map? schema) schema
-                                                      (vector? schema) schema
-                                                      :else {})
-                                  :mcp/output-schema output-schema
+                                  :mcp/input-schema input-schema
+                                  :mcp/output-schema out-schema
                                   :mcp/retry-safe? (boolean
                                                      (some-> t .annotations
                                                              .idempotentHint
                                                              boolean))
                                   :mcp/last-refreshed now}
-                           (map? output-schema) (assoc :mcp/output-schema-kind :json-schema)
-                           (vector? output-schema) (assoc :mcp/output-schema-kind :malli))))
+                           (instance? java.util.Map out-schema) (assoc :mcp/output-schema-kind :json-schema)
+                           (vector? out-schema) (assoc :mcp/output-schema-kind :malli))))
                      tools)
         :next-cursor next-cursor
         :has-more? (some? next-cursor)})

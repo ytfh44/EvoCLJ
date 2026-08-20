@@ -22,6 +22,7 @@
    metadata."
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.client :as mcp-client]
+            [evoclj.mcp.json-schema :as json-schema]
             [evoclj.provider.protocol :as proto]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m]))
@@ -30,45 +31,123 @@
 ;; JSON Schema -> Malli conversion
 ;; ---------------------------------------------------------------------------
 
-(defn- json-schema->malli
-  "Convert a simple JSON Schema map to an equivalent Malli schema.
-   v0 handles object, string, integer, boolean, array, and nested
-   properties recursively."
+(def ^:private unsupported-json-schema-keys
+  "JSON Schema keywords the converter cannot prove equivalent to a Malli
+   primitive. When present, the original schema is preserved and validated
+   by the native validator (fail-closed), never degraded to :any."
+  #{"oneOf" "anyOf" "allOf" "$ref" "$defs"
+    "pattern" "format" "dependentSchemas" "unevaluatedProperties"})
+
+(declare json-schema->malli)
+
+;; defined later in this namespace (content-block -> EDN section)
+(declare java-value->edn)
+
+(defn- maybe-nilable
+  "Wrap `node` in :maybe when the schema declares `nullable: true`.
+   (:nilable is not registered in Malli 0.20.1; :maybe is.)"
+  [node schema]
+  (if (true? (get schema "nullable")) [:maybe node] node))
+
+(defn- object->malli
   [schema]
-  (cond
-    (not (map? schema))
-    :any
+  (let [props (get schema "properties" {})
+        required (set (get schema "required" []))
+        closed? (false? (get schema "additionalProperties" true))
+        entries (map (fn [[k v]]
+                       (if (contains? required k)
+                         [k (json-schema->malli v)]
+                         [k {:optional true} (json-schema->malli v)]))
+                     props)
+        m (if closed?
+            (into [:map {:closed true}] entries)
+            (into [:map] entries))]
+    (maybe-nilable m schema)))
 
-    (= "object" (:type schema))
-    (let [props (:properties schema)
-          required (set (:required schema []))]
-      (into [:map]
-            (map (fn [[k v]]
-                   (if (required k)
-                     [k (json-schema->malli v)]
-                     [:optional k (json-schema->malli v)])))
-            props))
+(defn- string->malli
+  [schema]
+  (let [min-l (get schema "minLength")
+        max-l (get schema "maxLength")
+        node (cond
+               (and min-l max-l) [:string {:min min-l :max max-l}]
+               (some? min-l)      [:string {:min min-l}]
+               (some? max-l)      [:string {:max max-l}]
+               :else              :string)]
+    (maybe-nilable node schema)))
 
-    (= "string" (:type schema))
-    :string
+(defn- number->malli
+  [schema]
+  (let [integer? (= "integer" (get schema "type"))
+        min-v (get schema "minimum")
+        max-v (get schema "maximum")
+        opts (cond-> {}
+               (some? min-v) (assoc :min min-v)
+               (some? max-v) (assoc :max max-v))
+        ;; "integer" -> :int. JSON "number" accepts both integers and
+        ;; floats; Malli's :number is not registered, so union :int and
+        ;; :double (both honor :min/:max).
+        node (if integer?
+               (if (seq opts) [:int opts] :int)
+               (if (seq opts) [:or [:int opts] [:double opts]] [:or :int :double]))]
+    (maybe-nilable node schema)))
 
-    (= "integer" (:type schema))
-    :int
+(defn- array->malli
+  [schema]
+  (let [items (get schema "items")
+        node (if (and items (map? items))
+               [:vector (json-schema->malli items)]
+               [:vector :any])]
+    (maybe-nilable node schema)))
 
-    (= "number" (:type schema))
-    :num
+(defn- wrap-json-schema-validator
+  "Fallback for schema constructs we cannot prove equivalent to a Malli
+   primitive: preserve the (normalized string-keyed) schema and validate
+   it with the native validator inside a Malli :fn. Fail-closed."
+  [schema]
+  [:fn {:error/message "json-schema"}
+   (fn [v] (json-schema/validate schema v))])
 
-    (= "boolean" (:type schema))
-    :boolean
+(defn- json-schema->malli
+  "Convert a (string-keyed) JSON Schema map to an equivalent Malli schema.
 
-    (= "array" (:type schema))
-    (let [items (:items schema)]
-      (if (map? items)
-        [:vector (json-schema->malli items)]
-        [:vector :any]))
+   Operates on string-keyed maps (the shape produced by
+   evoclj.mcp.client/java-schema->clj) and also accepts a
+   java.util.Map with string keys.
 
-    :else
-    :any))
+   Handles the common MCP subset: object (properties + required +
+   additionalProperties), string, integer, number, boolean, array (items),
+   enum, const, null/nullable, and minLength/maxLength/minimum/maximum.
+
+   Fail-closed: constructs the converter cannot prove equivalent to a
+   Malli primitive (oneOf/anyOf/allOf/$ref/$defs/pattern/format/
+   dependentSchemas/unevaluatedProperties) preserve the original schema
+   and validate it with the native validator. :any is returned ONLY when
+   the schema is genuinely empty or absent."
+  [schema]
+  (let [s (cond
+            (instance? java.util.Map schema) (java-value->edn schema)
+            (map? schema) schema
+            :else nil)]
+    (cond
+      (nil? s) :any
+      (empty? s) :any
+      (some #(contains? s %) unsupported-json-schema-keys)
+      (wrap-json-schema-validator s)
+      (contains? s "enum")
+      (maybe-nilable (into [:enum] (get s "enum")) s)
+      (contains? s "const")
+      (maybe-nilable [:enum (get s "const")] s)
+      (= "object"  (get s "type")) (object->malli s)
+      (= "string"  (get s "type")) (string->malli s)
+      (= "integer" (get s "type")) (number->malli s)
+      (= "number"  (get s "type")) (number->malli s)
+      (= "boolean" (get s "type")) (maybe-nilable :boolean s)
+      (= "array"   (get s "type")) (array->malli s)
+      (= "null"    (get s "type")) (maybe-nilable :nil s)
+      :else
+      (if (seq s)
+        (wrap-json-schema-validator s)
+        :any))))
 
 ;; ---------------------------------------------------------------------------
 ;; connection pool
@@ -398,13 +477,25 @@
             (catch Throwable ex
               (if (= :mcp/tool-error (:error/type (ex-data ex)))
                 (throw ex)
-                (throw (err/error :provider/transient-error
-                                  "MCP provider call-tool failed"
-                                  {:tool-name mcp-name
-                                   :mcp/connection-id connection-id
-                                   :mcp/server-id server-id
-                                   :mcp/transport-config (err/sanitize transport-cfg)
-                                   :cause (err/sanitize ex)}))))))))))
+                (let [category (:error/type (mcp-client/classify-mcp-error ex))]
+                  (if (or (= category :mcp/transport-error)
+                          (= category :mcp/protocol-error))
+                    ;; transient/retryable: transport or protocol failures
+                    (throw (err/error :provider/transient-error
+                                      "MCP provider call-tool failed"
+                                      {:tool-name mcp-name
+                                       :mcp/connection-id connection-id
+                                       :mcp/server-id server-id
+                                       :mcp/transport-config (err/sanitize transport-cfg)
+                                       :cause (err/sanitize ex)}))
+                    ;; permanent: business/config/unknown failures are NOT retried
+                    (throw (err/error :provider/execution-failed
+                                      "MCP provider call-tool failed"
+                                      {:tool-name mcp-name
+                                       :mcp/connection-id connection-id
+                                       :mcp/server-id server-id
+                                       :mcp/transport-config (err/sanitize transport-cfg)
+                                       :cause (err/sanitize ex)}))))))))))))
 
 (defn refresh-provider!
   "Force a schema refresh for an MCP-backed provider by resetting its

@@ -1,6 +1,8 @@
 (ns evoclj.provider.mcp-bridge-test
   "Unit tests for evoclj.provider.mcp-bridge (no real MCP server required)."
   (:require [clojure.test :refer [deftest is testing]]
+            [malli.core :as m]
+            [evoclj.mcp.json-schema :as json-schema]
             [evoclj.provider.mcp-bridge :as mcp-bridge]
             [evoclj.provider.protocol :as proto]))
 
@@ -179,37 +181,138 @@
 (deftest json-schema->malli-basic-types
   (testing "string, integer, number, boolean map to correct Malli types"
     (let [f (find-var 'evoclj.provider.mcp-bridge/json-schema->malli)]
-      (is (= :string (f {:type "string"})))
-      (is (= :int (f {:type "integer"})))
-      (is (= :num (f {:type "number"})))
-      (is (= :boolean (f {:type "boolean"}))))))
+      (is (= :string (f {"type" "string"})))
+      (is (= :int (f {"type" "integer"})))
+      (is (= [:or :int :double] (f {"type" "number"})))
+      (is (= :boolean (f {"type" "boolean"}))))))
 
 (deftest json-schema->malli-object
   (testing "object with required and optional properties"
     (let [f (find-var 'evoclj.provider.mcp-bridge/json-schema->malli)
-          schema {:type "object"
-                  :required ["name"]
-                  :properties {"name" {:type "string"}
-                               "age" {:type "integer"}}}]
-      (is (= [:map ["name" :string] [:optional "age" :int]]
+          schema {"type" "object"
+                  "required" ["name"]
+                  "properties" {"name" {"type" "string"}
+                               "age" {"type" "integer"}}}]
+      (is (= [:map ["name" :string] ["age" {:optional true} :int]]
              (f schema))))))
 
 (deftest json-schema->malli-array
   (testing "array with map items and without items"
     (let [f (find-var 'evoclj.provider.mcp-bridge/json-schema->malli)]
-      (is (= [:vector [:map [:optional "x" :int]]]
-             (f {:type "array" :items {:type "object"
-                                       :properties {"x" {:type "integer"}}}})))
+      (is (= [:vector [:map ["x" {:optional true} :int]]]
+             (f {"type" "array" "items" {"type" "object"
+                                         "properties" {"x" {"type" "integer"}}}})))
       (is (= [:vector :any]
-             (f {:type "array"}))))))
+             (f {"type" "array"}))))))
 
 (deftest json-schema->malli-edge-cases
-  (testing "empty schema, nil, and non-map input return :any"
+  (testing "empty schema, nil, and non-map input return :any; unknown type is fail-closed"
     (let [f (find-var 'evoclj.provider.mcp-bridge/json-schema->malli)]
       (is (= :any (f {})))
       (is (= :any (f nil)))
       (is (= :any (f "not-a-map")))
-      (is (= :any (f {:type "unknown"}))))))
+      ;; unknown type is NOT silently :any (fail-closed via native validator)
+      (is (not= :any (f {"type" "unknown"}))))))
+
+(deftest json-schema->malli-string-keyed-java-map
+  (testing "string-keyed java.util.Map yields a real Malli schema, not :any"
+    (let [f (find-var 'evoclj.provider.mcp-bridge/json-schema->malli)
+          schema (doto (java.util.LinkedHashMap.)
+                   (.put "type" "object")
+                   (.put "properties"
+                         (doto (java.util.LinkedHashMap.)
+                           (.put "temperature" (doto (java.util.LinkedHashMap.)
+                                                 (.put "type" "number")))))
+                   (.put "required" ["temperature"]))
+          malli (f schema)]
+      (is (not= :any malli))
+      (is (true? (m/validate malli {"temperature" 0.7})))
+      (is (false? (m/validate malli {"temperature" "hot"})))
+      (is (false? (m/validate malli {}))))))
+
+(deftest json-schema->malli-preserves-unsupported-construct
+  (testing "oneOf is preserved via native validator and rejects invalid values"
+    (let [f (find-var 'evoclj.provider.mcp-bridge/json-schema->malli)
+          schema {"type" "object"
+                  "required" ["id"]
+                  "oneOf" [{"required" ["a"]} {"required" ["b"]}]
+                  "properties" {"id" {"type" "string"}
+                                "a" {"type" "string"}
+                                "b" {"type" "string"}}}
+          malli (f schema)]
+      ;; not silently :any (fail-closed, construct preserved)
+      (is (not= :any malli))
+      ;; missing required "id" -> rejected
+      (is (false? (m/validate malli {})))
+      ;; present required and valid props -> accepted
+      (is (true? (m/validate malli {"id" "1"}))))))
+
+(deftest json-schema-validate-rejects-invalid
+  (testing "validate rejects a missing required property and a wrong type"
+    (let [schema {"type" "object"
+                  "required" ["name"]
+                  "properties" {"name" {"type" "string"}}}]
+      (is (false? (json-schema/validate schema {})))
+      (is (false? (json-schema/validate schema {"name" 123})))
+      (is (true? (json-schema/validate schema {"name" "ok"}))))))
+
+(deftest json-schema->malli-nullable-and-closed
+  (testing "nullable wraps in :maybe; additionalProperties:false closes the map"
+    (let [f (find-var 'evoclj.provider.mcp-bridge/json-schema->malli)
+          nullable (f {"type" "string" "nullable" true})
+          closed (f {"type" "object"
+                     "properties" {"a" {"type" "integer"}}
+                     "additionalProperties" false})]
+      (is (true? (m/validate nullable nil)))
+      (is (true? (m/validate nullable "x")))
+      (is (false? (m/validate nullable 1)))
+      (is (true? (m/validate closed {"a" 1})))
+      (is (false? (m/validate closed {"a" 1 "b" 2}))))))
+
+;; ---------------------------------------------------------------------------
+;; execute-request! error classification (#13)
+;; ---------------------------------------------------------------------------
+
+(deftest execute-request-maps-classified-errors
+  (let [fake-managed {:client :fake
+                      :closed? false
+                      :last-error nil
+                      :open-count 1
+                      :transport-config {:type :stdio :command "echo" :args []}
+                      :transport-type :stdio
+                      :opened-at "2025-01-01T00:00:00Z"
+                      :call-count 0
+                      :last-latency-ms nil}
+        req {:tool/id :mcp/echo :args {:text "hello"}}
+        make-provider (fn []
+                        (mcp-bridge/mcp-provider
+                          {:transport-config {:type :stdio :command "echo" :args []}
+                           :tool/id :mcp/echo
+                           :tool/mcp-name "echo"
+                           :input-schema [:map [:text :string]]
+                           :output-schema [:map [:text :string]]}))
+        run-with! (fn [thrower]
+                    (with-redefs [evoclj.mcp.client/open! (fn [_] fake-managed)
+                                  evoclj.mcp.client/ensure-open (fn [_ _] fake-managed)
+                                  evoclj.mcp.client/closed? (fn [_] false)
+                                  evoclj.mcp.client/call-tool thrower]
+                      (let [p (make-provider)
+                            e (atom nil)]
+                        (try
+                          (proto/execute-request! p req)
+                          (is false "expected exception")
+                          (catch Throwable t
+                            (reset! e t)))
+                        (:error/type (ex-data @e)))))]
+    (testing "transport/protocol exceptions -> :provider/transient-error (retried)"
+      (is (= :provider/transient-error
+             (run-with! (fn [_ _ _] (throw (java.io.IOException. "connection refused")))))))
+    (testing "business/unknown exceptions -> :provider/execution-failed (NOT retried)"
+      ;; java.lang.Error avoids the classifier's transport regex
+      ;; (substring "io" inside "...Exception") so it maps to the
+      ;; non-transient :mcp/unknown-error category.
+      (is (= :provider/execution-failed
+             (run-with! (fn [_ _ _] (throw (java.lang.Error. "business logic failed")))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; content-block sandboxing and result audit
