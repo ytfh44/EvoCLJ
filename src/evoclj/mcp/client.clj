@@ -376,51 +376,65 @@
                       {:content/type :unknown
                        :content/raw (str c)}))
                   (.content result))
-            is-error (.isError result)
+            is-error (boolean (.isError result))
             structured-content (.structuredContent result)
-            raw-size (long (reduce + 0 (map #(.length (str %)) content-block-maps)))]
-        (if is-error
-          (throw (err/error :mcp/tool-error
-                            (str "MCP tool " tool-name " returned isError=true")
-                            {:tool-name tool-name
-                             :content (vec content-block-maps)}))
-          (cond-> {:mcp/content content-block-maps
-                   :mcp/is-error false}
-            (some? structured-content) (assoc :mcp/structured-content structured-content)
-            (pos? raw-size) (assoc :mcp/raw-size-bytes raw-size))))
+            wire-bytes (try
+                         (let [mapper (com.fasterxml.jackson.databind.ObjectMapper.)
+                               m {"content" content-block-maps
+                                  "structuredContent" structured-content
+                                  "isError" is-error}]
+                           (alength (.writeValueAsBytes mapper m)))
+                         (catch Throwable _
+                           (long (reduce + 0 (map #(alength (.getBytes (str %) "UTF-8")) content-block-maps)))))]
+        (cond-> {:mcp/content content-block-maps
+                 :mcp/is-error is-error
+                 :mcp/tool-status (if is-error :error :ok)
+                 :mcp/is-error is-error
+                 :mcp/model-content content-block-maps
+                 :mcp/structured-content structured-content
+                 :mcp/is-error is-error}
+          true (assoc :mcp/is-error is-error :mcp/tool-status (if is-error :error :ok))
+          (some? structured-content) (identity)
+          (pos? wire-bytes) (assoc :mcp/raw-size-bytes wire-bytes)))
       (catch Throwable ex
-        (if (= :mcp/tool-error (:error/type (ex-data ex)))
-          (throw ex)
-          (throw (err/error :mcp/call-tool-failed
-                            (str "MCP callTool " tool-name " failed")
-                            {:tool-name tool-name
-                             :args (err/sanitize args)
-                             :cause (err/sanitize ex)})))))))
+        (throw (err/error :mcp/call-tool-failed
+                          (str "MCP callTool " tool-name " failed")
+                          {:tool-name tool-name
+                           :args (err/sanitize args)
+                           :cause (err/sanitize ex)}))))))
 
 ;; --- observability ------------------------------------------------------------
 
-(defn- categorize-error
-  "Classify a Throwable into a more specific :error/type keyword.
+(def ^:private known-transport-classes
+  #{"java.io.IOException" "java.net.SocketException" "java.net.ConnectException"
+    "java.net.SocketTimeoutException" "java.util.concurrent.TimeoutException"})
 
-   Transport/IO failures become :mcp/transport-error.
-   Protocol/JSON parsing failures become :mcp/protocol-error.
-   Tool-reported business errors remain :mcp/tool-error.
-   Anything else is classified as :mcp/unknown-error."
+(def ^:private known-protocol-classes
+  #{"com.fasterxml.jackson.core.JsonParseException" "com.fasterxml.jackson.databind.JsonMappingException"})
+
+(defn- cause-chain-types
   [^Throwable ex]
-  (let [class-name (.getName (.getClass ex))
-        message (or (.getMessage ex) "")]
+  (lazy-seq
+   (when ex
+     (cons (:error/type (ex-data ex))
+           (cause-chain-types (.getCause ex))))))
+
+(defn- categorize-error
+  [^Throwable ex]
+  (let [stable (:error/type (ex-data ex))]
     (cond
-      (re-find #"(?i)(io|transport|connect|socket|timeout|stream)" class-name)
-      :mcp/transport-error
-
-      (re-find #"(?i)(json|parse|protocol|decode|serialize|deserialize)" class-name)
-      :mcp/protocol-error
-
-      (re-find #"(?i)(tool|iserror|result)" message)
-      :mcp/tool-error
-
+      (and stable (not= stable :error/unknown)) stable
+      (contains? known-transport-classes (.getName (.getClass ex))) :mcp/transport-error
+      (contains? known-protocol-classes (.getName (.getClass ex))) :mcp/protocol-error
       :else
-      :mcp/unknown-error)))
+      (let [cause-types (remove nil? (cause-chain-types (.getCause ex)))
+            first-cause (first cause-types)]
+        (cond
+          (some #{:mcp/transport-error} cause-types) :mcp/transport-error
+          (some #{:mcp/protocol-error} cause-types) :mcp/protocol-error
+          (some #{:mcp/tool-error} cause-types) :mcp/tool-error
+          first-cause first-cause
+          :else :mcp/unknown-error)))))
 
 (defn classify-mcp-error
   "Return a sanitized error map with an enriched :error/type for the

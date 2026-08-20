@@ -288,9 +288,12 @@
         edn-blocks (mapv content-block->edn blocks)
         sc (:mcp/structured-content result)
         audit {:mcp/block-count (count blocks)
-               :mcp/is-error (:mcp/is-error result)}
-        envelope (cond-> {:mcp/model-content edn-blocks}
-                   (some? sc) (assoc :mcp/structured-content (java-value->edn sc)))]
+               :mcp/is-error (boolean (:mcp/is-error result))}
+        envelope (cond-> {:mcp/model-content edn-blocks
+                          :mcp/tool-status (or (:mcp/tool-status result) (if (:mcp/is-error result) :error :ok))
+                          :mcp/is-error (boolean (:mcp/is-error result))}
+                   (some? sc) (assoc :mcp/structured-content (java-value->edn sc))
+                   (true) (assoc :mcp/is-error (boolean (:mcp/is-error result))))]
     {:value envelope
      :audit audit}))
 

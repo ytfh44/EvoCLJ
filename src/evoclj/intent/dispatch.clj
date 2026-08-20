@@ -468,10 +468,13 @@
                                      broker-context provider frozen-descriptor
                                      decision normalized)]
                       (if-let [value (:ok execution)]
-                        (let [enriched-value (enrich-value-audit value contract**)
-                              ok-result (validate-output! intent frozen-descriptor decision
-                                                          enriched-value @usage-atom)]
-                          (attach-contract-audit ok-result contract**))
+                        (let [tool-error? (= :error (:mcp/tool-status (:value value)))
+                              enriched-value (enrich-value-audit value contract**)]
+                          (if tool-error?
+                            (attach-contract-audit (result-ok intent enriched-value decision @usage-atom) contract**)
+                            (let [ok-result (validate-output! intent frozen-descriptor decision
+                                                               enriched-value @usage-atom)]
+                              (attach-contract-audit ok-result contract**))))
                         (attach-contract-audit
                          (result-error intent (:error-type execution)
                                        (:error-message execution)
