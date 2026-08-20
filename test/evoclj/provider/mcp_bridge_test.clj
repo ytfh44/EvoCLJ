@@ -417,6 +417,22 @@
         (is (= 0.7 (get structured "temperature")))
         (is (= 2 (get structured "n")))))))
 
+(deftest manager-concurrent-acquire-no-lost-update
+  (testing "50 concurrent acquires share single-flight open and no lost owner"
+    (let [mgr (evoclj.mcp.manager/create-manager)
+          ck [:stdio :shared/test {} 0]
+          open-count (atom 0)
+          open-fn (fn [] (swap! open-count inc) {:client (Object.) :transport-config {:type :stdio}})]
+      (let [futs (doall (for [i (range 50)] (future (evoclj.mcp.manager/get-or-open! mgr ck open-fn))))]
+        (doseq [f futs] @f)
+        (is (= 1 @open-count)))
+      (let [mgr2 (evoclj.mcp.manager/create-manager)
+            ck2 [:stdio :cnt {} 0]]
+        (swap! mgr2 assoc-in [:pools ck2] {:state :ready :owners #{} :generation 0})
+        (let [futs2 (doall (for [i (range 50)] (future (evoclj.mcp.manager/acquire mgr2 ck2 (keyword (str "o" i))))))]
+          (doseq [f futs2] @f)
+          (is (= 50 (count (:owners (evoclj.mcp.manager/pool-get mgr2 ck2))))))))))
+
 (deftest result->edn-is-error-audit
   (testing "is-error=true still yields a {:value :audit} envelope with :mcp/is-error true"
     (let [result {:mcp/content [{:content/type :text :content/text "err"}]
