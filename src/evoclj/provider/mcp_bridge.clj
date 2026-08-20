@@ -361,9 +361,7 @@
         mgr-atom (mgr opts)
         ck (manager/connection-key (assoc transport-cfg :connection/id connection-id))
         _ (when shared? (manager/acquire mgr-atom ck tool-id))]
-    (swap! (:refresh-registry @mgr-atom) assoc tool-id {:refresh-fn refresh-fn :descriptor-atom descriptor-atom})
-    ;; fallback also for test direct use
-    (try (swap! @(resolve 'evoclj.mcp.manager/fallback) assoc tool-id {}) (catch Throwable _ nil))
+    (swap! mgr-atom update :refresh-registry assoc tool-id {:refresh-fn refresh-fn :descriptor-atom descriptor-atom})
     (reify proto/Provider
       (describe [_]
         @descriptor-atom)
