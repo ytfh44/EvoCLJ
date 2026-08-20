@@ -462,8 +462,16 @@
 
 (defn refresh-provider! [provider]
   (let [tool-id (-> provider proto/describe :tool/id)
-        entry (or (get (:refresh-registry @fallback-manager) tool-id) (get (:refresh-registry @fallback-manager) tool-id))]
+        entry (get (:refresh-registry @fallback-manager) tool-id)]
     (when-let [f (:refresh-fn entry)] (f) nil)))
 (defn refresh-all-mcp-providers! []
   (reduce-kv (fn [a k {:keys [refresh-fn descriptor-atom]}] (when refresh-fn (refresh-fn)) (assoc a k @descriptor-atom)) {} (:refresh-registry @fallback-manager)))
-(defn dispose! [provider] (let [tool-id (-> provider proto/describe :tool/id) ck2 (manager/connection-key {:connection/id (-> provider proto/describe :mcp/connection-id)})] (manager/release fallback-manager ck2 tool-id)))
+(defn dispose! [provider] (let [tool-id (-> provider proto/describe :tool/id)
+        desc (proto/describe provider)
+        cid (:mcp/connection-id desc)]
+    (when cid
+      (let [ck2 (manager/connection-key {:connection/id cid :type :stdio})]
+        (try (manager/release fallback-manager ck2 tool-id) (catch Throwable _ nil))
+        ;; also try generic type lookup via fallback pools
+        (doseq [[k _] (:pools @fallback-manager)]
+          (when (= cid (second k)) (try (manager/release fallback-manager k tool-id) (catch Throwable _ nil))))))))
