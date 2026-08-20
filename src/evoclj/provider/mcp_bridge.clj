@@ -292,8 +292,7 @@
         envelope (cond-> {:mcp/model-content edn-blocks
                           :mcp/tool-status (or (:mcp/tool-status result) (if (:mcp/is-error result) :error :ok))
                           :mcp/is-error (boolean (:mcp/is-error result))}
-                   (some? sc) (assoc :mcp/structured-content (java-value->edn sc))
-                   (true) (assoc :mcp/is-error (boolean (:mcp/is-error result))))]
+                   (some? sc) (assoc :mcp/structured-content (java-value->edn sc)))]
     {:value envelope
      :audit audit}))
 

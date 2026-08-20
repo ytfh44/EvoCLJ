@@ -388,13 +388,8 @@
                            (long (reduce + 0 (map #(alength (.getBytes (str %) "UTF-8")) content-block-maps)))))]
         (cond-> {:mcp/content content-block-maps
                  :mcp/is-error is-error
-                 :mcp/tool-status (if is-error :error :ok)
-                 :mcp/is-error is-error
-                 :mcp/model-content content-block-maps
-                 :mcp/structured-content structured-content
-                 :mcp/is-error is-error}
-          true (assoc :mcp/is-error is-error :mcp/tool-status (if is-error :error :ok))
-          (some? structured-content) (identity)
+                 :mcp/tool-status (if is-error :error :ok)}
+          (some? structured-content) (assoc :mcp/structured-content structured-content)
           (pos? wire-bytes) (assoc :mcp/raw-size-bytes wire-bytes)))
       (catch Throwable ex
         (throw (err/error :mcp/call-tool-failed
