@@ -66,7 +66,8 @@
                                        [:totalThoughts :int]
                                        [:nextThoughtNeeded :boolean]]
                         :output-schema [:map
-                                        [:value :any]]
+                                        [:value [:map
+                                                 [:mcp/model-content [:vector any?]]]]]
                         :retry-safe? true})
             reg (registry/create-registry)]
         (registry/register! reg provider)
@@ -86,13 +87,27 @@
               (is (= :ok (:result/status r)) (:error r))
               (is (= {:decision :allow
                       :lease-id (:cap/id lease)} (:authorization r)))
+              ;; execute-request! returns {:value <envelope> :audit <map>}
               (is (map? (:value r)))
-              (let [raw (get-in r [:value :value])]
-                (is (string? raw))
-                (let [parsed (cheshire.core/parse-string raw true)]
+              (let [outer (:value r)
+                    envelope (:value outer)
+                    model-content (:mcp/model-content envelope)
+                    structured (:mcp/structured-content envelope)]
+                (is (map? envelope))
+                (is (map? (:audit outer)))
+                (is (vector? model-content))
+                ;; model/content channel: parse the first (text) content block
+                (let [raw (first model-content)
+                      parsed (cheshire.core/parse-string raw true)]
+                  (is (string? raw))
                   (is (= 1 (:thoughtNumber parsed)))
                   (is (= 1 (:totalThoughts parsed)))
-                  (is (false? (:nextThoughtNeeded parsed)))))))
+                  (is (false? (:nextThoughtNeeded parsed))))
+                ;; structured-content channel: server's structuredContent,
+                ;; string keys preserved (no keywordization)
+                (is (map? structured))
+                (is (= 1 (get structured "thoughtNumber")))
+                (is (false? (get structured "nextThoughtNeeded"))))))
           (testing "denied request never reaches the provider"
             (let [ctx-no-lease (dispatch/make-broker-context
                                  {:registry reg

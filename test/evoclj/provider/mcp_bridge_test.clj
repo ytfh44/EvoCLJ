@@ -212,7 +212,7 @@
       (is (= :any (f {:type "unknown"}))))))
 
 ;; ---------------------------------------------------------------------------
-;; content-block sandboxing and result audit metadata
+;; content-block sandboxing and result audit
 ;; ---------------------------------------------------------------------------
 
 (deftest content-block-sandboxes-image
@@ -226,6 +226,28 @@
       (is (nil? (:content/data result)))
       (is (= "image/png" (:mime-type result))))))
 
+(deftest content-block-sandboxes-audio
+  (testing ":audio blocks return a safe placeholder without binary data"
+    (let [block {:content/type :audio
+                 :content/data "base64audio"
+                 :content/mime-type "audio/wav"}
+          result ((find-var 'evoclj.provider.mcp-bridge/content-block->edn) block)]
+      (is (= :audio (:mcp/content-type result)))
+      (is (true? (:mcp/sandboxed result)))
+      (is (nil? (:content/data result)))
+      (is (= "audio/wav" (:mime-type result))))))
+
+(deftest content-block-sandboxes-resource-link
+  (testing ":resource-link blocks return a safe placeholder with uri and mime-type"
+    (let [block {:content/type :resource-link
+                 :content/uri "https://example.com/x"
+                 :content/mime-type "text/plain"}
+          result ((find-var 'evoclj.provider.mcp-bridge/content-block->edn) block)]
+      (is (= :resource-link (:mcp/content-type result)))
+      (is (true? (:mcp/sandboxed result)))
+      (is (= "https://example.com/x" (:uri result)))
+      (is (= "text/plain" (:mime-type result))))))
+
 (deftest content-block-sandboxes-resource
   (testing ":resource blocks return only safe metadata keys"
     (let [block {:content/type :resource
@@ -237,47 +259,64 @@
       (is (= "text/plain" (:mimeType result)))
       (is (nil? (:text result))))))
 
-(deftest result->edn-success-carries-audit-metadata
-  (testing "successful multi-block result carries :mcp/audit in metadata"
+(deftest result->edn-multi-block-envelope
+  (testing "multi-block result returns a {:value :audit} envelope"
     (let [result {:mcp/content [{:content/type :text :content/text "a"}
                                 {:content/type :text :content/text "b"}]
                   :mcp/is-error false}
           edn ((find-var 'evoclj.provider.mcp-bridge/result->edn) result)]
-      (is (= ["a" "b"] edn))
-      (let [audit (meta edn)]
+      (is (map? edn))
+      (is (= ["a" "b"] (:mcp/model-content (:value edn))))
+      (let [audit (:audit edn)]
         (is (= 2 (:mcp/block-count audit)))
         (is (false? (:mcp/is-error audit)))))))
 
-(deftest result->edn-string-block-carries-audit-via-wrapper
-  (testing "single :text block is wrapped so audit metadata is preserved"
+(deftest result->edn-single-text-block-envelope
+  (testing "single :text block returns a {:value :audit} envelope with text in :mcp/model-content"
     (let [result {:mcp/content [{:content/type :text :content/text "hello"}]
                   :mcp/is-error false}
           edn ((find-var 'evoclj.provider.mcp-bridge/result->edn) result)]
       (is (map? edn))
-      (is (= "hello" (:value edn)))
-      (let [audit (:mcp/audit edn)]
+      (is (= ["hello"] (:mcp/model-content (:value edn))))
+      (let [audit (:audit edn)]
         (is (= 1 (:mcp/block-count audit)))
         (is (false? (:mcp/is-error audit)))))))
 
-(deftest result->edn-multi-block-success-carries-audit-metadata
-  (testing "successful multi-block result carries :mcp/audit in metadata"
-    (let [result {:mcp/content [{:content/type :text :content/text "a"}
-                                {:content/type :text :content/text "b"}]
+(deftest result->edn-audio-block-envelope
+  (testing ":audio block in :mcp/model-content is sandboxed, not nil"
+    (let [result {:mcp/content [{:content/type :audio
+                                 :content/data "base64audio"
+                                 :content/mime-type "audio/wav"}]
                   :mcp/is-error false}
           edn ((find-var 'evoclj.provider.mcp-bridge/result->edn) result)]
-      (is (= ["a" "b"] edn))
-      (let [audit (meta edn)]
-        (is (= 2 (:mcp/block-count audit)))
-        (is (false? (:mcp/is-error audit)))))))
+      (is (= [{:mcp/content-type :audio
+               :mcp/sandboxed true
+               :mime-type "audio/wav"}]
+             (:mcp/model-content (:value edn)))))))
 
-(deftest result->edn-error-carries-audit-metadata
-  (testing "error path is unreachable from call-tool (upstream throws); result->edn only processes successful results"
+(deftest result->edn-structured-content-channel
+  (testing "when :mcp/structured-content is present it becomes :mcp/structured-content in the envelope"
+    (let [sc (doto (java.util.LinkedHashMap.)
+               (.put "temperature" (java.lang.Double. 0.7))
+               (.put "n" (java.lang.Integer. 2)))
+          result {:mcp/content [{:content/type :text :content/text "ok"}]
+                  :mcp/is-error false
+                  :mcp/structured-content sc}
+          edn ((find-var 'evoclj.provider.mcp-bridge/result->edn) result)]
+      (is (= ["ok"] (:mcp/model-content (:value edn))))
+      (let [structured (:mcp/structured-content (:value edn))]
+        (is (map? structured))
+        ;; string keys are preserved (no keywordization)
+        (is (= 0.7 (get structured "temperature")))
+        (is (= 2 (get structured "n")))))))
+
+(deftest result->edn-is-error-audit
+  (testing "is-error=true still yields a {:value :audit} envelope with :mcp/is-error true"
     (let [result {:mcp/content [{:content/type :text :content/text "err"}]
                   :mcp/is-error true}
           edn ((find-var 'evoclj.provider.mcp-bridge/result->edn) result)]
-      ;; upstream call-tool throws on isError=true, so this branch is unreachable
-      ;; in practice, but result->edn still returns a wrapped value for safety
       (is (map? edn))
-      (let [audit (:mcp/audit edn)]
+      (is (= ["err"] (:mcp/model-content (:value edn))))
+      (let [audit (:audit edn)]
         (is (= 1 (:mcp/block-count audit)))
         (is (true? (:mcp/is-error audit)))))))

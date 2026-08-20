@@ -15,11 +15,11 @@
    plain validated Clojure data (Global Constraint 22).
 
    Phase 5 (security boundaries): content-block output is sandboxed so
-   binary image data and opaque resource blobs never surface as EDN;
-   instead safe placeholder metadata is returned. Error data and
-   successful results carry MCP-aware audit metadata (tool name,
-   connection id, server id) attached as metadata on success and as a
-   map key on error."
+   binary image/audio data and opaque resource blobs never surface as
+   EDN; instead safe placeholder metadata is returned. Results carry
+   MCP-aware audit data (tool name, connection id, server id, block
+   count, is-error) as an explicit `:audit` map key — never as Clojure
+   metadata."
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.client :as mcp-client]
             [evoclj.provider.protocol :as proto]
@@ -189,16 +189,23 @@
 (defn- content-block->edn
   "Convert one MCP content-block map into a plain EDN value.
 
-   Output sandboxing: `:image` blocks are replaced with a safe
-   placeholder so base64 binary data never reaches the EDN layer;
-   `:resource` blocks are reduced to safe metadata keys only
-   (`:uri`, `:mimeType`). `:text` blocks pass through as strings."
+   Output sandboxing: binary/opaque blocks (`:image`, `:audio`,
+   `:resource-link`) are replaced with safe placeholders so base64
+   binary data and opaque resource blobs never reach the EDN layer;
+   `:text` blocks pass through as strings."
   [block]
   (case (:content/type block)
     :text (:content/text block)
     :image {:mcp/content-type :image
             :mcp/sandboxed true
             :mime-type (:content/mime-type block)}
+    :audio {:mcp/content-type :audio
+            :mcp/sandboxed true
+            :mime-type (:content/mime-type block)}
+    :resource-link {:mcp/content-type :resource-link
+                    :mcp/sandboxed true
+                    :uri (:content/uri block)
+                    :mime-type (:content/mime-type block)}
     :resource (let [uri (:content/uri block)
                     mime (:content/mime-type block)]
                 (cond
@@ -208,22 +215,61 @@
                          :mcp/sandboxed true}))
     (:content/raw block)))
 
-(defn- result->edn
-  "Convert the full call-tool result map into a plain EDN value.
+(defn- java-value->edn
+  "Recursively convert a value returned by the MCP Java SDK 2.0
+   (structuredContent is a java.util.Map with STRING keys) into plain
+   persistent Clojure data:
 
-   MCP-aware audit metadata is attached as metadata on successful
-   results when the value supports metadata (IObj)."
+     java.util.Map        -> persistent map (string keys preserved)
+     java.util.List       -> vector
+     java.util.Set        -> set
+     java.util.Collection -> vector
+     strings/numbers/bool -> passed through unchanged
+
+   The result is always plain EDN-safe data for the protocol boundary."
+  [v]
+  (cond
+    (instance? java.util.Map v)
+    (into {} (map (fn [[k val]] [k (java-value->edn val)]) v))
+
+    (instance? java.util.List v)
+    (mapv java-value->edn v)
+
+    (instance? java.util.Set v)
+    (into #{} (map java-value->edn v))
+
+    (instance? java.util.Collection v)
+    (mapv java-value->edn v)
+
+    :else v))
+
+(defn- result->edn
+  "Convert the full call-tool result map into a plain EDN envelope.
+
+   ALWAYS returns a plain-data map of the shape
+   `{:value <envelope> :audit <map>}` — audit is an EXPLICIT key, never
+   Clojure metadata.
+
+   The `<envelope>` carries BOTH channels:
+     (a) `:mcp/model-content`      — the sandboxed content blocks
+         (vector of content-block->edn results), and
+     (b) `:mcp/structured-content` — the server's structured content
+         (java.util.Map with string keys), when present, normalized by
+         java-value->edn.
+
+   The `:audit` map carries `:mcp/block-count` and `:mcp/is-error`; the
+   provider's execute-request! merges tool/connection/server ids into
+   the same `:audit` key."
   [result]
   (let [blocks (:mcp/content result)
         edn-blocks (mapv content-block->edn blocks)
+        sc (:mcp/structured-content result)
         audit {:mcp/block-count (count blocks)
-               :mcp/is-error (:mcp/is-error result)}]
-    (case (count edn-blocks)
-      1 (let [v (first edn-blocks)]
-          (if (instance? clojure.lang.IObj v)
-            (with-meta v audit)
-            {:value v :mcp/audit audit}))
-      (with-meta edn-blocks audit))))
+               :mcp/is-error (:mcp/is-error result)}
+        envelope (cond-> {:mcp/model-content edn-blocks}
+                   (some? sc) (assoc :mcp/structured-content (java-value->edn sc)))]
+    {:value envelope
+     :audit audit}))
 
 ;; ---------------------------------------------------------------------------
 ;; the provider
@@ -348,9 +394,7 @@
                       audit {:mcp/tool-name mcp-name
                              :mcp/connection-id connection-id
                              :mcp/server-id server-id}]
-                  (if (:mcp/is-error raw-result)
-                    (assoc edn-result :mcp/audit (merge (:mcp/audit edn-result) audit))
-                    (with-meta edn-result (merge (meta edn-result) {:mcp/audit audit}))))))
+                  (update edn-result :audit merge audit))))
             (catch Throwable ex
               (if (= :mcp/tool-error (:error/type (ex-data ex)))
                 (throw ex)
