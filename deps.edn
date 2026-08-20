@@ -10,6 +10,7 @@
          com.anthropic/anthropic-java {:mvn/version "2.54.0"}
          cheshire/cheshire {:mvn/version "5.13.0"}
          io.modelcontextprotocol.sdk/mcp {:mvn/version "2.0.0"}
+         com.networknt/json-schema-validator {:mvn/version "1.5.3"}
          ring/ring-core {:mvn/version "1.12.0"}
          ring/ring-jetty-adapter {:mvn/version "1.12.0"}
          ring/ring-mock {:mvn/version "0.4.0"}}

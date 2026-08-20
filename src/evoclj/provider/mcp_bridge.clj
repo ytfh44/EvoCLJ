@@ -21,6 +21,7 @@
    count, is-error) as an explicit `:audit` map key — never as Clojure
    metadata."
   (:require [evoclj.kernel.error :as err]
+            [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.client :as mcp-client]
             [evoclj.mcp.json-schema :as json-schema]
             [evoclj.provider.protocol :as proto]
@@ -248,13 +249,22 @@
                         {:value (err/sanitize opts)})))
     (let [input-schema  (:input-schema opts)
           output-schema (:output-schema opts)
+          mcp-in  (:mcp/input-schema opts (:mcp/input-schema-json opts))
+          mcp-out (:mcp/output-schema opts (:mcp/output-schema-json opts))
           retry-safe?   (or (:retry-safe? opts) false)
           connection-id (:connection/id opts)
           server-id     (:mcp/server-id opts)]
       (cond-> {:tool/id         tool-id
                :effect          :remote
-               :input-schema    input-schema
-               :output-schema   output-schema
+               :input-schema    (or input-schema :any)
+               :output-schema   (or output-schema :any)
+               :provider/input-schema (or input-schema :any)
+               :provider/output-schema (or output-schema :any)
+               :mcp/input-schema (or mcp-in {})
+               :mcp/output-schema (or mcp-out :any)
+               :mcp/input-schema-json (or mcp-in {})
+               :mcp/output-schema-json (or mcp-out :any)
+               :mcp/schema-source (if mcp-in :json-schema-fallback :malli)
                :required-action :invoke
                :version         1
                :mcp/generation  0
@@ -425,16 +435,21 @@
       (normalize-request [_ intent]
         (let [descriptor @descriptor-atom
               payload (:payload intent)
-              args (:args payload)]
+              raw-args (:args payload)
+              args (canonical/value->canonical raw-args)]
           (when-not (boundary/edn-safe? args)
             (throw (err/error :provider/input-invalid
                               "MCP provider input must be plain EDN-safe data"
                               {:value (err/sanitize args)})))
-          (when-not (m/validate (:input-schema descriptor) args)
+          (when-not (m/validate (:provider/input-schema descriptor) args)
             (throw (err/error :provider/input-invalid
                               "MCP provider input failed input-schema validation"
                               {:value (err/sanitize args)
-                               :explanation (err/sanitize (m/explain (:input-schema descriptor) args))})))
+                               :explanation (err/sanitize (m/explain (:provider/input-schema descriptor) args))})))
+          (when-not (json-schema/validate (:mcp/input-schema descriptor) args)
+            (throw (err/error :provider/input-invalid
+                              "MCP provider input failed JSON Schema validation"
+                              {:value (err/sanitize args)})))
           {:tool/id    tool-id
            :resource   {:kind :tool :id tool-id}
            :args       args}))
@@ -471,7 +486,15 @@
                       edn-result (result->edn raw-result)
                       audit {:mcp/tool-name mcp-name
                              :mcp/connection-id connection-id
-                             :mcp/server-id server-id}]
+                             :mcp/server-id server-id}
+                      sc (get-in edn-result [:value :mcp/structured-content])
+                      desc @descriptor-atom]
+                  (when (some? sc)
+                    (when-not (json-schema/validate (:mcp/output-schema desc) sc)
+                      (throw (err/error :provider/output-invalid "structuredContent failed mcp/output-schema" {:value (err/sanitize sc)}))))
+                  (let [env (:value edn-result)]
+                    (when-not (m/validate (:provider/output-schema desc) env)
+                      (throw (err/error :provider/output-invalid "envelope failed provider/output-schema" {:value (err/sanitize env)}))))
                   (update edn-result :audit merge audit))))
             (catch Throwable ex
               (if (= :mcp/tool-error (:error/type (ex-data ex)))
