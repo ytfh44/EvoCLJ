@@ -310,10 +310,12 @@
   (fn []
     (swap! descriptor-atom
            (fn [d]
-             (-> d
-                 (assoc :mcp/last-refreshed nil)
-                 (update :mcp/generation (fnil inc 0))
-                 (assoc :mcp/captured-at (System/currentTimeMillis)))))))
+             (if (= :removed (:mcp/status d))
+               d
+               (-> d
+                   (assoc :mcp/last-refreshed nil)
+                   (update :mcp/generation (fnil inc 0))
+                   (assoc :mcp/captured-at (System/currentTimeMillis))))))))
 
 (defn mcp-provider
   "Build an MCP-backed provider.
