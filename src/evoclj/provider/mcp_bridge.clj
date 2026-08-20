@@ -391,6 +391,8 @@
            :args       args}))
 
       (execute-request! [_ authorized-request]
+        (when (= :removed (:mcp/status @descriptor-atom))
+          (throw (err/error :provider/tool-removed "tool has been removed" {:tool/id tool-id})))
         (when-not (and (map? authorized-request)
                        (= tool-id (:tool/id authorized-request)))
           (throw (err/error :provider/request-invalid

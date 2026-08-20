@@ -116,6 +116,10 @@
                 (deliver p ex)
                 (throw ex)))))))))
 
+(defn mark-removed! [mgr-atom tool-id] (when-let [{:keys [descriptor-atom]} (get-in @mgr-atom [:refresh-registry tool-id])] (swap! descriptor-atom assoc :mcp/status :removed)))
+(defn mark-discovered-ungranted! [mgr-atom tool-id descriptor] (swap! mgr-atom assoc-in [:refresh-registry tool-id] {:descriptor-atom (atom (assoc descriptor :mcp/status :discovered-ungranted))}))
+(defn tool-status [mgr-atom tool-id] (get-in @mgr-atom [:refresh-registry tool-id :descriptor-atom] ))
+
 (defn shutdown! [mgr-atom]
   (doseq [[_ e] (:pools @mgr-atom)]
     (when-let [c (:client e)] (try (mcp-client/close! c) (catch Throwable _ nil))))
