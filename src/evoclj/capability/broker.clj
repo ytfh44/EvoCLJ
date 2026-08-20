@@ -70,9 +70,19 @@
     (throw (err/error :capability/schema-invalid
                       "normalized request must carry a :resource map"
                       {:value (err/sanitize normalized-request)})))
-  (policy/decide (or leases [])
-                 (policy/intent-subject intent)
-                 (:resource normalized-request)
-                 (policy/intent-action intent)
-                 now
-                 (or usage {})))
+  (let [resource (:resource normalized-request)
+        tool-resource {:kind :tool :id (:tool/id normalized-request)}
+        has-fs-policy? (some #(#{:filesystem :filesystem/path} (:kind (:resource %))) (or leases []))]
+    (if (and (= :filesystem/path (:kind resource)) has-fs-policy?)
+      (let [tool-decision (policy/decide (or leases []) (policy/intent-subject intent) tool-resource (policy/intent-action intent) now (or usage {}))
+            res-decision (policy/decide (or leases []) (policy/intent-subject intent) resource (policy/intent-action intent) now (or usage {}))]
+        (cond
+          (= :deny (:decision tool-decision)) tool-decision
+          (= :deny (:decision res-decision)) res-decision
+          :else tool-decision))
+      (policy/decide (or leases [])
+                     (policy/intent-subject intent)
+                     resource
+                     (policy/intent-action intent)
+                     now
+                     (or usage {})))))

@@ -10,7 +10,7 @@
 
 (defn value->canonical [v]
   (cond
-    (map? v) (into {} (map (fn [[k val]] [(if (keyword? k) (name k) (str k)) (value->canonical val)]) v))
+    (map? v) (into {} (map (fn [[k val]] [(if (keyword? k) (if-let [ns (namespace k)] (str ns "/" (name k)) (name k)) (str k)) (value->canonical val)]) v))
     (vector? v) (mapv value->canonical v)
     (seq? v) (map value->canonical v)
     (set? v) (into #{} (map value->canonical v))
