@@ -440,13 +440,17 @@
     (assoc (err/error-data ex)
            :error/type (categorize-error ex))))
 
-(defn call-tool-streaming
+(defn reduce-content-blocks
+  "Honest rename for legacy non-streaming block reduction. Was call-tool-streaming which falsely promised protocol-level streaming. For true async streaming use adapter async channel."
   [client tool-name args]
   (reify clojure.lang.IReduceInit
     (reduce [_ f init]
       (let [result (call-tool client tool-name args)
             blocks (:mcp/content result)]
         (reduce f init blocks)))))
+(def call-tool-streaming
+  "Deprecated alias for reduce-content-blocks. Will be removed."
+  reduce-content-blocks)
 
 ;; --- managed client helpers --------------------------------------------------
 
