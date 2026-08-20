@@ -153,4 +153,5 @@
                              (and (str/ends-with? g "/*")
                                   (str/starts-with? n (subs g 0 (dec (count g))))))))
            :filesystem (path-inside? (:path granted) (:path normalized-resource))
+           :filesystem/path (path-inside? (:path granted) (:path normalized-resource))
            false))))

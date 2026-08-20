@@ -188,6 +188,17 @@
     (update value :audit merge (contract/contract->audit contract))
     value))
 
+(defn- effect-journal
+  "Lightweight effect journal: proposed->authorized->call-started(with idempotency/key+gen)
+   ->committed/rejected/ambiguous. Ambiguous on sent+committed+break never disguised as success;
+   no blind retry of non-idempotent; remote idempotency explicitly mapped else keep ambiguous."
+  [contract intent decision final-status]
+  {:effect/proposed {:intent/id (:intent/id intent)}
+   :effect/authorized {:decision (:decision decision) :lease-id (:lease-id decision)}
+   :effect/call-started {:idempotency/key (get-in intent [:metadata :idempotency/key])
+                         :mcp/generation (:contract/generation contract)}
+   :effect/final final-status})
+
 ;; --- result construction ---------------------------------------------------
 
 (defn- result-error

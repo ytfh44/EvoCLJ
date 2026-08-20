@@ -387,7 +387,7 @@
                               "MCP provider input failed JSON Schema validation"
                               {:value (err/sanitize args)})))
           {:tool/id    tool-id
-           :resource   {:kind :tool :id tool-id}
+           :resource   (canonical/canonical-resource tool-id args)
            :args       args}))
 
       (execute-request! [_ authorized-request]
