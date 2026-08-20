@@ -56,7 +56,9 @@
    [:version {:optional true} number?]
    [:mcp/connection-id {:optional true} keyword?]
    [:mcp/server-id {:optional true} string?]
-   [:mcp/last-refreshed {:optional true} any?]])
+   [:mcp/last-refreshed {:optional true} any?]
+   [:mcp/generation {:optional true} int?]
+   [:mcp/captured-at {:optional true} any?]])
 
 (defn- ensure-schema-value!
   "Throw :provider/descriptor-invalid when s is not a valid Malli

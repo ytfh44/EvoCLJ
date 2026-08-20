@@ -256,7 +256,9 @@
                :input-schema    input-schema
                :output-schema   output-schema
                :required-action :invoke
-               :version         1}
+               :version         1
+               :mcp/generation  0
+               :mcp/captured-at (System/currentTimeMillis)}
         retry-safe? (assoc :retry {:safe? true})
         connection-id (assoc :mcp/connection-id connection-id)
         server-id (assoc :mcp/server-id server-id)))))
@@ -357,11 +359,17 @@
 (defn- build-refresh-fn
   "Build a no-arg fn that forces this provider's descriptor to refresh
    from the remote MCP server on the next call (by resetting the cached
-   :mcp/last-refreshed timestamp to nil)."
+   :mcp/last-refreshed timestamp to nil) and atomically bumping
+   :mcp/generation so a frozen CallContract can detect staleness.
+   Generation bump is via swap! — no stale-read lost update."
   [descriptor-atom]
   (fn []
-    (reset! descriptor-atom
-            (assoc @descriptor-atom :mcp/last-refreshed nil))))
+    (swap! descriptor-atom
+           (fn [d]
+             (-> d
+                 (assoc :mcp/last-refreshed nil)
+                 (update :mcp/generation (fnil inc 0))
+                 (assoc :mcp/captured-at (System/currentTimeMillis)))))))
 
 (defn mcp-provider
   "Build an MCP-backed provider.
@@ -400,9 +408,11 @@
         shared?       (some? connection-id)
         server-id     (:mcp/server-id opts)
         refresh-ms    (:schema/refresh-interval-ms opts)
-        descriptor    (if refresh-ms
-                        (assoc descriptor :mcp/last-refreshed (System/currentTimeMillis))
-                        descriptor)
+        descriptor    (cond-> descriptor
+                        (not (contains? descriptor :mcp/generation)) (assoc :mcp/generation 0)
+                        (not (contains? descriptor :mcp/captured-at)) (assoc :mcp/captured-at (System/currentTimeMillis))
+                        refresh-ms (assoc :mcp/last-refreshed (System/currentTimeMillis))
+                        (and (not refresh-ms) (not (contains? descriptor :mcp/last-refreshed))) (assoc :mcp/last-refreshed (System/currentTimeMillis)))
         descriptor-atom (atom descriptor)
         client-atom   (atom nil)
         refresh-fn    (build-refresh-fn descriptor-atom)]
@@ -451,23 +461,12 @@
                 (throw (err/error :mcp/client-closed
                                   "MCP managed client is closed"
                                   {:open-count (or (:open-count managed) 0)})))
-              (let [client (:client managed)]
-                (when refresh-ms
-                  (let [descriptor @descriptor-atom
-                        last-refreshed (:mcp/last-refreshed descriptor)
-                        now (System/currentTimeMillis)]
-                    (when (or (nil? last-refreshed)
-                              (>= (- now last-refreshed) (long refresh-ms)))
-                      (try
-                        (let [tools (mcp-client/list-all-tools client)
-                              matching (some #(when (= mcp-name (:mcp/name %)) %) tools)]
-                          (when matching
-                            (reset! descriptor-atom
-                                    (assoc descriptor
-                                           :input-schema (json-schema->malli (:mcp/input-schema matching))
-                                           :output-schema (json-schema->malli (:mcp/output-schema matching))
-                                           :mcp/last-refreshed (System/currentTimeMillis)))))
-                        (catch Throwable _ nil)))))
+              (let [client (:client managed)
+                    ;; Step 1: inline refresh REMOVED — refresh must happen
+                    ;; BEFORE call-started (dispatch pipeline's refresh-if-needed).
+                    ;; Any reset! after managed acquisition would violate
+                    ;; D_normalize=D_authorize=D_execute=D_validate.
+                    ]
                 (let [raw-result (mcp-client/call-tool client mcp-name args)
                       edn-result (result->edn raw-result)
                       audit {:mcp/tool-name mcp-name
