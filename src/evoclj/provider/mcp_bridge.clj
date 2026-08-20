@@ -24,6 +24,7 @@
             [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.client :as mcp-client]
             [evoclj.mcp.json-schema :as json-schema]
+            [evoclj.mcp.manager :as manager]
             [evoclj.provider.protocol :as proto]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m]))
@@ -156,79 +157,10 @@
 
 (def ^:private default-max-reopen-attempts 2)
 
-(def ^:private connection-pool
-  "Global atom mapping :connection/id -> {:managed <record> :refcount <n>}."
-  (atom {}))
-
-(def ^:private provider-refresh-fns
-  "Global atom mapping :tool/id -> {:refresh-fn <fn> :descriptor-atom <atom>}."
-  (atom {}))
-
-(defn- pool-get
-  "Look up a managed client by connection-id. Returns nil when absent
-   or closed."
-  [connection-id]
-  (let [entry (get @connection-pool connection-id)]
-    (when (and (map? entry) (not (:closed? (:managed entry))))
-      entry)))
-
-(defn- pool-put!
-  "Store a managed client under connection-id in the pool.
-   Asserts that the transport-config matches any existing entry for
-   the same connection-id to prevent cross-server contamination."
-  [connection-id managed]
-  (let [existing (get @connection-pool connection-id)]
-    (when (and existing (not (:closed? (:managed existing))))
-      (let [existing-config (some-> existing :managed :transport-config)
-            new-config (some-> managed :transport-config)]
-        (when (and existing-config new-config
-                   (not= existing-config new-config))
-          (throw (err/error :mcp/pool-conflict
-                            "connection-id already bound to a different transport-config"
-                            {:connection/id connection-id
-                             :existing existing-config
-                             :new new-config}))))))
-  (swap! connection-pool assoc connection-id {:managed managed :refcount 1}))
-
-(defn- pool-acquire!
-  "Increment the refcount for an existing pool entry. Returns the entry."
-  [connection-id]
-  (let [entry (get @connection-pool connection-id)]
-    (when entry
-      (swap! connection-pool assoc connection-id
-             (update entry :refcount inc))
-      entry)))
-
-(defn- pool-release!
-  "Decrement the refcount for a pool entry. When it reaches 0, close the
-   managed client and remove the entry. Returns the updated entry or nil."
-  [connection-id]
-  (let [entry (get @connection-pool connection-id)]
-    (when entry
-      (let [new-refcount (dec (:refcount entry))]
-        (if (pos? new-refcount)
-          (do
-            (swap! connection-pool assoc connection-id
-                   (assoc entry :refcount new-refcount))
-            entry)
-          (do
-            (mcp-client/close! (:managed entry))
-            (swap! connection-pool dissoc connection-id)
-            nil))))))
-
-(defn- pool-remove!
-  "Remove a connection-id from the pool (used on explicit close)."
-  [connection-id]
-  (when-let [entry (get @connection-pool connection-id)]
-    (mcp-client/close! (:managed entry)))
-  (swap! connection-pool dissoc connection-id))
-
-(defn shutdown-pool!
-  "Close all pooled connections and empty the pool. Intended for host halt."
-  []
-  (doseq [[_ {:keys [managed]}] @connection-pool]
-    (mcp-client/close! managed))
-  (reset! connection-pool {}))
+;; Global atoms removed — state is host-owned via :mcp/manager. Fallback for non-Integrant use.
+(def ^:private fallback-manager (manager/create-manager))
+(defn- mgr [opts] (or (:manager opts) (:mcp/manager opts) fallback-manager))
+(defn shutdown-pool! [] (manager/shutdown! fallback-manager))
 
 ;; ---------------------------------------------------------------------------
 ;; descriptor helper
@@ -425,9 +357,13 @@
                         (and (not refresh-ms) (not (contains? descriptor :mcp/last-refreshed))) (assoc :mcp/last-refreshed (System/currentTimeMillis)))
         descriptor-atom (atom descriptor)
         client-atom   (atom nil)
-        refresh-fn    (build-refresh-fn descriptor-atom)]
-    (swap! provider-refresh-fns assoc tool-id {:refresh-fn refresh-fn
-                                               :descriptor-atom descriptor-atom})
+        refresh-fn    (build-refresh-fn descriptor-atom)
+        mgr-atom (mgr opts)
+        ck (manager/connection-key (assoc transport-cfg :connection/id connection-id))
+        _ (when shared? (manager/acquire mgr-atom ck tool-id))]
+    (swap! (:refresh-registry @mgr-atom) assoc tool-id {:refresh-fn refresh-fn :descriptor-atom descriptor-atom})
+    ;; fallback also for test direct use
+    (try (swap! @(resolve 'evoclj.mcp.manager/fallback) assoc tool-id {}) (catch Throwable _ nil))
     (reify proto/Provider
       (describe [_]
         @descriptor-atom)
@@ -463,14 +399,14 @@
         (let [args (:args authorized-request)]
           (try
             (let [managed (if shared?
-                            (or (get (pool-acquire! connection-id) :managed)
-                                (let [m (mcp-client/open! transport-cfg)]
-                                  (pool-put! connection-id m)
-                                  m))
+                            (let [entry (manager/pool-get mgr-atom ck)
+                                  c (:client entry)]
+                              (if c c
+                                (let [cl (manager/get-or-open! mgr-atom ck #(mcp-client/open! (manager/normalize-transport transport-cfg)))]
+                                  {:client cl :transport-config transport-cfg})))
                             (or @client-atom
-                                (let [m (mcp-client/open! transport-cfg)]
-                                  (reset! client-atom m)
-                                  m)))
+                                (let [m (mcp-client/open! (manager/normalize-transport transport-cfg))]
+                                  (reset! client-atom m) m)))
                   managed (mcp-client/ensure-open managed default-max-reopen-attempts)]
               (when (mcp-client/closed? managed)
                 (throw (err/error :mcp/client-closed
@@ -495,6 +431,7 @@
                   (let [env (:value edn-result)]
                     (when-not (m/validate (:provider/output-schema desc) env)
                       (throw (err/error :provider/output-invalid "envelope failed provider/output-schema" {:value (err/sanitize env)}))))
+                  (when shared? (manager/set-metrics mgr-atom ck #(-> % (update :call-count (fnil inc 0)) (assoc :latency-ms 0))))
                   (update edn-result :audit merge audit))))
             (catch Throwable ex
               (if (= :mcp/tool-error (:error/type (ex-data ex)))
@@ -508,7 +445,7 @@
                                       {:tool-name mcp-name
                                        :mcp/connection-id connection-id
                                        :mcp/server-id server-id
-                                       :mcp/transport-config (err/sanitize transport-cfg)
+                                       :mcp/transport-config (err/sanitize (manager/normalize-transport transport-cfg))
                                        :cause (err/sanitize ex)}))
                     ;; permanent: business/config/unknown failures are NOT retried
                     (throw (err/error :provider/execution-failed
@@ -516,28 +453,13 @@
                                       {:tool-name mcp-name
                                        :mcp/connection-id connection-id
                                        :mcp/server-id server-id
-                                       :mcp/transport-config (err/sanitize transport-cfg)
+                                       :mcp/transport-config (err/sanitize (manager/normalize-transport transport-cfg))
                                        :cause (err/sanitize ex)}))))))))))))
 
-(defn refresh-provider!
-  "Force a schema refresh for an MCP-backed provider by resetting its
-   cached :mcp/last-refreshed timestamp. The next call to describe or
-   execute-request! will re-fetch the descriptor from the remote server
-   (when :schema/refresh-interval-ms is configured). Returns nil."
-  [provider]
+(defn refresh-provider! [provider]
   (let [tool-id (-> provider proto/describe :tool/id)
-        entry (get @provider-refresh-fns tool-id)]
-    (when-let [refresh-fn (-> entry :refresh-fn)]
-      (refresh-fn)
-      nil)))
-
-(defn refresh-all-mcp-providers!
-  "Force a schema refresh for all registered MCP providers. Returns a
-   map of tool ids to their current descriptors."
-  []
-  (reduce-kv (fn [acc tool-id {:keys [refresh-fn descriptor-atom]}]
-               (when refresh-fn
-                 (refresh-fn))
-               (assoc acc tool-id @descriptor-atom))
-             {}
-             @provider-refresh-fns))
+        entry (or (get (:refresh-registry @fallback-manager) tool-id) (get (:refresh-registry @fallback-manager) tool-id))]
+    (when-let [f (:refresh-fn entry)] (f) nil)))
+(defn refresh-all-mcp-providers! []
+  (reduce-kv (fn [a k {:keys [refresh-fn descriptor-atom]}] (when refresh-fn (refresh-fn)) (assoc a k @descriptor-atom)) {} (:refresh-registry @fallback-manager)))
+(defn dispose! [provider] (let [tool-id (-> provider proto/describe :tool/id) ck2 (manager/connection-key {:connection/id (-> provider proto/describe :mcp/connection-id)})] (manager/release fallback-manager ck2 tool-id)))

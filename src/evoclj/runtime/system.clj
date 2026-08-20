@@ -38,6 +38,7 @@
   exists (YAGNI, Global Constraint 24 — a key whose component cannot
   be constructed yet is not registered)."
   (:require [evoclj.intent.dispatch :as dispatch]
+            [evoclj.mcp.manager :as mcp-manager]
             [evoclj.provider.registry :as registry]
             [evoclj.store.cas :as cas]
             [evoclj.store.sqlite :as sqlite]
@@ -134,3 +135,6 @@
   "Destroy the :capability/broker component: the broker context is an
   in-memory map; nothing to close."
   nil)
+
+(defmethod ig/init-key :mcp/manager [_ _] (mcp-manager/create-manager))
+(defmethod ig/halt-key! :mcp/manager [_ mgr] (mcp-manager/shutdown! mgr))
