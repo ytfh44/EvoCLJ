@@ -21,6 +21,7 @@
    Phase 6 (observability): managed records carry transport metadata
    and monotonic call/latency counters; ping! validates liveness."
   (:require [evoclj.kernel.error :as err]
+            [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.transport :as transport])
   (:import [io.modelcontextprotocol.client McpClient McpSyncClient]
            [io.modelcontextprotocol.spec McpClientTransport]
@@ -333,7 +334,7 @@
     (throw (err/error :mcp/call-invalid
                       "MCP tool args must be a plain map"
                       {:args (pr-str args)})))
-  (let [args (evoclj.mcp.canonical/value->canonical args)]
+  (let [args (canonical/value->canonical args)]
     (try
       (let [^McpSchema$CallToolResult result
             (.callTool client (McpSchema$CallToolRequest. ^String tool-name args))
