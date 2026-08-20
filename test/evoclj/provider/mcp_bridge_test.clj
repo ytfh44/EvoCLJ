@@ -93,7 +93,8 @@
           nr (proto/normalize-request p intent)]
       (is (= :mcp/echo (:tool/id nr)))
       (is (= {:kind :tool :id :mcp/echo} (:resource nr)))
-      (is (= {:text "hello"} (:args nr))))))
+      ;; canonicalized args are string-keyed JSON-like EDN
+      (is (= {"text" "hello"} (:args nr))))))
 
 (deftest normalize-request-rejects-non-edn-safe
   (testing "non-EDN-safe payload throws :provider/input-invalid"
@@ -244,8 +245,11 @@
       (is (not= :any malli))
       ;; missing required "id" -> rejected
       (is (false? (m/validate malli {})))
-      ;; present required and valid props -> accepted
-      (is (true? (m/validate malli {"id" "1"}))))))
+      ;; oneOf requires a or b; only id is not enough with strict 2020-12 validator
+      (is (false? (m/validate malli {"id" "1"})))
+      ;; with a present, oneOf satisfied
+      (is (true? (m/validate malli {"id" "1" "a" "x"})))
+      (is (true? (m/validate malli {"id" "1" "b" "y"}))))))
 
 (deftest json-schema-validate-rejects-invalid
   (testing "validate rejects a missing required property and a wrong type"

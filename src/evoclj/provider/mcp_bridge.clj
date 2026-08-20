@@ -437,15 +437,15 @@
               payload (:payload intent)
               raw-args (:args payload)
               args (canonical/value->canonical raw-args)]
-          (when-not (boundary/edn-safe? args)
+          (when-not (boundary/edn-safe? raw-args)
             (throw (err/error :provider/input-invalid
                               "MCP provider input must be plain EDN-safe data"
-                              {:value (err/sanitize args)})))
-          (when-not (m/validate (:provider/input-schema descriptor) args)
+                              {:value (err/sanitize raw-args)})))
+          (when-not (m/validate (:provider/input-schema descriptor) raw-args)
             (throw (err/error :provider/input-invalid
                               "MCP provider input failed input-schema validation"
-                              {:value (err/sanitize args)
-                               :explanation (err/sanitize (m/explain (:provider/input-schema descriptor) args))})))
+                              {:value (err/sanitize raw-args)
+                               :explanation (err/sanitize (m/explain (:provider/input-schema descriptor) raw-args))})))
           (when-not (json-schema/validate (:mcp/input-schema descriptor) args)
             (throw (err/error :provider/input-invalid
                               "MCP provider input failed JSON Schema validation"

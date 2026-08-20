@@ -58,7 +58,14 @@
    [:mcp/server-id {:optional true} string?]
    [:mcp/last-refreshed {:optional true} any?]
    [:mcp/generation {:optional true} int?]
-   [:mcp/captured-at {:optional true} any?]])
+   [:mcp/captured-at {:optional true} any?]
+   [:provider/input-schema {:optional true} any?]
+   [:provider/output-schema {:optional true} any?]
+   [:mcp/input-schema {:optional true} any?]
+   [:mcp/output-schema {:optional true} any?]
+   [:mcp/input-schema-json {:optional true} any?]
+   [:mcp/output-schema-json {:optional true} any?]
+   [:mcp/schema-source {:optional true} [:enum :malli :json-schema-fallback]]])
 
 (defn- ensure-schema-value!
   "Throw :provider/descriptor-invalid when s is not a valid Malli
