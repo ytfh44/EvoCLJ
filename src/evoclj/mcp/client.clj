@@ -351,7 +351,7 @@
     (throw (err/error :mcp/call-invalid
                       "MCP tool args must be a plain map"
                       {:args (pr-str args)})))
-  (let [args (edn->json-compatible args)]
+  (let [args (evoclj.mcp.canonical/value->canonical args)]
     (try
       (let [^McpSchema$CallToolResult result
             (.callTool client (McpSchema$CallToolRequest. ^String tool-name args))

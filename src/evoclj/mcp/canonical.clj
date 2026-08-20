@@ -9,9 +9,12 @@
       (str (when abs? "/") (str/join "/" segs)))))
 
 (defn value->canonical [v]
-  (if (map? v)
-    (into {} (map (fn [[k val]] [(if (keyword? k) (name k) (str k)) (value->canonical val)]) v))
-    v))
+  (cond
+    (map? v) (into {} (map (fn [[k val]] [(if (keyword? k) (name k) (str k)) (value->canonical val)]) v))
+    (vector? v) (mapv value->canonical v)
+    (seq? v) (map value->canonical v)
+    (set? v) (into #{} (map value->canonical v))
+    :else v))
 
 (defn canonical-resource [tool-id args]
   (let [args (value->canonical args)]

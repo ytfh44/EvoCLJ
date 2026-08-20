@@ -377,11 +377,11 @@
             (throw (err/error :provider/input-invalid
                               "MCP provider input must be plain EDN-safe data"
                               {:value (err/sanitize raw-args)})))
-          (when-not (m/validate (:provider/input-schema descriptor) raw-args)
+          (when-not (m/validate (:provider/input-schema descriptor) args)
             (throw (err/error :provider/input-invalid
                               "MCP provider input failed input-schema validation"
-                              {:value (err/sanitize raw-args)
-                               :explanation (err/sanitize (m/explain (:provider/input-schema descriptor) raw-args))})))
+                              {:value (err/sanitize args)
+                               :explanation (err/sanitize (m/explain (:provider/input-schema descriptor) args))})))
           (when-not (json-schema/validate (:mcp/input-schema descriptor) args)
             (throw (err/error :provider/input-invalid
                               "MCP provider input failed JSON Schema validation"
