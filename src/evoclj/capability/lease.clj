@@ -79,6 +79,29 @@
          (or (= r "/") (= r p)
              (.startsWith p (str r "/"))))))
 
+(defn- canonicalize-mount-path
+  "Mount-relative canonicalization for logical mount namespace (no leading /).
+  Resolves \".\" and \"..\"; empty or \".\" -> \"\"."
+  [s]
+  (when (string? s)
+    (let [clean (str/replace s "\\" "/")
+          segments (->> (str/split clean #"/")
+                        (remove #{ "" "."})
+                        (reduce (fn [acc seg]
+                                  (if (= seg "..")
+                                    (if (seq acc) (pop acc) acc)
+                                    (conj acc seg)))
+                                []))]
+      (str/join "/" segments))))
+
+(defn- mount-path-inside?
+  "True when mount-relative request path is inside grant path.
+  Empty grant covers whole mount (segment-boundary aware)."
+  [grant-path req-path]
+  (let [g (canonicalize-mount-path (or grant-path ""))
+        p (canonicalize-mount-path (or req-path ""))]
+    (or (= g "") (= g p) (str/starts-with? p (str g "/")))))
+
 ;; --- shared input gate ------------------------------------------------------
 
 (defn- validate-input!
@@ -153,5 +176,8 @@
                              (and (str/ends-with? g "/*")
                                   (str/starts-with? n (subs g 0 (dec (count g))))))))
            :filesystem (path-inside? (:path granted) (:path normalized-resource))
-           :filesystem/path (path-inside? (:path granted) (:path normalized-resource))
+           :filesystem/path (if (contains? granted :mount/id)
+                              (and (= (:mount/id granted) (:mount/id normalized-resource))
+                                   (mount-path-inside? (:path granted) (:path normalized-resource)))
+                              (path-inside? (:path granted) (:path normalized-resource)))
            false))))
