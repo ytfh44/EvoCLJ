@@ -124,8 +124,10 @@
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
             [evoclj.provider.dialect :as dialect]
+            [evoclj.runtime.assembler :as assembler]
             [evoclj.runtime.node :as node]
             [evoclj.sci.boundary :as boundary]
+            [evoclj.store.binding :as binding-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.session :as session])
@@ -327,6 +329,29 @@
         (map (fn [t] [(:name t) t]))
         (get-in intent [:payload :tools])))
 
+(defn- fetch-bindings
+  "Current active ContextBindings for the session (from durable store).
+  Returns [] when the binding table is absent or the query fails so
+  scheduler tests that run without bindings still pass."
+  [executor pin]
+  (try
+    (binding-store/active-bindings (:sqlite (:stores executor)) (:session/id pin))
+    (catch Throwable _ [])))
+
+(defn- base-call-from-intent*
+  "Extract BaseModelCall from an intent, tolerating both new
+  :base/messages & legacy :messages shapes."
+  [intent]
+  (try
+    (assembler/base-call-from-intent intent)
+    (catch Throwable _
+      {:base/messages (or (get-in intent [:payload :base/messages])
+                          (get-in intent [:payload :messages]) [])
+       :requested-tools (or (get-in intent [:payload :requested-tools])
+                            (get-in intent [:payload :tools]) [])
+       :options (or (get-in intent [:payload :options]) {})
+       :model/id (get-in intent [:payload :model/id])})))
+
 (defn- tool-call-intent
   "A validated :intent/tool-call for one model-requested tool call,
   attributed to the same session/phenotype/node as the model-call
@@ -380,45 +405,120 @@
 
 (defn- dispatch-with-tools!
   "Dispatch one intent with the model tool-calling loop (post-v0
-  extension 1): after a :intent/model-call whose result carries
-  :tool-calls, each requested tool runs through the broker — never
-  inside the provider — and the conversation continues with the
-  assistant tool-call declaration plus the tool results until the
-  model stops requesting tools or :max-tool-rounds is consumed
-  (default 4, overridable via the payload :options). Every dispatch
-  persists its full effect protocol. Returns {:last-event <event>
-  :outputs <accumulated>}."
+  extension 1), now routed through the trusted RequestAssembler.
+
+  Why not in the provider? The provider only knows the wire request
+  (messages/tools JSON). The scheduler must also know the wire
+  tool-name -> EvoCLJ tool binding mapping to execute tool calls.
+  If dynamic ToolSurface tools were only visible inside the provider,
+  the model would see tool A but the scheduler's dispatch-tool loop
+  would not know how to execute A (or vice versa): visible-to-model
+  and executable-by-scheduler would diverge. The Assembler is trusted
+  runtime code that produces BOTH sides together: the wire :tools
+  vector for the model AND the :tool-map {wire-name -> tool binding}
+  for the scheduler. It is the single place that merges BaseModelCall
+  + dynamic context + dynamic tool catalog so the two views stay
+  consistent.
+
+  Pinning: the whole loop pins its ToolCatalogBinding. Round 1 sees
+  A/B/C; if a LiveSource refresh publishes D between rounds, round 2
+  still works on the same pinned snapshot. Only the next independent
+  model call (new LLM node visit) sees the new catalog. Implemented
+  by capturing the binding once at loop start and reusing it.
+
+  Context rebuild: unlike tools, Context MUST be reassembled each
+  round. Round 1's model may call activate_skill, the tool execution
+  creates a new ContextBinding, and round 2 must see the newly
+  activated Skill instructions. Therefore the Assembler is called
+  every round with fresh SessionBindings/CAS; it cannot just append
+  the tool result to the original messages and re-call."
   [executor pin cause intent outputs]
-  (let [rounds (get-in intent [:payload :options :max-tool-rounds]
-                       max-tool-rounds-default)
-        tool-map (tool-map-of intent)]
-    (loop [intent intent cause cause outputs outputs rounds rounds]
-      (let [cause-id (if (map? cause) (:event/id cause) cause)
-            step (dispatch-intent! executor pin cause-id intent outputs)
-            value (peek (:outputs step))
-            tool-calls (when (= :intent/model-call (:intent/type intent))
-                         (:tool-calls value))]
-        (if (and (seq tool-calls) (pos? rounds) (seq tool-map))
-          (let [calls (mapv (fn [tc]
-                              (if-let [t (get tool-map (:tool/name tc))]
-                                {:call tc :tool-id (:tool t)}
-                                (throw (err/error :scheduler/unknown-tool
-                                                  (str "model requested unknown tool "
-                                                       (:tool/name tc))
-                                                  {:tool/name (:tool/name tc)}))))
-                            tool-calls)
-                executed (execute-tool-calls! executor pin (:last-event step) intent calls)
-                assistant-msg {:role :assistant
-                               :content (get-in value [:model/output :text] "")
-                               :tool-calls (dialect/tool-calls->wire tool-calls)}
-                next-messages (into (get-in intent [:payload :messages])
-                                    (cons assistant-msg (:tool-msgs executed)))
-                next-intent (assoc-in intent [:payload :messages] next-messages)]
-            (recur next-intent
-                   (:last-event executed)
-                   (:outputs executed)
-                   (dec rounds)))
-          step)))))
+  (if (not= :intent/model-call (:intent/type intent))
+    ;; Non-model intents go directly through the broker (no assembler).
+    (let [cause-id (if (map? cause) (:event/id cause) cause)]
+      (dispatch-intent! executor pin cause-id intent outputs))
+    ;; Model-call path: trusted assembler owns the wire shape.
+    (let [rounds (get-in intent [:payload :options :max-tool-rounds]
+                         max-tool-rounds-default)
+          base-call (base-call-from-intent* intent)
+          ;; Pin the tool catalog once for the whole loop.
+          initial-tools (or (:requested-tools base-call)
+                            (get-in intent [:payload :tools]) [])
+          ;; Allow tests / dynamic hosts to supply a live catalog atom
+          ;; via executor's :tool-catalog. When present, pin its
+          ;; current snapshot; otherwise pin the base-call's own tools.
+          live-catalog (try (when-let [a (get-in executor [:stores :tool-catalog])]
+                               (when (instance? clojure.lang.Atom a) @a))
+                            (catch Throwable _ nil))
+          pinned-source (or live-catalog initial-tools)
+          pinned (try (assembler/capture-tool-catalog-binding pinned-source)
+                      (catch Throwable _
+                        (assembler/capture-tool-catalog-binding initial-tools)))]
+      (loop [current-base-call base-call
+             current-intent intent
+             cause cause
+             outputs outputs
+             rounds rounds
+             pinned pinned]
+        (let [cause-id (if (map? cause) (:event/id cause) cause)
+              bindings (fetch-bindings executor pin)
+              cas (:cas (:stores executor))
+              prepared (try
+                         (assembler/assemble current-base-call
+                                             {:session-bindings bindings
+                                              :tool-catalog/binding pinned
+                                              :cas cas
+                                              :history ""})
+                         (catch Throwable _ nil))
+              tool-map (if prepared (:tool-map prepared) (tool-map-of current-intent))
+              effective-intent (if prepared
+                                 (-> current-intent
+                                     (assoc-in [:payload :messages] (:messages prepared))
+                                     (assoc-in [:payload :tools] (:tools prepared))
+                                     ;; keep base fields so a refreshed
+                                     ;; intent still carries the original
+                                     ;; lightweight declaration as well
+                                     (assoc-in [:payload :base/messages] (:base/messages current-base-call))
+                                     (assoc-in [:payload :requested-tools] (:requested-tools current-base-call)))
+                                 current-intent)
+              step (dispatch-intent! executor pin cause-id effective-intent outputs)
+              value (peek (:outputs step))
+              tool-calls (when (= :intent/model-call (:intent/type current-intent))
+                           (:tool-calls value))]
+          (if (and (seq tool-calls) (pos? rounds) (seq tool-map))
+            (let [calls (mapv (fn [tc]
+                                (if-let [t (get tool-map (:tool/name tc))]
+                                  {:call tc :tool-id (:tool t)}
+                                  (throw (err/error :scheduler/unknown-tool
+                                                    (str "model requested unknown tool "
+                                                         (:tool/name tc))
+                                                    {:tool/name (:tool/name tc)}))))
+                              tool-calls)
+                  executed (execute-tool-calls! executor pin (:last-event step) effective-intent calls)
+                  assistant-msg {:role :assistant
+                                 :content (get-in value [:model/output :text] "")
+                                 :tool-calls (dialect/tool-calls->wire tool-calls)}
+                  ;; Build the next raw conversation history from the
+                  ;; prepared's messages (which already include any
+                  ;; injected context) plus the new assistant + tool
+                  ;; results. On the next loop the assembler will
+                  ;; re-inject fresh context (replacing the stale
+                  ;; leading system message) so a binding created by
+                  ;; the just-executed tool is visible.
+                  prepared-msgs (if prepared (:messages prepared)
+                                  (get-in effective-intent [:payload :messages]))
+                  next-messages (into (vec prepared-msgs)
+                                      (cons assistant-msg (:tool-msgs executed)))
+                  next-base-call (assoc current-base-call
+                                         :base/messages next-messages
+                                         :messages next-messages)]
+              (recur next-base-call
+                     (assoc effective-intent :payload (assoc (:payload effective-intent) :messages next-messages))
+                     (:last-event executed)
+                     (:outputs executed)
+                     (dec rounds)
+                     pinned))
+            step))))))
 
 ;; --- terminal session outcomes ----------------------------------------------
 

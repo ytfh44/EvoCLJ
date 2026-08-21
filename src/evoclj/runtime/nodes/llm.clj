@@ -48,10 +48,19 @@
               messages (if (:system node)
                          [{:role :system :content (:system node)} user-msg]
                          [user-msg])
+              ;; Trusted RequestAssembler owns the final messages/tools merge.
+              ;; The LLM node only declares the BaseModelCall — lightweight,
+              ;; no dynamic ToolSurface or Context materialization here.
               payload (cond-> {:model/id (:provider-model resolved)
-                               :messages messages
+                               :base/messages messages
                                :options (merge {:max-tool-rounds 4}
                                                (:options node))}
+                        (:tools node) (assoc :requested-tools (:tools node))
+                        ;; Backward compat for schedulers/tests that still
+                        ;; read :messages/:tools directly: also emit them so
+                        ;; an identity assembler keeps passing. New code should
+                        ;; read :base/messages & :requested-tools.
+                        true (assoc :messages messages)
                         (:tools node) (assoc :tools (:tools node)))
               intent (intent/model-call
                       (:session/id runtime-state)
