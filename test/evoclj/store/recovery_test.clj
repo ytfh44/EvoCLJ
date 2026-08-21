@@ -1,5 +1,5 @@
 (ns evoclj.store.recovery-test
-  "Task 5.5 tests for restart recovery and integrity checks.
+  "component tests for restart recovery and integrity checks.
 
   Step 1: a session left in :running with no terminal event is
   classified as orphaned — recovery never pretends completion (no
@@ -288,7 +288,7 @@
 
 ;; ============================================================================
 ;; supplementary — a tampered event row is reported as an invalid chain
-;; (closes the Task 5.5 review gap: no recovery-level chain-tamper test)
+;; (closes the component review gap: no recovery-level chain-tamper test)
 ;; ============================================================================
 
 (deftest tampered-event-row-is-reported-as-invalid-chain

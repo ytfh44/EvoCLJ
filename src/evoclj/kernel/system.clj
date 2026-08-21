@@ -1,8 +1,8 @@
 (ns evoclj.kernel.system
-  "Host wiring for the STABLE components (Task 10.1).
+  "Host wiring for the STABLE components (component).
 
   This namespace completes the wiring plan begun in
-  evoclj.runtime.system (Task 6.1 Step 4). The four stable lifecycle
+  evoclj.runtime.system (component Step 4). The four stable lifecycle
   keys — :store/sqlite, :store/cas, :provider/registry,
   :capability/broker — are OWNED by evoclj.runtime.system, whose
   init-key / halt-key! methods are the single registration for those
@@ -11,9 +11,9 @@
   four Milestone 9 subsystems:
 
     :runtime/executor    scheduler host (stores + dispatch + run-session!)
-    :evolution/system    evolution-system map (Task 7.8)
-    :eval/system         evaluator map (Task 8.7)
-    :promotion/system    promotion-system map (Task 9.2)
+    :evolution/system    evolution-system map (component)
+    :eval/system         evaluator map (component)
+    :promotion/system    promotion-system map (component)
 
   Because the stable keys keep evoclj.runtime.system's shapes, the
   host config follows those constructors exactly (see
@@ -116,7 +116,7 @@
 (def model-registry-key :model/registry)
 
 (def host-component-keys
-  "The normative Integrant-owned host component set (Task 10.1 plus
+  "The normative Integrant-owned host component set (component plus
   post-v0 extension 1: the models.dev catalog and the model
   registry). Genome graph nodes are NOT in this set."
   [store-sqlite-key store-cas-key provider-registry-key
@@ -306,7 +306,7 @@
   [_ config]
   "Build the :runtime/executor component: the scheduler HOST — the
   stores, the broker context, and the scheduler entry point. The
-  executor map the scheduler actually runs (Task 6.3:
+  executor map the scheduler actually runs (component:
   {:phenotype ... :stores ... :dispatch ...}) is assembled per session
   by :build from a compiled Phenotype, because the Phenotype is
   constructed inside an isolated SCI runtime and is never a host
@@ -459,7 +459,7 @@
 (defmethod ig/init-key :evolution/system
   [_ config]
   "Build the :evolution/system component: an evolution-system map
-  (Task 7.8 contract, see evoclj.evolution.core) assembled from the
+  (component contract, see evoclj.evolution.core) assembled from the
   config subtree and the injected store. The provider catalog is
   plain data; the diagnostician and mutator are constructed here
   (or injected as objects/fns — Step 4).
@@ -516,7 +516,7 @@
 
 (defmethod ig/init-key :eval/system
   [_ config]
-  "Build the :eval/system component: an evaluator map (Task 8.7
+  "Build the :eval/system component: an evaluator map (component
   contract, see evoclj.eval.core) assembled from the config subtree
   and the injected store. Fixture maps (:selection/fixtures,
   :replay/fixtures) default to empty — v0 ships no hidden fixtures;
@@ -598,7 +598,7 @@
 ;; --- :promotion/system ---------------------------------------------------------------
 
 (def ^:private seed-route-descriptor
-  "The v0 seed route program descriptor (Task 2.3 choice (a)): the
+  "The v0 seed route program descriptor (component choice (a)): the
   seed topology's :program/route entry point, carried on the loaded
   Genome under :programs. This is stable host bootstrap knowledge of
   the immutable seed bundle (genomes/seed)."
@@ -625,12 +625,11 @@
 
 (defmethod ig/init-key :promotion/system
   [_ config]
-  "Build the :promotion/system component: a promotion-system map (Task
-  9.2 contract, see evoclj.promotion.promote) with the injected store.
+  "Build the :promotion/system component: a promotion-system map (component contract, see evoclj.promotion.promote) with the injected store.
   :resolution/id names the current generation's compiled Resolution
   (config value or :derive — derived by compiling the seed Genome);
   :event/session-id anchors :promotion/* events (config value or a
-  fresh host operator session uuid; the Task 10.2 CLI overrides it
+  fresh host operator session uuid; the component CLI overrides it
   with the real operator session)."
   {:store {:sqlite (:sqlite (:store config))
            :cas (:cas (:store config))}

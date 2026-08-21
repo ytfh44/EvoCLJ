@@ -1,4 +1,4 @@
-# Evolution dataset — Task 9.7 fixture
+# Evolution dataset — component fixture
 
 The Evolution dataset root for the end-to-end evolutionary promotion
 test. In this e2e the evolution EVIDENCE is the generation's store

@@ -1,5 +1,5 @@
 (ns evoclj.store.cas
-  "Filesystem content-addressed storage (Task 5.2).
+  "Filesystem content-addressed storage (component).
 
   Artifacts are stored under a root directory keyed by content hash with
   the normative physical layout:

@@ -1,5 +1,5 @@
 (ns evoclj.runtime.nodes.loop
-  "The :loop node handler (Task 6.4).
+  "The :loop node handler (component).
 
   A :loop node {:node/type :loop :body :node/body :until :program/done?
   :max-iterations 8 :next :node/finish} iterates its :body until the
@@ -97,7 +97,7 @@
   :max-iterations cap: a :failed transition carrying serializable
   error data. evoclj.runtime.scheduler routes this error type to the
   :budget-exhausted session state (the typed budget outcome chosen for
-  Task 6.4 and documented there)."
+  component and documented there)."
   [iterations max-iterations]
   (node/validate-transition!
    {:transition/status :failed

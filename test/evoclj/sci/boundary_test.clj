@@ -1,5 +1,5 @@
 (ns evoclj.sci.boundary-test
-  "Tests for the EDN-safe boundary and eager realization (Task 3.2).
+  "Tests for the EDN-safe boundary and eager realization (component).
 
   Every value crossing the SCI boundary must be plain, fully realized,
   EDN-safe data (Global Constraint 22): edn-safe? tests a value

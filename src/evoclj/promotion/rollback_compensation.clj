@@ -1,5 +1,5 @@
 (ns evoclj.promotion.rollback-compensation
-  "Task 9.5 follow-up — external-effect compensation manifest.
+  "component follow-up — external-effect compensation manifest.
 
   When a generation is rolled back (see evoclj.promotion.rollback, which
   is SELECTION-ONLY per Global Constraint 18), the already-committed

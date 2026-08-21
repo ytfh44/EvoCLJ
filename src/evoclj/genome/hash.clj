@@ -1,5 +1,5 @@
 (ns evoclj.genome.hash
-  "Deterministic Genome hashing (Task 1.3).
+  "Deterministic Genome hashing (component).
 
   Implements the normative canonical hashing rules exactly:
 

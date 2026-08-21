@@ -1,16 +1,16 @@
 (ns evoclj.promotion.canary
-  "Task 9.3 — deterministic canary routing for NEW sessions.
+  "component — deterministic canary routing for NEW sessions.
 
   Route the creation of a NEW session to the current generation or to a
   canary generation from a stable hash of the session's routing key —
   NEVER a mutable global random source (Step 1). Sessions already
   created stay pinned to the generation they were created under: the
-  pin lives in the sessions row (Task 5.4, Global Constraint 2), and
+  pin lives in the sessions row (component, Global Constraint 2), and
   this namespace only ever DECIDES which generation a NEW session is
   created against; it writes nothing and holds no state.
 
   DEPLOYMENT-STATE SHAPE (normative, designed here and documented for
-  Tasks 9.4-9.5):
+  component):
 
       {:current-generation \"G42\"          ; the fallback (CURRENT pointer)
        :canary {:generation \"G43\"          ; the candidate under rollout
@@ -59,7 +59,7 @@
 ;; --- the normative ladder ----------------------------------------------------
 
 (def ladder-default
-  "The NORMATIVE canary ladder (Task 9.3): 10% → 25% → 50% → 100%."
+  "The NORMATIVE canary ladder (component): 10% → 25% → 50% → 100%."
   [0.10 0.25 0.50 1.0])
 
 ;; --- boundary validation -----------------------------------------------------
@@ -159,7 +159,7 @@
 
 (defn select-generation-for-new-session
   "The deterministic generation choice for a NEW session
-  (Task 9.3 interface): the canary generation when
+  (component interface): the canary generation when
   `deployment-state` actively routes `stable-routing-key` into the
   canary allocation, else :current-generation. nil deployment state
   returns nil (no canary information — the caller falls back to its own

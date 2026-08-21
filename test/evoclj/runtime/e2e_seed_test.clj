@@ -1,5 +1,5 @@
 (ns evoclj.runtime.e2e-seed-test
-  "Task 6.6 — the REAL seed Genome runs end to end (Milestone 6 exit).
+  "component — the REAL seed Genome runs end to end (Milestone 6 exit).
 
   This test drives the whole pipeline through the REAL
   genomes/seed bundle — no test-double CompiledGenome, no inline
@@ -41,7 +41,7 @@
   STEP 5: the store is reopened from disk (the sqlite store is
   per-operation connections and the CAS is a directory, so \"close +
   reopen\" rebuilds fresh handles over the same paths, exactly like the
-  Task 5.5 recovery test) and the episode + trace remain queryable.
+  component recovery test) and the episode + trace remain queryable.
 
   The route program contract's other branches ({:op :finish :value v}
   and anything-else → finish) are asserted against the real loaded
@@ -82,7 +82,7 @@
     p))
 
 (defn- route-descriptor
-  "The seed route program descriptor (Task 2.3 choice (a): an in-memory
+  "The seed route program descriptor (component choice (a): an in-memory
   descriptor list riding on the loaded-genome value under :programs)."
   []
   {:program/id :program/route
@@ -99,7 +99,7 @@
          :programs [(route-descriptor)]))
 
 (defn- fixture-catalog
-  "The on-disk provider catalog fixture (Task 2.1 Resolution)."
+  "The on-disk provider catalog fixture (component Resolution)."
   []
   (edn/read-string (slurp (io/resource "fixtures/resolution/provider-catalog.edn"))))
 
@@ -192,7 +192,7 @@
      :expires-at (java.util.Date. (+ (.getTime now) 60000))}))
 
 (defn- build-executor
-  "Assemble the Task 6.3 executor map from the REAL seed genome:
+  "Assemble the component executor map from the REAL seed genome:
 
     {:phenotype <instantiated Phenotype>
      :stores {:sqlite <migrated db> :cas <CAS root>}

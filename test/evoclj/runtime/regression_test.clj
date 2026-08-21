@@ -1,8 +1,8 @@
 (ns evoclj.runtime.regression-test
-  "Task A7 + C2a tests: the regression-detection trigger rule
+  "component + C2a tests: the regression-detection trigger rule
   (Foundation F6) and its two actions.
 
-  Task A7 (alert): the pure-data regression rule (no functions
+  component (alert): the pure-data regression rule (no functions
   anywhere, EDN round-trip, construction validation); the windowed
   drop observation over a synthetic paired-utility series (window
   truncation, window larger than the series, empty series, malformed
@@ -15,7 +15,7 @@
   (sessions/generations rows unchanged, hash chain still verifies),
   and appending nothing when the rule stays quiet.
 
-  Task C2a (auto-rollback): the :promotion/auto-rollback action —
+  component (auto-rollback): the :promotion/auto-rollback action —
   wired via trigger/register-action! — invokes the PUBLIC promotion
   rollback API (evoclj.promotion.rollback/rollback!, Global
   Constraint 15: the only code path that changes CURRENT) when a
@@ -28,7 +28,7 @@
   :rolled-back, parent :active, :promotion/rollback event appended,
   chain verifies).
 
-  Task C2b (case evolution): a confirmed regression appends ONE new
+  component (case evolution): a confirmed regression appends ONE new
   evaluation case derived from the failing input into the hidden
   (Selection) dataset — append-only, provenance-linked to the
   triggering evidence; a duplicate regression does not duplicate the
@@ -347,7 +347,7 @@
         (is (= :store/session-not-found (:error/type a)))))))
 
 ;; ============================================================================
-;; Task C2a — the :promotion/auto-rollback action (guarded)
+;; component — the :promotion/auto-rollback action (guarded)
 ;; ============================================================================
 
 (def ^:private parent-generation "generation-42")
@@ -555,7 +555,7 @@
       (is (invalid? {:rollback-fn 42})))))
 
 ;; ============================================================================
-;; Task C2b — failure-driven evaluation case evolution
+;; component — failure-driven evaluation case evolution
 ;; ============================================================================
 
 (def ^:private case-evolution-evidence

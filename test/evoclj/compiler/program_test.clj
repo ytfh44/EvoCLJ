@@ -1,13 +1,13 @@
 (ns evoclj.compiler.program-test
   "Tests for static discovery and validation of evolvable SCI programs
-  (Task 2.3).
+  (component).
 
   Genome programs are DECLARED via descriptors, never inferred from
   arbitrary source files; this task keeps `compile-program-descriptor`
   a pure function over a descriptor map plus a loaded Genome (choice
   (a) in the task brief): the descriptor list itself lives in
   memory/tests and the seed Genome's program registry wiring arrives in
-  Task 3.4/6.x, so the Task 1.2 closed-map manifest schema stays
+  component/6.x, so the component closed-map manifest schema stays
   untouched. compile-program-descriptor validates file existence, path,
   entry symbol, and source readability, then performs compile-policy
   inspection (best-effort; the SCI sandbox remains the final
@@ -44,7 +44,7 @@
   (load/load-genome (fixture-root "minimal-valid")))
 
 (defn- route-descriptor
-  "The seed route program descriptor from the Task 2.3 example."
+  "The seed route program descriptor from the component example."
   []
   {:program/id :program/route
    :file "programs/route.clj"

@@ -1,6 +1,6 @@
 (ns evoclj.compiler.core-test
   "Tests for compile-genome orchestration and the Phenotype identity
-  (Task 2.4).
+  (component).
 
   compile-genome is orchestration only: it composes the focused modules
   (load-genome / validate-manifest / resolve-models / compile-topology /
@@ -17,7 +17,7 @@
   provider catalog) therefore changes the Phenotype ID but never the
   Genome ID (Global Constraints 1, 2, 6).
 
-  The program registry follows Task 2.3 choice (a): an in-memory
+  The program registry follows component choice (a): an in-memory
   descriptor list that rides on the loaded-genome value under
   :programs (never a manifest change). The compiled value is pure,
   fully serializable EDN data (Global Constraint 22): program
@@ -56,7 +56,7 @@
   (edn/read-string (slurp (io/resource "fixtures/resolution/provider-catalog.edn"))))
 
 (defn- route-descriptor
-  "The seed route program descriptor (Task 2.3)."
+  "The seed route program descriptor (component)."
   []
   {:program/id :program/route
    :file "programs/route.clj"
@@ -66,7 +66,7 @@
 
 (defn- seed-loaded-genome
   "The real minimal-valid bundle loaded from disk with the in-memory
-  program registry attached (Task 2.3 choice (a))."
+  program registry attached (component choice (a))."
   []
   (assoc (load/load-genome (fixture-root "minimal-valid"))
          :programs [(route-descriptor)]))

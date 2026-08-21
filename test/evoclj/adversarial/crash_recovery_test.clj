@@ -1,5 +1,5 @@
 (ns evoclj.adversarial.crash-recovery-test
-  "Task 11.4 — crash/fault injection suite.
+  "component — crash/fault injection suite.
 
   Each deftest injects a process crash AFTER one step of a normative
   transaction and asserts the EXPECTED RECOVERABLE STATE: recovery
@@ -7,7 +7,7 @@
   never accepts a partially written Genome as content-addressed valid
   content.
 
-  Injection points (normative, docs Task 11.4) and their expected
+  Injection points (normative, docs component) and their expected
   recoverable state:
 
   1. CAS artifact temp write (before rename) — no artifact exists; an
@@ -507,7 +507,7 @@
                  now]))
 
 (defn- mutation-ir
-  "A fully-determined Mutation IR (Task 7.5 shape) for a parent genome."
+  "A fully-determined Mutation IR (component shape) for a parent genome."
   [parent-genome-id]
   {:mutation/id (random-uuid)
    :parent/genome-id parent-genome-id
@@ -885,7 +885,7 @@
         (is (= 1 (count (:stale-candidates r))))))))
 
 ;; ============================================================================
-;; Task Step 3 — no partially written Genome is accepted as content-addressed
+;; component 3 — no partially written Genome is accepted as content-addressed
 ;; valid content
 ;; ============================================================================
 

@@ -1,9 +1,9 @@
 (ns evoclj.capability.schema
-  "Malli schemas for the v0 CapabilityLease (Task 4.2).
+  "Malli schemas for the v0 CapabilityLease (component).
 
   A CapabilityLease is a bounded, HOST-OWNED grant: a plain immutable
   map the kernel issues so a Phenotype may cross an effect — never a
-  string name visible to the model (Task 4.2 acceptance). The contract
+  string name visible to the model (component acceptance). The contract
   is normative:
 
     {:cap/id #uuid \"...\"

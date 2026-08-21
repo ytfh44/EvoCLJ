@@ -1,5 +1,5 @@
 (ns evoclj.genome.load-test
-  "Tests for loading an immutable Genome bundle from disk (Task 1.4).
+  "Tests for loading an immutable Genome bundle from disk (component).
 
   load-genome walks the bundle directory without following symbolic
   links, validates the manifest before trusting its module paths, and
@@ -126,7 +126,7 @@
       (is (instance? java.nio.file.Path (:genome/root g)))
       (is (= (str (fixture-root "minimal-valid")) (str (:genome/root g)))))
     (testing "the five declared modules plus the route program load with inferred kinds"
-      ;; Task 2.3 adds the evolvable route program (programs/route.clj) to
+      ;; component adds the evolvable route program (programs/route.clj) to
       ;; the bundle; it is :clj source, not an :edn module.
       (is (= #{"manifest.edn" "topology.edn" "models.edn" "memory.edn" "evolution.edn"
                "programs/route.clj"}
@@ -329,7 +329,7 @@
         (is (= :not-found (:reason (ex-data e)))))
       (finally (delete-recursively! dir)))))
 
-;; --- seed trust anchors (Task C3) ------------------------------------------
+;; --- seed trust anchors (component) ------------------------------------------
 ;; The trust-anchor contract: a map of seed genome id -> expected
 ;; "sha256:" digest. load-genome verifies a bundle against the anchors
 ;; in force; a mismatch (including a tampered seed, whose id no longer

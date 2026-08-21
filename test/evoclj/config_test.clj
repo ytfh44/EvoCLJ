@@ -201,7 +201,7 @@
     (is (= :proposed (:new-status (ex-data e))))))
 
 ;; ============================================================================
-;; evolution-loop / canary / budget-extension (Tasks A3/B3/E1)
+;; evolution-loop / canary / budget-extension (component)
 ;; ============================================================================
 
 (deftest default-config-includes-new-sections

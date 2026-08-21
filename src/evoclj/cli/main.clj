@@ -1,5 +1,5 @@
 (ns evoclj.cli.main
-  "The CLI entry point (Task 10.2): argument parsing, command
+  "The CLI entry point (component): argument parsing, command
   dispatch, EDN output, and the exit contract.
 
   ARGUMENT PARSING is a tiny hand-rolled parser (tools.cli is not on
@@ -172,7 +172,7 @@
       (throw (err/error :cli/unknown-command
                         "unknown command"
                         {:command (str/join " " positionals)
-                         :usage "evoclj <command> ... — see docs/implementation-plan.md Task 10.2"})))
+                         :usage "evoclj <command> ... — see docs/implementation-plan.md component"})))
     (check-arity! entry positionals)
     ((:fn entry) (command-opts parsed opts (:path entry)))))
 

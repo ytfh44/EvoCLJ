@@ -1,6 +1,6 @@
 (ns evoclj.provider.registry-test
   "Tests for provider/tool descriptors and real-resource normalization
-  (Task 4.3).
+  (component).
 
   Providers adapt real resources behind the kernel-owned broker: the
   protocol is (describe provider) -> descriptor map,
@@ -14,7 +14,7 @@
   the seed Genome: its descriptor is exactly the normative example,
   normalize-request turns a user-facing request into a canonical
   resource descriptor in the shape the capability lease matcher
-  consumes ({:kind :tool :id ...}, Task 4.2), and execute-request!
+  consumes ({:kind :tool :id ...}, component), and execute-request!
   returns the echoed value. Step 3 asserts the traversal-style
   :fixture/path-resolve fixture: raw \"a/../secret\" input resolves to
   the canonical protected path \"/protected/work/secret\" and IS
@@ -26,7 +26,7 @@
   descriptors or results.
 
   The canonical path segment resolution is reused from
-  evoclj.capability.lease (Task 4.2) so the tests here assert the
+  evoclj.capability.lease (component) so the tests here assert the
   provider-side contract on the same canonical forms coverage is
   decided on."
   (:require [clojure.edn :as edn]
@@ -43,7 +43,7 @@
 ;; --- shared fixtures -------------------------------------------------------
 
 (def ^:private echo-descriptor
-  "The normative descriptor example from Task 4.3 — the :fixture/echo
+  "The normative descriptor example from component — the :fixture/echo
   tool declared by the seed Genome."
   {:tool/id :fixture/echo
    :effect :pure

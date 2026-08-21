@@ -10,7 +10,7 @@
 --
 -- Design decisions:
 --   * id TEXT PRIMARY KEY — a uuid string, exactly as 001-init.sql treats
---     ids (Global Constraint 21, Task 5.1 conventions).
+--     ids (Global Constraint 21, component conventions).
 --   * entity_kind / entity_id — the content-addressed or stable inner key
 --     of the immutable entity an enrichment attaches to. Because entities
 --     are immutable, this pair is a write-only identity: enrichment never
@@ -29,7 +29,7 @@
 --   * cause_ref TEXT — optional provenance: the cause Event id / artifact id
 --     / stable id that produced this enrichment (a lab-notebook narrative
 --     cites the run that generated it).
---   * created_at TEXT — ISO-8601 (UTC), Task 5.1 conventions.
+--   * created_at TEXT — ISO-8601 (UTC), component conventions.
 --
 -- The append-only invariant is enforced at the database level by triggers
 -- mirroring events_no_update / events_no_delete in 001-init.sql: a stray

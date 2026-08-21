@@ -1,5 +1,5 @@
 (ns evoclj.eval.runner-test
-  "Task A3 — Foundation F4: parallel candidate batch evaluation.
+  "component — Foundation F4: parallel candidate batch evaluation.
 
   evaluate-batch! (evoclj.eval.core) evaluates a BATCH of
   :evaluation-pending candidates under one profile in PARALLEL through
@@ -42,7 +42,7 @@
            (java.nio.file.attribute FileAttribute)
            (java.util UUID)))
 
-;; --- shared fixture identity (Task 7.6 style, mirrors core_test) ------------
+;; --- shared fixture identity (component style, mirrors core_test) ------------
 
 (def ^:private hex64
   "64 hex chars for the canonical content-addressed ids."
@@ -53,7 +53,7 @@
   (str "sha256:" hex64))
 
 (def ^:private candidate-genome-id
-  "The content-addressed candidate Genome (Task 7.4 patch output)."
+  "The content-addressed candidate Genome (component patch output)."
   (str "sha256:" (apply str (repeat 64 "c"))))
 
 (def ^:private evidence-id
@@ -78,7 +78,7 @@
   (UUID/fromString (format "00000000-0000-0000-0000-%012d" n)))
 
 (defn- mutation*
-  "A schema-plausible Mutation IR fixture (Task 7.3 shape) carrying one
+  "A schema-plausible Mutation IR fixture (component shape) carrying one
   :set-edn op; an optional override map wins. Varying :mutation/id
   keeps the (parent-genome-id, mutation-hash) dedup key distinct, so a
   batch can materialize several DIFFERENT pending candidates."
@@ -142,7 +142,7 @@
   (fn [f]
     ;; G3's suite registry is kernel-side and shared; every test starts
     ;; with an empty registry so no suite leaks across tests (the same
-    ;; discipline as the Task 8.2 gates tests)
+    ;; discipline as the component gates tests)
     (static/clear-suites!)
     (f)
     (cleanup!)))
@@ -195,7 +195,7 @@
          m1 (candidate/materialize-candidate! store c m)]
      (candidate/mark-evaluation-pending! store (:candidate/id m1)))))
 
-;; --- genome bundles (Task 8.4 paired-fixture style) --------------------------
+;; --- genome bundles (component paired-fixture style) --------------------------
 
 (defn- route-source
   "A route program: {:op :echo :text t} emits a :fixture/echo tool-call
@@ -317,7 +317,7 @@
 ;; --- the evaluation profile ---------------------------------------------------
 
 (defn- test-profile
-  "A Task 8.1 profile carrying the Task 8.5 thresholds (the paired
+  "A component profile carrying the component thresholds (the paired
   comparison demands a real utility improvement, min-delta 0.05)."
   []
   {:eval/profile-id :test/v1

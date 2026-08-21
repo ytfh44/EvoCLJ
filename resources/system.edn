@@ -1,4 +1,4 @@
-{;; EvoCLJ host configuration (Task 10.1).
+{;; EvoCLJ host configuration (component).
  ;;
  ;; The keys ARE the Integrant component keys; #ig/ref entries wire
  ;; component-to-component dependencies and are resolved by
@@ -6,7 +6,7 @@
  ;;
  ;; The four stable lifecycle keys (:store/sqlite, :store/cas,
  ;; :provider/registry, :capability/broker) follow the constructor
- ;; shapes of evoclj.runtime.system (Task 6.1 Step 4) — that
+ ;; shapes of evoclj.runtime.system (component Step 4) — that
  ;; namespace owns their init-key / halt-key! methods. The four
  ;; Milestone 9 keys (:runtime/executor, :evolution/system,
  ;; :eval/system, :promotion/system) are owned by
@@ -57,7 +57,7 @@
 
  :capability/broker
  {:registry #ig/ref :provider/registry
-  ;; no leases are granted by default; the CLI (Task 10.2) grants
+  ;; no leases are granted by default; the CLI (component) grants
   ;; per-session capability leases before any session runs
   :leases []}
 
@@ -74,7 +74,7 @@
  :evolution/system
  {:store {:sqlite #ig/ref :store/sqlite
           :cas #ig/ref :store/cas}
-  ;; the Task 2.1 Resolution provider catalog (plain data)
+  ;; the component Resolution provider catalog (plain data)
   :provider-catalog
   {:reasoning/high {:provider :fixture
                     :provider-model "fixture-model-v1"
@@ -88,7 +88,7 @@
   ;; the immutable seed Genome bundle at the repo root
   :genome-root "../genomes/seed"
   :candidates-dir "work/candidates"
-  ;; the deterministic pattern Diagnostician (Task 7.2)
+  ;; the deterministic pattern Diagnostician (component)
   :diagnostician {:task/success-threshold 1.0
                   :max-hypotheses 3
                   :confidence-band :medium}
@@ -145,7 +145,7 @@
           :provider-model "fixture-model-fast"
           :adapter-version "1"}}
   :kernel/abi {:kernel 1 :genome 1 :intent 1 :tool 1}
-  ;; the Task 8.1 normative default profile, as plain data
+  ;; the component normative default profile, as plain data
   :profiles {"default-v1"
              {:eval/profile-id :default-v1
               :evolution-set {:source :evals/evolution}
@@ -227,7 +227,7 @@
    :fast {:provider :fixture
           :provider-model "fixture-model-fast"
           :adapter-version "1"}}
-  ;; :derive — a fresh host operator session uuid; the Task 10.2 CLI
+  ;; :derive — a fresh host operator session uuid; the component CLI
   ;; overrides it with the real operator session for actual promotions
   :event/session-id :derive}
 

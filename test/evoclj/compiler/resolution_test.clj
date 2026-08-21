@@ -1,5 +1,5 @@
 (ns evoclj.compiler.resolution-test
-  "Tests for Resolution and provider alias resolution (Task 2.1).
+  "Tests for Resolution and provider alias resolution (component).
 
   resolve-models turns a Genome's models.edn config plus a provider
   catalog into a pure data Resolution: a canonical :resolution/id over
@@ -12,7 +12,7 @@
   deterministic canonical-EDN conventions as evoclj.genome.hash, so two
   provider catalogs resolving to different concrete model IDs yield
   different Resolution IDs for the same Genome models config (Global
-  Constraint 2's session pinning and Task 2.1 acceptance)."
+  Constraint 2's session pinning and component acceptance)."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]

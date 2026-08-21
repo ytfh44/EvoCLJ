@@ -1,8 +1,8 @@
 (ns evoclj.evolution.core
-  "Orchestrate one evolution proposal cycle (Task 7.8, Milestone 7).
+  "Orchestrate one evolution proposal cycle (component, Milestone 7).
 
   propose-candidates! runs the normative phase order over the REAL
-  pipeline — only the Diagnostician (Task 7.2 protocol) and the
+  pipeline — only the Diagnostician (component protocol) and the
   Mutator (protocol defined below) are adapters:
 
       freeze evidence      → evoclj.evolution.evidence/build-evidence-pack
@@ -10,10 +10,10 @@
       load negative history→ evoclj.evolution.history/recent-mutation-history
       propose mutation     → Mutator (protocol below)
       validate risk/budget → mutation/validate-mutation +
-                             budget/check-budget (v0 profile, Task 7.5)
-      apply patch          → evoclj.genome.patch/apply-mutation (Task 7.4)
-      compile candidate    → evoclj.compiler.core/compile-genome (Task 2.4)
-      persist Candidate    → evoclj.evolution.candidate (Task 7.6)
+                             budget/check-budget (v0 profile, component)
+      apply patch          → evoclj.genome.patch/apply-mutation (component)
+      compile candidate    → evoclj.compiler.core/compile-genome (component)
+      persist Candidate    → evoclj.evolution.candidate (component)
 
   Per-cycle and per-candidate semantics:
 
@@ -21,16 +21,16 @@
     carries everything the cycle needs:
 
         {:store            {:sqlite <db> :cas <CAS root>}  ; executor :stores
-         :provider-catalog {alias -> provider-entry}        ; Task 2.1 Resolution
+         :provider-catalog {alias -> provider-entry}        ; component Resolution
          :genome-loader    (fn [] -> loaded Genome map)     ; exactly one of
          :genome-root      <path|string>                    ;   these two
-         :candidates-dir   <path|string>  ; Task 7.4 output dir — the
+         :candidates-dir   <path|string>  ; component output dir — the
                                           ;   staging area; finalized
                                           ;   candidate bundles land here
-         :diagnostician    <Diagnostician impl>   ; Task 7.2 protocol
+         :diagnostician    <Diagnostician impl>   ; component protocol
          :mutator          <Mutator impl>         ; protocol below
          :budget-profile   map?          ; default budget/v0-profile
-         :programs-registry sequential?  ; Task 2.3 descriptors, used
+         :programs-registry sequential?  ; component descriptors, used
                                          ; only when the parent Genome
                                          ; carries no :programs
          :event-sink       (fn [event])  ; taxonomy events, default no-op
@@ -61,12 +61,11 @@
          :parent/genome-id   \"sha256:...\"    ; the loaded parent G1
          :parent-genome      <loaded parent Genome map> ; for choosing
                                         ; targets and :expect/hash digests
-         :diagnosis          <validated Diagnosis>      ; Task 7.2
-         :history            <Task 7.7 history entries> ; negative evidence
+         :diagnosis          <validated Diagnosis>      ; component
+         :history            <component history entries> ; negative evidence
          :budget-profile     <profile map>}
 
-    The Mutator must return mutations whose :ops stay inside the Task
-    7.3 op language; the orchestrator completes any MISSING lineage
+    The Mutator must return mutations whose :ops stay inside the component op language; the orchestrator completes any MISSING lineage
     fields before validation: :mutation/id (fresh uuid),
     :parent/genome-id (the loaded parent), :evidence/id (the frozen
     pack), and :hypothesis/id (the diagnosis's first hypothesis). A
@@ -117,7 +116,7 @@
     never depends on a promotion namespace (Global Constraint 15 keeps
     activation in M9). The candidate Genome BODY is the finalized
     bundle directory under :candidates-dir (content-addressed by its
-    :genome/id — Task 7.4 already made the finalize atomic and
+    :genome/id — component already made the finalize atomic and
     deterministic); the orchestrator stores no additional CAS copy in
     v0 (YAGNI, Global Constraint 24)."
   (:require [clojure.string :as str]
@@ -141,15 +140,15 @@
 ;; --- the Mutator contract (normative for this task) ---------------------------
 
 (defprotocol Mutator
-  "The Mutator contract (Task 7.8). An adapter implements exactly one
+  "The Mutator contract (component). An adapter implements exactly one
   method:
 
       (propose-mutations mutator context)
 
   `context` is the full, closed input the Mutator is allowed to see:
   the generation and its loaded parent Genome, the validated
-  Diagnosis, the Task 7.7 negative-history entries, and the budget
-  profile. It returns a FINITE vector of Mutation IR maps (Task 7.3)
+  Diagnosis, the component negative-history entries, and the budget
+  profile. It returns a FINITE vector of Mutation IR maps (component)
   to propose this cycle, or nil when nothing to propose. The result
   must be finite and data-only (Global Constraint 22); the
   orchestrator completes missing lineage fields (:mutation/id,
@@ -163,19 +162,19 @@
 ;; --- the v0 cap and the normative phase order ---------------------------------
 
 (def v0-max-candidates
-  "The hard v0 ceiling: at most three candidates per cycle (Task 7.8
+  "The hard v0 ceiling: at most three candidates per cycle (component
   Step 4). A request's :max-candidates is honored only below this."
   3)
 
 (def cycle-phases
-  "The normative phase order of one cycle (Task 7.8 Step 2), reported
+  "The normative phase order of one cycle (component Step 2), reported
   through the :phase-hook test seam in this exact order."
   [:freeze-evidence :diagnose :load-history :propose-mutation
    :validate-risk-budget :apply-patch :compile-candidate
    :persist-candidate])
 
 (def ^:private default-history-limit
-  "The recent-mutation-history window the cycle loads (Task 7.7
+  "The recent-mutation-history window the cycle loads (component
   default)."
   50)
 
@@ -183,7 +182,7 @@
 
 (def CycleRequestSchema
   "The propose-candidates! request contract (closed). :generation/id
-  names the current generation; :evidence-selector is the Task 7.1
+  names the current generation; :evidence-selector is the component
   selection quota map; :max-candidates is optional and v0-capped at
   three; :cutoff-event-id is an optional immutable evidence boundary
   (default: the newest event id of the generation's sessions)."
@@ -242,7 +241,7 @@
                    {:value (err/sanitize (:provider-catalog system))}))
   (when-not (satisfies? diagnose/Diagnostician (:diagnostician system))
     (system-error! :diagnostician-invalid
-                   ":diagnostician must implement the Task 7.2 Diagnostician protocol"
+                   ":diagnostician must implement the component Diagnostician protocol"
                    {:value (err/sanitize (:diagnostician system))}))
   (when-not (satisfies? Mutator (:mutator system))
     (system-error! :mutator-invalid
@@ -305,7 +304,7 @@
 
 (defn- generation-lineage
   "The generation lineage from the current generation back to the
-  root, derived by walking parent links (the shape Task 7.7's
+  root, derived by walking parent links (the shape component's
   recent-mutation-history expects). A missing current row or a
   dangling parent link fails loudly (:evolution/generation-not-found,
   :evolution/lineage-invalid)."
@@ -413,7 +412,7 @@
 
 (defn- attach-programs
   "Attach the program-descriptor registry to the candidate loaded
-  Genome before compilation (Task 2.3 choice (a)): the parent's own
+  Genome before compilation (component choice (a)): the parent's own
   :programs when present (non-empty), else the system's
   :programs-registry. compile-genome reads the registry from the
   loaded value, so the candidate must carry it explicitly."
@@ -425,7 +424,7 @@
 
 (defn- candidate-dir
   "The finalized bundle directory of a candidate genome under the
-  system's :candidates-dir (the same name rule as Task 7.4 finalize:
+  system's :candidates-dir (the same name rule as component finalize:
   the content address with ':' replaced so it is legal on every host)."
   [system genome-id]
   (.resolve (Path/of (str (:candidates-dir system)) (make-array String 0))
@@ -504,7 +503,7 @@
     (try
       (phase! system :validate-risk-budget)
       ;; schema + path + protected-path + mutable-class gates, then the
-      ;; hard budget gates (Task 7.5) — everything before any staging
+      ;; hard budget gates (component) — everything before any staging
       (mutation/validate-mutation mutation parent)
       (budget/check-budget mutation budget-profile)
       (emit-event! system (mutation-proposed-event mutation))
@@ -548,7 +547,7 @@
 ;; --- the public entry point -----------------------------------------------------
 
 (defn propose-candidates!
-  "Orchestrate one evolution proposal cycle (Task 7.8) and return the
+  "Orchestrate one evolution proposal cycle (component) and return the
   persisted Candidate records — a vector of at most three
   :evaluation-pending records in mutation order.
 

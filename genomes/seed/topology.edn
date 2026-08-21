@@ -1,4 +1,4 @@
-;; Seed Genome topology (Task 6.6).
+;; Seed Genome topology (component).
 ;;
 ;; Executable chain (the M2 fixture's :llm planner is replaced by the
 ;; :sci router as the ENTRY — the v0 runtime registry implements no
@@ -8,7 +8,7 @@
 ;;
 ;; The route program (programs/route.clj) is the seed's decision-maker:
 ;; for {:op :echo :text "abc"} it EMITS the typed :intent/tool-call for
-;; :fixture/echo, which the Task 6.3 scheduler dispatches through the
+;; :fixture/echo, which the component scheduler dispatches through the
 ;; kernel-owned broker — that is the session's ONE authorized tool call
 ;; and ONE provider result. The :tool node then exercises the :tool
 ;; handler path against :fixture/non-idempotent, a REGISTERED provider

@@ -3,8 +3,7 @@
 
   A :memory node only EMITS a typed intent — it never touches the
   store or the provider (Global Constraint 8: every external effect
-  must cross the kernel-owned Intent/Capability Broker, so the Task
-  6.3 scheduler dispatches the emitted intent). The handler builds a
+  must cross the kernel-owned Intent/Capability Broker, so the component scheduler dispatches the emitted intent). The handler builds a
   validated :intent/memory-read or :intent/memory-write from the node
   config and the runtime-state, with attribution from runtime-state and
   the input-event (:session/id, :phenotype/id, :node/id,

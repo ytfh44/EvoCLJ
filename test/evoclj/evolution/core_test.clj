@@ -1,5 +1,5 @@
 (ns evoclj.evolution.core-test
-  "Task 7.8 tests — orchestrate one evolution proposal cycle.
+  "component tests — orchestrate one evolution proposal cycle.
 
   propose-candidates! (evoclj.evolution.core) is the Milestone 7
   orchestrator: it runs the REAL pipeline (freeze evidence → diagnose →
@@ -7,7 +7,7 @@
   apply patch → compile candidate → persist Candidate) and returns the
   persisted Candidate records. The only adapters are the deterministic
   fakes sanctioned by the task (Step 1): a FakeDiagnostician
-  implementing the Task 7.2 Diagnostician protocol and a FakeMutator
+  implementing the component Diagnostician protocol and a FakeMutator
   implementing the Mutator protocol defined in evoclj.evolution.core.
 
   The four normative scenarios, in the task's numbered order:
@@ -107,7 +107,7 @@
     p))
 
 (defn- route-descriptor
-  "The seed route program descriptor (Task 2.3 choice (a): an in-memory
+  "The seed route program descriptor (component choice (a): an in-memory
   descriptor list riding on the loaded-genome value under :programs)."
   []
   {:program/id :program/route
@@ -124,7 +124,7 @@
          :programs [(route-descriptor)]))
 
 (defn- fixture-catalog
-  "The on-disk provider catalog fixture (Task 2.1 Resolution)."
+  "The on-disk provider catalog fixture (component Resolution)."
   []
   (edn/read-string (slurp (io/resource "fixtures/resolution/provider-catalog.edn"))))
 
@@ -149,7 +149,7 @@
 (defn- fake-diagnosis
   "A fixed, schema-valid Diagnosis for the frozen pack: it copies the
   pack's :evidence/id (provenance) and carries one bounded hypothesis,
-  so the orchestrator's evidence-id agreement check and the Task 7.2
+  so the orchestrator's evidence-id agreement check and the component
   persistence path both pass."
   [pack]
   (let [body {:evidence/id (:evidence/id pack)
@@ -308,7 +308,7 @@
   pinned to the generation, six append-only events (ids 1-6), and two
   episodes — one :budget-exhausted failure (trace 1-3) and one
   :completed success (trace 4-6). Failures and successes are both
-  evidence (Task 7.1)."
+  evidence (component)."
   [store]
   (let [db (:sqlite store)
         genome-id (:genome/id (seed-loaded-genome))

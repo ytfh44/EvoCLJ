@@ -23,7 +23,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
 
 ## Phase A — Foundation adoption (wire F1–F7 to their first consumers)
 
-### Task A1 — Redaction on the event write path (F7)
+### component — Redaction on the event write path (F7)
 
 - **Purpose**: `evoclj.store.event/append-event!` accepts optional redaction specs
   and applies `evoclj.security.redact/redact-event` to the event payload BEFORE
@@ -38,7 +38,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   to before; invalid specs throw `:security/redact-invalid`.
 - **Commit**: `feat(store): redact events on the write path`
 
-### Task A2 — Metric records during evaluation (F2)
+### component — Metric records during evaluation (F2)
 
 - **Purpose**: `evoclj.eval.core/evaluate-candidate!` records Metric records
   (see `evoclj.metrics.core`: `{:metric/id :metric/name :metric/scope
@@ -53,7 +53,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   unchanged.
 - **Commit**: `feat(eval): record evaluation phase metrics`
 
-### Task A3 — Parallel candidate batch evaluation (F4)
+### component — Parallel candidate batch evaluation (F4)
 
 - **Purpose**: batch evaluation of N candidates through `evoclj.eval.workers/run-batch!`
   with `side-task-runner`; same isolation semantics as `run-side!` (temp stores),
@@ -67,7 +67,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   (per-candidate status + eval refs).
 - **Commit**: `feat(eval): parallel candidate batch evaluation`
 
-### Task A4 — Validated config in CLI startup (F5)
+### component — Validated config in CLI startup (F5)
 
 - **Purpose**: `evoclj.cli.session/build-config` delegates to
   `evoclj.config/load-config` (validated merge over EDN/map, `resolve-profile`,
@@ -81,7 +81,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   overrides (cases/fixtures/mutator injection) still work — existing tests pass.
 - **Commit**: `feat(cli): wire validated config into session startup`
 
-### Task A5 — Behavior profiles into the diagnostician (F1)
+### component — Behavior profiles into the diagnostician (F1)
 
 - **Purpose**: the diagnostician's input context gains a compact BehaviorProfile
   summary (`evoclj.analytics.behavior/profile-events` + `fingerprint`) computed
@@ -95,7 +95,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   `sha256:` fingerprint; without evidence, key absent; existing diagnose tests pass.
 - **Commit**: `feat(evolution): feed behavior profiles to the diagnostician`
 
-### Task A6 — Judge verdicts as enrichments (F3)
+### component — Judge verdicts as enrichments (F3)
 
 - **Purpose**: per-case judge verdicts persist as enrichment records
   (`evoclj.store.enrichment/put-enrichment!`; entity-kind `:evaluation`,
@@ -108,13 +108,13 @@ leaf modules; Phase A gives each foundation its first real consumer.
   counter increments per verdict batch; evaluation succeeds even if store write fails.
 - **Commit**: `feat(eval): persist judge verdicts as enrichments`
 
-### Task A7 — Regression-detection trigger rule (F6, alert only)
+### component — Regression-detection trigger rule (F6, alert only)
 
 - **Purpose**: a data-driven rule (`evoclj.runtime.trigger`: `match-metric-rule`,
   `evaluate`, `register-action!`, `run-actions!`) that fires when a promoted
   child's paired utility drops below parent by a threshold within a window —
   action `:monitor/alert-regression` which ONLY appends an audit event; NO state
-  mutation (auto-rollback is Task C2).
+  mutation (auto-rollback is component).
 - **Files**: `src/evoclj/runtime/trigger.clj` (read-only), new
   `src/evoclj/runtime/regression.clj`, `test/evoclj/runtime/regression_test.clj`.
 - **Steps**: rule data (metric name, comparator, threshold, window); wire action
@@ -127,7 +127,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
 
 ## Roadmap backlog — Evolution depth (E1–E5)
 
-### Task E1 — Evidence/history retrieval tools for the mutator
+### component — Evidence/history retrieval tools for the mutator
 
 - **Purpose** (roadmap E1): expose `:evolution/evidence` and `:evolution/history`
   as broker tools so the LLM mutator retrieves context via the tool-calling loop
@@ -142,7 +142,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   subject denied with the standard deny codes; tools read-only (no mutation).
 - **Commit**: `feat(evolution): evidence/history broker tools for the mutator`
 
-### Task E2 — Hypothesis ranking (roadmap E2)
+### component — Hypothesis ranking (roadmap E2)
 
 - **Purpose**: diagnosis hypotheses carry `:confidence`; the kernel re-validates
   order (descending confidence) before adoption; ties broken deterministically;
@@ -153,7 +153,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   bad confidence rejected with typed error.
 - **Commit**: `feat(evolution): rank and re-validate diagnosis hypotheses`
 
-### Task E3 — Candidate diff report (roadmap E3)
+### component — Candidate diff report (roadmap E3)
 
 - **Purpose**: CLI shows file-level diff of parent vs candidate.
 - **Files**: `src/evoclj/cli/evolution.clj` (or `eval_inspect.clj`),
@@ -164,7 +164,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   unrelated files absent; empty diff for identical genomes.
 - **Commit**: `feat(cli): candidate diff report`
 
-### Task E4 — Mutation-budget adaptation (roadmap E4)
+### component — Mutation-budget adaptation (roadmap E4)
 
 - **Purpose**: budget profile adapts from rejection history (per mutation-class
   success rate via F2 aggregation): allowance shrinks after consecutive
@@ -176,7 +176,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   caps; unchanged history → unchanged profile.
 - **Commit**: `feat(evolution): adapt mutation budgets from rejection history`
 
-### Task E5 — Evidence-pack usage enrichment (roadmap E5)
+### component — Evidence-pack usage enrichment (roadmap E5)
 
 - **Purpose**: evidence-pack summaries include model usage/cost when present in
   the model-call channel (token counts, cost estimate).
@@ -192,7 +192,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
 
 ## Roadmap backlog — Eval, runtime, ops (V2, V5, R4, O4, S3)
 
-### Task V2 — Judge score aggregation
+### component — Judge score aggregation
 
 - **Purpose** (roadmap V2): per-case judge verdicts feed a utility summary
   (win/loss/equiv counts, per-category breakdown) joined into the paired outcome.
@@ -201,7 +201,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
 - **Acceptance**: verdict list → summary record; counts correct; categories stable.
 - **Commit**: `feat(eval): aggregate judge verdicts into utility summaries`
 
-### Task V5 — Judge configuration
+### component — Judge configuration
 
 - **Purpose** (roadmap V5): config exposes `:judge {:temperature :system-prompt
   :max-tokens}` with defaults; validated; passed into the judge's model call.
@@ -211,7 +211,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   rejected by `validate-config!`; fixture judge path unaffected.
 - **Commit**: `feat(eval): expose judge model configuration`
 
-### Task R4 — Scheduler concurrency semantics + stress test
+### component — Scheduler concurrency semantics + stress test
 
 - **Purpose** (roadmap R4): document single-session scheduler semantics (what is
   serialized, what is concurrent) and add a stress test proving no corruption.
@@ -222,7 +222,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
 - **Acceptance**: doc matches code; stress test green and deterministic.
 - **Commit**: `docs(runtime): scheduler concurrency semantics + stress test`
 
-### Task O4 — Full-cycle harness + performance baseline
+### component — Full-cycle harness + performance baseline
 
 - **Purpose** (roadmap O4): a harness that runs evolve → eval → promote on seed
   genomes with the configured model (fixture/mock fallback, no network needed),
@@ -235,7 +235,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   per-phase timings; baseline doc updated honestly.
 - **Commit**: `feat(ops): full-cycle timing harness + performance baseline`
 
-### Task S3 — Lease refinement denial tests
+### component — Lease refinement denial tests
 
 - **Purpose** (roadmap S3): per-model and per-tool lease denial cases.
 - **Files**: `test/evoclj/capability/lease_test.clj` (or broker_test), tests only.
@@ -248,7 +248,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
 
 ## Phase C — Trust deepening
 
-### Task C1 — F6 action registry authority audit + ACL
+### component — F6 action registry authority audit + ACL
 
 - **Purpose** (T2b): `register-action!` requires an action descriptor
   (`:action/id`, `:action/allowlist`, `:action/subject-scope`); `run-actions!`
@@ -259,7 +259,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   authorized action runs and is audited; descriptor missing → `:trigger/invalid`.
 - **Commit**: `feat(runtime): action registry ACL and audit trail`
 
-### Task C2a — Auto-rollback action
+### component — Auto-rollback action
 
 - **Purpose** (T1b): the `:promotion/auto-rollback` action invokes the promotion
   rollback API (CAS-safe) when the regression rule fires; guarded — rollback only
@@ -271,7 +271,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   first-data-point case does NOT roll back; rollback path via the public API.
 - **Commit**: `feat(runtime): auto-rollback on confirmed regression`
 
-### Task C2b — Failure-driven case evolution
+### component — Failure-driven case evolution
 
 - **Purpose** (T1b): a confirmed regression auto-creates a new evaluation case
   from the failing input into the hidden dataset (append-only, provenance-linked
@@ -282,7 +282,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   duplicate regression does not duplicate the case; dataset stays append-only.
 - **Commit**: `feat(runtime): failure-driven evaluation case evolution`
 
-### Task C3 — Seed trust anchors
+### component — Seed trust anchors
 
 - **Purpose** (T2c): a trust-anchor file (map of seed genome id → expected
   `sha256:`) ships in `resources/` (and is overridable via config); `load-genome`
@@ -297,7 +297,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
 
 ## Phase D — Operations
 
-### Task D1 — Demo profile with built-in mutator
+### component — Demo profile with built-in mutator
 
 - **Purpose** (T3a): a `:demo` config profile injects a built-in heuristic
   mutator (non-LLM: template/function-swap mutations over the seed genome) via the
@@ -311,7 +311,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   passes); quickstart steps reproducible.
 - **Commit**: `feat(cli): demo profile with built-in mutator`
 
-### Task D2 — Lineage CLI with candidate diffs + provenance (roadmap O5)
+### component — Lineage CLI with candidate diffs + provenance (roadmap O5)
 
 - **Purpose**: `lineage` shows per-generation: genome ids, file-level diff
   summary vs parent (stats + changed files), promotion reason, and evidence
@@ -326,7 +326,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
 
 ## Phase E — Research depth (commit-sized)
 
-### Task E-prop — Property-based core invariant suites
+### component — Property-based core invariant suites
 
 - **Purpose** (T4d): test.check suites over core invariants.
 - **Files**: `deps.edn` (`:test` extra-deps gains `org.clojure/test.check`),
@@ -340,7 +340,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   suite unaffected.
 - **Commit**: `test: add property-based core invariant suites`
 
-### Task E-cross — Dual-parent crossover (host opt-in)
+### component — Dual-parent crossover (host opt-in)
 
 - **Purpose** (T4a): a `crossover` mutation op producing a valid child genome
   from two parents via topology-aware recombination (split the topology at a node,
@@ -354,7 +354,7 @@ leaf modules; Phase A gives each foundation its first real consumer.
   parent combinations rejected with typed error; determinism for identical inputs.
 - **Commit**: `feat(evolution): dual-parent crossover mutation`
 
-### Task E-judge — Judge calibration harness
+### component — Judge calibration harness
 
 - **Purpose** (T4c): a calibration fixture of known-equivalent/known-different
   pairs + a harness that runs the judge (fixture judge in CI) and reports
@@ -375,4 +375,4 @@ leaf modules; Phase A gives each foundation its first real consumer.
   promotion policy as evolvable objects. Needs Phase B data and its own design.
 - **B1 real-model marathon timings**: full loop against a live LLM endpoint
   (LM Studio etc.) for realistic `performance-baseline.md` numbers. Blocked on
-  endpoint availability; the Task O4 harness is the vehicle for it.
+  endpoint availability; the component harness is the vehicle for it.

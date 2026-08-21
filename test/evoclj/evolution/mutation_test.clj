@@ -1,11 +1,11 @@
 (ns evoclj.evolution.mutation-test
-  "Task 7.3 tests for the Mutation IR and patch preconditions.
+  "component tests for the Mutation IR and patch preconditions.
 
   The Mutation is the evolution subsystem's declarative successor
   language: an immutable, closed-map IR that names its parent Genome,
   the evidence and hypothesis it answers, its risk class, a NON-EMPTY
   bounded op vector, and the expected effect it claims. This task is
-  DATA VALIDATION ONLY — application comes in Task 7.4. The three
+  DATA VALIDATION ONLY — application comes in component The three
   normative scenarios, in the task's numbered order:
 
   - Step 1: schema tests for ALL THIRTEEN op variants
@@ -500,7 +500,7 @@
         (delete-recursively! dir)))))
 
 ;; ============================================================================
-;; Task E-cross — dual-parent crossover (host opt-in)
+;; component — dual-parent crossover (host opt-in)
 ;;
 ;; The crossover mutation recombines TWO parent Genomes into one child
 ;; by topology-aware recombination: split parent A's topology at a

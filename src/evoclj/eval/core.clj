@@ -1,5 +1,5 @@
 (ns evoclj.eval.core
-  "Task 8.7 — end-to-end candidate evaluation orchestration.
+  "component — end-to-end candidate evaluation orchestration.
 
   evaluate-candidate! runs the NORMATIVE phase order for one candidate
   under one profile and returns an IMMUTABLE Evaluation record:
@@ -15,7 +15,7 @@
       ;;     :eligibility {:eligible? bool :reasons [<reason maps>]}
       ;;     :created-at <inst>}
 
-  PHASE ORDER (normative, Task 8.7 — a failed HARD gate records later
+  PHASE ORDER (normative, component — a failed HARD gate records later
   gates as :not-run, never implicit passes):
 
       G0 parse (evoclj.eval.gates/g0-parse — from scratch)
@@ -118,7 +118,7 @@
 
   The eligibility decision is compare/eligibility over that summary —
   lexicographic: hard first, then utility, then cost, then complexity
-  (Task 8.5; a hard failure short-circuits everything downstream).
+  (component; a hard failure short-circuits everything downstream).
 
   THE FINALIZATION TRANSACTION (documented; the plan's 'Evaluation
   finalization transaction'): all gate/case artifacts are already
@@ -127,7 +127,7 @@
   the SQL transaction opens). ONE SQL transaction then (1) inserts the
   eval_runs row (status 'finalized' — the evaluation is born
   finalized, never mutable), and (2) CAS-updates the candidate row
-  state 'evaluating' → 'eligible' (the Task 7.6 machine's
+  state 'evaluating' → 'eligible' (the component machine's
   :evaluation-pending → :evaluated edge, realized at the row boundary
   per the documented vocabulary mapping in evoclj.evolution.candidate
   — 'evaluating' ↔ :evaluation-pending, 'eligible' ↔ :evaluated).
@@ -149,13 +149,13 @@
     The :evaluation-pending → :evaluated edge is realized here by the
     SQL CAS inside the finalization transaction, with the same
     vocabulary mapping candidate.clj documents. The :invalid state
-    (also named for M8 there) has no Task 5.1 schema value; this task
+    (also named for M8 there) has no component schema value; this task
     resolves only the :evaluated leg — every completed evaluation
     (eligible or not) lands the candidate on :evaluated. Promotion
     (M9) decides :rejected/:canary/:promoted from the eligibility
     DATA.
-  - statistics/promotion-checks (Task 8.6 Step 5) are NOT wired into
-    eligibility: the Task 8.1 profile schema (closed) cannot carry
+  - statistics/promotion-checks (component Step 5) are NOT wired into
+    eligibility: the component profile schema (closed) cannot carry
     :min-pairs/:max-candidate-failure-rate without an edit to
     evoclj.eval.profile, which this task must not touch. The checks
     remain pure, available data; wiring is trivially additive in a
@@ -173,19 +173,19 @@
   the failure-injection hook's throw propagates (the transaction has
   already rolled back).
 
-  Task A2 (Foundation F2): evaluate-candidate! accepts an optional
+  component (Foundation F2): evaluate-candidate! accepts an optional
   metric collector (atom of metric records; nil = no-op) and records,
   scoped :candidate / the candidate id, per-phase wall-ms, per-gate
   :pass/:fail outcomes (numeric 1.0/0.0 — the closed MetricSchema
   requires numeric values), and the total evaluation wall-ms. See
   record-eval-metrics! for the exact vocabulary.
 
-  Task A3 (Foundation F4): evaluate-batch! evaluates a BATCH of
+  component (Foundation F4): evaluate-batch! evaluates a BATCH of
   :evaluation-pending candidates under ONE profile in PARALLEL through
   evoclj.eval.workers/run-batch! (bounded concurrency, default 4),
   reusing the exact single-candidate pipeline (run-pipeline) per task
   — the single-candidate path (evaluate-candidate!) is untouched, and
-  the batch records no per-candidate metric records (the Task A2
+  the batch records no per-candidate metric records (the component
   collector envelope is single-candidate only). Per-task timeout
   (:timeout-ms) and per-task error isolation come from the pool; every
   candidate's pipeline keeps run-side!'s fresh-temp-store isolation
@@ -225,7 +225,7 @@
 ;; --- the normative phase order -------------------------------------------------
 
 (def phase-ids
-  "The NORMATIVE Task 8.7 phase order."
+  "The NORMATIVE component phase order."
   [:G0-parse :G1-schema-abi :G2-static-policy
    :G3-deterministic-suites :G4-replay
    :G5-paired-selection :G6-cost-complexity])
@@ -341,7 +341,7 @@
 (defn- details-store
   "The details persistence fn for this run: the evaluator's
   :store-details! when given, else a CAS content-hash artifact ref
-  (the same convention the Task 8.2 gates default to, made durable in
+  (the same convention the component gates default to, made durable in
   the CAS)."
   [evaluator]
   (or (:store-details! evaluator)
@@ -351,7 +351,7 @@
 
 (defn- resolve-profile!
   "The profile registered under `profile-id`, validated against the
-  Task 8.1 contract; an unknown id fails closed."
+  component contract; an unknown id fails closed."
   [evaluator profile-id]
   (let [p (get (:profiles evaluator) profile-id)]
     (when-not p
@@ -410,7 +410,7 @@
 ;; --- the gate / phase contexts -----------------------------------------------------
 
 (defn- gate-context
-  "The Task 8.2 gate context for the candidate bundle: the candidate
+  "The component gate context for the candidate bundle: the candidate
   root, the provider catalog, the kernel ABI, the parent's
   capabilities (re-read from the parent manifest), the program
   registry, the G3 staging parent, and the details store."
@@ -424,7 +424,7 @@
    :store-details! (details-store evaluator)})
 
 (defn- replay-context
-  "The Task 8.3 replay evaluator context (a subset of the orchestrator
+  "The component replay evaluator context (a subset of the orchestrator
   evaluator)."
   [evaluator]
   (select-keys evaluator
@@ -432,7 +432,7 @@
                 :programs :equivalence/by-keyword]))
 
 (defn- paired-context
-  "The Task 8.4 paired-selection evaluator context (a subset of the
+  "The component paired-selection evaluator context (a subset of the
   orchestrator evaluator — the same :genome/roots and :programs, plus
   the optional :model/registry / :model/resource keys that switch on
   real model execution for :llm topologies)."
@@ -469,7 +469,7 @@
   result envelope. `status-fn` derives the gate :status from the
   report; a typed ExceptionInfo becomes a :fail gate with persisted
   error details and an unexpected throwable a :error gate — the same
-  policy as the Task 8.2 gates, so a throwing phase can never
+  policy as the component gates, so a throwing phase can never
   masquerade as a pass. Returns {:gate <result map> :report <fn's
   return or nil>}."
   [store-details gate-id status-fn f]
@@ -493,7 +493,7 @@
 ;; --- the phases ---------------------------------------------------------------------
 
 (defn- run-g4-phase!
-  "G4 historical replay (Task 8.3): re-walk the candidate against the
+  "G4 historical replay (component): re-walk the candidate against the
   evaluator's replay cases. The gate fails on :hard-failure? (any
   critical regression)."
   [evaluator candidate-root]
@@ -518,7 +518,7 @@
                                    :score/parent :score/candidate])))))
 
 (defn- raw-paired-observations
-  "The RAW paired observations in the Task 8.6 statistics shape —
+  "The RAW paired observations in the component statistics shape —
   the durable recomputable record the :paired-results-ref points at."
   [paired-result]
   (mapv (fn [p] {:parent (get-in p [:case/outcome :score/parent])
@@ -526,7 +526,7 @@
         (:pairs paired-result)))
 
 (defn- run-g5-phase!
-  "G5 paired hidden selection (Task 8.4): re-evaluate the parent NOW
+  "G5 paired hidden selection (component): re-evaluate the parent NOW
   against the candidate on the same selection cases, same derived
   seeds, same repetitions. The gate fails when a critical paired case
   was lost."
@@ -715,7 +715,7 @@
 
 (defn- eligibility
   "The eligibility decision: compare/eligibility over the summary —
-  lexicographic, hard first, with explicit reason data (Task 8.5)."
+  lexicographic, hard first, with explicit reason data (component)."
   [summary profile]
   (compare/eligibility summary profile))
 
@@ -832,10 +832,10 @@
                       (str candidate-id)])
        (mapv (fn [row] (validate-evaluation! (row->evaluation row))))))
 
-;; --- Task A2 — F2 metric records during evaluation ----------------------------------------
+;; --- component — F2 metric records during evaluation ----------------------------------------
 
 (defn- record-eval-metrics!
-  "Task A2 — F2 metric records during evaluation. `collector` is an
+  "component — F2 metric records during evaluation. `collector` is an
   injectable atom holding a vector of metric records
   (evoclj.metrics.core/collect-metric!); nil means no-op (zero
   overhead — the default for every existing caller). Records, scoped
@@ -877,8 +877,8 @@
 ;; --- the entry point ----------------------------------------------------------------------
 
 (defn- run-pipeline
-  "The Task 8.7 phase pipeline — the body of evaluate-candidate!,
-  kept private so the public entry point can wrap it with the Task A2
+  "The component phase pipeline — the body of evaluate-candidate!,
+  kept private so the public entry point can wrap it with the component
   metric envelope."
   [evaluator candidate-id profile-id]
   (validate-evaluator! evaluator)
@@ -927,7 +927,7 @@
                  parent-root candidate-root)))))))))
 
 (defn evaluate-candidate!
-  "Run the NORMATIVE Task 8.7 phase order for one candidate under one
+  "Run the NORMATIVE component phase order for one candidate under one
   profile and return the immutable Evaluation record.
 
   The candidate must be :evaluation-pending (persisted as 'evaluating'
@@ -945,7 +945,7 @@
   — this namespace only produces eligibility FACTS; it never changes
   CURRENT (no promotion/current dependency exists).
 
-  Task A2 — F2 metric records: the optional `collector` (an atom
+  component — F2 metric records: the optional `collector` (an atom
   holding a vector of metric records, evoclj.metrics.core) receives,
   scoped :candidate / the candidate id string, one :eval/<phase>-ms
   record per gate result (its :duration-ms; :not-run phases record 0),
@@ -963,15 +963,15 @@
                            (:gates evaluation) (elapsed t0))
      evaluation)))
 
-;; --- Task A3 — F4 parallel candidate batch evaluation -----------------------------
+;; --- component — F4 parallel candidate batch evaluation -----------------------------
 
 (defn- batch-task-runner
-  "The DEFAULT batch task-runner: one full Task 8.7 pipeline run for
+  "The DEFAULT batch task-runner: one full component pipeline run for
   the task's candidate under the batch's profile. Returns the
   immutable Evaluation record — the :task/result that becomes the
   per-candidate eval ref. This is the SAME pipeline evaluate-candidate!
   runs (run-pipeline), so a batch candidate and a single candidate
-  observe identical evaluation semantics; only the Task A2 metric
+  observe identical evaluation semantics; only the component metric
   envelope (single-candidate) is absent. Throws are caught per task by
   run-batch! and become :batch/failed entries — never another task's
   outcome (Global Constraint 22)."
@@ -1008,13 +1008,13 @@
     ids))
 
 (defn evaluate-batch!
-  "Task A3 — F4 parallel candidate batch evaluation. Evaluate a BATCH
+  "component — F4 parallel candidate batch evaluation. Evaluate a BATCH
   of candidates under ONE profile in parallel through
   evoclj.eval.workers/run-batch!, reusing the exact single-candidate
   pipeline per task (fresh temp stores per G5 side — run-side!'s
   isolation, Global Constraints 11/12/23). The single-candidate path
   (evaluate-candidate!) is untouched; the batch records no per-task
-  metric records (the Task A2 collector is single-candidate only).
+  metric records (the component collector is single-candidate only).
 
   `candidate-ids` is a sequential collection of distinct candidate ids,
   each required to be :evaluation-pending (persisted as 'evaluating')

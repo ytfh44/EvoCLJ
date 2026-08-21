@@ -1,5 +1,5 @@
 (ns evoclj.evolution.llm-diagnostician
-  "An LLM-driven Diagnostician adapter (Task 7.2 Step 3, feature 1).
+  "An LLM-driven Diagnostician adapter (component Step 3, feature 1).
 
   This adapter conforms to the Diagnostician protocol of
   evoclj.evolution.diagnose: it consumes EXACTLY ONE value — the frozen,

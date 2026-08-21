@@ -1,5 +1,5 @@
 (ns evoclj.store.event-schema
-  "Malli schemas for the public Event contract (Task 5.3; the `Event`
+  "Malli schemas for the public Event contract (component; the `Event`
   contract in docs/implementation-plan.md).
 
   `AppendRequestSchema` validates what callers may hand to

@@ -1,5 +1,5 @@
 (ns evoclj.eval.paired
-  "G5 isolated paired Selection runner (Task 8.4).
+  "G5 isolated paired Selection runner (component).
 
   run-paired-selection! evaluates the parent and the candidate as a
   PAIRED comparison on the same selection cases, the same derived
@@ -602,7 +602,7 @@
 ;; --- the entry point (G5) ----------------------------------------------------
 
 (defn run-paired-selection!
-  "Run the paired Selection comparison (G5, Task 8.4).
+  "Run the paired Selection comparison (G5, component).
 
   For every case in :case-set, for every repetition 1..:repetitions:
   derive ONE persisted seed (Step 1), alternate the execution order by
@@ -626,7 +626,7 @@
 
   USAGE (Feature C): every side result carries the ALWAYS-present
   :side/usage sample (see evoclj.eval.runner/side-usage) — the side's
-  aggregated Task 12.1 model counters + :provider-calls, attributed to
+  aggregated component model counters + :provider-calls, attributed to
   the side session. Each top-level side summary aggregates its
   :side/usage across all pairs (:usage), and each pair record carries a
   per-pair usage summary {:parent <usage> :candidate <usage> :total

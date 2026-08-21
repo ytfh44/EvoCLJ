@@ -1,5 +1,5 @@
 (ns evoclj.sci.limits
-  "Deterministic resource limits for evolvable SCI execution (Task 3.3).
+  "Deterministic resource limits for evolvable SCI execution (component).
 
   Execution limits are three non-negative integer budgets:
 
@@ -36,7 +36,7 @@
 
 (def ^:private limit-keys
   "The closed key set of an execution limits map; anything else is
-  rejected (closed maps at trust boundaries, Task 1.2 convention)."
+  rejected (closed maps at trust boundaries, component convention)."
   #{:wall-ms :max-steps :max-output-nodes})
 
 (defn validate-limits!

@@ -1,5 +1,5 @@
 (ns evoclj.runtime.scheduler-test
-  "Task 6.3 tests for the deterministic scheduler and step budget.
+  "component tests for the deterministic scheduler and step budget.
 
   run-session! executes the phenotype's compiled topology (the
   executor map's :phenotype :compiled :topology) against a session the
@@ -46,13 +46,13 @@
   phenotype, so a directly constructed CompiledGenome is a faithful
   test double.
 
-  The executor map shape (normative for Task 6.3, designed here):
+  The executor map shape (normative for component, designed here):
 
     {:phenotype <Phenotype from evoclj.runtime.phenotype/instantiate>
      :stores {:sqlite <migrated db> :cas <CAS root>}
      :dispatch <broker context from evoclj.intent.dispatch/make-broker-context>}
 
-  The test builds it directly; Integrant assembly is Task 10.1."
+  The test builds it directly; Integrant assembly is component"
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.java.jdbc :as jdbc]
@@ -137,7 +137,7 @@
 ;; --- fixture topologies and programs ---------------------------------------
 
 (defn- chain-topology
-  "The Task 6.3 fixture graph: :sci router → :tool → :emit."
+  "The component fixture graph: :sci router → :tool → :emit."
   [limits]
   {:graph/id :graph/scheduler-fixture
    :entry :node/router
@@ -441,7 +441,7 @@
 
 ;; ============================================================================
 ;; supplementary — a dispatch failure (unknown tool) is persisted as
-;; :intent/failed and the session continues (closes the Task 6.3 review
+;; :intent/failed and the session continues (closes the component review
 ;; gap: the non-denial dispatch-error branch was untested)
 ;; ============================================================================
 

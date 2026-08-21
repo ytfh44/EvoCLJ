@@ -1,5 +1,5 @@
 (ns evoclj.genome.types-test
-  "Tests for ID conventions and validated value helpers (Task 1.1).
+  "Tests for ID conventions and validated value helpers (component).
 
   Content-addressed IDs (genome, resolution, artifact) are canonical
   strings of the form \"sha256:<64 lowercase hex>\". Session and intent

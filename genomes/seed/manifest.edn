@@ -1,4 +1,4 @@
-;; Seed Genome manifest — EvoCLJ v1 (Task 6.6, Milestone 6 exit fixture).
+;; Seed Genome manifest — EvoCLJ v1 (component, Milestone 6 exit fixture).
 ;;
 ;; The v1 manifest is a CLOSED map validated by evoclj.genome.schema at
 ;; the trust boundary: the four declared modules below are the only

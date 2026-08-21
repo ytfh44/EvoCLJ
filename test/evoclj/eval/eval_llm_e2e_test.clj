@@ -284,7 +284,7 @@
 ;; (evaluate-candidate! end-to-end, :measure/cost absent)
 ;; ============================================================================
 
-;; Candidate-store plumbing for evaluate-candidate! (mirrors the Task 7.6
+;; Candidate-store plumbing for evaluate-candidate! (mirrors the component
 ;; candidate tests + evoclj.eval.core-test): a migrated temp db seeded with
 ;; one current parent generation row and a materialized :evaluation-pending
 ;; candidate, plus a temp CAS root.
@@ -404,7 +404,7 @@
    :tools #{}})
 
 (defn- cost-profile
-  "A Task 8.1 profile with the Task 8.5 promotion thresholds."
+  "A component profile with the component promotion thresholds."
   []
   {:eval/profile-id :test/cost
    :evolution-set {:source :evals/evolution}

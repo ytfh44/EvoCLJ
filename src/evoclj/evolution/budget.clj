@@ -1,5 +1,5 @@
 (ns evoclj.evolution.budget
-  "Mutation budgets and risk classes (Task 7.5).
+  "Mutation budgets and risk classes (component).
 
   Every mutation op belongs to exactly one of the plan's risk classes
   (R0-R4; the op language can express only R0-R3):
@@ -48,7 +48,7 @@
   length of its string anchor. A line-offset anchor has no computable
   preimage size from the op alone, so it contributes 0 deleted bytes.
 
-  Task E4 (roadmap E4) adds `adapt-budget`, which adapts a profile
+  component (roadmap E4) adds `adapt-budget`, which adapts a profile
   from rejection history (per mutation-class success rate): allowance
   shrinks after consecutive rejections, grows after successes, with
   floor/ceiling caps; deterministic and check-budget-compatible."
@@ -312,10 +312,10 @@
                              {:cost cost :failures failures})))))  
      mutation)))
 
-;; --- Task E4: budget adaptation from rejection history ------------------------
+;; --- component: budget adaptation from rejection history ------------------------
 
 (def adapt-defaults
-  "Task E4 adaptation knobs. The allowance multiplier of a risk class
+  "component adaptation knobs. The allowance multiplier of a risk class
   is clamped into [:floor :ceiling] — the caps that prevent both
   explosion and zeroing — and combines two deterministic signals from
   the class's own history:
@@ -338,7 +338,7 @@
 
 (defn- verdict-entries
   "The verdict-carrying (:accepted/:rejected) history entries of one
-  risk class in CHRONOLOGICAL order. `history` is the Task 7.7
+  risk class in CHRONOLOGICAL order. `history` is the component
   newest-first vector; a :pending entry carries no verdict, so it
   neither breaks nor extends a streak."
   [history risk]
@@ -358,7 +358,7 @@
                                 (reverse entries)))}))
 
 (defn- class-multiplier
-  "The Task E4 allowance multiplier of one risk class: the streak
+  "The component allowance multiplier of one risk class: the streak
   signal plus the success-rate pull, clamped into [:floor :ceiling].
   A class with no verdicts has no signal and keeps its base allowance
   (multiplier 1)."
@@ -388,10 +388,10 @@
         limit-map))
 
 (defn adapt-budget
-  "Task E4: adapt a budget profile from rejection history — pure and
+  "component: adapt a budget profile from rejection history — pure and
   deterministic.
 
-  `history` is a vector of Task 7.7 history entries, NEWEST FIRST (the
+  `history` is a vector of component history entries, NEWEST FIRST (the
   recent-mutation-history contract); each entry contributes its :risk
   class and its resolved verdict :state (:accepted / :rejected /
   :pending — pending carries no verdict). Every risk class present in
@@ -426,7 +426,7 @@
   ([history profile opts]
    (when-not (or (nil? history) (sequential? history))
      (throw (err/error :evolution/adapt-invalid
-                       "adapt-budget history must be a sequential collection of Task 7.7 entries"
+                       "adapt-budget history must be a sequential collection of component entries"
                        {:history (err/sanitize history)})))
    (reduce (fn [acc [risk limit-map]]
              (let [m (class-multiplier (verdict-entries (vec history) risk)

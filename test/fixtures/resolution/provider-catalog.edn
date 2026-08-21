@@ -1,4 +1,4 @@
-;; Provider catalog fixture for Resolution (Task 2.1).
+;; Provider catalog fixture for Resolution (component).
 ;;
 ;; Maps model aliases to concrete provider/provider-model/adapter-version
 ;; entries. The :fixture provider with "fixture-model-v1" is the

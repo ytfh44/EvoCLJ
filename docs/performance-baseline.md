@@ -1,6 +1,6 @@
 # EvoCLJ Performance Baseline
 
-Task 12.2 — benchmark fixtures and regression ceilings. This document is
+component — benchmark fixtures and regression ceilings. This document is
 written from the ACTUAL measurements of `test/evoclj/perf/runtime_benchmark_test.clj`
 (three consecutive runs on the recording host, 2026-06). It records the
 baseline environment, fixture sizes, the measured numbers, and the broad
@@ -66,7 +66,7 @@ Derived per-run figures for #3/#4/#8:
 
 Ceilings are deliberately 18–900× the recorded baseline — broad enough to
 only trip on pathological regressions, never on normal host variance. The
-two floors/ceilings named in Task 12.2 (`append-event > 50 events/s`,
+two floors/ceilings named in component (`append-event > 50 events/s`,
 `seed e2e < 60 s`, `genome load+hash < 10 s`) are used verbatim.
 
 | # | Assertion in the benchmark | Recorded | Ceiling |
@@ -83,7 +83,7 @@ two floors/ceilings named in Task 12.2 (`append-event > 50 events/s`,
 
 **Margin note on #5:** the recorded append-event throughput (~75 events/s,
 dominated by one fsync'd SQLite transaction per event on this host) sits
-1.5× above the 50 events/s floor. 50 events/s is the Task 12.2 normative
+1.5× above the 50 events/s floor. 50 events/s is the component normative
 example floor and is kept verbatim; the 1.5× margin means a busy host with
 a ~35% slowdown would approach the floor — if this ever flakes on CI, raise
 the floor's margin by asserting on the best-of-3 run or lowering it to
@@ -128,12 +128,12 @@ unacceptable in CI.
 | 8 | Real seed end-to-end: load → compile → instantiate → pinned session → `scheduler/run-session!` → broker dispatch → event store (no model network) | `evoclj.runtime.scheduler` + broker + store |
 | 9 | `eval-core/evaluate-candidate!` full G0–G6 phase order on a minimal valid evaluator | `evoclj.eval.core` |
 
-## 7. Full-cycle harness (Task O4)
+## 7. Full-cycle harness (component)
 
 `scripts/full-cycle.clj` (ns `evoclj.perf.full-cycle-harness`) runs the
 whole evolve → eval → promote loop through the same public subsystem
 APIs the `cycle` CLI command walks — `propose-candidates!`,
-`evaluate-candidate!` (with the Task A2 F2 collector), and the atomic
+`evaluate-candidate!` (with the component F2 collector), and the atomic
 `promote!` CAS — timing every phase with `System/nanoTime` and
 collecting F2 metric records (`evoclj.metrics.core`, closed
 MetricSchema) into one structured EDN report.
@@ -172,7 +172,7 @@ with a configured model endpoint runs the harness; the report's
 | PROMOTE | 98 ms | candidate CAS body + atomic `promote!` CAS moving CURRENT |
 | **CYCLE total** | **2 620 ms** | evolve + eval + promote, one headless run |
 
-Per-gate eval breakdown (the Task A2 `:eval/<phase>-ms` records):
+Per-gate eval breakdown (the component `:eval/<phase>-ms` records):
 
 | Gate | Wall time |
 | --- | --- |

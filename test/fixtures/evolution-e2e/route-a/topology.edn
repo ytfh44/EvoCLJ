@@ -1,7 +1,7 @@
-;; Task 9.7 fixture — G1 topology (test/fixtures/evolution-e2e/route-a).
+;; component fixture — G1 topology (test/fixtures/evolution-e2e/route-a).
 ;;
 ;; The route program (programs/route.clj) is the decision-maker: for
-;; every request it EMITS a typed intent, which the Task 6.3 scheduler
+;; every request it EMITS a typed intent, which the component scheduler
 ;; dispatches through the kernel-owned broker. The :emit node
 ;; completes the session with the accumulated outputs. Acyclic, so it
 ;; compiles under the step budget.

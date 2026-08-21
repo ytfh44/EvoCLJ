@@ -1,5 +1,5 @@
 (ns evoclj.promotion.monitor
-  "Task 9.4 — evaluate online canary guardrails and automatic stop.
+  "component — evaluate online canary guardrails and automatic stop.
 
   Two pure/deciding halves and one persistence half:
 
@@ -15,7 +15,7 @@
                      :aggregates {...}
                      :observations [...]}}
 
-     Guardrail classification (normative, Task 9.4):
+     Guardrail classification (normative, component):
 
          hard policy violation   → HARD (Step 1): ONE violation stops
                                    immediately. Hard violations are
@@ -41,10 +41,10 @@
      exceeded guardrail is the reason.
 
   2. `deactivate-canary` — the ROUTING EFFECT of a stop: the same
-     deployment state with :active? false (Task 9.3 reads :active?
+     deployment state with :active? false (component reads :active?
      only), so FUTURE sessions route to the current generation while
      already-created sessions stay pinned to the generation they were
-     created under (the pin lives in the store row — Task 9.3 Step 2,
+     created under (the pin lives in the store row — component Step 2,
      Global Constraint 2). Stopping NEVER rewrites an existing
      session's generation.
 
@@ -61,7 +61,7 @@
 
          :cancel — each running candidate session is transitioned
              :running → :cancelled via evoclj.store.session's
-             compare-and-set (Task 5.4); a session that is no longer
+             compare-and-set (component); a session that is no longer
              :running is recorded :skipped with its actual state, so a
              single stop cannot be aborted by a racing worker.
          :finish — running candidate sessions are left running.
@@ -307,11 +307,11 @@
 
 (defn deactivate-canary
   "The ROUTING EFFECT of a stop (Step 3): the same deployment state
-  with the canary deactivated (:active? false) — Task 9.3's routing
+  with the canary deactivated (:active? false) — component's routing
   reads :active? only, so every NEW session now routes to
   :current-generation while the canary generation is never selected.
   Already-created sessions are untouched: their pin lives in the store
-  row (Task 9.3 Step 2, Global Constraint 2). nil deployment state
+  row (component Step 2, Global Constraint 2). nil deployment state
   stays nil (no canary information to deactivate). Pure."
   [deployment-state]
   (when deployment-state
@@ -347,7 +347,7 @@
 (defn- cancel-session!
   "The :cancel profile action for ONE already-running candidate
   session: a compare-and-set :running → :cancelled through the store
-  (Task 5.4) carrying the stop reason as transition data. A session
+  (component) carrying the stop reason as transition data. A session
   that a racing worker already moved out of :running is recorded
   :skipped with its actual state (never an aborted stop); a missing
   session is recorded :missing."

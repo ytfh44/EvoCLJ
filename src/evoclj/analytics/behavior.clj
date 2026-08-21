@@ -1,5 +1,5 @@
 (ns evoclj.analytics.behavior
-  "Foundation F1 — the behavior-profile layer (Task F1).
+  "Foundation F1 — the behavior-profile layer (component).
 
   Turns an event-log sequence into a structured BehaviorProfile: a
   closed Malli-validated map summarizing how a session actually
@@ -111,7 +111,7 @@
 ;; --- behavioral profile schema ----------------------------------------------
 
 (def BehaviorProfileSchema
-  "The closed Malli contract for a BehaviorProfile (Task F1).
+  "The closed Malli contract for a BehaviorProfile (component).
 
   A behavior profile is fully EDN-safe: keywords, ints, strings,
   uuids, and small maps only. All key sets are closed; downstream

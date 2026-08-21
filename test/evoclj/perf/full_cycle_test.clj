@@ -1,5 +1,5 @@
 (ns evoclj.perf.full-cycle-test
-  "Task O4 — the full-cycle timing harness, exercised headlessly on the
+  "component — the full-cycle timing harness, exercised headlessly on the
   fixture-provider path (no model endpoint, no network needed).
 
   The harness lives in scripts/full-cycle.clj (namespace
@@ -8,7 +8,7 @@
   the SAME public subsystem APIs the `cycle` CLI command walks
   (evolution.core/propose-candidates!, eval.core/evaluate-candidate!,
   promotion.promote/promote!), timing every phase and collecting F2
-  metric records (evoclj.metrics.core) — including the Task A2 eval
+  metric records (evoclj.metrics.core) — including the component eval
   envelope passed into evaluate-candidate!.
 
   scripts/ is NOT on the test classpath (deps.edn :paths is src +
@@ -105,7 +105,7 @@
                     (and (= :eval/total-ms (:metric/name r))
                          (= :candidate (:metric/scope r))))
                   records)
-            "the Task A2 eval envelope recorded :eval/total-ms for the candidate")
+            "the component eval envelope recorded :eval/total-ms for the candidate")
         (is (some (fn [r]
                     (and (= :eval/total-ms (:metric/name r))
                          (pos? (:metric/value r))))

@@ -1,12 +1,11 @@
-# Scheduler Concurrency Semantics (Task R4)
+# Scheduler Concurrency Semantics (component)
 
 **Scope:** `evoclj.runtime.scheduler/run-session!`, the executor map it
 consumes, and the store components it writes through
 (`evoclj.store.event/append-event!`,
 `evoclj.store.session/transition-session!`, `evoclj.store.cas`).
 This document describes what is **serialized** and what is
-**concurrent** in the v0 single-session scheduler, and what the Task
-R4 stress test (`test/evoclj/runtime/scheduler_stress_test.clj`)
+**concurrent** in the v0 single-session scheduler, and what the component stress test (`test/evoclj/runtime/scheduler_stress_test.clj`)
 proves about it. The doc is the contract: it matches the code, and
 the stress test verifies the claims below under real concurrency.
 
@@ -18,7 +17,7 @@ topology the executor carries. Within one call:
 - node visits are strictly sequential — the walk starts at the
   topology's `:entry` and follows `:next` edges one node at a time;
 - each step's events are **fully persisted before the scheduler
-  advances** to the next node (Task 6.3 Step 3) — `:node/started`,
+  advances** to the next node (component Step 3) — `:node/started`,
   `:node/completed`, and every intent-effect event for that node are
   appended to the store first;
 - the session's causal log is a single **linear chain**: every event's
@@ -83,7 +82,7 @@ For N sessions × M events run concurrently:
    per-session event count and the global total are exact, and the
    shared provider executes exactly once per requested tool call.
 
-## 5. The Task R4 stress test
+## 5. The component stress test
 
 `test/evoclj/runtime/scheduler_stress_test.clj` runs N sessions (8 by
 default) concurrently behind a `CountDownLatch` barrier over **one**
@@ -111,4 +110,4 @@ fingerprints (determinism).
   is already running or terminal is rejected with
   `:scheduler/session-invalid`.
 - Recovery of a session interrupted mid-run is the store recovery
-  layer's job (Task 5.5), not the scheduler's.
+  layer's job (component), not the scheduler's.

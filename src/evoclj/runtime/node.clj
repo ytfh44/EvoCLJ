@@ -1,5 +1,5 @@
 (ns evoclj.runtime.node
-  "Node handler protocol and pure transitions (Task 6.2).
+  "Node handler protocol and pure transitions (component).
 
   A node handler computes ONE pure transition for one node of a
   compiled Genome graph:
@@ -13,7 +13,7 @@
   The transition is pure DATA: handlers NEVER call providers or the
   capability broker (Global Constraint 8 — every external effect must
   cross the kernel-owned Intent/Capability Broker, so a handler only
-  EMITS a validated Intent; the Task 6.3 scheduler dispatches it), and
+  EMITS a validated Intent; the component scheduler dispatches it), and
   only validated, fully serializable Clojure data crosses this
   boundary (Global Constraint 22). Attribution is a parameter, never
   guessed: the intents a handler constructs carry :session/id,
@@ -37,15 +37,15 @@
       and preserve the error artifact.
 
   One shared Malli schema (TransitionSchema) validates EVERY handler
-  result (Task 6.2 Step 3): every handler ends by passing its result
+  result (component Step 3): every handler ends by passing its result
   through validate-transition!, which enforces the schema and requires
   every :intents entry to be a FULLY validated Intent
   (evoclj.intent.schema/IntentSchema), so no un-validated intent
-  request can cross this boundary. The scheduler (Task 6.3) should
+  request can cross this boundary. The scheduler (component) should
   validate again as defense in depth.
 
   RUNTIME-STATE CONTRACT (the per-session map the scheduler injects;
-  designed here, normative for Task 6.3):
+  designed here, normative for component):
 
     {:session/id #uuid \"...\"          ; REQUIRED attribution
      :phenotype/id \"sha256:<64 hex>\"  ; REQUIRED attribution
@@ -63,7 +63,7 @@
      :limits {...}                     ; OPTIONAL SCI limits for :sci
                                        ;   invocations
      :loop-state {node-id n}           ; OPTIONAL per-session loop
-                                       ;   counters (Task 6.4): a map
+                                       ;   counters (component): a map
                                        ;   of :loop node id -> iteration
                                        ;   count, threaded by the
                                        ;   scheduler in its visit loop;
@@ -152,7 +152,7 @@
 
 (def TransitionSchema
   "The ONE shared transition schema validating EVERY handler result
-  (Task 6.2 Step 3): a :multi dispatching on :transition/status.
+  (component Step 3): a :multi dispatching on :transition/status.
 
   - :continue — :next is a vector of successor node ids (possibly
     empty when the node declares none), :outputs the values this step
@@ -197,7 +197,7 @@
   explanation under :explanation.
 
   Every handler ends with this call, so a handler bug fails at the
-  handler; the Task 6.3 scheduler should validate again as defense in
+  handler; the component scheduler should validate again as defense in
   depth."
   [x]
   (when-not (boundary/edn-safe? x)
@@ -354,7 +354,7 @@
   (a 0-ary fn returning a NodeHandler). :emit, :sci, :tool, :loop,
   :llm, :memory/read, and :memory/write are implemented; the only
   remaining v0 type (:route) throws :node/not-implemented-yet from
-  handler-for until its task lands (:loop landed in Task 6.4, :llm in
+  handler-for until its task lands (:loop landed in component, :llm in
   post-v0 extension 1, :memory/* in feature R1)."
   {:emit emit/emit-handler
    :sci sci/sci-handler

@@ -1,5 +1,5 @@
 (ns evoclj.compiler.resolution
-  "Define Resolution and provider alias resolution (Task 2.1).
+  "Define Resolution and provider alias resolution (component).
 
   resolve-models turns a Genome's models.edn config plus a provider
   catalog into a pure data Resolution:

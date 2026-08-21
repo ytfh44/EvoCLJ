@@ -1,5 +1,5 @@
 (ns evoclj.eval.runner
-  "The G5 per-side scheduler harness (Task 8.4).
+  "The G5 per-side scheduler harness (component).
 
   run-side! evaluates ONE side of ONE pair through the FULL scheduler
   stack — evoclj.runtime.scheduler/run-session! with FRESH temp stores
@@ -29,7 +29,7 @@
   side's genome root). Scheduler/compiler/phenotype/store errors
   propagate as their own typed errors.
 
-  Task A3 (Foundation F4): candidate-batch-tasks builds the run-batch!
+  component (Foundation F4): candidate-batch-tasks builds the run-batch!
   task maps for a batch of candidate ids — the eval layer's task
   contract for the worker pool (evoclj.eval.workers), consumed by
   evoclj.eval.core/evaluate-batch!. The batch reuses this harness's
@@ -41,7 +41,7 @@
   REAL MODEL EXECUTION (post-v0 extension 1): the G5 evaluator is
   OPTIONALLY augmented to run Genomes whose topology contains :llm
   nodes through real model providers, with both new keys reserved by
-  the Task 8.7 contract:
+  the component contract:
 
     :model/registry  — the kernel-owned model registry atom (the
       result of evoclj.provider.model-registry/build-model-registry);
@@ -233,14 +233,14 @@
                           :metadata {}})
     sid))
 
-;; --- side usage (Task 12.1 counters, Feature C) ------------------------------
+;; --- side usage (component counters, Feature C) ------------------------------
 
 (defn- usage-from-output
   "Convert ONE side output value that carries model usage into a
   runtime.usage-shaped sample, or nil when it carries none. Each such
   output value is the provider result value of a model dispatch (e.g.
   {:model/output {...} :usage {:model-input-tokens 10
-  :model-output-tokens 6} :model-cost-units 0.16}) — the Task 12.1
+  :model-output-tokens 6} :model-cost-units 0.16}) — the component
   model counters appear either nested under :usage (:model-input-tokens
   / :model-output-tokens) or at the value's own top level
   (:model-cost-units / :provider-reported-cost, both runtime.usage
@@ -327,7 +327,7 @@
        :side/status :completed | :failed | :budget-exhausted
        :side/output-ref <sha256 | nil>
        :side/outputs <vector | nil>  ; read back from the temp CAS
-       :side/usage <runtime.usage sample>  ; ALWAYS present: the Task 12.1
+       :side/usage <runtime.usage sample>  ; ALWAYS present: the component
        ;   model counters aggregated from the side outputs plus
        ;   :provider-calls (the usage atom's :cap/id -> count total),
        ;   attributed to the fresh session (see side-usage). A run with
@@ -394,11 +394,10 @@
       (finally
         (dispose-stores! stores))))))
 
-;; --- Task A3 — the batch task contract (Foundation F4) --------------------------
+;; --- component — the batch task contract (Foundation F4) --------------------------
 
 (defn candidate-batch-tasks
-  "Build the run-batch! task maps for a batch of candidate ids (Task
-  A3 — Foundation F4): one {:task/id <candidate-id> :candidate/id
+  "Build the run-batch! task maps for a batch of candidate ids (component — Foundation F4): one {:task/id <candidate-id> :candidate/id
   <candidate-id>} per id. :task/id is the stable per-candidate
   identity every batch entry carries (:task/index is force-set by
   run-batch! to the original position); :candidate/id is the payload

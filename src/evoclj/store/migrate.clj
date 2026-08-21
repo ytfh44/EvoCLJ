@@ -1,5 +1,5 @@
 (ns evoclj.store.migrate
-  "SQLite migration runner (Task 5.1).
+  "SQLite migration runner (component).
 
   `migrate!` brings a database up to `latest-version` by applying every
   SQL file under resources/migrations (lexicographic order) inside a

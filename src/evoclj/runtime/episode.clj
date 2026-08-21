@@ -1,8 +1,8 @@
 (ns evoclj.runtime.episode
-  "Task 6.5 — materialize Episode records from completed sessions.
+  "component — materialize Episode records from completed sessions.
 
   materialize-episode! turns a TERMINAL session into an immutable
-  Episode record: one SQLite row in the Task 5.1 `episodes` table that
+  Episode record: one SQLite row in the component `episodes` table that
   REFERENCES the session's causal trace and its CAS artifacts instead
   of copying any payload (Global Constraint 21 — the episode row
   stores task_ref, the first/last event ids, and small outcome/usage
@@ -20,7 +20,7 @@
        :outcome map?
        :usage map?}
 
-  WHERE THE TASK PAYLOAD LIVES: run-session! (Task 6.3) persists the
+  WHERE THE TASK PAYLOAD LIVES: run-session! (component) persists the
   task input as a CAS artifact on the :session/started event's
   :payload-ref. materialize-episode! READS that ref as the episode's
   :task-ref — the scheduler is the only writer of the task artifact;
@@ -45,7 +45,7 @@
   IDEMPOTENT: materializing the same session twice returns the same
   :episode/id and never duplicates the row.
 
-  `store` is the executor's :stores map, exactly as the Task 6.3
+  `store` is the executor's :stores map, exactly as the component
   scheduler defines it: {:sqlite <migrated db> :cas <CAS root>}. Both
   handles arrive open; this namespace opens and closes nothing.
 
@@ -104,7 +104,7 @@
 
 (defn- validate-store!
   "Validate the store trust boundary: the executor :stores map
-  {:sqlite <db> :cas <CAS root>} exactly as the Task 6.3 scheduler
+  {:sqlite <db> :cas <CAS root>} exactly as the component scheduler
   defines it."
   [store]
   (when-not (map? store)
@@ -158,14 +158,13 @@
 
 (defn materialize-episode!
   "Materialize the immutable Episode record for a TERMINAL session
-  (Task 6.5) and return the Episode contract map.
+  (component) and return the Episode contract map.
 
   Reads the session's PINNED generation/genome/resolution from the
   store's session row (never assumes CURRENT — Global Constraint 2),
   bounds the trace by the session's root :session/created event and
   its terminal event, and takes the episode's :task-ref from the
-  :session/started event's :payload-ref — the CAS artifact the Task
-  6.3 scheduler already persisted for the task input. The episode row
+  :session/started event's :payload-ref — the CAS artifact the component scheduler already persisted for the task input. The episode row
   stores ONLY references (task_ref, first/last event ids, small
   outcome/usage EDN); no payload body is ever copied into it (Global
   Constraint 21). The task artifact is verified to resolve in the CAS

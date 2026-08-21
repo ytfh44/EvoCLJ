@@ -1,4 +1,4 @@
-# Audit dataset — Task 9.7 fixture
+# Audit dataset — component fixture
 
 The Audit dataset root for the end-to-end evolutionary promotion
 test. The audit set is OPERATOR-only and absent from ordinary

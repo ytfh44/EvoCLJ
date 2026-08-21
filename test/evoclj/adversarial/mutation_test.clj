@@ -1,5 +1,5 @@
 (ns evoclj.adversarial.mutation-test
-  "Task 11.5 — Mutation determinism and sandbox escape suite (adversarial
+  "component — Mutation determinism and sandbox escape suite (adversarial
   release gate).
 
   This suite ATTACKS the mutation pipeline's own claims. Every malformed
@@ -24,7 +24,7 @@
     9. SCI huge/infinite lazy output    -> :edn/size-exceeded, contained
 
   DEVIATION (reported per Repo Conventions rule 5 — the plan's case list
-  is normative, the implemented Task 7.4 contract is the higher-priority
+  is normative, the implemented component contract is the higher-priority
   Global Constraint 6 determinism requirement, and the implementation
   itself is the documented contract of evoclj.genome.patch-clj): the
   plan expects a multi-match rewrite-clj selector to be REJECTED when
@@ -80,7 +80,7 @@
 (def ^:private skills-edn-source "{:workflow {:before-edit []}}\n")
 (def ^:private notes-source "alpha\nbeta\ngamma\n")
 (def ^:private route-source
-  "(ns agent.route\n  \"Mutated route program fixture (Task 11.5).\")\n\n;; Keep me! This comment must survive form replacement.\n(defn run\n  \"Route one task.\"\n  [x]\n  x)\n\n(defn other\n  \"Unrelated helper.\"\n  []\n  2)\n")
+  "(ns agent.route\n  \"Mutated route program fixture (component).\")\n\n;; Keep me! This comment must survive form replacement.\n(defn run\n  \"Route one task.\"\n  [x]\n  x)\n\n(defn other\n  \"Unrelated helper.\"\n  []\n  2)\n")
 (def ^:private multi-source
   "(ns fixture.multi)\n(defn a [] (run 1))\n(defn b [] (run 2))\n")
 
@@ -324,7 +324,7 @@
         (is (= [] (dir-entries output-dir)))))))
 
 (deftest case-6-rewrite-clj-selector-matching-multiple-forms-is-bounded-and-deterministic
-  ;; DEVIATION from the plan's case list: the shipped Task 7.4 selector
+  ;; DEVIATION from the plan's case list: the shipped component selector
   ;; contract is FIRST-MATCH-WINS (evoclj.genome.patch-clj), NOT
   ;; reject-on-multi-match. This case verifies the implemented guarantees
   ;; that keep the multi-match scenario safe: the edit touches exactly ONE

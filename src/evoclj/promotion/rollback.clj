@@ -1,10 +1,10 @@
 (ns evoclj.promotion.rollback
-  "Task 9.5 — explicit rollback semantics.
+  "component — explicit rollback semantics.
 
   rollback! is SELECTION-ONLY (Global Constraint 18): it changes ONLY
   which generation is chosen for FUTURE sessions and MUST NOT claim to
   reverse already-committed external effects. It moves the CURRENT
-  pointer back through the Task 9.2 CAS machinery
+  pointer back through the component CAS machinery
   (evoclj.promotion.current/cas-current! — the ONLY code path that
   changes CURRENT, Global Constraint 15), marks the rolled-back
   generation :rolled-back, reactivates the target :active, and appends
@@ -16,7 +16,7 @@
   compensating external action is a SEPARATELY authorized operator/
   agent task, never this code.
 
-  INTERFACE (normative, Task 9.5):
+  INTERFACE (normative, component):
 
       (rollback! promotion-system
         {:from-generation G43
@@ -26,7 +26,7 @@
       ;; or {:status :stale :current G43a :expected G43}
       ;;    (from-generation is no longer CURRENT — nothing changed)
 
-  promotion-system is the SAME contract Task 9.2's promote! accepts:
+  promotion-system is the SAME contract component's promote! accepts:
   {:store {:sqlite <db> :cas <CAS root or config>}
    :resolution/id <str>       ; part of the shared contract; rollback
                               ; does not consume it (no generation is
@@ -39,7 +39,7 @@
                               ; immediately before the CAS pointer
                               ; move; a throw rolls back every write
 
-  THE ROLLBACK TRANSACTION (normative order, Task 9.5):
+  THE ROLLBACK TRANSACTION (normative order, component):
 
       read CURRENT
       compare CURRENT == from-generation   (else return :stale — no write)
@@ -64,9 +64,9 @@
   overwritten.
 
   STATE MACHINE DEVIATION (documented, per Repo Convention 5): the
-  Task 9.1 closed table in evoclj.promotion.state marks :superseded
+  component closed table in evoclj.promotion.state marks :superseded
   terminal (:superseded → #{}) and reserves :active → :rolled-back
-  for the rollback direction. Task 9.5's rollback semantic requires
+  for the rollback direction. component's rollback semantic requires
   the inverse reactivation edge :superseded → :active (\"G42 →
   :active\") — the operator re-activation exception. It is applied at
   the ROW boundary here (state 'retired' → 'active') and nowhere
@@ -80,7 +80,7 @@
   SELECTION-ONLY, NO PROMOTION ROW: the rollback is not a candidate
   decision (the request carries no candidate/evaluation id, and the
   promotions.candidate_id/evaluation_id columns are NOT NULL with
-  foreign keys), so no promotions row is written. The Task 5.1
+  foreign keys), so no promotions row is written. The component
   promotions decision value 'rolled-back' stays RESERVED for host-
   level rollback bookkeeping, exactly as promote! documents for
   'stale'. The rollback is carried by the generation states, the
@@ -138,7 +138,7 @@
    [:reason keyword?]])
 
 (def RollbackSystemSchema
-  "The promotion-system contract (the SAME closed schema Task 9.2's
+  "The promotion-system contract (the SAME closed schema component's
   promote! validates — one system object works for both entry
   points). :cas is required because the rollback target's Genome must
   pass the Step 3 integrity check; :resolution/id is part of the
@@ -297,7 +297,7 @@
 ;; --- the state changes ---------------------------------------------------------
 
 (defn- mark-rolled-back!
-  "The Task 9.1 machine edge :active → :rolled-back at the row
+  "The component machine edge :active → :rolled-back at the row
   boundary, CAS-guarded: only the CURRENT, :active from-generation
   may be marked rolled back (the pointer itself is moved afterwards by
   current/cas-current!)."
@@ -312,9 +312,9 @@
                         {:generation/id from})))))
 
 (defn- reactivate-generation!
-  "The Task 9.5 reactivation edge :superseded → :active at the row
-  boundary ('retired' → 'active' in the Task 5.1 vocabulary —
-  documented deviation from the Task 9.1 closed table; see the
+  "The component reactivation edge :superseded → :active at the row
+  boundary ('retired' → 'active' in the component vocabulary —
+  documented deviation from the component closed table; see the
   namespace docstring). The current=1 flag is NOT touched here: the
   CURRENT pointer is moved exclusively by current/cas-current!."
   [conn to]
@@ -362,7 +362,7 @@
 ;; --- the public entry point ------------------------------------------------------
 
 (defn rollback!
-  "Perform the explicit selection-only rollback (Task 9.5). See the
+  "Perform the explicit selection-only rollback (component). See the
   namespace docstring for the normative transaction order, the
   promotion-system contract, the outcome contract, and the typed
   error vocabulary.

@@ -1,8 +1,8 @@
 (ns evoclj.capability.policy-property-test
   "Property-based invariants of the pure authorization decision
-  (Task E-prop).
+  (component).
 
-  A test.check layer over evoclj.capability.policy/decide (Task 4.4).
+  A test.check layer over evoclj.capability.policy/decide (component).
   decide is a pure, deterministic function of plain data: leases are
   considered in a deterministic total order (sorted by :cap/id), the
   first lease that passes every check allows, and when nothing allows

@@ -1,5 +1,5 @@
 (ns evoclj.eval.cost-guard
-  "Pure cost hard-stop guard for the evolution loop (Task E2).
+  "Pure cost hard-stop guard for the evolution loop (component).
 
    The guard answers a single question: has the evolution loop spent
    past its budget? It is a PURE function — no IO, no state, no side
@@ -10,7 +10,7 @@
   (:require [evoclj.kernel.error :as err]))
 
 (defn should-stop?
-  "Pure cost hard-stop check (Task E2).
+  "Pure cost hard-stop check (component).
 
    Input:
      - `cumulative-cost` — the accumulated cost so far (number).

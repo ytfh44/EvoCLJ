@@ -1,5 +1,5 @@
 (ns evoclj.http.api-test
-  "Task S3-3 — HTTP API shell route smoke tests.
+  "component — HTTP API shell route smoke tests.
 
   Every test drives the Ring handler through `ring.mock.request` with
   no live server."

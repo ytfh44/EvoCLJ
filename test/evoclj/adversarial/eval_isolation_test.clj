@@ -1,5 +1,5 @@
 (ns evoclj.adversarial.eval-isolation-test
-  "Task 11.2 — Evaluation leakage and tampering suite (adversarial
+  "component — Evaluation leakage and tampering suite (adversarial
   release gate).
 
   This suite attacks the evaluation-selection boundary at the
@@ -169,12 +169,12 @@
   (load/load-genome "genomes/seed"))
 
 (defn- fixture-catalog
-  "The on-disk provider catalog fixture (Task 2.1 Resolution)."
+  "The on-disk provider catalog fixture (component Resolution)."
   []
   (edn/read-string (slurp (io/resource "fixtures/resolution/provider-catalog.edn"))))
 
 (defn- route-descriptor
-  "The route program descriptor (Task 2.3 choice (a))."
+  "The route program descriptor (component choice (a))."
   []
   {:program/id :program/route
    :file "programs/route.clj"
@@ -384,7 +384,7 @@
     (str dir)))
 
 (defn- replay-episode
-  "A stored-Episode-shaped map (Task 6.5) for replay case construction."
+  "A stored-Episode-shaped map (component) for replay case construction."
   []
   {:episode/id (random-uuid)
    :session/id (random-uuid)

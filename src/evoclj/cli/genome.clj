@@ -1,5 +1,5 @@
 (ns evoclj.cli.genome
-  "The genome-facing CLI commands (Task 10.2): `genome validate`,
+  "The genome-facing CLI commands (component): `genome validate`,
   `genome inspect`, and `genome diff`.
 
   All three are READ-ONLY and build no host system: `validate` loads

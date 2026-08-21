@@ -1,5 +1,5 @@
 (ns evoclj.promotion.lineage
-  "Task 9.6 — reconstruct the complete evolutionary history of a
+  "component — reconstruct the complete evolutionary history of a
   generation from the store tables (generations + candidates +
   mutations + eval_runs + promotions), with strict-mode integrity
   verification over every referenced artifact while reconstructing.
@@ -25,7 +25,7 @@
   available by calling (lineage store parent-id).
 
   :children mixes two kinds of edges, so a lineage reports the FULL
-  history — rejected branches, not only winners (Task 9.6 Step 2):
+  history — rejected branches, not only winners (component Step 2):
 
   * a promoted generation edge (generations.parent_id), whose node
     carries the generation record and the promotion record whose
@@ -37,18 +37,17 @@
     rejected branch can never have children. Its promotion row names
     the parent generation as the :to-generation (the pointer did not
     move; the parent satisfies the promotions FK and records the
-    rejection — host-level rejection bookkeeping, reserved by Task
-    5.1's schema comment).
+    rejection — host-level rejection bookkeeping, reserved by component's schema comment).
 
   Every edge carries the mutation/evaluation/promotion evidence needed
-  to explain it (Task 9.6 Step 3): :mutation and :evidence come from
+  to explain it (component Step 3): :mutation and :evidence come from
   the promotion's candidate row, :evaluation from the promotion's
   finalized eval_runs row (Invariant 5), and :promotion is the
   decision record itself. A generation created by promotion therefore
   always has all five evidence fields; only a seed generation (no
   promotion) has them nil.
 
-  INTEGRITY VERIFICATION (Task 9.6 Step 4): while reconstructing,
+  INTEGRITY VERIFICATION (component Step 4): while reconstructing,
   every referenced CAS artifact is checked for existence and content
   integrity — the technique of evoclj.store.recovery (existence via
   cas/exists?, then a VERIFYING read that re-hashes the body and
@@ -67,7 +66,7 @@
   storage root to verify against, so integrity verification is skipped
   and reconstruction is purely the store rows.
 
-  ROLLBACK NOTE: a rollback (Task 9.5) is selection-only (Global
+  ROLLBACK NOTE: a rollback (component) is selection-only (Global
   Constraint 18) and writes no promotions row; it is visible in the
   lineage through the generation states (:rolled-back on the displaced
   generation, :active again on the reactivated target) and the CURRENT
@@ -88,7 +87,7 @@
 ;; --- row → record helpers ----------------------------------------------------
 
 (def ^:private row-state->kw
-  "The Task 5.1 row vocabulary → Task 9.1 machine states (the mapping
+  "The component row vocabulary → component machine states (the mapping
   evoclj.promotion.promote documents): 'active'→:active,
   'retired'→:superseded, 'rolled-back'→:rolled-back."
   {"active" :active "retired" :superseded "rolled-back" :rolled-back})
@@ -149,7 +148,7 @@
    :created-at (row-ts (:created_at row))})
 
 (defn- promotion-record
-  "A promotions row as the public Promotion record (the Task 9.2
+  "A promotions row as the public Promotion record (the component
   contract in evoclj.promotion.schema)."
   [row]
   {:promotion/id (row-uuid (:id row))
@@ -191,7 +190,7 @@
   (cas/->cas (if (map? cas-config) (:root cas-config) cas-config)
              {:verify true}))
 
-;; --- integrity verification (Task 9.6 Step 4) ---------------------------------
+;; --- integrity verification (component Step 4) ---------------------------------
 
 (defn- artifact-finding
   "Existence + content integrity check for ONE referenced artifact,
@@ -298,7 +297,7 @@
 (defn- rejected-branches
   "The lineage nodes for every rejected candidate branch of `gen-id`:
   promotions rows with from_generation_id = `gen-id` and decision
-  'rejected' (Task 9.6 Step 2). Each branch's candidate never became a
+  'rejected' (component Step 2). Each branch's candidate never became a
   generation, so :generation is nil; the node carries the
   mutation/evidence/evaluation/promotion records that explain the
   rejection, and :parent is the parent generation's record. A rejected
@@ -333,7 +332,7 @@
   recursively: :parent is the parent generation's record, :children
   are the promoted generations and the rejected candidate branches.
   Every referenced artifact is verified (strict throws, lenient
-  annotates) — Task 9.6 Steps 2-4."
+  annotates) — component Steps 2-4."
   [db v-cas gen-id strict?]
   (let [grow (first (query db "SELECT * FROM generations WHERE id = ?" gen-id))]
     (when-not grow
@@ -366,7 +365,7 @@
 
 (defn lineage
   "Reconstruct the complete evolutionary history of `generation-id`
-  (Task 9.6). See the namespace docstring for the node shape, the
+  (component). See the namespace docstring for the node shape, the
   store argument, the integrity contract, and the typed errors.
 
   `store` is {:sqlite <db> :cas <root|config|cas>} or a bare db (path

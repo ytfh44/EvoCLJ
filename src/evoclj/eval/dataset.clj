@@ -1,5 +1,5 @@
 (ns evoclj.eval.dataset
-  "Physically separated evaluation datasets (Task 8.1).
+  "Physically separated evaluation datasets (component).
 
   The three datasets — Evolution, Selection, Audit — live in THREE
   DISTINCT filesystem roots (by default evals/evolution,

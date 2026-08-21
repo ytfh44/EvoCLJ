@@ -1,5 +1,5 @@
 (ns evoclj.store.recovery
-  "Startup recovery and integrity scans (Task 5.5).
+  "Startup recovery and integrity scans (component).
 
   `scan-recovery-state` is the normative read-only scan. It NEVER
   writes: no event is appended, no session state is rewritten, no
@@ -12,7 +12,7 @@
       ;;     :invalid-event-chains [...]
       ;;     :stale-candidates    [...]}
 
-  Category semantics (Task 5.5 Steps 1-3):
+  Category semantics (component Steps 1-3):
 
   * :orphaned-sessions — sessions whose persisted :state is non-terminal
     AND whose event log contains no terminal session event
@@ -33,14 +33,14 @@
     a present body is later consumed and corrupted).
 
   * :invalid-event-chains — sessions whose hash chain fails
-    evoclj.store.event/verify-event-chain (Task 5.3 Step 5): a tampered
+    evoclj.store.event/verify-event-chain (component Step 5): a tampered
     or corrupted historical row. Each entry is the verify failure
     (reason, event seq, expected/actual hashes) plus :session/id.
 
   * :stale-candidates — candidate rows still in a prepared state
     (:materialized, :evaluating, :eligible) when the process died. They
     are reported with their original :state; recovery MUST NOT promote
-    them — promotion is exclusively the Task 9 compare-and-set path and
+    them — promotion is exclusively the component compare-and-set path and
     this scan performs no writes at all (Step 3).
 
   `startup-integrity-scan` (Step 4) wraps the recovery scan with a
@@ -73,7 +73,7 @@
 (def terminal-session-event-types
   "Event types that close a session's lifecycle. A session whose log
   contains one of these is finished; a session with a non-terminal row
-  state and none of these is orphaned (Task 5.5 Step 1)."
+  state and none of these is orphaned (component Step 1)."
   #{:session/completed :session/failed :session/cancelled
     :session/budget-exhausted})
 
@@ -221,7 +221,7 @@
 ;; --- public API -------------------------------------------------------------
 
 (defn scan-recovery-state
-  "The normative recovery scan (Task 5.5 interface). Read-only: it
+  "The normative recovery scan (component interface). Read-only: it
   classifies crash residue and reports corruption; it never appends,
   rewrites, or promotes anything.
 
@@ -247,7 +247,7 @@
               [cg]))))
 
 (defn startup-integrity-scan
-  "Startup integrity scan with configurable strict mode (Task 5.5
+  "Startup integrity scan with configurable strict mode (component
   Step 4). The production default is strict (fail-closed).
 
   Runs scan-recovery-state, verifies the CURRENT generation (Database

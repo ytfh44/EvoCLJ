@@ -1,5 +1,5 @@
 (ns evoclj.store.event-test
-  "Task 5.3 tests for the append-only causal event log.
+  "component tests for the append-only causal event log.
 
   Step 1: the per-session :event/seq is monotonic and allocated inside
   a transaction — sequential appends yield contiguous 1..n sequences,
@@ -404,7 +404,7 @@
           (is (= (:event/seq ev2) (:event/seq v))))))))
 
 ;; ============================================================================
-;; Task A1 — redaction on the event write path (F7)
+;; component — redaction on the event write path (F7)
 ;; ============================================================================
 
 (def ^:private bearer-spec

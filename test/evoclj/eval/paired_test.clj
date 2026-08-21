@@ -1,5 +1,5 @@
 (ns evoclj.eval.paired-test
-  "G5 isolated paired Selection runner (Task 8.4).
+  "G5 isolated paired Selection runner (component).
 
   run-paired-selection! evaluates the parent (re-evaluated NOW, never
   a stale historical score) and the candidate as a PAIRED comparison

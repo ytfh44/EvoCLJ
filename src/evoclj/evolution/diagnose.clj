@@ -1,5 +1,5 @@
 (ns evoclj.evolution.diagnose
-  "Diagnostician contract and the deterministic pattern adapter (Task 7.2).
+  "Diagnostician contract and the deterministic pattern adapter (component).
 
   The Diagnostician protocol (Step 3) is the single evolution-facing
   diagnosis contract:
@@ -9,7 +9,7 @@
 
   A Diagnostician consumes exactly ONE value — the frozen,
   content-addressed Evolution-set evidence pack produced by
-  evoclj.evolution.evidence/build-evidence-pack (Task 7.1) — and
+  evoclj.evolution.evidence/build-evidence-pack (component) — and
   returns a validated, content-addressed Diagnosis:
 
       {:diagnosis/id \"sha256:...\"          ; content hash of the body
@@ -79,7 +79,7 @@
   :evidence/id, so the artifact is self-provenancing back to the
   frozen evidence pack.
 
-  INPUT CONTEXT (Task A5): `build-context` assembles the compact EDN
+  INPUT CONTEXT (component): `build-context` assembles the compact EDN
   summary the Diagnostician consumes alongside the frozen pack — the
   candidate's BehaviorProfile (evoclj.analytics.behavior/profile-events
   plus its stable sha256 fingerprint) — present only when evidence
@@ -99,7 +99,7 @@
   :diagnosis/config-invalid, :diagnosis/hypothesis-invalid,
   :diagnosis/invalid, :diagnosis/store-invalid, :diagnosis/id-mismatch,
   :evolution/hypothesis-confidence-invalid (the kernel ranking gate).
-  Invalid evidence packs are rejected with the Task 7.1
+  Invalid evidence packs are rejected with the component
   :evidence/pack-invalid error; CAS/store errors propagate as-is."
   (:require [evoclj.analytics.behavior :as behavior]
             [evoclj.evolution.diagnosis-schema :as ds]
@@ -112,10 +112,10 @@
            (java.util Locale UUID)))
 
 (defprotocol Diagnostician
-  "The Diagnostician contract (Task 7.2 Step 3).
+  "The Diagnostician contract (component Step 3).
 
   (diagnose d evidence-pack) consumes exactly one value: the frozen
-  Evolution-set evidence pack (Task 7.1). It returns a validated
+  Evolution-set evidence pack (component). It returns a validated
   Diagnosis {:diagnosis/id :evidence/id :hypotheses [...]}. The
   adapter holds no store handle and no Selection/Audit fixture handle
   (Global Constraint 11); everything a Diagnostician can see is
@@ -159,11 +159,11 @@
   [data]
   (UUID/nameUUIDFromBytes (utf8-bytes (pr-str (canonical data)))))
 
-;; --- the diagnose input context (Task A5) ------------------------------------
+;; --- the diagnose input context (component) ------------------------------------
 
 (defn build-context
   "Build the Diagnostician input context map from the candidate's
-  evidence events (Task A5).
+  evidence events (component).
 
   The context is the compact EDN summary a Diagnostician consumes
   alongside the frozen evidence pack. When `events` is a non-empty
@@ -196,7 +196,7 @@
        (assoc profile :behavior/fingerprint (behavior/fingerprint profile))})
     {}))
 
-;; --- episode classification (same semantics as Task 7.1) ---------------------
+;; --- episode classification (same semantics as component) ---------------------
 
 (defn- success?
   "A success episode: :outcome :status :completed."
@@ -378,7 +378,7 @@
 
 (defn pattern-diagnostician
   "Construct the deterministic pattern adapter from a plain config map
-  (Task 7.2 Step 3).
+  (component Step 3).
 
   The constructor receives ONLY pattern configuration — plain data:
     :task/success-threshold (number, default 1.0 — the success rate
@@ -417,7 +417,7 @@
   store)
 
 (defn persist-diagnosis!
-  "Persist a validated diagnosis with provenance (Task 7.2 Step 5).
+  "Persist a validated diagnosis with provenance (component Step 5).
 
   The diagnosis body (everything except :diagnosis/id) is
   canonicalized and stored in the filesystem CAS under its own content

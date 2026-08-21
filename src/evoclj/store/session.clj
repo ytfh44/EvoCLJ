@@ -1,5 +1,5 @@
 (ns evoclj.store.session
-  "Session pinning and lifecycle transitions (Task 5.4).
+  "Session pinning and lifecycle transitions (component).
 
   A session is created pinned to one Genome, one Resolution, one
   Phenotype, and one Generation for its whole lifetime (Global
@@ -9,7 +9,7 @@
   matches the stored state and changes state (plus the transition
   timestamp) alone.
 
-  State machine (normative, docs Task 5.4):
+  State machine (normative, docs component):
 
       :created → :resolving → :running ↔ :waiting → :completed
                                ├──────────────→ :failed
@@ -22,23 +22,23 @@
   the database, and the SQL `WHERE state = expected-state` backstop
   means a concurrent worker that lost the compare-and-set also sees
   :session/invalid-transition — two workers can never both transition
-  from the same state silently (Task 5.4 Step 4).
+  from the same state silently (component Step 4).
 
   Public Session contract (docs 'Detailed Public Data Contracts'):
   :session/id, :generation/id, :genome/id, :resolution/id,
   :phenotype/id, :state, :created-at, :routing. Pinned identity fields
   are immutable after insert.
 
-  Known deviation: the Task 5.1 sessions schema defines no data
+  Known deviation: the component sessions schema defines no data
   column, so the transition `data` argument is validated at the module
   boundary (Global Constraint 22) but NOT persisted. The :routing
-  input IS persisted (Task 9.3, additive migration 003-routing.sql):
+  input IS persisted (component, additive migration 003-routing.sql):
   the allocation version and bucket that decided the session's
   generation are written at insert and never touched again, so routing
   can be audited later. Terminal-state classification is driven by
   :state, which is persisted. The Database Invariant 2 guarantee is
   enforced at the application layer (the only write path is the state
-  CAS) because the schema committed in Task 5.1 has no sessions
+  CAS) because the schema committed in component has no sessions
   trigger and migrations were out of scope there."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
@@ -54,7 +54,7 @@
 ;; --- state machine (normative) ---------------------------------------------
 
 (def states
-  "Every state in the Task 5.4 state machine."
+  "Every state in the component state machine."
   #{:created :resolving :running :waiting
     :completed :failed :cancelled :budget-exhausted})
 
@@ -208,7 +208,7 @@
   unknown keys — the trust boundary is a closed map),
   :store/generation-not-found (no generation row with that id). The
   optional :routing input {:deployment-version string? :bucket int?}
-  is the Task 9.3 routing decision (evoclj.promotion.canary) and is
+  is the component routing decision (evoclj.promotion.canary) and is
   persisted into the sessions routing columns (003-routing.sql) so the
   decision can be audited later."
   [store request]
@@ -235,13 +235,13 @@
     (get-session store sid)))
 
 (defn transition-session!
-  "Compare-and-set state transition (Task 5.4 Step 4).
+  "Compare-and-set state transition (component Step 4).
 
   Sets the session's state to `new-state` ONLY when the stored state
   is exactly `expected-state`, in one atomic UPDATE, and returns the
   updated Session contract map. `data` is transition metadata (nil or
   an EDN-safe map), validated at the boundary (Global Constraint 22)
-  but not persisted — the Task 5.1 schema has no data column (see the
+  but not persisted — the component schema has no data column (see the
   namespace docstring).
 
   Typed errors:

@@ -1,4 +1,4 @@
-;; Filesystem-escalation Genome fixture — Task 11.1 (adversarial release
+;; Filesystem-escalation Genome fixture — component (adversarial release
 ;; gate).
 ;;
 ;; This Genome's program DEMANDS the filesystem ROOT (\"/\") — broader
@@ -20,4 +20,4 @@
  :evolution {:max-risk :behavioral
              :mutable #{:parameters :prompts :skills :programs}}
  :metadata {:name "filesystem-escalation"
-            :description "demands filesystem scope broader than the host grant (Task 11.1)"}}
+            :description "demands filesystem scope broader than the host grant (component)"}}

@@ -1,6 +1,6 @@
 (ns evoclj.sci.context
   "Closed SCI execution context with an explicit allow surface
-  (Task 3.1).
+  (component).
 
   make-context builds a Babashka SCI context in which evolvable Genome
   programs run with NO ambient host authority (Global Constraint 7):
@@ -27,17 +27,17 @@
 
   Definitions made inside the context (def/defn) create SCI Vars in the
   isolated environment only; host Clojure Vars are never created or
-  mutated (Task Step 4).
+  mutated (component 4).
 
   run-form evaluates a program source inside the context and then
   invokes a declared entry symbol with an EDN input value, returning
   the entry's return value. Exceptions — policy denials and program
   errors alike — propagate as clojure.lang.ExceptionInfo; converting
-  them to stable serializable error data at the boundary is Task 3.3.
+  them to stable serializable error data at the boundary is component
 
   The :programs and :limits configuration keys are accepted and
   validated for interface stability; loading compiled programs into the
-  context (Task 3.4) and enforcing execution limits (Task 3.3) are the
+  context (component) and enforcing execution limits (component) are the
   responsibility of later milestones.
 
   Residual surface, documented honestly: SCI's internal default class
@@ -155,12 +155,12 @@
 (defn make-context
   "Build and return a closed SCI context with an explicit allow surface.
 
-  `config` is a map with the keys declared by the Task 3.1 interface:
+  `config` is a map with the keys declared by the component interface:
   :programs (compiled program descriptors; accepted for interface
-  stability, consumed by Task 3.4), :api-namespaces (a map of namespace
+  stability, consumed by component), :api-namespaces (a map of namespace
   symbol to map of simple var symbol to host value, extending the
   default evo.api.intent exposure), and :limits (accepted for interface
-  stability, consumed by Task 3.3).
+  stability, consumed by component).
 
   The context is initialized with explicit :namespaces / :classes /
   :allow policy ONLY — never :allow :all:
@@ -202,7 +202,7 @@
   source is denied the same way a one-off hostile form is: policy
   violations and program errors propagate as
   clojure.lang.ExceptionInfo (stable serializable error conversion is
-  Task 3.3)."
+  component)."
   [ctx source entry input]
   (sci/eval-string* ctx source)
   (sci/eval-string* ctx (str "(" entry " " (pr-str input) ")")))

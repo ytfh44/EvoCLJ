@@ -1,5 +1,5 @@
 (ns evoclj.promotion.canary-test
-  "Task 9.3 tests for canary routing of NEW sessions.
+  "component tests for canary routing of NEW sessions.
 
   Step 1: routing is a deterministic pure function of the session-routing
   key — a stable sha256-based bucket (reusing evoclj.genome.hash
@@ -74,7 +74,7 @@
                      :created_at now}))))
 
 (defn- deployment-state
-  "The Task 9.3 deployment-state shape; callers merge overrides:
+  "The component deployment-state shape; callers merge overrides:
 
       {:current-generation \"G42\"
        :canary {:generation \"G43\"

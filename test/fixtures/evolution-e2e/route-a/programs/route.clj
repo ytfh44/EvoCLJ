@@ -1,5 +1,5 @@
 (ns agent.route
-  "G1 route program (Task 9.7 fixture): chooses tool A for EVERY
+  "G1 route program (component fixture): chooses tool A for EVERY
   request.
 
   Class-A requests ({:op :echo-a :text t}) are served by tool A

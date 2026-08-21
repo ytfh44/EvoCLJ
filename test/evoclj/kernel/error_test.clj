@@ -1,5 +1,5 @@
 (ns evoclj.kernel.error-test
-  "Tests for the typed error contract (Task 1.1).
+  "Tests for the typed error contract (component).
 
   Failures crossing EvoCLJ module boundaries must carry a stable
   machine-readable :error/type and must be fully serializable:
@@ -35,7 +35,7 @@
     (is (= d (edn/read-string (pr-str d))))))
 
 (deftest error-data-excludes-unsafe-values
-  ;; Task Step 4: error-data must not contain a Throwable object, Java
+  ;; component 4: error-data must not contain a Throwable object, Java
   ;; class instance, lazy sequence, or function — and the result must
   ;; round-trip through pr-str/edn read-string.
   (let [e (err/error :kernel/unsafe "unsafe payload"

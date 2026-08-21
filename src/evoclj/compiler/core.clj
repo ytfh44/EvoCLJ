@@ -1,6 +1,6 @@
 (ns evoclj.compiler.core
   "Orchestrate Genome compilation into a pure CompiledGenome and derive
-  the Phenotype identity (Task 2.4).
+  the Phenotype identity (component).
 
   compile-genome is ORCHESTRATION ONLY: it composes the focused modules
   (evoclj.genome.load already produced the loaded Genome;
@@ -13,7 +13,7 @@
   disk, and never executed), attaching the program registry, checking
   topology program references resolve, and computing the Phenotype ID.
 
-  The program registry follows Task 2.3 choice (a): an in-memory
+  The program registry follows component choice (a): an in-memory
   descriptor list validated against the loaded Genome. It rides on the
   loaded-genome value under :programs (a sequential collection of
   descriptor maps), so the plan's two-argument interface is preserved
@@ -109,7 +109,7 @@
                             {:reason :module-parse-error :module module-k
                              :path path :message (.getMessage e)})))))))
 
-;; --- program registry (Task 2.3 choice (a)) --------------------------------
+;; --- program registry (component choice (a)) --------------------------------
 
 (defn- compile-programs
   "Compile the in-memory program descriptor registry into a sorted map
@@ -170,12 +170,12 @@
 
 (defn compile-genome
   "Compile a loaded Genome into the pure CompiledGenome and derive the
-  Phenotype identity (Task 2.4). Orchestration only — every validation
+  Phenotype identity (component). Orchestration only — every validation
   rule lives in the focused modules called here.
 
   `loaded-genome` is the evoclj.genome.load result, optionally carrying
   the in-memory program descriptor registry under :programs (a
-  sequential collection of Task 2.3 descriptor maps). `provider-catalog`
+  sequential collection of component descriptor maps). `provider-catalog`
   is the map of alias keyword to concrete provider entry consumed by
   evoclj.compiler.resolution/resolve-models.
 

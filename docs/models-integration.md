@@ -177,7 +177,7 @@ Environment overrides: EVOCLJ_CATALOG_URL, EVOCLJ_CATALOG_CACHE_DIR.
 
 ## LLM-driven evolution
 
-The deterministic pattern Diagnostician (Task 7.2) and the no-op
+The deterministic pattern Diagnostician (component) and the no-op
 default Mutator are the shipped defaults, but both evolution adapters
 can be switched to LLM-driven ones by configuring a `{:type :llm ...}`
 map in `resources/system.edn`. LLM evolution is strictly OPT-IN — the

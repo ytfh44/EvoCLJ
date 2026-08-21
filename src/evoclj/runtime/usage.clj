@@ -1,5 +1,5 @@
 (ns evoclj.runtime.usage
-  "Standard usage accounting across the runtime (Task 12.1).
+  "Standard usage accounting across the runtime (component).
 
   Design: a PURE, merge-based accumulator. Usage is an immutable map
   of monotonic counters plus attribution keys; samples are combined
@@ -26,7 +26,7 @@
     - :tool-calls         — phenotype-level tool invocations
     - :model-input-tokens, :model-output-tokens, :model-cost-units /
       :provider-reported-cost, :network-bytes, :artifact-bytes — the
-      Task 12.1 normative counters; :provider-reported-cost is accepted
+      component normative counters; :provider-reported-cost is accepted
       as a counter key in its own right, :model-cost-units is canonical
       (callers pick one; both are monotonic if both appear)
 
@@ -47,7 +47,7 @@
   {})
 
 (def counter-keys
-  "Keys that MERGE BY SUMMING. Every Task 12.1 normative counter plus
+  "Keys that MERGE BY SUMMING. Every component normative counter plus
   the vocabulary the runtime already emits (:steps, :wall-ms,
   :total-cost, :cost). Summing is what makes accumulation monotonic."
   #{:wall-ms

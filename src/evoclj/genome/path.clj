@@ -1,5 +1,5 @@
 (ns evoclj.genome.path
-  "Canonical relative-path validation for Genome bundles (Task 1.3).
+  "Canonical relative-path validation for Genome bundles (component).
 
   Genome file references are canonical slash-separated relative paths.
   Implementation delegates to evoclj.fs.path for single-source safety;

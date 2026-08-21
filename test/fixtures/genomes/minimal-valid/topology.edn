@@ -1,4 +1,4 @@
-;; Seed Genome topology (Task 2.2).
+;; Seed Genome topology (component).
 ;;
 ;; A single forward chain executed from :entry: the :llm planner
 ;; proposes, the :sci router runs the route program, and the :emit node

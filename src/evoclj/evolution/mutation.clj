@@ -1,8 +1,8 @@
 (ns evoclj.evolution.mutation
-  "Mutation IR validation: schema plus patch preconditions (Task 7.3).
+  "Mutation IR validation: schema plus patch preconditions (component).
 
   This namespace is DATA VALIDATION ONLY — applying mutations to a
-  parent Genome is Task 7.4 (evoclj.genome.patch). `validate-mutation`
+  parent Genome is component (evoclj.genome.patch). `validate-mutation`
   runs, in order:
 
   1. The schema gates (evoclj.evolution.mutation-schema): each op's
@@ -65,7 +65,7 @@
   (with :reason), :mutation/undeclared-mutable-class (with :class and
   :declared).
 
-  Task E-cross adds the dual-parent crossover mutation (host opt-in):
+  component adds the dual-parent crossover mutation (host opt-in):
   `crossover` recombines TWO parent Genomes into one child by
   topology-aware recombination — split parent A's topology at a node,
   take that node's subtree from parent B, re-resolve dependencies, and
@@ -192,7 +192,7 @@
 
 (defn validate-mutation
   "Validate a Mutation IR against the schema AND the patch
-  preconditions (Task 7.3).
+  preconditions (component).
 
   With no context, applies the schema gate (envelope, all op variants,
   Step 2 :expect/hash) plus the path-safety and protected-path gates.
@@ -225,7 +225,7 @@
    mutation))
 
 ;; ============================================================================
-;; Task E-cross — dual-parent crossover (host opt-in)
+;; component — dual-parent crossover (host opt-in)
 ;;
 ;; The crossover mutation recombines TWO parent Genomes into one child
 ;; by topology-aware recombination: split parent A's topology at a
@@ -240,10 +240,10 @@
 
 (def default-op-distribution
   "The default mutation op distribution — the closed thirteen-op
-  language of Task 7.3 that default mutators may propose from
+  language of component that default mutators may propose from
   (identical to the OpSchema :multi dispatch of
   evoclj.evolution.mutation-schema). :crossover is DELIBERATELY
-  ABSENT: dual-parent recombination (Task E-cross) is a host-opt-in
+  ABSENT: dual-parent recombination (component) is a host-opt-in
   operation reachable ONLY through the explicit `crossover` entry
   point below. It is never part of a single-parent Mutation IR and no
   default mutator ever proposes it."
@@ -252,7 +252,7 @@
     :add-edge :remove-edge :update-node})
 
 (defn- crossover-error!
-  "Throw the stable Task E-cross typed error (Global Constraint 22:
+  "Throw the stable component typed error (Global Constraint 22:
   plain serializable data)."
   [reason data]
   (throw (err/error :evolution/crossover-invalid
@@ -300,7 +300,7 @@
 
 (defn crossover-topologies
   "Recombine two parent topology values into one child topology value
-  (Task E-cross).
+  (component).
 
   Semantics: split parent A's topology at `cut` (a declared node id),
   remove A's subtree at `cut` (everything reachable from `cut` via
@@ -376,7 +376,7 @@
 (defn- topology-value-of
   "Parse a parent context's topology module value from its :files
   payload (clojure.edn/read-string — never clojure.core read-string,
-  Global Constraint 22). Throws the Task E-cross typed error for a
+  Global Constraint 22). Throws the component typed error for a
   malformed context, a missing topology file, or an unparseable
   topology."
   [ctx label]
@@ -403,7 +403,7 @@
                              :message (.getMessage e)}))))))
 
 (defn crossover
-  "Dual-parent crossover mutation (Task E-cross, host opt-in).
+  "Dual-parent crossover mutation (component, host opt-in).
 
   Produces a valid child Genome from two parent Genome contexts by
   topology-aware recombination: split parent A's topology at the

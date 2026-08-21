@@ -1,6 +1,6 @@
 (ns evoclj.genome.patch-test
   "Tests for applying a declarative mutation to an immutable parent Genome
-  (Task 7.4, evoclj.genome.patch/apply-mutation).
+  (component, evoclj.genome.patch/apply-mutation).
 
   apply-mutation stages a safe copy of the parent bundle (bytes from the
   already-loaded in-memory Genome, never following symlinks), applies the

@@ -1,5 +1,5 @@
 (ns evoclj.http.api
-  "HTTP API shell (Task S3-3): Ring routes for health, session, and
+  "HTTP API shell (component): Ring routes for health, session, and
   evolution status.
 
   The handler expects the kernel system map on the request as `:system`

@@ -1,8 +1,8 @@
 (ns evoclj.evolution.diagnose-test
-  "Task 7.2 tests for the Diagnostician contract and structured
+  "component tests for the Diagnostician contract and structured
   hypotheses.
 
-  The normative shape (the plan's Task 7.2 interface):
+  The normative shape (the plan's component interface):
 
       {:diagnosis/id \"sha256:...\"
        :evidence/id \"sha256:...\"
@@ -43,7 +43,7 @@
   FIXTURE DESIGN: most pattern tests hand-build schema-valid frozen
   evidence packs (compact episode refs + summary), so the adapter is
   exercised as a pure function of its input; one integration test
-  builds a REAL pack through the Task 7.1 pipeline
+  builds a REAL pack through the component pipeline
   (evoclj.evolution.evidence/build-evidence-pack) to prove the adapter
   and the persistence path work on genuine frozen packs. The support
   citation convention of the deterministic adapter: each supporting
@@ -133,7 +133,7 @@
                      :created_at now}))
     {:sqlite db :cas (cas/->cas (temp-cas-dir))}))
 
-;; --- real-pack fixtures (the Task 7.1 pipeline) -----------------------------
+;; --- real-pack fixtures (the component pipeline) -----------------------------
 
 (defn- scene!
   "Create one complete episode under the fixture generation: session →
@@ -182,7 +182,7 @@
        :usage (or usage {})})))
 
 (defn- build-real-pack
-  "Build a REAL frozen evidence pack through the Task 7.1 pipeline."
+  "Build a REAL frozen evidence pack through the component pipeline."
   [store]
   (evidence/build-evidence-pack
    store
@@ -195,7 +195,7 @@
 
 (defn- ep
   "One compact episode ref for a hand-built evidence pack (schema-valid
-  per the Task 7.1 EpisodeRefSchema)."
+  per the component EpisodeRefSchema)."
   [{:keys [id first last outcome usage]}]
   {:episode/id id
    :session/id (random-uuid)
@@ -541,7 +541,7 @@
              (thrown-error-type #(diag/persist-diagnosis! nil diagnosis)))))))
 
 ;; ============================================================================
-;; Task A5 — behavior profiles into the diagnostician context (F1)
+;; component — behavior profiles into the diagnostician context (F1)
 ;; ============================================================================
 
 (defn- evidence-events
@@ -607,7 +607,7 @@
              (:context/behavior-profile context))))))
 
 ;; ============================================================================
-;; Task E2 — hypothesis ranking with kernel re-validation (roadmap E2)
+;; component — hypothesis ranking with kernel re-validation (roadmap E2)
 ;; ============================================================================
 
 (deftest e2-pattern-adapter-emits-numeric-confidence

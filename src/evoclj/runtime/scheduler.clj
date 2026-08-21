@@ -1,5 +1,5 @@
 (ns evoclj.runtime.scheduler
-  "Task 6.3 — deterministic single-session scheduler and step budget.
+  "component — deterministic single-session scheduler and step budget.
 
   run-session! executes ONE session against the phenotype topology the
   executor carries, in strict FIFO (v0 has no concurrency):
@@ -9,18 +9,18 @@
     ;;     :session/id <uuid>
     ;;     :output-ref <sha256 or nil>
     ;;     :error/artifact-ref <sha256 or nil>   ; :failed only
-    ;;     :episode/id nil                        ; Task 6.5 materializes
+    ;;     :episode/id nil                        ; component materializes
     ;;                                            ;   episodes
     ;;     :event/count n}
 
-  THE EXECUTOR MAP (normative for Task 6.x, designed here):
+  THE EXECUTOR MAP (normative for component, designed here):
 
     {:phenotype <Phenotype from evoclj.runtime.phenotype/instantiate>
      :stores {:sqlite <migrated db>   ; the OPENED sqlite store
               :cas <CAS root>}        ; the OPENED content-addressed store
      :dispatch <broker context from evoclj.intent.dispatch/make-broker-context>}
 
-  The test constructs it directly; Integrant assembly is Task 10.1.
+  The test constructs it directly; Integrant assembly is component
   The scheduler opens nothing and closes nothing: the stores and the
   broker context belong to the host and arrive open.
 
@@ -34,11 +34,11 @@
   against the wrong phenotype (the session's pinned identity is the
   store's contract, not the executor's claim).
 
-  SESSION STATE MACHINE: the store's normative machine (Task 5.4) is
+  SESSION STATE MACHINE: the store's normative machine (component) is
   authoritative. The task text abbreviates the scheduler's transitions
   as :created → :running → :completed | :failed | :budget-exhausted;
   the store has no :created → :running edge and no :running →
-  :completed edge (Task 5.4: :created → :resolving → :running ↔
+  :completed edge (component: :created → :resolving → :running ↔
   :waiting → :completed), so run-session! walks :created → :resolving
   → :running, then :running → :failed | :budget-exhausted directly, or
   :running → :waiting → :completed for a successful run (two
@@ -53,9 +53,9 @@
   event chains to the event appended immediately before it, so the log
   is a single linear causal chain (each event's :cause/event-id is the
   previous event's :event/id) and every step's events are persisted
-  BEFORE the scheduler advances to the next node (Task 6.3 Step 3).
+  BEFORE the scheduler advances to the next node (component Step 3).
 
-  EXECUTION (Task 6.3 Steps 1-4): starting at the topology's :entry,
+  EXECUTION (component Steps 1-4): starting at the topology's :entry,
   each visit builds the per-session runtime-state contract of
   evoclj.runtime.node, steps the node's handler, and persists:
 
@@ -67,7 +67,7 @@
     :intent/denied for a broker denial (no provider event — the
     provider never ran), or :intent/failed for any other dispatch
     failure. Every provider result is fed back into the session's
-    accumulated :outputs (Task 6.3: dispatch and feed results back);
+    accumulated :outputs (component: dispatch and feed results back);
     the next node's input payload is the most recently accumulated
     output (the entry node receives the task-input). A denied or
     failed intent is a node-level outcome — the session continues.
@@ -80,7 +80,7 @@
   artifact (:output-ref — failures are evidence, not discarded
   traces).
 
-  LOOPS (Task 6.4): a :loop node's iteration counter travels in the
+  LOOPS (component): a :loop node's iteration counter travels in the
   scheduler's per-session runtime-state as :loop-state, a map of loop
   node id -> iteration count — SESSION-LOCAL DATA, never a SCI global
   var (Global Constraint 23). The scheduler builds :loop-state fresh
@@ -94,7 +94,7 @@
   error type and routes it to the SAME :budget-exhausted outcome as
   the step budget (:session/budget-exhausted event recording the
   {:max-iterations N} limit and the accumulated outputs as a CAS
-  artifact) — the typed budget outcome chosen for Task 6.4, so an
+  artifact) — the typed budget outcome chosen for component, so an
   unbounded predicate is a budget outcome, not a session failure.
 
   FAILURE (Step 4): an unhandled node failure — a handler :failed
@@ -108,7 +108,7 @@
   undeclared node) fail the session the same way with a :scheduler/*
   error data map. Errors in the STORE or the BROKER CONTEXT
   themselves (host infrastructure failures) propagate as typed
-  ExceptionInfo; recovery of a session left mid-run is Task 5.5's job.
+  ExceptionInfo; recovery of a session left mid-run is component's job.
 
   Error contract (Global Constraint 22 — plain serializable data):
   :scheduler/executor-invalid (:reason distinguishes :not-a-map,
@@ -523,7 +523,7 @@
 ;; --- terminal session outcomes ----------------------------------------------
 
 (defn- fail-session!
-  "Fail the session (Task 6.3 Step 4): store the serializable error
+  "Fail the session (component Step 4): store the serializable error
   payload as a CAS artifact, append :node/failed (chained to `cause`,
   :payload-ref = the artifact), transition the session to :failed, and
   append :session/failed carrying the artifact ref in its metadata
@@ -547,7 +547,7 @@
 
 (defn- budget-exhaust!
   "Halt the run when the topology's :max-steps budget is consumed
-  (Task 6.3 Step 2): transition the session to :budget-exhausted and
+  (component Step 2): transition the session to :budget-exhausted and
   append :session/budget-exhausted carrying the limit, the steps
   consumed, and the accumulated outputs as a CAS artifact. Returns the
   run result map."
@@ -643,7 +643,7 @@
                            :session/id (:session/id pin)
                            :first-event (:event/type root)})))
       ;; the store's state machine has no :created → :running edge;
-      ;; the :resolving hop is the normative path (Task 5.4)
+      ;; the :resolving hop is the normative path (component)
       (session/transition-session! db (:session/id pin) :created :resolving nil)
       (session/transition-session! db (:session/id pin) :resolving :running nil)
       (let [started (append-event! executor pin (:event/id root) :session/started
@@ -699,7 +699,7 @@
                             :failed
                             (if (= :loop/max-iterations-exceeded
                                    (:error/type (:error transition)))
-                              ;; Task 6.4 typed budget outcome: a :loop
+                              ;; component typed budget outcome: a :loop
                               ;; node whose iteration count reached
                               ;; :max-iterations is a budget outcome,
                               ;; routed to the same :budget-exhausted
@@ -723,7 +723,7 @@
                                               :step (inc steps)
                                               :transition/status :complete})]
                               ;; the store's state machine has no
-                              ;; :running → :completed edge (Task 5.4:
+                              ;; :running → :completed edge (component:
                               ;; :running ↔ :waiting → :completed), so
                               ;; completion walks :running → :waiting →
                               ;; :completed
@@ -768,7 +768,7 @@
                               (if-let [failed-outcome (:failed-outcome dispatch-result)]
                                 failed-outcome
                                 (let [{:keys [last-event outputs]} dispatch-result
-                                      ;; Task 6.4: the loop counter travels in
+                                      ;; component: the loop counter travels in
                                       ;; runtime-state. Each time a :loop node
                                       ;; chooses to iterate (its :continue
                                       ;; transition's :next leads to its :body)

@@ -1,5 +1,5 @@
 (ns evoclj.eval.gates
-  "Candidate evaluation gates G0–G3 (Task 8.2).
+  "Candidate evaluation gates G0–G3 (component).
 
   The four gates are the deterministic, policy-first front door of
   candidate evaluation. Each gate is a callable that returns the
@@ -20,7 +20,7 @@
     gate is still hard and still stops the pipeline.
 
   All four gates are :hard? true: a non-pass stops later effectful
-  gates (orchestration in Task 8.7 uses run-gates-until-hard-failure).
+  gates (orchestration in component uses run-gates-until-hard-failure).
   Details are persisted through the context's :store-details! fn
   (default: a content-hash ref over the pr-str of the details, per
   Global Constraint 21 — the v0 pipeline keeps the results vector as
@@ -30,7 +30,7 @@
   evoclj.genome.load/load-genome and compiles it with
   evoclj.compiler.core/compile-genome on the candidate's own files —
   never a cached Mutator claim (Global Constraints 4, 6). The program
-  registry (Task 2.3 choice (a)) is supplied by the context resolver.
+  registry (component choice (a)) is supplied by the context resolver.
 
   G1 (schema + ABI): revalidates the manifest schema explicitly and
   requires the candidate's :abi to equal the kernel's expected ABI.
@@ -43,7 +43,7 @@
   evoclj.compiler.program/policy-violation; the topology is
   re-compiled by evoclj.compiler.topology/compile-topology; and the
   eval-root file check doubles as the evaluator-mutation assertion
-  (the candidate's own mutation ops are already validated by Task 7.x;
+  (the candidate's own mutation ops are already validated by component;
   what G2 asserts is that no eval-root files exist in the candidate
   Genome at all).
 
@@ -351,7 +351,7 @@
 (def gate-order
   "The gate execution order. Every gate is :hard? true — a non-pass
   result stops the pipeline before any later effectful gate runs
-  (Task 8.7 consumes this)."
+  (component consumes this)."
   [{:gate/id :G0-parse :run g0-parse}
    {:gate/id :G1-schema-abi :run g1-schema-abi}
    {:gate/id :G2-static-policy :run g2-static-policy}

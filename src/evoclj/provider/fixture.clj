@@ -1,6 +1,6 @@
 (ns evoclj.provider.fixture
   "Deterministic fixture providers for the seed Genome and the broker
-  tests (Task 4.3).
+  tests (component).
 
   Two providers live here:
 
@@ -21,7 +21,7 @@
     root; raw user-facing input such as \"a/../secret\" canonicalizes
     to the protected path under that root, and the canonical resource
     descriptor carries {:kind :filesystem :path ...} in exactly the
-    form the capability lease matcher consumes (Task 4.2), so the
+    form the capability lease matcher consumes (component), so the
     broker checks the canonical protected path — never the raw string.
     Backslash and Windows drive forms normalize to the same canonical
     \"/\"-separated form; an absolute user path stays absolute and is
@@ -39,7 +39,7 @@
   resource descriptor. execute-request! consumes the normalized
   request (:provider/request-invalid on an unnormalized target) and
   returns a plain result VALUE, which the broker validates against
-  :output-schema (Task 4.5)."
+  :output-schema (component)."
   (:require [clojure.string :as str]
             [evoclj.capability.lease :as lease]
             [evoclj.kernel.error :as err]
@@ -111,11 +111,10 @@
     mirroring how a real adapter closes over its API key.
   - :execution-count — an atom bumped once per execute-request! call,
     so tests can assert when the provider REALLY ran: a denied request
-    must never bump it (Task 4.5 Step 2).
+    must never bump it (component Step 2).
   - :fail-count — a non-negative integer: the first N execute-request!
     calls throw a TRANSIENT provider error (:provider/transient-error)
-    before succeeding, letting tests simulate a flaky upstream (Task
-    4.5 Step 3). The descriptor still declares :retry {:safe? true}
+    before succeeding, letting tests simulate a flaky upstream (component Step 3). The descriptor still declares :retry {:safe? true}
     because the echo effect is pure and idempotent, so the dispatcher
     MAY retry it.
 
@@ -157,7 +156,7 @@
 
 (def ^:private non-idempotent-descriptor
   ;; Deliberately NO :retry block: automatic retries are allowed only
-  ;; when a provider declares :retry {:safe? true} (Task 4.5), so the
+  ;; when a provider declares :retry {:safe? true} (component), so the
   ;; dispatcher must NEVER auto-retry this provider, even when it
   ;; reports a transient failure.
   {:tool/id :fixture/non-idempotent
@@ -167,7 +166,7 @@
    :required-action :invoke})
 
 (defn non-idempotent-provider
-  "Build the :fixture/non-idempotent provider (Task 4.5 Step 3).
+  "Build the :fixture/non-idempotent provider (component Step 3).
 
   The descriptor deliberately carries NO :retry block, so the
   dispatcher must never retry this provider, even when it reports a
@@ -261,7 +260,7 @@
   canonical resource descriptor {:tool/id :fixture/path-resolve
    :resource {:kind :filesystem :path \"/protected/work/secret\"}
    :args {...}} — the REAL target, in exactly the canonical form the
-  capability lease matcher checks (Task 4.2), so authorization sees
+  capability lease matcher checks (component), so authorization sees
   the protected canonical path and never the raw traversal string.
   execute-request! returns {:path <canonical>}, the value the broker
   validates against :output-schema."

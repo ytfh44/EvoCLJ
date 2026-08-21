@@ -1,4 +1,4 @@
-;; Child-extension topology — Task 11.1. The :sci router emits the same
+;; Child-extension topology — component The :sci router emits the same
 ;; :fixture/echo tool call the PARENT seed makes; the host lease is
 ;; bound to the parent's phenotype id, so the child's request is denied
 ;; with :capability/subject-mismatch.

@@ -1,9 +1,9 @@
 (ns evoclj.runtime.nodes.tool
-  "The :tool node handler (Task 6.2).
+  "The :tool node handler (component).
 
   A :tool node only EMITS a typed intent — it never calls the provider
   (Global Constraint 8: every external effect must cross the
-  kernel-owned Intent/Capability Broker, so the Task 6.3 scheduler
+  kernel-owned Intent/Capability Broker, so the component scheduler
   dispatches the emitted intent). The handler builds a validated
   :intent/tool-call from the node config (:tool — the tool id) and the
   input-event's :payload (the args map), with attribution from

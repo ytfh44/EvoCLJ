@@ -1,6 +1,6 @@
 (ns evoclj.eval.compare
   "Lexicographic comparison of an evaluation summary against a profile
-  (Task 8.5).
+  (component).
 
   The comparison pipeline keeps every section SEPARATE and decides in
   LEXICOGRAPHIC order — hard first, then utility, then cost, then
@@ -81,7 +81,7 @@
 
 (defn eligibility
   "The lexicographic eligibility decision for one evaluation summary
-  against one profile (Task 8.5, Step 4).
+  against one profile (component, Step 4).
 
   Pipeline (short-circuiting — a failing dimension ends the check):
 
@@ -94,8 +94,8 @@
 
   Returns {:eligible? <bool> :reasons [<reason maps>]}; :reasons is
   empty exactly when :eligible? is true. The profile must satisfy the
-  Task 8.1 contract (evoclj.eval.profile/validate-profile!) and the
-  summary the Task 8.5 contract (metrics/validate-summary!)."
+  component contract (evoclj.eval.profile/validate-profile!) and the
+  summary the component contract (metrics/validate-summary!)."
   [summary profile]
   (profile/validate-profile! profile)
   (metrics/validate-summary! summary)

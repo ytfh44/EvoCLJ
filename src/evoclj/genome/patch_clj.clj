@@ -1,5 +1,5 @@
 (ns evoclj.genome.patch-clj
-  "Clojure source-form patch operations for Task 7.4.
+  "Clojure source-form patch operations for component
 
   This namespace owns the source-preserving form ops (:replace-form
   :insert-form :delete-form) built on rewrite-clj 1.2.55. Each

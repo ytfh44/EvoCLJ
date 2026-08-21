@@ -1,9 +1,9 @@
 (ns evoclj.intent.dispatch-test
-  "Tests for the effectful intent dispatcher (Task 4.5).
+  "Tests for the effectful intent dispatcher (component).
 
   dispatch! is the effectful wrapper that turns an authorized Intent
   into a real provider effect, in the NORMATIVE dispatcher order
-  (Task 4.5 Step 5): validate intent -> lookup provider -> normalize
+  (component Step 5): validate intent -> lookup provider -> normalize
   resource -> authorize -> execute once/retry per policy -> validate
   output -> return a typed result. It returns
 
@@ -96,7 +96,7 @@
   "A provider whose execute-request! returns a value violating its own
   :output-schema — a host-side bug the dispatcher must surface as
   :provider/output-invalid instead of trusting the value as
-  model-visible data (Task 4.5 Step 4)."
+  model-visible data (component Step 4)."
   [counter]
   (reify proto/Provider
     (describe [_]
@@ -114,7 +114,7 @@
       {:text 42})))
 
 (defn- write-provider
-  "A non-pure (:effect :write) provider: per the Task 4.5 interface, a
+  "A non-pure (:effect :write) provider: per the component interface, a
   non-pure write must carry an idempotency key before execution, so the
   dispatcher must refuse to run it without one."
   [counter]

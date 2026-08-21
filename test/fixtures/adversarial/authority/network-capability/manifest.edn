@@ -1,4 +1,4 @@
-;; Network-capability Genome fixture — Task 11.1 (adversarial release
+;; Network-capability Genome fixture — component (adversarial release
 ;; gate).
 ;;
 ;; This Genome's manifest REQUESTS a network capability
@@ -20,4 +20,4 @@
  :evolution {:max-risk :behavioral
              :mutable #{:parameters :prompts :skills :programs}}
  :metadata {:name "network-capability"
-            :description "requests a network capability the host never grants (Task 11.1)"}}
+            :description "requests a network capability the host never grants (component)"}}

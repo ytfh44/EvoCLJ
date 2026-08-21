@@ -1,5 +1,5 @@
 (ns evoclj.genome.patch-edn
-  "EDN and topology graph patch operations for Task 7.4.
+  "EDN and topology graph patch operations for component
 
   This namespace owns the EDN value ops (:set-edn :delete-edn) and the
   topology graph ops (:add-node :remove-node :add-edge :remove-edge

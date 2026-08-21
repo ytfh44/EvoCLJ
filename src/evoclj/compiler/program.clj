@@ -1,5 +1,5 @@
 (ns evoclj.compiler.program
-  "Static discovery and validation of evolvable SCI programs (Task 2.3).
+  "Static discovery and validation of evolvable SCI programs (component).
 
   Genome programs are DECLARED via descriptors, never inferred from
   arbitrary source files. compile-program-descriptor validates a
@@ -40,7 +40,7 @@
   Program descriptors are kept as an in-memory registry validated by
   callers (choice (a) in the task brief); the manifest and topology
   schemas are untouched, and the seed Genome's program registry wiring
-  arrives in Task 3.4/6.x.
+  arrives in component/6.x.
 
   Error types: :program/invalid (malformed descriptor, invalid entry,
   non-.clj file, invalid genome value, entry not defined, entry
@@ -345,7 +345,7 @@
 
 (def ^:private descriptor-keys
   "The closed key set of a program descriptor; anything else is
-  rejected (closed maps at trust boundaries, as in Task 1.2)."
+  rejected (closed maps at trust boundaries, as in component)."
   #{:program/id :file :entry :input-schema :output-schema})
 
 (defn- validate-descriptor!
@@ -435,7 +435,7 @@
   "Validate a declared program descriptor against a loaded Genome and
   return a pure serializable ProgramDescriptor.
 
-  `descriptor` is the Task 2.3 shape: {:program/id <keyword> :file
+  `descriptor` is the component shape: {:program/id <keyword> :file
   \"programs/route.clj\" :entry 'agent.route/run :input-schema <keyword>
   :output-schema <keyword>}. `loaded-genome` is the evoclj.genome.load
   result (its :files map holds the immutable program bytes).

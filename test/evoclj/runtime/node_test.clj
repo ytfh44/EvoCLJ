@@ -1,5 +1,5 @@
 (ns evoclj.runtime.node-test
-  "Task 6.2 tests for the node handler protocol and pure transitions.
+  "component tests for the node handler protocol and pure transitions.
 
   step computes ONE pure transition for one node:
 

@@ -1,5 +1,5 @@
 (ns evoclj.eval.cost-guard-test
-  "Pure cost hard-stop guard tests (Task E2).
+  "Pure cost hard-stop guard tests (component).
 
    The guard is a PURE function: no IO, no state. Each test asserts a
    single strict-comparison boundary or the invalid-input contract. The

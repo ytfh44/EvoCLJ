@@ -1,8 +1,8 @@
 (ns evoclj.sci.limits-test
-  "Tests for SCI execution limits and interruption (Task 3.3).
+  "Tests for SCI execution limits and interruption (component).
 
   execute-program runs an evolvable program source inside the closed
-  SCI context (Task 3.1) under deterministic resource limits and
+  SCI context (component) under deterministic resource limits and
   returns {:status :ok :value <materialized EDN> :usage {:steps n
   :wall-ms ms}} or {:status :error :error <serializable error data>
   :usage {...}}.
@@ -30,7 +30,7 @@
 
 (defn- make-runtime
   "A Phenotype-style sci-runtime: a closed context plus a program
-  registry keyed by :program/id (Task 3.4 wires compiled descriptors
+  registry keyed by :program/id (component wires compiled descriptors
   into such a registry)."
   [programs]
   {:context (context/make-context {})
@@ -43,7 +43,7 @@
 
 (def infinite-loop-program
   "An intentionally infinite loop/recur fixture: run enters an
-  unconditional loop that never terminates (Task Step 1)."
+  unconditional loop that never terminates (component 1)."
   (program :fixture/loop
            "(ns fixture.loop)\n(defn run [x]\n  (loop [] (recur)))"
            'fixture.loop/run))
@@ -63,7 +63,7 @@
 
 (def lazy-output-program
   "A fixture returning an infinite lazy sequence, which must be realized
-  under the output cap rather than escaping or hanging (Task 3.2)."
+  under the output cap rather than escaping or hanging (component)."
   (program :fixture/lazy
            "(ns fixture.lazy)\n(defn run [x] (range))"
            'fixture.lazy/run))

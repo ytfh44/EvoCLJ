@@ -1,6 +1,6 @@
 (ns evoclj.sci.expose
   "The explicit host surface handed into the closed SCI context
-  (Task 3.1).
+  (component).
 
   Everything an evolvable program can touch beyond the pure
   clojure.core allowlist is whatever this namespace exposes: at this

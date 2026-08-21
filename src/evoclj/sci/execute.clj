@@ -1,9 +1,9 @@
 (ns evoclj.sci.execute
   "Bounded execution of evolvable programs inside the closed SCI
-  context (Task 3.3).
+  context (component).
 
   execute-program runs one program — a source string evaluated inside
-  the closed SCI context (Task 3.1) followed by an entry invocation
+  the closed SCI context (component) followed by an entry invocation
   with an EDN input — under deterministic resource limits and returns
   a plain result map:
 
@@ -20,7 +20,7 @@
   output value is materialized through
   evoclj.sci.boundary/materialize-edn under the :max-output-nodes size
   cap, so excessive output is a typed :edn/size-exceeded error, never
-  a hang (Task 3.2). Input must be EDN-safe before it is serialized
+  a hang (component). Input must be EDN-safe before it is serialized
   into the context (Global Constraint 22: an infinite lazy input would
   hang pr-str, so it is rejected, not realized).
 
@@ -40,9 +40,9 @@
   <symbol>}}} (Phenotype use — load-program! wires compiled program
   descriptors into such a registry; the descriptor identifies the
   program by :program/id). A runtime is not thread-safe; it belongs to
-  one Phenotype/session (Task 6.x single-session FIFO).
+  one Phenotype/session (component single-session FIFO).
 
-  Task 3.4 splits this one-shot flow into a load phase (load-program!,
+  component splits this one-shot flow into a load phase (load-program!,
   which evaluates the source ONCE into the context) and a call phase
   (invoke!, which looks up the registered entry and calls it with EDN
   input); execute-program remains for standalone one-shot use."
@@ -188,7 +188,7 @@
 (defn load-program!
   "Evaluate a compiled Genome program's source ONCE into the isolated
   SCI context of a runtime and register it under its :program/id
-  (Task 3.4, Global Constraints 3, 7, 23).
+  (component, Global Constraints 3, 7, 23).
 
   `sci-runtime` is a bare closed SCI context
   (evoclj.sci.context/make-context result) or a runtime map
@@ -213,7 +213,7 @@
   in place, redefining its SCI vars in that context only (a successor
   Genome redefinition never touches a sibling context).
 
-  Limit enforcement (Task 3.3) is preserved across the load/invoke
+  Limit enforcement (component) is preserved across the load/invoke
   split: SCI freezes the ctx's :interrupt-fn into every fn at
   definition time, so load-program! evaluates the source under a
   DELEGATING interrupt fn that reads the runtime's current check from
@@ -248,7 +248,7 @@
 (defn invoke!
   "Call a previously loaded program's entry inside the closed SCI
   context with validated EDN input and return validated, fully
-  realized EDN output (Task 3.4).
+  realized EDN output (component).
 
   `sci-runtime` is a runtime map {:context <ctx> :programs {<program/id>
   {:source <string> :entry <symbol>}}} as returned by load-program!;
@@ -331,13 +331,13 @@
 
 (defn execute-program
   "Execute one evolvable program inside the closed SCI context with
-  deterministic resource limits (Task 3.3).
+  deterministic resource limits (component).
 
   `sci-runtime` is either a bare closed SCI context
   (evoclj.sci.context/make-context result — standalone use, where
   `program-descriptor` itself carries :source and :entry) or a runtime
   map {:context <ctx> :programs {<program/id> {:source <string> :entry
-  <symbol>}}} (Phenotype use, Task 3.4; the descriptor identifies the
+  <symbol>}}} (Phenotype use, component; the descriptor identifies the
   program by :program/id).
 
   `limits` is a map of non-negative integers: :wall-ms (wall-clock

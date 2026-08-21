@@ -1,6 +1,6 @@
 (ns evoclj.sci.boundary
   "The EDN-safe boundary between evolvable code and the trusted kernel
-  (Task 3.2).
+  (component).
 
   Global Constraint 22 requires that only validated Clojure data cross
   Genome/SCI/Intent/Event boundaries: raw Java objects, lazy sequences,
@@ -23,7 +23,7 @@
     Lazy sequences are realized under the size limit and returned as
     proper lists — an infinite sequence such as (range) is cut off by
     the limit and rejected with :edn/size-exceeded; it is never
-    returned lazily and never allowed to hang the boundary (Task Step
+    returned lazily and never allowed to hang the boundary (component
     4). Values that cannot be represented as EDN at all — functions,
     atoms, promises, futures, delays, Clojure/SCI vars, records (unless
     explicitly registered), and other Java objects such as File or
@@ -40,7 +40,7 @@
     EDN-safe is rejected before schema checking; otherwise the schema
     decides. On success the value is returned unchanged — validation
     never coerces (matching the project's trust-boundary convention
-    from Task 1.2). On failure a typed :program/input-invalid /
+    from component). On failure a typed :program/input-invalid /
     :program/output-invalid error is thrown with a fully serializable
     Malli explanation.
 
@@ -308,7 +308,7 @@
   element-wise. Sequences — including lazy sequences — are realized
   under the size limit and returned as proper lists, so an infinite
   sequence is rejected with :edn/size-exceeded rather than hanging or
-  escaping as an unrealized lazy value (Task Step 4). Values that
+  escaping as an unrealized lazy value (component 4). Values that
   cannot be represented as EDN — functions, atoms, promises, futures,
   delays, Clojure/SCI vars, unregistered records, and other Java
   objects such as File or InputStream — throw :edn/unsupported with a

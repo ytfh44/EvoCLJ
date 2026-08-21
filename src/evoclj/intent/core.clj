@@ -1,10 +1,10 @@
 (ns evoclj.intent.core
   "Canonical Intent normalization and the pure v0 Intent constructors
-  (Task 4.1).
+  (component).
 
   An Intent is the only way evolvable code requests an effect, and a
   runtime action is always represented by a validated immutable value
-  before any provider code runs (Task 4.1 acceptance).
+  before any provider code runs (component acceptance).
 
   (normalize-intent x) validates x against the Intent ABI and returns a
   canonical form. Canonicalization is order-insensitive: two

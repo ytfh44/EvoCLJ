@@ -1,6 +1,6 @@
 (ns evoclj.store.cas-property-test
   "Property-based invariants of filesystem content-addressed storage
-  (Task E-prop).
+  (component).
 
   The model mirrored is scripts/verify-semantics/verify1_cas.clj
   section A: an atomic compare-and-set admits at most ONE winner —

@@ -121,7 +121,7 @@ Use deterministic fixture directories under `test/fixtures/`; do not put hidden 
 
 **Milestone outcome:** A Genome can be loaded from disk, validated as pure serializable data/assets, canonicalized, hashed, inspected, and rejected for forbidden paths or non-deterministic structure. No execution exists yet.
 
-## Task 1.1 — Establish domain values, error contract, and project skeleton
+## component — Establish domain values, error contract, and project skeleton
 
 **Files:**
 
@@ -174,7 +174,7 @@ git commit -m "feat: establish EvoCLJ domain error and id contracts"
 
 ---
 
-## Task 1.2 — Define Malli schemas for Genome manifest and module descriptors
+## component — Define Malli schemas for Genome manifest and module descriptors
 
 **Files:**
 
@@ -222,7 +222,7 @@ git commit -m "feat: define immutable genome manifest schemas"
 
 ---
 
-## Task 1.3 — Canonical path validation and deterministic Genome hashing
+## component — Canonical path validation and deterministic Genome hashing
 
 **Files:**
 
@@ -261,7 +261,7 @@ Canonical hashing rules are normative:
 
 ---
 
-## Task 1.4 — Load an immutable Genome bundle from disk
+## component — Load an immutable Genome bundle from disk
 
 **Files:**
 
@@ -304,7 +304,7 @@ Expected: all Genome tests pass; no SCI, provider, network, or database namespac
 
 **Milestone outcome:** A validated Genome is transformed into a pure `CompiledGenome` containing resolved module data, validated topology IR, parsed program descriptors, capability requests, and a reproducible `Resolution`. Compilation performs no external effects beyond explicit provider metadata resolution supplied as data.
 
-## Task 2.1 — Define Resolution and provider alias resolution
+## component — Define Resolution and provider alias resolution
 
 **Files:**
 
@@ -335,7 +335,7 @@ Resolution is pure data. Secrets never appear in it.
 
 ---
 
-## Task 2.2 — Define and validate topology IR
+## component — Define and validate topology IR
 
 **Files:**
 
@@ -380,7 +380,7 @@ Topology value:
 
 ---
 
-## Task 2.3 — Discover and statically validate evolvable SCI programs
+## component — Discover and statically validate evolvable SCI programs
 
 **Files:**
 
@@ -410,7 +410,7 @@ Genome programs are declared as descriptors, not inferred from arbitrary source 
 
 ---
 
-## Task 2.4 — Produce the `CompiledGenome` and Phenotype identity
+## component — Produce the `CompiledGenome` and Phenotype identity
 
 **Files:**
 
@@ -451,7 +451,7 @@ phenotype-id = SHA256(kernel-abi || genome-id || resolution-id)
 
 **Milestone outcome:** A `CompiledGenome` program can run inside an explicitly restricted SCI context, accept only validated EDN input, return only fully realized validated EDN output, and be interrupted by deterministic resource limits. It still cannot perform external effects.
 
-## Task 3.1 — Build a closed SCI context with an explicit allow surface
+## component — Build a closed SCI context with an explicit allow surface
 
 **Files:**
 
@@ -478,7 +478,7 @@ Default host exposure MUST exclude filesystem, environment, Java interop, proces
 
 ---
 
-## Task 3.2 — Enforce the EDN-safe boundary and eager realization
+## component — Enforce the EDN-safe boundary and eager realization
 
 **Files:**
 
@@ -502,7 +502,7 @@ Default host exposure MUST exclude filesystem, environment, Java interop, proces
 
 ---
 
-## Task 3.3 — Add SCI execution limits and interruption
+## component — Add SCI execution limits and interruption
 
 **Files:**
 
@@ -530,7 +530,7 @@ Default host exposure MUST exclude filesystem, environment, Java interop, proces
 
 ---
 
-## Task 3.4 — Execute a Genome-declared SCI entry point
+## component — Execute a Genome-declared SCI entry point
 
 **Files:**
 
@@ -560,7 +560,7 @@ The load operation mutates only the isolated SCI context owned by a Phenotype in
 
 **Milestone outcome:** Evolvable code can request actions only by emitting typed Intents. The trusted broker normalizes the real resource target, checks an explicit capability lease and budget/policy constraints, invokes a registered provider adapter, and returns a typed Result. Tool visibility and authorization are separate concepts.
 
-## Task 4.1 — Define the Intent ABI and canonical normalization
+## component — Define the Intent ABI and canonical normalization
 
 **Files:**
 
@@ -606,7 +606,7 @@ Base shape:
 
 ---
 
-## Task 4.2 — Define capability resources and lease semantics
+## component — Define capability resources and lease semantics
 
 **Files:**
 
@@ -644,7 +644,7 @@ Functions:
 
 ---
 
-## Task 4.3 — Introduce provider/tool descriptors and real-resource normalization
+## component — Introduce provider/tool descriptors and real-resource normalization
 
 **Files:**
 
@@ -683,7 +683,7 @@ Descriptor example:
 
 ---
 
-## Task 4.4 — Implement authorization as a pure broker decision
+## component — Implement authorization as a pure broker decision
 
 **Files:**
 
@@ -716,7 +716,7 @@ Descriptor example:
 
 ---
 
-## Task 4.5 — Execute authorized Intents with idempotency and typed results
+## component — Execute authorized Intents with idempotency and typed results
 
 **Files:**
 
@@ -751,7 +751,7 @@ For non-pure writes, request descriptors must include an idempotency key before 
 
 **Milestone outcome:** Every session transition, Intent, authorization, provider effect, result, episode, candidate, evaluation, and promotion decision can be represented durably. Large payloads are immutable CAS artifacts. The event log is append-only and reconstructable after process restart.
 
-## Task 5.1 — Create SQLite schema and migration runner
+## component — Create SQLite schema and migration runner
 
 **Files:**
 
@@ -791,7 +791,7 @@ promotions
 
 ---
 
-## Task 5.2 — Implement filesystem content-addressed storage
+## component — Implement filesystem content-addressed storage
 
 **Files:**
 
@@ -823,7 +823,7 @@ cas/sha256/ab/abcdef.../meta.edn
 
 ---
 
-## Task 5.3 — Implement append-only events with causal references
+## component — Implement append-only events with causal references
 
 **Files:**
 
@@ -856,7 +856,7 @@ cas/sha256/ab/abcdef.../meta.edn
 
 ---
 
-## Task 5.4 — Persist session pinning and lifecycle transitions
+## component — Persist session pinning and lifecycle transitions
 
 **Files:**
 
@@ -888,7 +888,7 @@ cas/sha256/ab/abcdef.../meta.edn
 
 ---
 
-## Task 5.5 — Implement restart recovery and integrity checks
+## component — Implement restart recovery and integrity checks
 
 **Files:**
 
@@ -919,7 +919,7 @@ cas/sha256/ab/abcdef.../meta.edn
 
 **Milestone outcome:** A compiled Genome becomes a live Phenotype capable of executing a task through its topology. Node handlers produce Intents; the broker performs effects; every transition is persisted; the session remains pinned to its original generation. The seed Genome can complete a deterministic end-to-end fixture task.
 
-## Task 6.1 — Define Phenotype construction and lifecycle
+## component — Define Phenotype construction and lifecycle
 
 **Files:**
 
@@ -948,7 +948,7 @@ cas/sha256/ab/abcdef.../meta.edn
 
 ---
 
-## Task 6.2 — Implement node handler protocol and pure transitions
+## component — Implement node handler protocol and pure transitions
 
 **Files:**
 
@@ -979,7 +979,7 @@ cas/sha256/ab/abcdef.../meta.edn
 
 ---
 
-## Task 6.3 — Build deterministic scheduler and step budget
+## component — Build deterministic scheduler and step budget
 
 **Files:**
 
@@ -1003,7 +1003,7 @@ For v0, scheduler is single-session deterministic FIFO. Add concurrency only aft
 
 ---
 
-## Task 6.4 — Add explicit bounded loop semantics
+## component — Add explicit bounded loop semantics
 
 **Files:**
 
@@ -1029,7 +1029,7 @@ For v0, scheduler is single-session deterministic FIFO. Add concurrency only aft
 
 ---
 
-## Task 6.5 — Materialize Episode records from completed sessions
+## component — Materialize Episode records from completed sessions
 
 **Files:**
 
@@ -1056,7 +1056,7 @@ For v0, scheduler is single-session deterministic FIFO. Add concurrency only aft
 
 ---
 
-## Task 6.6 — Seed Genome end-to-end execution fixture
+## component — Seed Genome end-to-end execution fixture
 
 **Files:**
 
@@ -1085,7 +1085,7 @@ For v0, scheduler is single-session deterministic FIFO. Add concurrency only aft
 
 **Milestone outcome:** Episodes can be converted into bounded evidence packs; an isolated Diagnostician can emit structured hypotheses; a Mutator can emit a finite Mutation IR; the kernel can deterministically apply those mutations to a parent Genome and persist one or more immutable Candidates. Evolution still cannot decide promotion.
 
-## Task 7.1 — Build evidence selection and frozen evidence packs
+## component — Build evidence selection and frozen evidence packs
 
 **Files:**
 
@@ -1122,7 +1122,7 @@ Evidence cutoff is immutable. Episodes created after the cutoff MUST NOT silentl
 
 ---
 
-## Task 7.2 — Define Diagnostician contract and structured hypotheses
+## component — Define Diagnostician contract and structured hypotheses
 
 **Files:**
 
@@ -1163,7 +1163,7 @@ No free-form diagnosis may directly alter the Genome.
 
 ---
 
-## Task 7.3 — Define the Mutation IR and patch preconditions
+## component — Define the Mutation IR and patch preconditions
 
 **Files:**
 
@@ -1218,7 +1218,7 @@ Initial operation set:
 
 ---
 
-## Task 7.4 — Apply EDN/text/Clojure-form mutations deterministically
+## component — Apply EDN/text/Clojure-form mutations deterministically
 
 **Files:**
 
@@ -1248,7 +1248,7 @@ Initial operation set:
 
 ---
 
-## Task 7.5 — Enforce mutation budgets and risk classes
+## component — Enforce mutation budgets and risk classes
 
 **Files:**
 
@@ -1282,7 +1282,7 @@ Default v0 budget profile:
 
 ---
 
-## Task 7.6 — Create Candidate records without activation rights
+## component — Create Candidate records without activation rights
 
 **Files:**
 
@@ -1305,7 +1305,7 @@ Later Promotion may transition an evaluated candidate to `:canary`, `:promoted`,
 
 ---
 
-## Task 7.7 — Retain rejected mutation evidence and prevent immediate oscillation
+## component — Retain rejected mutation evidence and prevent immediate oscillation
 
 **Files:**
 
@@ -1327,7 +1327,7 @@ Later Promotion may transition an evaluated candidate to `:canary`, `:promoted`,
 
 ---
 
-## Task 7.8 — Orchestrate one evolution proposal cycle
+## component — Orchestrate one evolution proposal cycle
 
 **Files:**
 
@@ -1358,7 +1358,7 @@ Later Promotion may transition an evaluated candidate to `:canary`, `:promoted`,
 
 **Milestone outcome:** Candidates are judged by a kernel-owned evaluation pipeline separated from the mutation context. Gates run from static validity through historical replay to hidden paired selection. Results preserve hard constraints, utility, cost, and complexity separately. Evaluation produces eligibility facts, not activation.
 
-## Task 8.1 — Define evaluation profiles and physically separated datasets
+## component — Define evaluation profiles and physically separated datasets
 
 **Files:**
 
@@ -1390,7 +1390,7 @@ Later Promotion may transition an evaluated candidate to `:canary`, `:promoted`,
 
 ---
 
-## Task 8.2 — Implement Gates G0–G3: parse, schema, static policy, deterministic tests
+## component — Implement Gates G0–G3: parse, schema, static policy, deterministic tests
 
 **Files:**
 
@@ -1417,7 +1417,7 @@ Later Promotion may transition an evaluated candidate to `:canary`, `:promoted`,
 
 ---
 
-## Task 8.3 — Implement G4 historical replay with representative cases
+## component — Implement G4 historical replay with representative cases
 
 **Files:**
 
@@ -1440,7 +1440,7 @@ Later Promotion may transition an evaluated candidate to `:canary`, `:promoted`,
 
 ---
 
-## Task 8.4 — Implement isolated paired Selection runner G5
+## component — Implement isolated paired Selection runner G5
 
 **Files:**
 
@@ -1471,7 +1471,7 @@ Later Promotion may transition an evaluated candidate to `:canary`, `:promoted`,
 
 ---
 
-## Task 8.5 — Preserve hard, utility, cost, and complexity metrics separately
+## component — Preserve hard, utility, cost, and complexity metrics separately
 
 **Files:**
 
@@ -1502,7 +1502,7 @@ Comparison is lexicographic, not a weighted scalar.
 
 ---
 
-## Task 8.6 — Add repeated rollout statistics without pretending certainty
+## component — Add repeated rollout statistics without pretending certainty
 
 **Files:**
 
@@ -1525,7 +1525,7 @@ Comparison is lexicographic, not a weighted scalar.
 
 ---
 
-## Task 8.7 — End-to-end candidate evaluation orchestration
+## component — End-to-end candidate evaluation orchestration
 
 **Files:**
 
@@ -1568,7 +1568,7 @@ Canary remains Promotion's responsibility.
 
 **Milestone outcome:** Only the trusted Promotion subsystem can change which generation new sessions receive. Activation is atomic and parent-checked. Canary rollout is explicit. Rollback changes future selection without erasing history or claiming to undo external effects. Operators can reconstruct the complete evolutionary lineage.
 
-## Task 9.1 — Model generation and promotion states
+## component — Model generation and promotion states
 
 **Files:**
 
@@ -1603,7 +1603,7 @@ Canary remains Promotion's responsibility.
 
 ---
 
-## Task 9.2 — Implement atomic CURRENT compare-and-set promotion
+## component — Implement atomic CURRENT compare-and-set promotion
 
 **Files:**
 
@@ -1647,7 +1647,7 @@ COMMIT
 
 ---
 
-## Task 9.3 — Route new sessions by canary allocation without migrating old sessions
+## component — Route new sessions by canary allocation without migrating old sessions
 
 **Files:**
 
@@ -1676,7 +1676,7 @@ Canary ladder default:
 
 ---
 
-## Task 9.4 — Evaluate online canary guardrails and automatic stop
+## component — Evaluate online canary guardrails and automatic stop
 
 **Files:**
 
@@ -1702,7 +1702,7 @@ operator escalation rate
 
 ---
 
-## Task 9.5 — Implement rollback semantics explicitly
+## component — Implement rollback semantics explicitly
 
 **Files:**
 
@@ -1726,7 +1726,7 @@ operator escalation rate
 
 ---
 
-## Task 9.6 — Build lineage reconstruction
+## component — Build lineage reconstruction
 
 **Files:**
 
@@ -1754,7 +1754,7 @@ operator escalation rate
 
 ---
 
-## Task 9.7 — Complete end-to-end evolutionary promotion test
+## component — Complete end-to-end evolutionary promotion test
 
 **Files:**
 
@@ -1793,7 +1793,7 @@ Lineage query explains G1 + evidence + Δ + evaluation → G2.
 
 This milestone is not a new conceptual dependency in the requested chain; it assembles the completed subsystems into operable commands without bypassing their APIs.
 
-## Task 10.1 — Wire stable host components with Integrant
+## component — Wire stable host components with Integrant
 
 **Files:**
 
@@ -1824,7 +1824,7 @@ Genome graph nodes are NOT Integrant components.
 
 ---
 
-## Task 10.2 — Implement CLI read/execute commands
+## component — Implement CLI read/execute commands
 
 **Files:**
 
@@ -1870,7 +1870,7 @@ evoclj capability inspect --session <uuid>
 
 No v0 release should be called complete until the following tests execute in CI. They directly test the architectural claims rather than only happy-path behavior.
 
-## Task 11.1 — Self-authority escalation suite
+## component — Self-authority escalation suite
 
 **Files:**
 
@@ -1895,7 +1895,7 @@ Child/future extension attempts to reuse another Phenotype's capability ID.
 
 ---
 
-## Task 11.2 — Evaluation leakage and tampering suite
+## component — Evaluation leakage and tampering suite
 
 **Files:**
 
@@ -1918,7 +1918,7 @@ Verifier adapter accidentally receives Diagnostician private context.
 
 ---
 
-## Task 11.3 — Concurrency and stale promotion suite
+## component — Concurrency and stale promotion suite
 
 **Files:**
 
@@ -1948,7 +1948,7 @@ No session's pinned generation changes after creation.
 
 ---
 
-## Task 11.4 — Crash/fault injection suite
+## component — Crash/fault injection suite
 
 **Files:**
 
@@ -1973,7 +1973,7 @@ CURRENT CAS before outer transaction commit
 
 ---
 
-## Task 11.5 — Mutation determinism and sandbox escape suite
+## component — Mutation determinism and sandbox escape suite
 
 **Files:**
 
@@ -2003,7 +2003,7 @@ SCI emits huge lazy/infinite data.
 
 Performance optimization happens only after correctness, but v0 needs measurement so later evolution cannot quietly purchase tiny quality gains with explosive cost.
 
-## Task 12.1 — Standard usage accounting
+## component — Standard usage accounting
 
 **Files:**
 
@@ -2030,7 +2030,7 @@ artifact bytes written
 
 ---
 
-## Task 12.2 — Establish benchmark fixtures and regression ceilings
+## component — Establish benchmark fixtures and regression ceilings
 
 **Files:**
 
@@ -2340,7 +2340,7 @@ commit
 
 ## Promotion transaction
 
-As specified in Task 9.2; it must be the only code path that changes CURRENT.
+As specified in component; it must be the only code path that changes CURRENT.
 
 ---
 
@@ -2434,7 +2434,7 @@ These batches are review boundaries, not a license to skip per-task commits.
 
 ## Batch A — Immutable substrate
 
-Tasks 1.1–2.4.
+component–2.4.
 
 **Review questions:**
 
@@ -2447,7 +2447,7 @@ Tasks 1.1–2.4.
 
 ## Batch B — Safe computation/effects
 
-Tasks 3.1–4.5.
+component–4.5.
 
 **Review questions:**
 
@@ -2460,7 +2460,7 @@ Tasks 3.1–4.5.
 
 ## Batch C — Durable execution
 
-Tasks 5.1–6.6.
+component–6.6.
 
 **Review questions:**
 
@@ -2473,7 +2473,7 @@ Tasks 5.1–6.6.
 
 ## Batch D — Evolution without power to self-approve
 
-Tasks 7.1–7.8.
+component–7.8.
 
 **Review questions:**
 
@@ -2486,7 +2486,7 @@ Tasks 7.1–7.8.
 
 ## Batch E — Independent judgment
 
-Tasks 8.1–8.7.
+component–8.7.
 
 **Review questions:**
 
@@ -2499,7 +2499,7 @@ Tasks 8.1–8.7.
 
 ## Batch F — Governed activation
 
-Tasks 9.1–9.7 plus adversarial release gate.
+component–9.7 plus adversarial release gate.
 
 **Review questions:**
 

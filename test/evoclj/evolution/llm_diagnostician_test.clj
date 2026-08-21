@@ -8,7 +8,7 @@
   so the adapter's JSON parsing, per-entry schema filtering (LLM-noise
   tolerance), deterministic id assignment, and fail-loud error contract
   are exercised without any provider. Fixture evidence packs mirror the
-  frozen-pack shape from the Task 7.1 schema (compact episode refs +
+  frozen-pack shape from the component schema (compact episode refs +
   summary), exactly as diagnosed in evoclj.evolution.diagnose-test.
 
   Error contract under test: :diagnosis/config-invalid,
@@ -36,7 +36,7 @@
 
 (defn- ep
   "One compact episode ref for a hand-built, schema-valid evidence
-  pack (Task 7.1 EpisodeRefSchema)."
+  pack (component EpisodeRefSchema)."
   [{:keys [id first last outcome usage]}]
   {:episode/id id
    :session/id (random-uuid)

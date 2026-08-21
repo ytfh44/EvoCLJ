@@ -1,5 +1,5 @@
 (ns evoclj.eval.dataset-test
-  "Task 8.1 tests for the evaluation profile and physically separated
+  "component tests for the evaluation profile and physically separated
   datasets (evoclj.eval.profile / evoclj.eval.dataset).
 
   The four normative scenarios, in the task's numbered order:

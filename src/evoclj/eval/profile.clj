@@ -1,5 +1,5 @@
 (ns evoclj.eval.profile
-  "Evaluation profiles (Task 8.1).
+  "Evaluation profiles (component).
 
   An evaluation profile is the NORMATIVE declaration of how one
   evaluation run is provisioned. It names the three physically
@@ -9,7 +9,7 @@
   audit set to operator-only visibility, declares how many times each
   selection case is repeated, and names the promotion strategy the
   profile is evaluated under. The :promotion map MAY additionally
-  carry the Task 8.5 comparison thresholds — :min-delta (minimum
+  carry the component comparison thresholds — :min-delta (minimum
   utility improvement) and :max-cost-regression (maximum allowed
   candidate/parent cost ratio) — plus an OPTIONAL
   :max-complexity-regression guard. When a profile omits them,
@@ -54,7 +54,7 @@
    [:visibility {:optional true} keyword?]])
 
 (def EvalProfileSchema
-  "The normative Task 8.1 profile contract (closed). :source values
+  "The normative component profile contract (closed). :source values
   are dataset registry keywords, not paths and never loader handles;
   :repetitions is the number of times each selection case runs in a
   paired comparison; :promotion names the promotion strategy this
@@ -75,12 +75,12 @@
                 [:max-cost-regression {:optional true} number?]
                 [:max-complexity-regression {:optional true} number?]]]])
 
-;; --- canonical promotion thresholds (Task 8.5) ---------------------------------
+;; --- canonical promotion thresholds (component) ---------------------------------
 
 (def default-promotion-thresholds
-  "The canonical Task 8.5 comparison thresholds used when a profile
+  "The canonical component comparison thresholds used when a profile
   does not declare its own (the schema keeps them optional so every
-  Task 8.1 profile stays valid): :min-delta is the minimum utility
+  component profile stays valid): :min-delta is the minimum utility
   improvement a candidate must show, :max-cost-regression is the
   maximum candidate/parent cost ratio allowed, and
   :max-complexity-regression is the OPTIONAL complexity guard — a
@@ -98,8 +98,8 @@
   evals/evolution, evals/selection, evals/audit. Selection cases run
   once per paired comparison; promotion is a paired comparison of
   parent vs. candidate on the same case set and environment fixture
-  (Global Constraint 13). The profile carries the Task 8.5 comparison
-  thresholds explicitly (Task 8.5 requires the profile to carry
+  (Global Constraint 13). The profile carries the component comparison
+  thresholds explicitly (component requires the profile to carry
   them)."
   {:eval/profile-id :default-v1
    :evolution-set {:source :evals/evolution}

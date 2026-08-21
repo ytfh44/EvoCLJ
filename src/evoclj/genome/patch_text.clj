@@ -1,5 +1,5 @@
 (ns evoclj.genome.patch-text
-  "Bounded text patch operations for Task 7.4.
+  "Bounded text patch operations for component
 
   This namespace owns the text ops (:insert-text :replace-text
   :delete-text). Each `apply-op` takes the CURRENT text of the target

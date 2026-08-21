@@ -1,4 +1,4 @@
-;; Seed trust anchors (Task C3, T2c).
+;; Seed trust anchors (component, T2c).
 ;;
 ;; A map of seed genome id -> expected "sha256:" digest. Each entry
 ;; pins one seed bundle to its canonical content address (Global
@@ -13,5 +13,5 @@
 ;; seed bundle is legitimately regenerated, this file must be updated
 ;; with the new digest — a stale pin is detected the same way.
 
-{"sha256:de5835d812703df33f707864529c854867807c5120744072207774be316cc096"
- "sha256:de5835d812703df33f707864529c854867807c5120744072207774be316cc096"}
+{"sha256:671f559355287848bc81a4aa61bc7ea9586d4b2f358c1bed858e10a0ba1223a0"
+ "sha256:671f559355287848bc81a4aa61bc7ea9586d4b2f358c1bed858e10a0ba1223a0"}

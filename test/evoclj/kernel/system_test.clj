@@ -1,5 +1,5 @@
 (ns evoclj.kernel.system-test
-  "Task 10.1 — host wiring tests.
+  "component — host wiring tests.
 
   The tests build the host config map DIRECTLY with temp paths
   (dependency injection, Step 4): nothing here reads
@@ -41,7 +41,7 @@
   (str "sha256:" (apply str (repeat 64 "7"))))
 
 (def ^:private provider-catalog
-  "The v0 fixture provider catalog (Task 2.1 Resolution shape)."
+  "The v0 fixture provider catalog (component Resolution shape)."
   {:reasoning/high {:provider :fixture
                     :provider-model "fixture-model-v1"
                     :adapter-version "1"}
@@ -122,7 +122,7 @@
 (defn- seed-generation!
   "Insert the generation row sessions are pinned to (current = 1: the
   seed generation IS the CURRENT pointer, Database Invariant 6),
-  mirroring the Task 6.3 e2e fixture. Returns the generation id."
+  mirroring the component e2e fixture. Returns the generation id."
   [db]
   (sqlite/exec! db ["INSERT INTO generations
                       (id, genome_id, resolution_id, parent_id, state, current, created_at)

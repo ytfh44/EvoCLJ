@@ -1,5 +1,5 @@
 (ns evoclj.evolution.budget-test
-  "Task 7.5 tests for the mutation budget and risk-class gate.
+  "component tests for the mutation budget and risk-class gate.
 
   Every mutation op belongs to exactly one risk class (R0 :parameter,
   R1 :behavioral, R2 :program, R3 :topology); the mutation's declared
@@ -33,7 +33,7 @@
   - Step 4: R4 (:meta) is explicitly rejected in v0 with
     :evolution/risk-not-enabled.
 
-  FIXTURE DESIGN: ops are hand-built to the Task 7.3 op shapes so a
+  FIXTURE DESIGN: ops are hand-built to the component op shapes so a
   costed mutation could also pass mutation-schema validation. The
   :set-edn / :delete-edn fixtures take a :file argument so the same
   shape can be pointed at parameters/, skills/, prompts/, programs/,
@@ -456,11 +456,11 @@
              (thrown-error-type #(budget/check-budget (assoc m :ops []))))))))
 
 ;; ============================================================================
-;; Task E4 — budget adaptation from rejection history
+;; component — budget adaptation from rejection history
 ;; ============================================================================
 
 (defn- history-entry
-  "A Task 7.7-shaped history entry: a risk class plus a resolved
+  "A component history entry: a risk class plus a resolved
   verdict :state (:accepted / :rejected / :pending)."
   [risk state n]
   {:mutation/id (uuid n)

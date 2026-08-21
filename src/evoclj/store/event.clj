@@ -1,14 +1,14 @@
 (ns evoclj.store.event
-  "Append-only causal event log (Task 5.3).
+  "Append-only causal event log (component).
 
   Only append + read/verify queries are exposed: this namespace has NO
-  update or delete API by design (Database Invariant 10, Task 5.3
+  update or delete API by design (Database Invariant 10, component
   Step 3). The only write path is append-event!, and the SQL triggers
   in 001-init.sql reject UPDATE/DELETE on the events table outright,
   so the log cannot be silently rewritten through the application
   path.
 
-  Redaction (Task A1, foundation F7): append-event! accepts optional
+  Redaction (component, foundation F7): append-event! accepts optional
   redaction specs and applies evoclj.security.redact/redact-event to
   :metadata BEFORE hashing/append; without specs the write path is
   byte-identical.
@@ -237,7 +237,7 @@
   "Append one event to a session's append-only log inside a single
   transaction and return the persisted event (public Event contract).
 
-  Optional third argument `redaction-specs` (Task A1, foundation F7):
+  Optional third argument `redaction-specs` (component, foundation F7):
   when non-nil, evoclj.security.redact/redact-event is applied to the
   event BEFORE any hash is computed or row inserted, so secrets keyed
   or embedded in :metadata never reach persistent storage. Specs are
@@ -391,7 +391,7 @@
                        (str (types/session-id session-id)) (type->db type)])))
 
 (defn verify-event-chain
-  "Verify the integrity of a session's event chain (Task 5.3 Step 5).
+  "Verify the integrity of a session's event chain (component Step 5).
 
   Reads every event of `session-id` in :event/seq order and, for each
   one: checks that its stored :prev-hash links to the previous event's

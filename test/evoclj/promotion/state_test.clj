@@ -1,6 +1,6 @@
 (ns evoclj.promotion.state-test
-  "Task 9.1 tests: generation states and candidate deployment states as
-  PURE, closed transition tables (data, no SQL — Task 9.2 owns the
+  "component tests: generation states and candidate deployment states as
+  PURE, closed transition tables (data, no SQL — component owns the
   CURRENT compare-and-set).
 
   The machine fragments this task owns:
@@ -9,7 +9,7 @@
     the normative edges :seed → :active, :active → :superseded,
     :active → :rolled-back (a generation that was never active is
     never rolled back; terminal states have no outgoing edges).
-  - candidate deployment states (the M9 fragment of the Task 7.6
+  - candidate deployment states (the M9 fragment of the component
     candidate machine): :evaluated → #{:canary :promoted :rejected
     :stale}, :canary → #{:promoted :canary-failed}; :rejected
     :stale :canary-failed :promoted are terminal.
@@ -29,7 +29,7 @@
 
   Eligibility gates ENTRY only: once a candidate is in :canary, exit
   to :promoted/:canary-failed is decided by the canary guardrails
-  (Task 9.4) and never re-checks the entry eligibility."
+  (component) and never re-checks the entry eligibility."
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.promotion.schema :as schema]
             [evoclj.promotion.state :as state]
@@ -47,7 +47,7 @@
   (:error/type (ex-data (try (f) nil (catch clojure.lang.ExceptionInfo e e)))))
 
 (def ^:private eligible
-  "Finalized eligibility data for an eligible evaluation (Task 8.x
+  "Finalized eligibility data for an eligible evaluation (component
   shape: :reasons is empty exactly when :eligible? is true)."
   {:eligible? true :reasons []})
 
@@ -64,7 +64,7 @@
     (is (= :canary (state/deployment-transition :evaluated eligible :canary))))
   (testing "an evaluated, ELIGIBLE candidate may be directly promoted"
     (is (= :promoted (state/deployment-transition :evaluated eligible :promoted))))
-  (testing "an evaluated, ELIGIBLE candidate may become :stale (Task 9.2 CAS loser)"
+  (testing "an evaluated, ELIGIBLE candidate may become :stale (component CAS loser)"
     (is (= :stale (state/deployment-transition :evaluated eligible :stale))))
   (testing "the evaluated-only rule is structural: only :evaluated carries
             the canary/promotion edges"
@@ -84,7 +84,7 @@
 
 (deftest step1-canary-exit-never-rechecks-eligibility
   (testing "eligibility gates ENTRY to :canary/:promoted, not exit from :canary
-            (canary exit is decided by the Task 9.4 guardrails)"
+            (canary exit is decided by the component guardrails)"
     (is (= :promoted
            (state/deployment-transition :canary ineligible :promoted)))
     (is (= :canary-failed
@@ -153,7 +153,7 @@
     (is (= state/candidate-states (set (keys state/candidate-transitions))))
     (is (every? #(contains? state/candidate-states %)
                 (apply concat (vals state/candidate-transitions)))))
-  (testing "the base machine fragment (Task 7.6 + M8) is preserved"
+  (testing "the base machine fragment (component + M8) is preserved"
     (is (= #{:materialized} (state/next-candidate-states :proposed)))
     (is (= #{:evaluation-pending} (state/next-candidate-states :materialized)))
     (is (= #{:evaluated :invalid} (state/next-candidate-states :evaluation-pending))))

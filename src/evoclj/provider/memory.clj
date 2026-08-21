@@ -45,7 +45,7 @@
 
 (def ^:private memory-descriptor
   ;; Deliberately NO :retry block: automatic retries are allowed only
-  ;; when a provider declares :retry {:safe? true} (Task 4.5), so the
+  ;; when a provider declares :retry {:safe? true} (component), so the
   ;; dispatcher must NEVER auto-retry this provider. Memory WRITES are
   ;; not idempotent; reads are safe but share the descriptor.
   {:tool/id :memory/kv
@@ -126,7 +126,7 @@
 
   - :execution-count — an atom bumped once per execute-request! call, so
     tests can assert when the provider REALLY ran: a denied request must
-    never bump it (Task 4.5 Step 2).
+    never bump it (component Step 2).
 
   normalize-request turns an :intent/memory-read payload
   {:memory/key k :memory/limit n?} into the canonical resource

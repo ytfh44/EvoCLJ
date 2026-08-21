@@ -1,6 +1,6 @@
 (ns evoclj.sci.context-test
   "Tests for the closed SCI execution context with an explicit allow
-  surface (Task 3.1).
+  surface (component).
 
   make-context returns a Babashka SCI context in which evolvable Genome
   programs run with NO ambient host authority (Global Constraint 7): no
@@ -27,7 +27,7 @@
 ;; --- shared helpers --------------------------------------------------------
 
 (defn- route-source
-  "The seed Genome routing program source (Task 2.3 fixture)."
+  "The seed Genome routing program source (component fixture)."
   []
   (slurp (io/resource "fixtures/genomes/minimal-valid/programs/route.clj")))
 

@@ -1,5 +1,5 @@
 (ns evoclj.http.server
-  "HTTP API shell (Task S3-3): Jetty server lifecycle.
+  "HTTP API shell (component): Jetty server lifecycle.
 
   start-server! returns the Jetty Server instance so the caller can
   stop it later with stop-server!. The kernel system map is injected

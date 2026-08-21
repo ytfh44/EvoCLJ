@@ -60,7 +60,7 @@
                                   OR the model text was not usable
                                   (non-JSON / invalid / missing :equivalent).
 
-  Task A6 (Foundation F3): this namespace also owns the judge-verdict
+  component (Foundation F3): this namespace also owns the judge-verdict
   enrichment adapter. Per-case judge verdicts persist as versioned
   enrichment records attached to the :evaluation entity (entity-kind
   :evaluation, entity-id = the evaluation id, kind :judge-verdict,
@@ -69,7 +69,7 @@
   (persist-verdict-enrichment!) that NEVER fails the evaluation — a
   store failure is caught and returned as a :failed record.
 
-  Task V2 (roadmap V2): this namespace also owns judge score
+  component (roadmap V2): this namespace also owns judge score
   aggregation. Per-case judge verdicts feed a utility summary
   (win/loss/equiv counts plus a per-case — category — breakdown)
   joined into the paired outcome. The pure surface: verdict-pair
@@ -82,7 +82,7 @@
   :eval/judge-summary-invalid — silently pairing or tallying
   misaligned verdicts would corrupt the win/loss counts.
 
-  Task V5 (roadmap V5): judge configuration. The judge's model-call
+  component (roadmap V5): judge configuration. The judge's model-call
   settings are configurable and validated: :temperature (optional
   number, default 0.0 — deterministic judgement), :system-prompt
   (optional string, built-in default), :max-tokens (optional pos-int,
@@ -90,7 +90,7 @@
   the host's evoclj.config envelope exposes the same three keys under
   :config/judge (JudgeSectionSchema), validated by validate-config!.
 
-  Task E-judge (T4c): the judge calibration harness.
+  component (T4c): the judge calibration harness.
   calibration-judgement runs ONE judge decision over ONE calibration
   pair (known-equivalent or known-different expected/actual outputs)
   into a plain per-pair record; agreement-stats is the pure agreement
@@ -306,11 +306,11 @@
                                :excerpt (subs text 0 (min 200 (count text)))})))
           v)))))
 
-;; --- Task A6 — judge verdicts as enrichment records (Foundation F3) -----------
+;; --- component — judge verdicts as enrichment records (Foundation F3) -----------
 
 (defn verdict-record
   "ONE per-case judge verdict as a plain EDN map — the pure
-  verdict→enrichment mapping (Task A6):
+  verdict→enrichment mapping (component):
 
       {:case/id <keyword>            ; the selection case id
        :repetition <pos-int>         ; the 1-based repetition
@@ -334,7 +334,7 @@
    :score (if equivalent 1.0 0.0)})
 
 (defn verdict-payload
-  "The Task A6 enrichment :payload for a verdict batch: a plain EDN map
+  "The component enrichment :payload for a verdict batch: a plain EDN map
   {:verdicts <vector of verdict-record maps> :count n}. Pure — the
   exact map stored in the CAS via
   evoclj.store.enrichment/put-enrichment! (the row keeps only the
@@ -344,7 +344,7 @@
    :count (count verdicts)})
 
 (defn persist-verdict-enrichment!
-  "Task A6 — the judge-verdict store adapter (Foundation F3). Persist a
+  "component — the judge-verdict store adapter (Foundation F3). Persist a
   verdict batch as a VERSIONED enrichment record attached to the
   evaluation entity:
 
@@ -362,7 +362,7 @@
   next version (max+1) for the (entity-kind, entity-id, kind) triple
   inside the write transaction, so concurrent writers serialize.
 
-  FAILURE ISOLATION (Task A6 acceptance): enrichment persistence must
+  FAILURE ISOLATION (component acceptance): enrichment persistence must
   NEVER fail the evaluation. Every store failure — an invalid store
   map, a CAS write failure, a DB failure — is caught and RETURNED as a
   :failed record carrying the typed :error/type (preserved from an
@@ -391,7 +391,7 @@
        :error/message (.getMessage t)
        :error/data (err/error-data t)})))
 
-;; --- Task V2 — judge score aggregation (roadmap V2) ---------------------------
+;; --- component — judge score aggregation (roadmap V2) ---------------------------
 
 (defn- summary-error
   "A typed :eval/judge-summary-invalid error for the aggregation
@@ -412,14 +412,14 @@
 (defn verdict-pair
   "Join ONE parent verdict record and ONE candidate verdict record on
   the same (case, repetition) into a paired verdict for aggregation
-  (Task V2):
+  (component):
 
       (verdict-pair parent-record candidate-record)
       ;; => {:case/id <kw> :repetition <pos-int> :pair/seed <string>
       ;;     :parent {:equivalent <bool> :score 1.0|0.0}
       ;;     :candidate {:equivalent <bool> :score 1.0|0.0}}
 
-  Both inputs are the Task A6 verdict-record maps (the records the
+  Both inputs are the component verdict-record maps (the records the
   two sides persist as enrichments). The paired-verdict map carries
   the case context plus each side's decision and derived score, ready
   for aggregate-verdicts.
@@ -498,7 +498,7 @@
       (update :total inc)))
 
 (defn aggregate-verdicts
-  "Aggregate paired judge verdicts into a utility summary (Task V2):
+  "Aggregate paired judge verdicts into a utility summary (component):
 
       (aggregate-verdicts pairs)
       ;; => {:total 4 :win 1 :loss 1 :equiv 1 :both-failed 1
@@ -570,7 +570,7 @@
 
 (defn join-utility-summary
   "Join the judge-derived utility summary into a paired outcome record
-  (Task V2). evoclj.eval.paired stays read-only; this pure join is
+  (component). evoclj.eval.paired stays read-only; this pure join is
   the wiring point for the orchestrator:
 
       (join-utility-summary paired-result summary)
@@ -590,7 +590,7 @@
                           paired-result)))
   (assoc paired-result :utility/summary summary))
 
-;; --- Task E-judge — judge calibration harness ----------------------------------
+;; --- component — judge calibration harness ----------------------------------
 
 (def ^:private calibration-labels
   "The binary ground-truth labels a calibration pair may carry: the
@@ -676,7 +676,7 @@
 
 (defn calibration-judgement
   "Run ONE judge decision over ONE calibration pair and produce the
-  per-pair calibration record (Task E-judge):
+  per-pair calibration record (component):
 
       (calibration-judgement judge-fn pair)
       ;; => {:calib/id <kw>
@@ -702,7 +702,7 @@
      :agree (agrees? label (boolean equivalent))}))
 
 (defn agreement-stats
-  "The pure calibration agreement statistics (Task E-judge):
+  "The pure calibration agreement statistics (component):
 
       (agreement-stats records)
       ;; => {:total 10 :agree 10 :disagree 0
@@ -756,7 +756,7 @@
      :by-label (into (sorted-map) label-totals)}))
 
 (defn run-calibration
-  "The judge calibration HARNESS (Task E-judge): run a judge fn over a
+  "The judge calibration HARNESS (component): run a judge fn over a
   calibration fixture and report agreement:
 
       (run-calibration judge-fn pairs)

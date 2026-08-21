@@ -1,5 +1,5 @@
 (ns evoclj.eval.statistics
-  "Descriptive statistics over repeated paired observations (Task 8.6).
+  "Descriptive statistics over repeated paired observations (component).
 
   The NORMATIVE interface:
 
@@ -42,11 +42,11 @@
   recomputation or re-analysis. pairs-artifact-ref derives the
   content-hash artifact reference (Global Constraint 21 — SQLite rows
   reference the hash, never duplicated payload bodies) that the
-  persistence layer (Task 8.7) stores instead of the body.
+  persistence layer (component) stores instead of the body.
 
   STEP 5 — PROFILE-DECLARED SAMPLE REQUIREMENTS: promotion-checks
   exposes the checks for high-risk mutations as pure reason data in
-  the Task 8.5 shape:
+  the component shape:
 
       (promotion-checks summary profile)
       ;; => []                                        ; every declared check passes
@@ -57,10 +57,9 @@
   :max-candidate-failure-rate (the maximum fraction of pairs the
   candidate may LOSE — losses / n). A check applies ONLY when the
   profile declares it, mirroring how evoclj.eval.compare treats the
-  optional complexity guard. The Task 8.1 profile schema (closed map)
+  optional complexity guard. The component profile schema (closed map)
   does not yet carry these keys; extending the schema and wiring these
-  checks into evoclj.eval.compare's lexicographic pipeline is Task
-  8.7 — here the checks are exposed as data with complete evidence, so
+  checks into evoclj.eval.compare's lexicographic pipeline is component — here the checks are exposed as data with complete evidence, so
   that wiring is trivially additive.
 
   Error contract (Global Constraint 22 — plain serializable data):
@@ -120,7 +119,7 @@
 ;; --- the normative interface -----------------------------------------------------
 
 (defn summarize-paired-deltas
-  "The NORMATIVE Task 8.6 interface: DESCRIPTIVE statistics over the
+  "The NORMATIVE component interface: DESCRIPTIVE statistics over the
   raw paired observations.
 
       (summarize-paired-deltas pairs)
@@ -146,7 +145,7 @@
 (defn pairs-artifact-ref
   "The content-hash artifact reference for the raw paired observations
   (Global Constraint 21): a deterministic digest over the EDN of the
-  pairs vector. The persistence layer (Task 8.7) stores THIS ref in
+  pairs vector. The persistence layer (component) stores THIS ref in
   SQLite rows instead of duplicating the payload body; the raw pairs
   remain available for recomputation, keyed by this ref."
   [pairs]
@@ -188,8 +187,8 @@
                      :max-candidate-failure-rate max-rate}}])))))
 
 (defn promotion-checks
-  "The Task 8.6 Step 5 data checks for high-risk mutations, exposed as
-  pure reason data in the Task 8.5 shape.
+  "The component Step 5 data checks for high-risk mutations, exposed as
+  pure reason data in the component shape.
 
       (promotion-checks summary profile)
       ;; => []                                         ; every declared check passes
@@ -202,7 +201,7 @@
   ONLY when the profile declares it. Returns a vector of failing
   reason maps — empty exactly when every declared check passes. The
   reasons carry complete evidence (:detail), so wiring them into
-  evoclj.eval.compare's lexicographic pipeline (Task 8.7) is
+  evoclj.eval.compare's lexicographic pipeline (component) is
   trivially additive."
   [summary profile]
   (let [p (or (:promotion profile) {})]

@@ -1,5 +1,5 @@
 (ns evoclj.runtime.system
-  "Integrant wiring for the STABLE HOST components (Task 6.1 Step 4).
+  "Integrant wiring for the STABLE HOST components (component Step 4).
 
   This namespace is the host-component wiring PLAN only. Integrant
   (integrant.core 1.0.1 — init-key / halt-key!) appears here exactly
@@ -17,7 +17,7 @@
   evoclj.runtime.phenotype/instantiate, never global host components
   (Global Constraints 22, 23). The Phenotype is deliberately NOT an
   Integrant component either — it is constructed per session by the
-  Task 6.3 executor.
+  component executor.
 
   Every method below is THIN and dependency-injected: init-key builds
   one component from the config subtree (or defers to the focused
@@ -34,7 +34,7 @@
     (ig/init-key :capability/broker {:registry reg :leases []})
 
   :runtime/executor is the declared extension point of the wiring
-  plan: the Task 6.3 scheduler component joins here once the executor
+  plan: the component scheduler component joins here once the executor
   exists (YAGNI, Global Constraint 24 — a key whose component cannot
   be constructed yet is not registered)."
   (:require [evoclj.intent.dispatch :as dispatch]
@@ -68,7 +68,7 @@
   :capability/broker)
 
 (def runtime-executor-key
-  "Declared extension point of the host wiring plan: the Task 6.3
+  "Declared extension point of the host wiring plan: the component
   scheduler/executor component key. No init-key is registered until
   the executor exists (YAGNI, Global Constraint 24)."
   :runtime/executor)

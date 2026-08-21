@@ -1,5 +1,5 @@
 (ns evoclj.cli.session
-  "CLI host building and the session-facing commands (Task 10.2):
+  "CLI host building and the session-facing commands (component):
   `run`, `replay`, `events`, and `capability inspect`.
 
   This namespace owns the CLI's HOST BUILDING (shared by all cli
@@ -8,7 +8,7 @@
   CLI's ONLY raw SQL — a small set of READ-ONLY SELECTs (generations
   and candidates lookups) documented below; there is no write SQL and
   no raw JDBC anywhere in the cli layer (the by-construction
-  guarantee of Task 10.2 Step 2).
+  guarantee of component Step 2).
 
   THE STATE-DIR LAYOUT (normative for the CLI; a real deployment
   provisions it the same way the tests do):
@@ -18,7 +18,7 @@
       <state-dir>/genomes/<id-as-dash>  immutable Genome bundles, one
                                         directory per content address
                                         ('sha256:' -> 'sha256-')
-      <state-dir>/candidates/         evolution candidates-dir (Task 7.4
+      <state-dir>/candidates/         evolution candidates-dir (component
                                         finalize output)
       <state-dir>/evals/evolution|selection|audit   dataset roots
 
@@ -28,7 +28,7 @@
   tests inject what v0 ships empty: the evaluator's hidden selection/
   replay cases and fixture providers, an evolution :mutator adapter,
   and so on — the CLI itself ships no cases and no mutator (YAGNI,
-  Global Constraint 24). Task D1 adds ONE built-in exception: the
+  Global Constraint 24). component adds ONE built-in exception: the
   :demo profile injects the demo heuristic Mutator and the demo's
   hidden selection cases/fixtures through the SAME :overrides seam, so
   a fresh state dir + the :demo profile runs the whole demo loop
@@ -72,11 +72,11 @@
            (java.util Date UUID)))
 
 ;; ============================================================================
-;; shared host knowledge (the Task 2.3 route descriptor + Resolution catalog)
+;; shared host knowledge (the component route descriptor + Resolution catalog)
 ;; ============================================================================
 
 (def provider-catalog
-  "The Task 2.1 Resolution provider catalog (the fixture adapters; no
+  "The component Resolution provider catalog (the fixture adapters; no
   real provider credentials ever appear — Global Constraint 22)."
   {:reasoning/high {:provider :fixture
                     :provider-model "fixture-model-v1"
@@ -89,7 +89,7 @@
           :adapter-version "1"}})
 
 (def route-descriptor
-  "The v0 seed route program descriptor (Task 2.3 choice (a)): the
+  "The v0 seed route program descriptor (component choice (a)): the
   immutable route entry point carried on loaded Genomes under
   :programs so they compile for execution/evolution."
   {:program/id :program/route
@@ -99,8 +99,7 @@
    :output-schema :schema/intent-or-route})
 
 (defn load-genome-for-execution
-  "Load a Genome bundle and attach the route program registry (Task
-  2.3 choice (a)) so it compiles for execution, evolution, and
+  "Load a Genome bundle and attach the route program registry (component choice (a)) so it compiles for execution, evolution, and
   promotion."
   [bundle-root]
   (assoc (load/load-genome bundle-root) :programs [route-descriptor]))
@@ -124,7 +123,7 @@
 
 (defn candidate-bundle-root
   "The finalized candidate bundle directory under the CLI's candidates
-  dir (the Task 7.4 name rule: the content address with ':' replaced,
+  dir (the component name rule: the content address with ':' replaced,
   so the name is legal on every host)."
   [opts genome-id]
   (str (candidates-dir opts) "/" (dash-id genome-id)))
@@ -158,7 +157,7 @@
     b))
 
 ;; ============================================================================
-;; the validated F5 config envelope (foundation F5, Task A4)
+;; the validated F5 config envelope (foundation F5, component)
 ;; ============================================================================
 
 (def ^:private config-env-overrides
@@ -220,7 +219,7 @@
   EVOCLJ_* scalar overrides on top (env wins over file). The result
   is re-validated against ConfigSchema before use.
 
-  Task D1: the :demo profile is BUILT-IN — when selected, its profile
+  component: the :demo profile is BUILT-IN — when selected, its profile
   map (config/demo-profile) is merged into the config source so
   resolve-profile finds it without a config file (a map source still
   wins per-key).
@@ -244,7 +243,7 @@
     (config/validate-config! (apply-config-env-overrides profiled env))))
 
 (defn- demo-host-overrides
-  "The :demo profile's host-injected surface (Task D1): the built-in
+  "The :demo profile's host-injected surface (component): the built-in
   heuristic Mutator (a plain fn the kernel wraps into the Mutator
   protocol — kernel.system/build-mutator) plus the demo's hidden
   selection cases and fixture providers, injected through the SAME
@@ -272,7 +271,7 @@
   :budget-profile (the envelope's first CLI consumer; the base
   {:max-candidates 3} cap stays when the section is empty).
 
-  Task D1: selecting the :demo profile injects the built-in heuristic
+  component: selecting the :demo profile injects the built-in heuristic
   Mutator and the demo's hidden selection cases/fixture providers
   through the SAME :overrides seam below (a host's own :overrides
   still win per-key).
@@ -350,7 +349,7 @@
                :model/registry
                {:catalog (ig/ref :modelsdev/catalog)
                 :registry/api-keys {}}}
-        ;; Task D1: the :demo profile's host-injected surface is merged
+        ;; component: the :demo profile's host-injected surface is merged
         ;; in first, then a host's own :overrides win per-key
         overrides (merge (when (= :demo (active-profile-key opts env))
                            (demo-host-overrides))
@@ -454,7 +453,7 @@
 
 (defn- query-one
   "Run ONE read-only SELECT and return its first row. This is the cli
-  layer's only raw SQL surface (Task 10.2 Step 2's by-construction
+  layer's only raw SQL surface (component Step 2's by-construction
   guarantee: no SQL writes, no raw JDBC, no promotion.current
   dependency)."
   [db sql-params]
@@ -564,7 +563,7 @@
    (String. (cas/get-bytes (:cas store) artifact-id) StandardCharsets/UTF_8)))
 
 (defn build-evaluator
-  "The Task 8.7 evaluator value for one candidate, assembled from the
+  "The component evaluator value for one candidate, assembled from the
   host's eval-system component (:kernel/abi, :profiles,
   :provider/catalog, and the hidden cases/fixtures a host injected
   through config :overrides) plus the resolved bundle roots."

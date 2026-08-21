@@ -1,6 +1,6 @@
 (ns evoclj.intent.core-test
   "Tests for the v0 Intent ABI: schemas and canonical normalization
-  (Task 4.1).
+  (component).
 
   An Intent is the ONLY way evolvable code requests an effect — a
   validated, immutable, plain-data map. The base shape and the six v0

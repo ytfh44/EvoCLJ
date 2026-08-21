@@ -1,4 +1,4 @@
-;; EvoCLJ judge calibration fixture (Task E-judge).
+;; EvoCLJ judge calibration fixture (component).
 ;;
 ;; Known-equivalent and known-different expected/actual output pairs with
 ;; HUMAN labels. The judge calibration harness (evoclj.eval.judge/
@@ -19,7 +19,7 @@
 ;;   :expected-output   — the oracle output
 ;;   :outputs           — the judged side's actual outputs (vector)
 ;;
-;; The three required categories (Task E-judge acceptance):
+;; The three required categories (component acceptance):
 ;;   :equiv       — outputs are byte-identical to the expected output.
 ;;   :non-equiv   — outputs differ from the expected output.
 ;;   :shared-edge — boundary cases the byte-identical comparison and a

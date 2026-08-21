@@ -1,11 +1,11 @@
 (ns evoclj.capability.evolution-tools
   "Tool definitions and lease for the read-only evolution retrieval
-  tools (Task E1): :evolution/evidence and :evolution/history.
+  tools (component): :evolution/evidence and :evolution/history.
 
   The LLM mutator retrieves its context through the tool-calling loop
   instead of prompt-rendered context (roadmap E1). Both tools are
   READ-ONLY views over the kernel's durable evolution data — the
-  frozen evidence pack (CAS) and the Task 7.7 rejection history
+  frozen evidence pack (CAS) and the component rejection history
   (lineage rows) — and both are SUBJECT-BOUND through the capability
   broker: a tool-call intent carries the requesting phenotype's
   attribution (Global Constraint 20), and the broker authorizes it
@@ -67,10 +67,10 @@
   "The broker tool id of the read-only history retrieval tool."
   :evolution/history)
 
-;; --- window bounds (Task 7.7 contract) --------------------------------------
+;; --- window bounds (component contract) --------------------------------------
 
 (def default-history-window
-  "The default rejection-history window (Task 7.7 interface:
+  "The default rejection-history window (component interface:
   {:limit 50})."
   50)
 
@@ -115,7 +115,7 @@
    [:reason {:optional true} keyword?]])
 
 (def HistoryOutputSchema
-  "The :evolution/history result: a vector of Task 7.7 history entry
+  "The :evolution/history result: a vector of component history entry
   summaries."
   [:vector :map])
 
@@ -201,8 +201,7 @@
 ;; --- the providers ----------------------------------------------------------
 
 (defn evidence-provider
-  "Build the kernel-owned READ-ONLY :evolution/evidence provider (Task
-  E1).
+  "Build the kernel-owned READ-ONLY :evolution/evidence provider (component).
 
   `store` is the executor :stores map {:sqlite <db> :cas <CAS root>}
   the provider CLOSES OVER — the store handle never crosses the
@@ -245,8 +244,7 @@
                 (throw e)))))))))
 
 (defn history-provider
-  "Build the kernel-owned READ-ONLY :evolution/history provider (Task
-  E1).
+  "Build the kernel-owned READ-ONLY :evolution/history provider (component).
 
   `store` is the executor :stores map the provider CLOSES OVER.
   normalize-request validates the args against HistoryArgsSchema
@@ -331,7 +329,7 @@
 ;; --- the subject-bound lease --------------------------------------------------
 
 (defn evolution-tool-lease
-  "Mint one v0 CapabilityLease (Task 4.2) binding ONE phenotype id to
+  "Mint one v0 CapabilityLease (component) binding ONE phenotype id to
   ONE evolution retrieval tool (:evolution/evidence or
   :evolution/history) with :actions #{:invoke} — the grant the broker
   authorizes a tool-call against. Subject matching is EXACT, so a

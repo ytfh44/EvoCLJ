@@ -1,12 +1,12 @@
 (ns evoclj.compiler.topology-test
-  "Tests for topology IR validation and compilation (Task 2.2).
+  "Tests for topology IR validation and compilation (component).
 
   compile-topology turns a Genome's topology.edn value into validated,
   normalized adjacency IR. It rejects unknown node types, a missing
   entry node, dangling :next edges, node ids that would collide when
   merged, and — per Step 2 — any raw graph cycle that does not pass
   through an explicit :loop node (only :loop nodes may iterate; their
-  runtime semantics arrive in Task 6.4, so only their shape is
+  runtime semantics arrive in component, so only their shape is
   validated here). The compiled value is pure sorted EDN data (Global
   Constraint 22) whose equality and serialization do not depend on the
   key order of the source topology (Step 4)."

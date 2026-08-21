@@ -1,5 +1,5 @@
 (ns evoclj.evolution.evidence-schema
-  "Malli schemas for frozen evidence packs (Task 7.1).
+  "Malli schemas for frozen evidence packs (component).
 
   The schemas here are the trust-boundary contracts of
   evoclj.evolution.evidence: the BuildEvidenceRequest (generation +
@@ -28,7 +28,7 @@
   USAGE ENRICHMENT (roadmap E5): :usage is OPTIONAL on the Episode
   contract and on the pack's episode refs. When present it must be a
   map of keyword → number — the model-call channel's token counts and
-  cost estimate (Task 12.1 counters) — and non-numeric usage is
+  cost estimate (component counters) — and non-numeric usage is
   rejected at the trust boundary. Unknown usage is ABSENT, never
   fabricated as zeros (honest accounting).
 
@@ -49,7 +49,7 @@
 
 (def UsageSchema
   "The model usage of one episode: numeric counters from the
-  model-call channel (Task 12.1) — token counts (:model-input-tokens,
+  model-call channel (component) — token counts (:model-input-tokens,
   :model-output-tokens) and a cost estimate (:model-cost-units,
   :total-cost, :cost). Every value MUST be numeric: usage is
   accounting data, so a non-numeric value is rejected at the trust

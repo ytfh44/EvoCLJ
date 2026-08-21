@@ -1,5 +1,5 @@
 (ns evoclj.evolution.evidence-test
-  "Task 7.1 tests for build-evidence-pack.
+  "component tests for build-evidence-pack.
 
   build-evidence-pack freezes a bounded, immutable evidence boundary
   for one generation: episodes of that generation whose causal trace
@@ -24,7 +24,7 @@
     compact metadata in the pack, and every excerpt preserves the
     original episode provenance (:episode/id inside the artifact).
     The pack itself carries NO trace payload bytes.
-  - Task E5: model-usage enrichment — a pack entry carries :usage
+  - component: model-usage enrichment — a pack entry carries :usage
     (token counts, cost estimate) only when its episode carries usage
     from the model-call channel; the pack summary aggregates the
     selected episodes' usage; unknown usage is ABSENT (never zero),
@@ -423,7 +423,7 @@
                                      :excerpt-ref :outcome :trace}
                               (seq (:usage e)) (conj :usage))]
           (is (= expected-keys (set (keys e)))
-              "Task E5: :usage appears only when the episode carries usage
+              "component: :usage appears only when the episode carries usage
                (unknown usage is omitted, never zero)"))
         (is (uuid? (:episode/id e)))
         (is (re-matches #"^sha256:[0-9a-f]{64}$" (:excerpt-ref e)))
@@ -446,7 +446,7 @@
       (is (some #(= {:total-cost 55} (:usage %)) (:episodes pack))))))
 
 ;; ============================================================================
-;; Task E5 — model-usage enrichment (optional :usage, absent when unknown)
+;; component — model-usage enrichment (optional :usage, absent when unknown)
 ;; ============================================================================
 
 (deftest e5-usage-round-trips-through-the-pack

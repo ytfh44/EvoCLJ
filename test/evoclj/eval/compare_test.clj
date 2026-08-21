@@ -1,5 +1,5 @@
 (ns evoclj.eval.compare-test
-  "Task 8.5 tests: hard, utility, cost, and complexity metrics stay
+  "component tests: hard, utility, cost, and complexity metrics stay
   SEPARATE and comparison is LEXICOGRAPHIC (Global Constraint 14 —
   hard constraints dominate and are never collapsed into a
   compensating weighted score).
@@ -16,7 +16,7 @@
   - reason-data: eligibility returns explicit
     {:eligible? <bool> :reasons [{:dimension ... :rule ... :metric ...
     :detail ...} ...]} data; complexity is informational unless the
-    profile guards it; thresholds are optional in the Task 8.1 profile
+    profile guards it; thresholds are optional in the component profile
     contract and fall back to the canonical defaults.
 
   Step 5 (no Promotion coupling): this test asserts that neither the
@@ -41,7 +41,7 @@
                 :graph-nodes {:parent 4 :candidate 4}}})
 
 (defn- promotion-profile
-  "A Task 8.1 profile carrying the Task 8.5 promotion thresholds."
+  "A component profile carrying the component promotion thresholds."
   ([] (promotion-profile {}))
   ([overrides]
    (merge {:eval/profile-id :test/v1
@@ -194,7 +194,7 @@
     (is (= 1.0 (get-in (metrics/summarize-utility paired)
                        [:utility :task/success :candidate])))))
 
-;; --- profile schema carries the Task 8.5 thresholds ------------------------------
+;; --- profile schema carries the component thresholds ------------------------------
 
 (deftest profile-schema-carries-promotion-thresholds
   (is (profile/profile? (promotion-profile)))
@@ -213,7 +213,7 @@
 ;; --- Step 5: no Promotion coupling ------------------------------------------------
 
 (deftest comparison-namespace-never-calls-promotion
-  ;; M9 created the evoclj.promotion.* namespaces (Task 9.1), so the M8
+  ;; M9 created the evoclj.promotion.* namespaces (component), so the M8
   ;; 'no promotion namespace is loaded anywhere' (all-ns) guard is obsolete;
   ;; the durable guarantee is that THIS namespace never couples to promotion.
   (testing "evoclj.eval.compare requires no evoclj.promotion.* alias"

@@ -1,6 +1,6 @@
 (ns evoclj.sci.program-execution-test
   "Tests for loading a compiled Genome program into an isolated SCI
-  context and invoking its declared entry (Task 3.4).
+  context and invoking its declared entry (component).
 
   load-program! evaluates a compiled ProgramDescriptor's source ONCE
   into the SCI context owned by a runtime (a Phenotype-style
@@ -52,7 +52,7 @@
   (load/load-genome (fixture-root "minimal-valid")))
 
 (defn- route-descriptor
-  "The seed route program descriptor from the Task 2.3 example."
+  "The seed route program descriptor from the component example."
   []
   {:program/id :program/route
    :file "programs/route.clj"
@@ -61,7 +61,7 @@
    :output-schema :schema/intent-or-route})
 
 (defn- route-source
-  "The seed Genome routing program source text (Task 2.3 fixture)."
+  "The seed Genome routing program source text (component fixture)."
   []
   (slurp (io/resource "fixtures/genomes/minimal-valid/programs/route.clj")))
 

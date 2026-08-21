@@ -1,5 +1,5 @@
 (ns evoclj.cli.deploy-test
-  "Task D1 tests: `evoclj deploy <generation-id>` — set a generation as
+  "component tests: `evoclj deploy <generation-id>` — set a generation as
   the deployment target.
 
   The command reads an existing generation row and returns its genome id

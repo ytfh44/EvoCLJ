@@ -1,5 +1,5 @@
 (ns evoclj.provider.protocol
-  "The Provider protocol (Task 4.3).
+  "The Provider protocol (component).
 
   Providers adapt REAL resources behind the kernel-owned broker: a
   model adapter talks to a model endpoint, a filesystem adapter talks
@@ -25,7 +25,7 @@
 
     3. (execute-request! provider authorized-request) — perform the
        authorized effect and return the result VALUE, which the
-       broker validates against :output-schema (Task 4.5) before it
+       broker validates against :output-schema (component) before it
        is visible anywhere.
 
   All three methods deal in plain validated Clojure data (Global

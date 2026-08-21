@@ -15,7 +15,7 @@
        threshold / comparator / window values.
 
     2. The ACTION REGISTRY — an atom mapping action keywords to
-       {:descriptor ... :handler ...} entries (Task C1). Every
+       {:descriptor ... :handler ...} entries (component). Every
        registration carries an action descriptor {:action/id
        :action/allowlist :action/subject-scope}; `run-actions!` enforces
        the ACL — an unknown action id or a subject outside the
@@ -96,7 +96,7 @@
    [:trigger/context :map]])
 
 (def ActionDescriptorSchema
-  "The action descriptor contract (Task C1, closed): the ACL identity
+  "The action descriptor contract (component, closed): the ACL identity
   of one registered action. :action/id is the action keyword (the
   registry key); :action/allowlist is the set of subject keywords
   authorized to trigger the action (nil = the legacy permissive
@@ -308,7 +308,7 @@
   forms:
 
     (register-action! registry descriptor handler)
-      Descriptor form (Task C1): `descriptor` is a map satisfying
+      Descriptor form (component): `descriptor` is a map satisfying
       ActionDescriptorSchema — :action/id (the registry key), the
       :action/allowlist of subject keywords authorized to trigger the
       action (nil = no subject restriction), and the
@@ -529,7 +529,7 @@
   :trigger/action-unauthorized — neither is ever thrown by
   run-actions!.
 
-  Optional third argument `audit-context` (Task C1): nil or a map
+  Optional third argument `audit-context` (component): nil or a map
   {:store <db> :session/id <uuid-or-string>}. When provided, every
   executed action and every denial appends an audit event to the
   session's append-only store (:action/executed / :action/denied,
@@ -558,7 +558,7 @@
   :trigger/invalid for a malformed rule, context or registry argument
   exactly as `evaluate` and `run-actions!` do.
 
-  Optional fourth argument `audit-context` (Task C1) is forwarded to
+  Optional fourth argument `audit-context` (component) is forwarded to
   `run-actions!`: when provided, every executed action and every denial
   appends an audit event to the session's append-only store."
   ([registry rules events]

@@ -1,6 +1,6 @@
 (ns evoclj.runtime.regression
-  "Foundation F6 regression-detection trigger rules (Task A7 alert,
-  Task C2a auto-rollback, Task C2b failure-driven case evolution).
+  "Foundation F6 regression-detection trigger rules (component alert,
+  component auto-rollback, component failure-driven case evolution).
 
   A data-driven :metric trigger rule that fires when a promoted
   child's paired utility drops below its parent by a threshold within
@@ -34,10 +34,10 @@
   observation count) — so guarded actions can refuse to act below a
   minimum observation count.
 
-  TWO actions are wired (both via trigger/register-action!, Task C1
+  TWO actions are wired (both via trigger/register-action!, component
   ACL descriptors):
 
-  :monitor/alert-regression (Task A7, `register-alert-action!`) — the
+  :monitor/alert-regression (component, `register-alert-action!`) — the
   ALERT: appends exactly ONE audit event (:monitor/regression-alert)
   to the session's append-only log through
   evoclj.store.event/append-event!, anchored to the session's pinned
@@ -45,7 +45,7 @@
   event-anchoring pattern). It performs NO other state mutation — no
   generation, session-state, or CURRENT-pointer writes.
 
-  :promotion/auto-rollback (Task C2a, `register-rollback-action!`) —
+  :promotion/auto-rollback (component, `register-rollback-action!`) —
   the ROLLBACK: when the fired rule carries an observation count at
   or above the :min-samples guard, it invokes the PUBLIC promotion
   rollback API (evoclj.promotion.rollback/rollback! — the ONLY code
@@ -227,7 +227,7 @@
   below a minimum observation count. When the worst sample within the
   window carries a :sample/input, the fired context additionally
   carries that input as :monitor/failing-input — the input the
-  case-evolution action (:monitor/evolve-case, Task C2b) turns into a
+  case-evolution action (:monitor/evolve-case, component) turns into a
   new hidden-dataset case. Optional fourth argument `evidence-ref`
   (the triggering evidence-pack reference) is attached to every fired
   rule's context as :monitor/evidence-ref for the same action. Throws
@@ -314,7 +314,7 @@
   (trigger/register-action! registry alert-action-id
                             (alert-handler store (str (types/session-id session-id)))))
 
-;; --- Task C2a: the :promotion/auto-rollback action (guarded) -----------------
+;; --- component: the :promotion/auto-rollback action (guarded) -----------------
 
 (defn- observation-count
   "The observation count carried by `fired`'s :trigger/context — the
@@ -414,7 +414,7 @@
                                                  (str (types/session-id session-id))
                                                  from-generation to-generation opts)))))
 
-;; --- Task C2b: failure-driven evaluation case evolution ----------------------
+;; --- component: failure-driven evaluation case evolution ----------------------
 
 (def case-evolution-action-id
   "The action id the case-evolution regression targets: appends ONE
@@ -530,7 +530,7 @@
 (defn evolve-case!
   "Append ONE evaluation case derived from a confirmed regression into
   the hidden (Selection) dataset — append-only and provenance-linked
-  to the triggering evidence (Task C2b, Purpose T1b).
+  to the triggering evidence (component, Purpose T1b).
 
   `store` is the executor :stores map {:sqlite ... :cas ...} that
   evoclj.store.enrichment needs for the provenance record. `roots` is

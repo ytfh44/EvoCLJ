@@ -10,7 +10,7 @@
   and throwing-handler :error entries, per-fired-rule isolation); and
   check-events! end to end.
 
-  Task C1 adds the action-registry authority audit + ACL: descriptor
+  component adds the action-registry authority audit + ACL: descriptor
   validation (a descriptor missing :action/id / :action/allowlist /
   :action/subject-scope throws :trigger/invalid); unauthorized subjects
   denied with :trigger/action-unauthorized and NEVER executed; and, with
@@ -456,7 +456,7 @@
         (is (= :t/alarm (:action/id r)))
         (is (= {:alerted :t/fire-1} (:action/result r)))))))
 
-;; --- Task C1: action descriptor validation ---------------------------------
+;; --- component: action descriptor validation ---------------------------------
 
 (deftest register-action-descriptor-validates
   (let [reg (trigger/make-registry)]
@@ -493,7 +493,7 @@
         (is (= #{:a} (set (keys @reg))))
         (is (= desc (get-in @reg [:a :descriptor])))))))
 
-;; --- Task C1: ACL enforcement ----------------------------------------------
+;; --- component: ACL enforcement ----------------------------------------------
 
 (deftest run-actions-unauthorized-action-never-executes
   (let [calls (atom 0)
@@ -522,7 +522,7 @@
         (is (= {:alerted true} (:action/result r)))
         (is (= 1 @calls))))))
 
-;; --- Task C1: audit trail ---------------------------------------------------
+;; --- component: audit trail ---------------------------------------------------
 
 (deftest run-actions-audits-authorized-execution
   (let [db (fresh-db)

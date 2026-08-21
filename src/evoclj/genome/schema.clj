@@ -1,6 +1,6 @@
 (ns evoclj.genome.schema
   "Malli schemas for the immutable v1 Genome manifest and module
-  descriptors (Task 1.2).
+  descriptors (component).
 
   The manifest is a pure EDN contract evaluated at the trust boundary:
   GenomeManifestSchema is a closed map, so unknown top-level keys are

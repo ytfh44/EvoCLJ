@@ -1,5 +1,5 @@
 (ns agent.hostile
-  "Deliberately hostile program (Task 11.1): every form here reaches for
+  "Deliberately hostile program (component): every form here reaches for
   ambient JVM, filesystem, or process authority that evolvable SCI code
   must NEVER hold (Global Constraint 7). The compiler's static policy
   gate rejects this source at compile time (:program/policy-violation);

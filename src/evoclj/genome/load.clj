@@ -1,5 +1,5 @@
 (ns evoclj.genome.load
-  "Load an immutable Genome bundle from disk (Task 1.4).
+  "Load an immutable Genome bundle from disk (component).
 
   `load-genome` walks the bundle directory depth-first WITHOUT following
   symbolic links, parses the manifest with clojure.edn/read-string and
@@ -38,7 +38,7 @@
     participates in hashing and never appears in :files.
   - Every file is read with Files/readAllBytes; no stream is opened or
     retained by this function, and no lazy sequence escapes.
-  - Seed trust anchors (Task C3, T2c): with anchors in force (an
+  - Seed trust anchors (component, T2c): with anchors in force (an
     optional second argument — a map of seed genome id → expected
     \"sha256:\" digest, defaulting to nothing), the loaded bundle MUST
     be a pinned seed; a tampered seed (any byte changed), an unanchored
@@ -61,7 +61,7 @@
 
 (def ^:private manifest-file-name "manifest.edn")
 
-;; --- seed trust anchors (Task C3) ------------------------------------------
+;; --- seed trust anchors (component) ------------------------------------------
 
 (def ^:private trust-anchor-resource
   "Classpath resource name of the shipped trust-anchor file."
@@ -98,7 +98,7 @@
 
 (defn- verify-trust-anchors!
   "Verify the loaded bundle's computed genome id against the trust
-  anchors in force (Task C3, T2c).
+  anchors in force (component, T2c).
 
   With NO anchors in force (nil or an empty map) the load is
   unanchored and passes through unchanged (backward compatible). With
@@ -129,7 +129,7 @@
 (defn trust-anchors
   "The seed trust anchors shipped in resources/trust-anchors.edn: a map
   of seed genome id → expected \"sha256:\" digest for every pinned
-  seed (Task C3). The file is parsed with clojure.edn/read-string and
+  seed (component). The file is parsed with clojure.edn/read-string and
   validated; an absent or unparseable file throws
   :genome/trust-anchor-invalid (fail-closed — a missing anchor file
   never silently means 'no anchors').
@@ -319,7 +319,7 @@
   "Load the immutable Genome bundle rooted at `root-path` (a
   java.nio.file.Path or a string naming an existing directory).
 
-  Optional second argument `trust-anchors` (Task C3): the trust-anchor
+  Optional second argument `trust-anchors` (component): the trust-anchor
   map of seed genome id → expected \"sha256:\" digest to enforce. With
   NO anchors (absent, nil, or empty) the load is unanchored and behaves
   byte-identically to the pre-C3 loader (backward compatible). With

@@ -1,5 +1,5 @@
 (ns evoclj.eval.core-test
-  "Task 8.7 — end-to-end candidate evaluation orchestration.
+  "component — end-to-end candidate evaluation orchestration.
 
   evaluate-candidate! runs the NORMATIVE phase order (G0 parse → G1
   schema/ABI → G2 static policy → G3 deterministic tests → G4 replay →
@@ -32,11 +32,11 @@
     namespace exists on the classpath, no promotion alias or public
     function in evoclj.eval.core).
 
-  FIXTURE DESIGN: the store is seeded exactly like the Task 7.6
+  FIXTURE DESIGN: the store is seeded exactly like the component
   candidate tests (a migrated temp database with the seed generation
   row current = 1, a materialized candidate marked
   :evaluation-pending, a temp CAS root). Genome bundles are the
-  Task 8.4 paired-fixture bundles (:sci router → :emit, one
+  component paired-fixture bundles (:sci router → :emit, one
   :fixture/echo tool). The parent bundle's route TRANSFORMS the text
   (so the re-evaluated parent fails the selection oracle) while the
   candidate bundle is the identity transform (so the candidate passes
@@ -60,7 +60,7 @@
            (java.nio.file.attribute FileAttribute)
            (java.util UUID)))
 
-;; --- shared fixture identity (Task 7.6 style) ---------------------------------
+;; --- shared fixture identity (component style) ---------------------------------
 
 (def ^:private hex64
   "64 hex chars for the canonical content-addressed ids."
@@ -71,7 +71,7 @@
   (str "sha256:" hex64))
 
 (def ^:private candidate-genome-id
-  "The content-addressed candidate Genome (Task 7.4 patch output)."
+  "The content-addressed candidate Genome (component patch output)."
   (str "sha256:" (apply str (repeat 64 "c"))))
 
 (def ^:private evidence-id
@@ -96,7 +96,7 @@
   (UUID/fromString (format "00000000-0000-0000-0000-%012d" n)))
 
 (defn- mutation*
-  "A schema-plausible Mutation IR fixture (Task 7.3 shape) carrying one
+  "A schema-plausible Mutation IR fixture (component shape) carrying one
   :set-edn op; an optional override map wins."
   [& [overrides]]
   (merge {:mutation/id (uuid 1)
@@ -158,7 +158,7 @@
   (fn [f]
     ;; G3's suite registry is kernel-side and shared; every test starts
     ;; with an empty registry so no suite leaks across tests (the same
-    ;; discipline as the Task 8.2 gates tests)
+    ;; discipline as the component gates tests)
     (static/clear-suites!)
     (f)
     (cleanup!)))
@@ -205,7 +205,7 @@
         m1 (candidate/materialize-candidate! store c m)]
     (candidate/mark-evaluation-pending! store (:candidate/id m1))))
 
-;; --- genome bundles (Task 8.4 paired-fixture style) --------------------------
+;; --- genome bundles (component paired-fixture style) --------------------------
 
 (defn- route-source
   "A route program: {:op :echo :text t} emits a :fixture/echo tool-call
@@ -327,7 +327,7 @@
 ;; --- the evaluation profile ---------------------------------------------------
 
 (defn- test-profile
-  "A Task 8.1 profile carrying the Task 8.5 thresholds (the paired
+  "A component profile carrying the component thresholds (the paired
   comparison demands a real utility improvement, min-delta 0.05)."
   []
   {:eval/profile-id :test/v1
@@ -544,7 +544,7 @@
                                     ["SELECT id FROM generations"])))
           "evaluation never inserts or updates a generation row"))
     (testing "no promotion API in evoclj.eval.core, by construction"
-      ;; M9 created the evoclj.promotion.* namespaces (Task 9.1), so the M8
+      ;; M9 created the evoclj.promotion.* namespaces (component), so the M8
       ;; 'no promotion namespace is loaded anywhere' (all-ns) guard is
       ;; obsolete; the durable guarantees below still hold: this namespace
       ;; exposes no promotion/current/activation API and requires no
@@ -593,17 +593,17 @@
       (is (= {} (get-in evaluation [:summary :cost]))))))
 
 ;; ============================================================================
-;; Task A2 — F2 metric records during evaluation (injectable collector)
+;; component — F2 metric records during evaluation (injectable collector)
 ;; ============================================================================
 
 (defn- phase-metric-names
-  "The 7 :eval/<phase>-ms metric names (Task A2)."
+  "The 7 :eval/<phase>-ms metric names (component)."
   []
   (mapv (fn [p] (keyword "eval" (str (name p) "-ms")))
         eval-core/phase-ids))
 
 (defn- outcome-metric-names
-  "The 7 :eval/<phase>-outcome metric names (Task A2)."
+  "The 7 :eval/<phase>-outcome metric names (component)."
   []
   (mapv (fn [p] (keyword "eval" (str (name p) "-outcome")))
         eval-core/phase-ids))

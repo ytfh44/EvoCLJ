@@ -1,6 +1,5 @@
 (ns evoclj.evolution.demo-mutator
-  "The built-in heuristic Mutator adapter for the :demo profile (Task
-  D1).
+  "The built-in heuristic Mutator adapter for the :demo profile (component).
 
   This adapter conforms to the Mutator protocol of
   evoclj.evolution.core and mirrors the LLM adapter's shape — the
@@ -208,7 +207,7 @@
             demo-templates))))
 
 (defn demo-mutator
-  "Construct the built-in heuristic Mutator adapter (Task D1). Zero
+  "Construct the built-in heuristic Mutator adapter (component). Zero
   configuration: the adapter is stateless and deterministic, holding
   no store handle (Global Constraint 11) and calling no provider
   (Global Constraint 8). The CLI host injects it under the :demo
@@ -255,7 +254,7 @@
       {:text (get-in authorized-request [:args :text])})))
 
 (defn demo-selection-cases
-  "The demo's hidden selection cases (Task D1), keyed by :case/id as
+  "The demo's hidden selection cases (component), keyed by :case/id as
   the G5 paired runner resolves them: the :echo case both sides pass,
   and the :echo-b case ONLY the demo-mutated candidate passes (the
   seed falls back to finish), so a promoted candidate must show the
@@ -281,7 +280,7 @@
     :critical? true}})
 
 (defn demo-selection-fixtures
-  "The demo's hidden selection fixtures (Task D1): 1-ary fns the G5
+  "The demo's hidden selection fixtures (component): 1-ary fns the G5
   runner invokes with the derived per-case seed — :fixture/echo is the
   standard seed provider, :fixture/echo-b the demo's own pure echo."
   []

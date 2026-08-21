@@ -1,8 +1,8 @@
 (ns evoclj.promotion.current
-  "Task 9.2 — the CURRENT generation pointer and its compare-and-set.
+  "component — the CURRENT generation pointer and its compare-and-set.
 
   This namespace owns the ONLY code path that CHANGES the generations
-  CURRENT pointer (Global Constraint 15; the Task 9.2 promotion
+  CURRENT pointer (Global Constraint 15; the component promotion
   transaction is the only caller). It is deliberately small: reading
   the pointer, and moving it with a compare-and-set. Nothing else in
   the codebase may write the `current` column (evoclj.store.recovery
@@ -11,13 +11,13 @@
 
   Database Invariant 6 (CURRENT is exactly one row) is enforced by the
   partial unique index `generations_current_unique` (001-init.sql,
-  Task 5.1) at the database level: at most one row may carry
+  component) at the database level: at most one row may carry
   current = 1. Exactly-one is guaranteed by this CAS: the seed
   generation is activated with current = 1, and every promotion clears
   the parent and sets the child inside ONE transaction, so a second
   current = 1 row can never be created.
 
-  THE CAS (normative, Task 9.2):
+  THE CAS (normative, component):
 
       UPDATE generations SET current = 0 WHERE current = 1 AND id = ?
 
@@ -86,7 +86,7 @@
   (first (sqlite/query store ["SELECT * FROM generations WHERE current = 1"])))
 
 (defn cas-current!
-  "THE CURRENT compare-and-set (Task 9.2). Called INSIDE the promotion
+  "THE CURRENT compare-and-set (component). Called INSIDE the promotion
   transaction (BEGIN IMMEDIATE), after the new generation row exists:
 
       1. UPDATE generations SET current = 0

@@ -1,5 +1,5 @@
 (ns evoclj.adversarial.concurrency-test
-  "Task 11.3 — Concurrency and stale promotion suite (adversarial
+  "component — Concurrency and stale promotion suite (adversarial
   release gate).
 
   Four plan cases, repeated until the race windows have been exercised
@@ -30,7 +30,7 @@
 
   BARRIER DESIGN (Step 2): every race uses java.util.concurrent
   latches so the interleavings are deliberate, not lucky. The
-  promotion/rollback transactions expose the Task 9.2/9.5 :failpoint
+  promotion/rollback transactions expose the component/9.5 :failpoint
   test seam (called INSIDE the BEGIN IMMEDIATE transaction, after all
   writes, immediately before the CURRENT compare-and-set), so the
   WINNER can be parked holding SQLite's write lock while the LOSER
@@ -120,7 +120,7 @@
 (def ^:private seed-genome-body
   "Deterministic seed Genome body. The seed id must be content
   addressed (not a fake constant) because rollback!'s
-  verify-target-genome-integrity! (Task 9.5 Step 3) re-hashes the
+  verify-target-genome-integrity! (component Step 3) re-hashes the
   target Genome in the CAS before any write — the rollback-vs-
   promotion race needs that check to PASS."
   "evoclj-race-seed-genome-body-v1\n")
@@ -181,7 +181,7 @@
   (fn [f]
     ;; G3's suite registry is kernel-side and shared; every test starts
     ;; with an empty registry so no suite leaks across tests (the same
-    ;; discipline as the Task 8.2 gates tests).
+    ;; discipline as the component gates tests).
     (static/clear-suites!)
     (f)
     (cleanup!)))
@@ -265,7 +265,7 @@
 ;; ============================================================================
 
 (defn- mutation*
-  "A schema-plausible Mutation IR fixture (Task 7.3 shape) whose
+  "A schema-plausible Mutation IR fixture (component shape) whose
   content differs per sibling (the uniqueness rule — two siblings from
   one parent need different mutation content). The parent Genome id
   defaults to the seed; the rollback race passes g1's genome so the
@@ -311,7 +311,7 @@
 
 (defn- materialize-and-pend!
   "Materialize a fresh sibling candidate from `parent-generation-id` /
-  `parent-genome-id` (defaults: the seed pair) via the REAL Task 7.6
+  `parent-genome-id` (defaults: the seed pair) via the REAL component
   path and transition it to :evaluation-pending. Returns the pending
   Candidate record."
   ([store n] (materialize-and-pend! store seed-generation-id parent-genome-id n))
@@ -329,7 +329,7 @@
   write shape: one transaction inserts the finalized eval_runs row and
   CAS-updates the candidate 'evaluating' → 'eligible') and return
   {:candidate-id <uuid> :evaluation-id <uuid>}. The eligibility is the
-  stored evaluator judgment consumed verbatim by promote! (Task 9.1:
+  stored evaluator judgment consumed verbatim by promote! (component:
   :eligible? true is the only entry to :promoted)."
   [db pending]
   (let [cid (:candidate/id pending)
@@ -408,7 +408,7 @@
     sid))
 
 (defn- promotion-system
-  "The Task 9.2/9.5 promotion-system contract. `failpoint` is the
+  "The component/9.5 promotion-system contract. `failpoint` is the
   optional test seam: called inside the transaction after every write,
   immediately before the CURRENT CAS."
   [world & [failpoint]]
@@ -450,7 +450,7 @@
     (f)))
 
 ;; ============================================================================
-;; case 1 — evaluation fixtures (the Task 8.4 paired-fixture shape)
+;; case 1 — evaluation fixtures (the component paired-fixture shape)
 ;; ============================================================================
 
 (defn- provider-catalog
@@ -569,7 +569,7 @@
 
 (defn- evaluator-for
   "A minimal valid evaluator value for evaluate-candidate! (the exact
-  Task 8.7 shape the Task 8.7 core tests use). Each evaluation gets
+  component shape the component core tests use). Each evaluation gets
   its OWN CAS root so the two candidate evaluations race on the
   shared database only — see the namespace docstring's STORAGE
   FINDING for why a shared root flakes on Windows."
@@ -875,7 +875,7 @@
 
 (defn- create-pinned-session!
   "The host's session-creation adapter: read CURRENT, then pin the
-  session to that generation (the Task 9.3 canary routing read).
+  session to that generation (the component canary routing read).
   `read-done` is an optional zero-arg callback invoked immediately
   after the CURRENT read (before the INSERT) so a test can prove the
   read happened inside a parked-writer window."
@@ -1023,7 +1023,7 @@
       (is (not (str/includes?
                 (slurp (io/resource "migrations/001-init.sql"))
                 "journal_mode"))
-          "the Task 5.1 schema issues no journal-mode pragma — the
+          "the component schema issues no journal-mode pragma — the
           default applies, and 'delete' (not WAL) is therefore the
           operating mode of every store")))
   (testing "busy_timeout: promotion/rollback/event transactions set it

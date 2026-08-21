@@ -1,5 +1,5 @@
 (ns agent.route
-  "G2 route program — the REFERENCE decision table the Task 9.7
+  "G2 route program — the REFERENCE decision table the component
   mutation must reproduce (test/fixtures/evolution-e2e/route-b).
 
   Class-A requests ({:op :echo-a :text t}) are served by tool A

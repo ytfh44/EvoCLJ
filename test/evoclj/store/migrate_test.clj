@@ -1,5 +1,5 @@
 (ns evoclj.store.migrate-test
-  "Task 5.1 tests for the SQLite schema and migration runner.
+  "component tests for the SQLite schema and migration runner.
 
   Step 1: a fresh temporary database applies all migrations once and
   ends with all 15 normative tables plus a recorded schema version.
@@ -23,7 +23,7 @@
 ;; --- shared fixtures -------------------------------------------------------
 
 (def ^:private expected-tables
-  "The 16 normative tables (Task 5.1 + 006 session_bindings)."
+  "The 16 normative tables (component + 006 session_bindings)."
   #{"meta" "generations" "candidates" "mutations" "sessions" "events"
     "artifacts" "model_calls" "tool_calls" "episodes" "eval_runs"
     "eval_cases" "eval_results" "capability_leases" "promotions"
@@ -366,7 +366,7 @@
       (is (= :missing-migration-record (:reason (ex-data e)))))))
 
 ;; ============================================================================
-;; Task 9.3 — an existing version-1 database upgrades additively
+;; component — an existing version-1 database upgrades additively
 ;; ============================================================================
 
 (deftest version-1-database-upgrades-additively

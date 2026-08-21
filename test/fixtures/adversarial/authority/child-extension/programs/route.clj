@@ -1,5 +1,5 @@
 (ns agent.route
-  "Child-extension router (Task 11.1): emits the parent's :fixture/echo
+  "Child-extension router (component): emits the parent's :fixture/echo
   tool call, reusing the parent's capability request. The host lease is
   bound to the PARENT phenotype's id; exact subject matching denies the
   child with :capability/subject-mismatch. Pure decision data.")

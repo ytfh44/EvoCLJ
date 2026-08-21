@@ -1,10 +1,10 @@
 (ns evoclj.evolution.history-test
-  "Task 7.7 tests — retained rejection evidence, no immediate
+  "component tests — retained rejection evidence, no immediate
   oscillation.
 
   The recent-mutation-history store turns the durable lineage rows
-  (mutations + candidates from Task 7.6; eval_runs + promotions from
-  the Task 5.1 schema, written by the M8 evaluator and M9 promotion
+  (mutations + candidates from component; eval_runs + promotions from
+  the component schema, written by the M8 evaluator and M9 promotion
   subsystems) into accepted/rejected mutation summaries with metric
   deltas and rejection reasons (Global Constraint 16: rejected
   mutations remain durable, queryable negative evidence). The four
@@ -24,15 +24,15 @@
     ≡ one-element vector, line-ending-normalized anchors, op order
     irrelevant).
   - Step 3: an EXACT repeat of a recently rejected mutation (same
-    Task 7.6 :mutation/hash) is flagged :negative-evidence true to
+    component :mutation/hash) is flagged :negative-evidence true to
     the Mutator; fingerprint-similar but content-distinct mutations
     are NOT flagged.
   - Step 4: history is evidence only — the public surface is exactly
     the evidence API, no banning/blocking/rejection vocabulary
     exists, and similar future mutations are neither filtered nor
-    banned (proposal logic in Task 7.8 decides).
+    banned (proposal logic in component decides).
 
-  FIXTURE DESIGN: mirroring the Task 7.6 candidate test, the parent
+  FIXTURE DESIGN: mirroring the component candidate test, the parent
   generation row is seeded (current = 1) so the candidate lineage FK
   (Database Invariant 8) is exercised against a real row; mutations
   are materialized through evoclj.evolution.candidate so the history
@@ -60,7 +60,7 @@
   (str "sha256:" hex64))
 
 (def ^:private candidate-genome-id
-  "The content-addressed candidate Genome (Task 7.4 patch output)."
+  "The content-addressed candidate Genome (component patch output)."
   (str "sha256:" (apply str (repeat 64 "c"))))
 
 (def ^:private evidence-id
@@ -80,7 +80,7 @@
   "generation-1")
 
 (def ^:private eval-summary
-  "A Task 8.5-shaped evaluation summary (hard/utility/cost/complexity
+  "A component evaluation summary (hard/utility/cost/complexity
   sections; each leaf is {:parent x :candidate y}). Chosen so every
   expected delta is exactly representable, and :integrity carries
   non-numeric :parent/:candidate values (no numeric delta)."
@@ -99,7 +99,7 @@
    :complexity {:genome-bytes 600}})
 
 (def ^:private rejection-reason
-  "A rejection reason of the Task 8.5 eligibility shape."
+  "A rejection reason of the component eligibility shape."
   "utility regression exceeds the configured cost cap")
 
 (defn- uuid
@@ -108,7 +108,7 @@
   (java.util.UUID/fromString (format "00000000-0000-0000-0000-%012d" n)))
 
 (defn- mutation*
-  "A schema-plausible Mutation IR fixture (Task 7.3 shape) carrying one
+  "A schema-plausible Mutation IR fixture (component shape) carrying one
   :set-edn op; an optional override map wins (including a wholesale
   :ops replacement)."
   [& [overrides]]
@@ -201,7 +201,7 @@
 (defn- materialize!
   "Materialize a candidate for `m` (default fixture mutation) and
   return the candidate record. The candidate request inherits the
-  mutation's :mutation/id and :parent/genome-id so the Task 7.6
+  mutation's :mutation/id and :parent/genome-id so the component
   agreement checks hold for non-default parents; `parent-generation`
   overrides the request's :parent/generation-id (default
   generation-id) so the composite lineage FK stays consistent."
@@ -418,7 +418,7 @@
       (is (= (uuid 2) (:mutation/id newest)))
       (is (= :rejected (:state newest)))
       (is (= (:mutation/hash newest) (:mutation/hash oldest))
-          "exact repeat = the Task 7.6 content hash is identical")
+          "exact repeat = the component content hash is identical")
       (is (true? (:negative-evidence newest))
           "the exact repeat is flagged to the Mutator as negative evidence")
       (is (false? (:negative-evidence oldest))
@@ -493,7 +493,7 @@
               future mutations"
       (is (not-any? #(re-find #"(?i)ban|block|reject|suppress|prevent|veto|filter|skip" %)
                     names)))
-    (testing "no dependency on the Task 7.8 proposal logic or the Mutator"
+    (testing "no dependency on the component proposal logic or the Mutator"
       (is (not-any? #(re-find #"(?i)proposal|mutator" (str %))
                     (map str (keys (ns-aliases 'evoclj.evolution.history))))))))
 

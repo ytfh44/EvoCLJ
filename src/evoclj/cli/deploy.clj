@@ -1,5 +1,5 @@
 (ns evoclj.cli.deploy
-  "The deployment-facing CLI command (Task D1): `deploy <generation-id>`.
+  "The deployment-facing CLI command (component): `deploy <generation-id>`.
 
   Set the specified generation as the deployment target. The command
   validates that the generation exists in the store, records an

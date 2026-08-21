@@ -1,5 +1,5 @@
 (ns evoclj.eval.judge-calibration-test
-  "Tests for the judge calibration harness (Task E-judge).
+  "Tests for the judge calibration harness (component).
 
   The calibration harness runs a judge over a fixture of
   known-equivalent and known-different expected/actual output pairs and
@@ -30,7 +30,7 @@
             [evoclj.eval.judge :as judge]))
 
 (def ^:private calibration-path
-  "The on-disk calibration fixture (Task E-judge)."
+  "The on-disk calibration fixture (component)."
   "test/fixtures/evals/calibration.edn")
 
 (defn- calibration-pairs
@@ -193,7 +193,7 @@
 
 (deftest fixture-covers-the-three-calibration-categories
   (testing "the calibration fixture covers equiv, non-equiv, and
-            shared-edge pairs with both binary labels (Task E-judge
+            shared-edge pairs with both binary labels (component
             acceptance)"
     (let [pairs (calibration-pairs)]
       (is (seq pairs))

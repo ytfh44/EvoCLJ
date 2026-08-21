@@ -1,5 +1,5 @@
 (ns evoclj.cli.promotion-test
-  "Task D2 tests: `evoclj lineage` — the per-generation lineage report
+  "component tests: `evoclj lineage` — the per-generation lineage report
   with candidate diffs and provenance (roadmap O5).
 
   The lineage reconstruction itself (promotion.lineage/lineage) is

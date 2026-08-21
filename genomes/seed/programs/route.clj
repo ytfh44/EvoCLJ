@@ -1,5 +1,5 @@
 (ns agent.route
-  "Seed Genome routing program (Task 6.6, Milestone 6 exit fixture).
+  "Seed Genome routing program (component, Milestone 6 exit fixture).
 
   Pure decision logic only: reads one EDN task input map and returns a
   deterministic route decision map. No host interop, no IO, no eval —
@@ -10,7 +10,7 @@
   namespaces, no Java class literals, no host interop forms, and no
   #= reader-eval.
 
-  DECISION CONTRACT (normative, shared with the Task 6.2 :sci handler):
+  DECISION CONTRACT (normative, shared with the component :sci handler):
 
     {:op :echo :text t}    -> {:action {:intent/type :intent/tool-call
                                          :payload {:tool/id :fixture/echo

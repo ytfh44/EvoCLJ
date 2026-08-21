@@ -1,5 +1,5 @@
 (ns evoclj.evolution.evidence
-  "Evidence selection and frozen evidence packs (Task 7.1).
+  "Evidence selection and frozen evidence packs (component).
 
   build-evidence-pack freezes a reproducible evidence boundary for one
   generation: it selects episodes of that generation whose causal
@@ -80,7 +80,7 @@
 
   USAGE ENRICHMENT (roadmap E5): a pack entry carries :usage only when
   its episode carries model usage from the model-call channel (token
-  counts, cost estimate — Task 12.1 counters); the pack summary
+  counts, cost estimate — component counters); the pack summary
   aggregates those counters over the SELECTED episodes. Unknown usage
   is ABSENT — never fabricated as zeros (honest accounting)."
   (:require [clojure.edn :as edn]
@@ -163,7 +163,7 @@
 
 (defn- episode-cost
   "The numeric cost of an episode from its :usage map: :total-cost,
-  falling back to :cost, else 0.0. v0 usage accounting (Task 12.1)
+  falling back to :cost, else 0.0. v0 usage accounting (component)
   will populate these keys; until then only fabricated usage carries
   cost."
   [episode]
@@ -178,8 +178,7 @@
   (pos? (episode-cost episode)))
 
 (defn- summary-usage
-  "The model usage of the selected evidence (roadmap E5): the Task
-  12.1 counters of the selected episodes accumulated with the standard
+  "The model usage of the selected evidence (roadmap E5): the component counters of the selected episodes accumulated with the standard
   evoclj.runtime.usage merge (counters sum — monotonic accounting).
   Attribution keys (which may be non-numeric) are dropped so the
   summary stays a numeric-only usage map. Returns {} when no selected
@@ -238,7 +237,7 @@
     - :include-high-cost n — up to n most recent high-cost episodes
   The pack is the deduplicated union, re-ranked by recency, so a
   failure-skewed recent window still shows the optimizer successes
-  (Task 7.1 Step 1) and vice versa. The pack stays bounded: at most
+  (component Step 1) and vice versa. The pack stays bounded: at most
   :recent + :include-successes + :include-failures + :include-high-cost
   episodes.
 
@@ -315,7 +314,7 @@
 
 (defn build-evidence-pack
   "Freeze a bounded, immutable evidence pack for one generation and
-  return it (Task 7.1).
+  return it (component).
 
   Eligible episodes are the rows of the episodes table with the
   request's :generation/id whose :trace :last-event ≤ the IMMUTABLE

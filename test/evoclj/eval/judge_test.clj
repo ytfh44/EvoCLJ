@@ -8,9 +8,9 @@
   config validation are exercised without any provider.
 
   Error contract under test: :eval/judge-config-invalid,
-  :eval/judge-failed, :eval/judge-summary-invalid (Task V2).
+  :eval/judge-failed, :eval/judge-summary-invalid (component).
 
-  Task V2 (judge score aggregation) is also under test here: per-case
+  component (judge score aggregation) is also under test here: per-case
   judge verdicts aggregate into a utility summary (win/loss/equiv
   counts plus a per-case breakdown) that joins into the paired
   outcome. The pure surface under test is verdict-pair (join one
@@ -19,7 +19,7 @@
   per-category breakdown stable; empty list -> zeroed summary), and
   join-utility-summary (pure join into the paired outcome).
 
-  Task V5 (judge configuration, roadmap V5) is also under test here:
+  component (judge configuration, roadmap V5) is also under test here:
   the judge's model-call settings (:temperature, :system-prompt,
   :max-tokens) are configurable with built-in defaults (temperature
   0.0, max-tokens 1024, the built-in system prompt) that apply when
@@ -188,7 +188,7 @@
       (is (= = (:equivalence/byte-identical reg))))))
 
 ;; ============================================================================
-;; Task A6 — judge verdicts as enrichment records (Foundation F3)
+;; component — judge verdicts as enrichment records (Foundation F3)
 ;; ============================================================================
 
 ;; --- temp stores (mirrors evoclj.store.enrichment-test temp-stores!) ---------
@@ -314,13 +314,13 @@
                                           evaluation-id :judge-verdict))))))
 
 ;; ============================================================================
-;; Task V2 — judge score aggregation (roadmap V2)
+;; component — judge score aggregation (roadmap V2)
 ;; ============================================================================
 
 ;; --- fixture verdict helpers ---------------------------------------------------
 
 (defn- side-verdict
-  "A Task A6 verdict-record for ONE side: case id, repetition, pair
+  "A component verdict-record for ONE side: case id, repetition, pair
   seed, expected output, outputs, and the judge's boolean decision."
   [case-id repetition seed equivalent]
   (judge/verdict-record case-id repetition seed :expected
@@ -467,7 +467,7 @@
       (is (= s (edn/read-string (pr-str s)))))))
 
 ;; ============================================================================
-;; Task V5 — judge configuration (roadmap V5)
+;; component — judge configuration (roadmap V5)
 ;; ============================================================================
 
 (deftest judge-config-defaults-apply-when-absent

@@ -1,9 +1,9 @@
 (ns evoclj.compiler.topology
-  "Topology IR validation and compilation (Task 2.2).
+  "Topology IR validation and compilation (component).
 
   compile-topology turns a Genome's topology.edn value into validated,
   normalized adjacency IR that the runtime can execute without ever
-  discovering malformed graph structure mid-task (Task 2.2 acceptance):
+  discovering malformed graph structure mid-task (component acceptance):
 
     {:graph/id :graph/main
      :entry :node/planner
@@ -14,7 +14,7 @@
   Rules (Step 2): arbitrary graph cycles are rejected; only explicit
   :loop nodes may iterate. A cycle in the :next graph that contains no
   :loop node throws :topology/cycle. The :loop node's normative shape
-  (Task 6.4) is validated here: :body (the node id iterated — must be
+  (component) is validated here: :body (the node id iterated — must be
   a declared node, :reason :dangling-body), :until (a keyword program
   id), a positive integer :max-iterations (:reason
   :invalid-max-iterations), and :next (the exit node). The :body edge
@@ -48,8 +48,7 @@
   #{:llm :sci :tool :route :loop :emit :memory/read :memory/write})
 
 (def ^:private required-keys
-  "Per-type keys a node must declare. :loop carries its normative Task
-  6.4 shape: :body (the iterated node id), :until (the done? program
+  "Per-type keys a node must declare. :loop carries its normative component shape: :body (the iterated node id), :until (the done? program
   id), a positive integer :max-iterations (checked in validate-node!),
   and :next (the exit node)."
   {:llm #{:model}
@@ -174,7 +173,7 @@
 
 (defn- check-nexts!
   "Reject any :next edge that points to an undeclared node id, and any
-  :loop node whose :body points to an undeclared node id (Task 6.4:
+  :loop node whose :body points to an undeclared node id (component:
   the :body edge is the sanctioned iteration edge, so a dangling
   :body must fail at compile time, never mid-task)."
   [entries node-ids]

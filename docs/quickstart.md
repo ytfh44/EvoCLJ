@@ -1,4 +1,4 @@
-# EvoCLJ Quickstart — the 30-minute demo (Task D1)
+# EvoCLJ Quickstart — the 30-minute demo (component)
 
 This is the hands-on demo of the self-evolving loop. With the built-in
 `:demo` config profile, EvoCLJ runs the **whole evolution cycle
@@ -115,7 +115,7 @@ In one invocation the demo:
    validated, applied, and compiled — the compiler topology gate
    passes for every candidate (only the mutable route program changes;
    `topology.edn` is never touched).
-2. **evaluates** — every candidate runs the full Task 8.7 pipeline
+2. **evaluates** — every candidate runs the full component pipeline
    against the demo's hidden selection cases (`:sel/demo-echo`,
    `:sel/demo-echo-b`) with the demo's fixture providers
    (`:fixture/echo`, `:fixture/echo-b`). The seed parent passes only

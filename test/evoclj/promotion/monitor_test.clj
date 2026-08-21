@@ -1,7 +1,7 @@
 (ns evoclj.promotion.monitor-test
-  "Task 9.4 tests: online canary guardrails and automatic stop.
+  "component tests: online canary guardrails and automatic stop.
 
-  The guardrails (Task 9.4, normative):
+  The guardrails (component, normative):
 
       hard policy violation          → HARD (Step 1): ONE violation
                                        immediately stops new sessions
@@ -172,7 +172,7 @@
     sid))
 
 (defn- deployment-state
-  "The Task 9.3 deployment-state shape with an ACTIVE G43 canary;
+  "The component deployment-state shape with an ACTIVE G43 canary;
   callers merge overrides."
   [& [overrides]]
   (merge {:current-generation g42
@@ -184,7 +184,7 @@
          overrides))
 
 (defn- thresholds
-  "The Task 9.4 thresholds; callers merge overrides."
+  "The component thresholds; callers merge overrides."
   [& [overrides]]
   (merge {:min-samples 20
           :failure-rate 0.25
@@ -331,7 +331,7 @@
         running-sid (running-session! db)
         ds (deployment-state)
         inactive (monitor/deactivate-canary ds)]
-    (testing "deactivation is the :active? false routing state (Task 9.3)"
+    (testing "deactivation is the :active? false routing state (component)"
       (is (false? (:active? inactive)))
       (is (= (:current-generation ds) (:current-generation inactive))))
     (testing "every new key now routes to the current generation, never the canary"
@@ -480,7 +480,7 @@
                            (hard-stop-decision) :nuke)))))))
 
 ;; ============================================================================
-;; Task B2 — the advance path: healthy-window auto-rollout of the canary
+;; component — the advance path: healthy-window auto-rollout of the canary
 ;; ============================================================================
 
 (deftest advance-triggers-after-healthy-window

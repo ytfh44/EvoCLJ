@@ -1,5 +1,5 @@
 (ns evoclj.provider.registry
-  "Provider registration and lookup (Task 4.3).
+  "Provider registration and lookup (component).
 
   The registry is the kernel-owned collection of registered providers
   (Global Constraint 19: the authority root is kernel-owned, never
@@ -9,7 +9,7 @@
   protocol. A malformed registration is rejected with a typed error
   and changes nothing.
 
-  The descriptor contract is normative (Task 4.3):
+  The descriptor contract is normative (component):
 
     {:tool/id :fixture/echo
      :effect :pure
@@ -19,7 +19,7 @@
      :retry {:safe? true}}
 
   :retry is OPTIONAL: automatic retries are allowed only when a
-  provider declares :retry {:safe? true} (Task 4.5), so a descriptor
+  provider declares :retry {:safe? true} (component), so a descriptor
   without it is simply never auto-retried. :input-schema and
   :output-schema are validated as Malli schema VALUES at registration
   time so a malformed contract fails before any request is served.
@@ -28,8 +28,7 @@
   the provider is the single authority on its own contract, so the
   registry never has to reconcile two possibly-diverging copies.
   lookup returns the entry {:descriptor ... :provider ...} for a tool
-  id, or nil when no such tool is registered — the broker (Task
-  4.4/4.5) decides what an unknown or visible-but-ungranted tool
+  id, or nil when no such tool is registered — the broker (component/4.5) decides what an unknown or visible-but-ungranted tool
   means for authorization (Global Constraint 9: merely registering a
   tool never authorizes it)."
   (:require [evoclj.kernel.error :as err]
@@ -39,7 +38,7 @@
 ;; --- the normative descriptor contract -------------------------------------
 
 (def ToolDescriptorSchema
-  "The v0 tool descriptor contract (normative, Task 4.3): a closed
+  "The v0 tool descriptor contract (normative, component): a closed
   map of the five required fields plus optional :retry and :version
   blocks. The top level is closed — no field may be missing, renamed,
   or extended beyond these, except for optional MCP extension fields
@@ -89,7 +88,7 @@
                          :value (err/sanitize s)})))))
 
 (defn validate-descriptor
-  "Validate x as a v0 tool descriptor (normative shape, Task 4.3).
+  "Validate x as a v0 tool descriptor (normative shape, component).
 
   Returns x unchanged when it is well-formed; validation never
   coerces or rewrites values. Otherwise throws
@@ -149,7 +148,7 @@
 (defn lookup
   "Return the registry entry for `tool-id`: {:descriptor ... :provider
   ...}, or nil when no such tool is registered. Pure read; the broker
-  (Task 4.4/4.5) decides what an unregistered or
+  (component/4.5) decides what an unregistered or
   visible-but-ungranted tool means for authorization."
   [registry tool-id]
   (get @registry tool-id))

@@ -1,13 +1,12 @@
 (ns evoclj.capability.policy
-  "Pure authorization policy for the v0 capability broker (Task 4.4).
+  "Pure authorization policy for the v0 capability broker (component).
 
   The decision logic is deliberately separated from the broker entry
   point (evoclj.capability.broker): `decide` is a pure function of
   plain data — the lease collection, the requesting subject, the
   canonical resource, the requested action, the decision instant, and
   the per-lease call usage — and performs no I/O of any kind, so
-  authorization can be tested without invoking a real provider (Task
-  4.4 acceptance).
+  authorization can be tested without invoking a real provider (component acceptance).
 
   The v0 decision model:
 
@@ -19,7 +18,7 @@
   - `intent-action` derives the requested action from the intent
     type. A :intent/tool-call, :intent/model-call, :intent/memory-read,
     and :intent/memory-write each request the single action :invoke —
-    the :required-action of every v0 provider descriptor (Task 4.3;
+    the :required-action of every v0 provider descriptor (component;
     memory intents landed in feature R1). Any other intent type
     requests nil, and a nil action is never a member of any :actions
     set, so those intents fail closed at the action check.
@@ -86,7 +85,7 @@
 (def ^:private v0-actions
   "The v0 action requested by each intent type. :intent/tool-call
   requests the single action :invoke — the :required-action of every
-  v0 provider descriptor (Task 4.3); :intent/model-call also requests
+  v0 provider descriptor (component); :intent/model-call also requests
   :invoke (post-v0 extension 1 — model leases carry :actions
   #{:invoke}); :intent/memory-read and :intent/memory-write request
   :invoke too (feature R1 — a :memory-kv lease grants the exact
@@ -198,7 +197,7 @@
   Inputs: `leases` (a collection of CapabilityLease values), the
   requesting `subject` ({:phenotype/id ...}), the canonical
   `resource` (the normalized resource descriptor from provider
-  normalize-request, Task 4.3), the requested `action`, the decision
+  normalize-request, component), the requested `action`, the decision
   `now` instant, and `usage` (map of :cap/id to calls consumed).
 
   Returns {:decision :allow :lease-id ...} when some lease grants the

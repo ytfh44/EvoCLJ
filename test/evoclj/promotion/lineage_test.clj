@@ -1,5 +1,5 @@
 (ns evoclj.promotion.lineage-test
-  "Task 9.6 tests: build lineage reconstruction.
+  "component tests: build lineage reconstruction.
 
   lineage/lineage reconstructs the complete evolutionary history of a
   generation from the store tables (generations + candidates +
@@ -116,7 +116,7 @@
   [cas body]
   (:artifact/id (cas/put-bytes! cas (.getBytes body StandardCharsets/UTF_8) {})))
 
-;; --- the Task 9.6 fixture (built via the store tables) ----------------------
+;; --- the component fixture (built via the store tables) ----------------------
 
 (defn- insert-mutation!
   "Insert one mutation row; returns nothing."
@@ -161,7 +161,7 @@
                  :created_at ts}))
 
 (defn- insert-promotion!
-  "Insert one promotion decision row (`decision` is the Task 5.1 row
+  "Insert one promotion decision row (`decision` is the component row
   value: 'promoted' or 'rejected')."
   [conn p c e from-gen to-gen decision reason ts]
   (jdbc/insert! conn :promotions
@@ -175,7 +175,7 @@
                  :created_at ts}))
 
 (defn- fixture
-  "Build the Task 9.6 fixture lineage in a fresh temp store. Every
+  "Build the component fixture lineage in a fresh temp store. Every
   referenced artifact (Genomes, evidence packs, a paired-results body)
   is a real CAS body, so strict-mode integrity verification passes.
 

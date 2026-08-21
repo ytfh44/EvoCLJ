@@ -1,5 +1,5 @@
 (ns evoclj.promotion.promote-test
-  "Task 9.2 tests: the atomic CURRENT compare-and-set promotion.
+  "component tests: the atomic CURRENT compare-and-set promotion.
 
   promote! is the ONLY code path that changes the generations CURRENT
   pointer (evoclj.promotion.current/cas-current!): a promotion reads
@@ -11,7 +11,7 @@
   The task's numbered steps:
 
   - Step 1: happy path — promote! moves CURRENT G42 → G43, the old
-    generation becomes :superseded (persisted 'retired', the Task 5.1
+    generation becomes :superseded (persisted 'retired', the component
     vocabulary for the 9.1 machine state), the new generation row is
     born :active with current = 1 and full lineage, the candidate
     becomes :promoted, a promotions row (Invariant 5) and a

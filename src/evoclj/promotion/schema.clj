@@ -1,5 +1,5 @@
 (ns evoclj.promotion.schema
-  "Malli schemas for the Task 9.1 state vocabulary and the Promotion
+  "Malli schemas for the component state vocabulary and the Promotion
   record (docs 'Detailed Public Data Contracts').
 
   The state-value schemas are derived from the pure transition-table
@@ -16,38 +16,38 @@
        :from-generation stable-id?   ; string, e.g. \"generation-1\"
        :to-generation stable-id?
        :decision keyword?            ; :canary :promoted :rejected
-                                    ; :stale :canary-failed (Task 9.5 :rolled-back)
+                                    ; :stale :canary-failed (component :rolled-back)
        :reason map?                  ; the finalized decision context
        :created-at inst?}
 
-  Eligibility data is the evaluator's finalized judgment (Task 8.x):
+  Eligibility data is the evaluator's finalized judgment (component):
   {:eligible? boolean? :reasons [<reason maps>]} — :reasons is empty
   exactly when :eligible? is true. Promotion consumes this finalized
-  data and NEVER re-computes evaluator judgment (Task 9.2 Step 4)."
+  data and NEVER re-computes evaluator judgment (component Step 4)."
   (:require [evoclj.promotion.state :as state]
             [malli.core :as m]))
 
 ;; --- state-value schemas ------------------------------------------------------
 
 (def GenerationStateSchema
-  "The four generation states (Task 9.1): :seed :active :superseded
+  "The four generation states (component): :seed :active :superseded
   :rolled-back."
   (into [:enum] (sort state/generation-states)))
 
 (def DeploymentStateSchema
-  "The five candidate terminal/deployment states (Task 9.1): :rejected
+  "The five candidate terminal/deployment states (component): :rejected
   :stale :canary :promoted :canary-failed."
   (into [:enum] (sort state/deployment-states)))
 
 (def CandidateStateSchema
-  "The full candidate state vocabulary — the Task 7.6 base machine
+  "The full candidate state vocabulary — the component base machine
   (:proposed :materialized :evaluation-pending), the M8 evaluation
   outcomes (:evaluated :invalid), and the M9 deployment states. A
   Candidate record's :state is validated against this."
   (into [:enum] (sort state/candidate-states)))
 
 (def EligibilitySchema
-  "The evaluator's finalized eligibility judgment (Task 8.x). :reasons
+  "The evaluator's finalized eligibility judgment (component). :reasons
   is empty exactly when :eligible? is true; a non-empty :reasons means
   ineligible. Promotion treats this map as immutable finalized data."
   [:map {:closed true}

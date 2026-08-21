@@ -1,5 +1,5 @@
 (ns evoclj.runtime.loop-test
-  "Task 6.4 tests for explicit bounded loop semantics.
+  "component tests for explicit bounded loop semantics.
 
   A :loop node {:node/type :loop :body :node/body :until :program/done?
   :max-iterations 8 :next :node/finish} iterates its :body until the
@@ -13,7 +13,7 @@
   - when the predicate is satisfied the loop exits to :next;
   - when the counter reaches :max-iterations the handler returns a
     :failed transition typed :loop/max-iterations-exceeded, which the
-    Task 6.3 scheduler routes to the :budget-exhausted session state
+    component scheduler routes to the :budget-exhausted session state
     (the typed budget outcome chosen here and documented in
     evoclj.runtime.scheduler);
   - the loop forwards its input payload as the step output only while
@@ -44,7 +44,7 @@
     entries still carry only {:source :entry}; the handler-level tests
     prove the counter is read from runtime-state's :loop-state).
 
-  FIXTURE DESIGN: like the Task 6.3 scheduler tests, the CompiledGenome
+  FIXTURE DESIGN: like the component scheduler tests, the CompiledGenome
   is constructed directly (pure data, topology validated through
   evoclj.compiler.topology/compile-topology) instead of through
   evoclj.compiler.core, because the scheduler reads only the pinned
@@ -138,7 +138,7 @@
 ;; --- fixture topology and programs ------------------------------------------
 
 (defn- loop-topology
-  "The Task 6.4 fixture graph: :loop -> :step (body, :next back to the
+  "The component fixture graph: :loop -> :step (body, :next back to the
   :loop) -> :finish. The :body edge is the sanctioned iteration edge;
   the body's :next back to the :loop is the only edge that closes the
   iteration, and it passes through the explicit :loop node."

@@ -1,8 +1,8 @@
 (ns evoclj.genome.hash-property-test
   "Property-based invariants of deterministic Genome hashing
-  (Task E-prop).
+  (component).
 
-  A test.check layer over the normative hashing rules (Task 1.3,
+  A test.check layer over the normative hashing rules (component,
   Global Constraints 1 and 6):
 
     1. determinism — the same bytes always hash to the same canonical

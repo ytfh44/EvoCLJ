@@ -1,5 +1,5 @@
 (ns agent.route
-  "Seed Genome routing program (Task 2.3).
+  "Seed Genome routing program (component).
 
   Pure decision logic only: reads one EDN task input map and returns a
   deterministic route decision map. No host interop, no IO, no eval —

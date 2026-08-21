@@ -1,9 +1,9 @@
 (ns evoclj.evolution.history
   "Recent-mutation history — durable, queryable negative evidence
-  (Task 7.7; Global Constraint 16: rejected mutations MUST remain
+  (component; Global Constraint 16: rejected mutations MUST remain
   durable, queryable negative evidence).
 
-  THE STORE (Task 7.7 interface):
+  THE STORE (component interface):
 
       (recent-mutation-history store generation-lineage {:limit 50})
       ;; => accepted/rejected mutation summaries with metric deltas/reasons
@@ -12,7 +12,7 @@
   from the current generation back to the root. The history of that
   lineage is the set of Mutation IR PROPOSALS whose content material-
   ized a Candidate whose parent generation is IN the lineage. A
-  proposal is matched to its candidate by the Task 7.6 DEDUP KEY
+  proposal is matched to its candidate by the component DEDUP KEY
   (parent-genome-id, mutation-hash) — NOT by the candidate row's
   mutation_id — because the uniqueness rule means a repeat proposal
   of the same content carries no candidate row of its own (it dedupes
@@ -29,7 +29,7 @@
        :candidate/id #uuid
        :evidence/id \"sha256:...\"
        :risk :behavioral
-       :mutation/hash \"sha256:...\" ; the Task 7.6 content hash — the
+       :mutation/hash \"sha256:...\" ; the component content hash — the
                                       ; exact-repeat identity
        :fingerprint \"sha256:...\"   ; the Step 2 structural fingerprint
        :state :pending | :accepted | :rejected
@@ -40,7 +40,7 @@
 
   PERSISTENCE MODEL (Step 1): this namespace WRITES NO DECISION ROWS.
   The rejection reason and metric deltas are persisted by the
-  evaluation and promotion write paths — the Task 5.1 eval_runs and
+  evaluation and promotion write paths — the component eval_runs and
   promotions rows (the M8 evaluator persists :summary and
   :eligibility; the M9 promotion subsystem persists :decision and
   :reason). History is the durable QUERY surface over those rows, and
@@ -58,8 +58,7 @@
        run is not a result yet.
     3. Otherwise the evaluator has no results: :pending, :reason nil.
 
-  Metric deltas are derived from the eval run's :summary (the Task
-  8.5 shape {:hard ... :utility ... :cost ... :complexity ...}):
+  Metric deltas are derived from the eval run's :summary (the component shape {:hard ... :utility ... :cost ... :complexity ...}):
   every leaf map carrying BOTH a numeric :parent and a numeric
   :candidate value yields candidate - parent under its metric key,
   in its section; leaves without a numeric parent/candidate pair
@@ -79,7 +78,7 @@
   mutations collide); text anchors have CRLF/CR line endings
   normalized to LF (the evoclj.genome.hash canonical text
   convention); form selectors canonicalize a scalar to its
-  one-element vector form (the Task 7.3 schema admits both spellings
+  one-element vector form (the component schema admits both spellings
   for the same target); op ORDER never changes the fingerprint (the
   same edits reordered are the same target set). Selector kinds are
   tagged (:edn-path :anchor :form :node :edge) so no two op families
@@ -88,7 +87,7 @@
   (Global Constraint 6).
 
   NEGATIVE EVIDENCE (Step 3): an entry whose :mutation/hash (the
-  Task 7.6 content hash — same parent Genome + same mutation content)
+  component content hash — same parent Genome + same mutation content)
   appeared on an EARLIER entry in the returned window with :state
   :rejected is an EXACT repeat and is flagged :negative-evidence true
   for the Mutator. Fingerprint SIMILARITY alone never flags.
@@ -97,7 +96,7 @@
   out, no similar mutation is banned or suppressed here — the public
   surface is exactly the evidence API (recent-mutation-history,
   mutation-fingerprint, op-fingerprint) and the final proposal logic
-  (Task 7.8) decides what to do with the evidence.
+  (component) decides what to do with the evidence.
 
   Error contract (Global Constraint 22 — plain serializable data):
   :history/store-invalid (:reason :not-a-map :sqlite-missing
@@ -120,7 +119,7 @@
 ;; --- the window -----------------------------------------------------------------
 
 (def ^:private default-limit
-  "The default recent-history window size (Task 7.7 interface:
+  "The default recent-history window size (component interface:
   {:limit 50})."
   50)
 
@@ -235,7 +234,7 @@
     (scalar-normalized anchor)))
 
 (defn- normalized-form-selector
-  "A form :selector normalized. The Task 7.3 schema admits a scalar
+  "A form :selector normalized. The component schema admits a scalar
   AND a one-element vector for the same target, so a scalar is
   canonicalized to its one-element vector form; every element stays
   type-stable."
@@ -257,7 +256,7 @@
       [:node <id>]    — the :node/id of the topology node ops
       [:edge <from> <to>] — the ordered endpoints of the edge ops
 
-  The op must satisfy the Task 7.3 op schema (fail-closed:
+  The op must satisfy the component op schema (fail-closed:
   :mutation/op-invalid on a malformed or unknown op, :history/
   op-invalid on an op outside the language)."
   [op]
@@ -323,7 +322,7 @@
 (defn- row->mutation
   "Reconstruct the Mutation IR content from a mutations row — the
   same reconstruction evoclj.evolution.candidate uses — so the exact
-  repeat identity (Task 7.6 :mutation/hash) can be recomputed
+  repeat identity (component :mutation/hash) can be recomputed
   content-identically."
   [{:keys [id parent_genome_id hypothesis_id evidence_id risk ops
            expected_effect]}]
@@ -336,7 +335,7 @@
    :expected-effect (edn/read-string expected_effect)})
 
 (defn- dedupe-key-of
-  "The Task 7.6 dedup identity of a mutation row: (parent-genome-id,
+  "The component dedup identity of a mutation row: (parent-genome-id,
   mutation-hash) — the same rule evoclj.evolution.candidate uses to
   deduplicate candidates."
   [mutation-row]
@@ -345,12 +344,12 @@
      :mutation/hash (candidate/mutation-hash m)}))
 
 (defn- candidate-by-dedupe-key
-  "Map the Task 7.6 dedup key (parent-genome-id, mutation-hash) →
+  "Map the component dedup key (parent-genome-id, mutation-hash) →
   candidate row for the in-lineage candidates. The candidate's
   mutation_id references the CANONICAL proposal of its content; the
   content hash IS the dedup identity, so every proposal row whose
   content deduped into that candidate resolves to it — including
-  repeat proposals that carry no candidate row of their own (Task 7.6
+  repeat proposals that carry no candidate row of their own (component
   Step 3: the same parent + mutation content is ONE candidate)."
   [db candidate-rows]
   (let [mutation-ids (distinct (map :mutation_id candidate-rows))
@@ -482,7 +481,7 @@
 
   Walking the window oldest-first, an entry is an exact repeat — and
   flagged :negative-evidence true — when an EARLIER entry in the
-  window shares its :mutation/hash (the Task 7.6 content hash: same
+  window shares its :mutation/hash (the component content hash: same
   parent Genome + same mutation content) with :state :rejected.
   Fingerprint similarity alone never flags (Step 4)."
   [entries]
@@ -524,8 +523,7 @@
 ;; --- the public entry point ----------------------------------------------------------
 
 (defn recent-mutation-history
-  "Return the recent mutation history of a generation lineage (Task
-  7.7): one entry per Mutation IR proposal whose materialized
+  "Return the recent mutation history of a generation lineage (component): one entry per Mutation IR proposal whose materialized
   Candidate's parent generation is IN `generation-lineage` (a vector
   of generation ids — the lineage from the current generation back
   to the root), newest proposal first, bounded by :limit (default
@@ -566,7 +564,7 @@
                                                    ")")]
                                             parent-genomes)))
         ;; pair each proposal with the candidate its content deduped
-        ;; into (Task 7.6 rule); unmaterialized proposals have no
+        ;; into (component rule); unmaterialized proposals have no
         ;; candidate and are not part of the history
         paired (keep (fn [mrow]
                        (when-let [crow (get cand-by-key (dedupe-key-of mrow))]

@@ -1,5 +1,5 @@
 (ns evoclj.genome.path-test
-  "Tests for canonical relative-path validation (Task 1.3).
+  "Tests for canonical relative-path validation (component).
 
   Genome file references are canonical slash-separated relative paths.
   `normalize-relative-path` canonicalizes backslashes to forward

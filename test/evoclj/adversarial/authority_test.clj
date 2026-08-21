@@ -1,5 +1,5 @@
 (ns evoclj.adversarial.authority-test
-  "Task 11.1 — Self-authority escalation suite (adversarial release gate).
+  "component — Self-authority escalation suite (adversarial release gate).
 
   This suite ATTACKS the system's own architectural claims. Every case
   must FAIL CLOSED before any protected effect occurs:
@@ -79,14 +79,14 @@
 (def ^:private pid-pattern #"^sha256:[0-9a-f]{64}$")
 
 (defn- fixture-catalog
-  "The on-disk provider catalog fixture (Task 2.1 Resolution)."
+  "The on-disk provider catalog fixture (component Resolution)."
   []
   (edn/read-string (slurp (io/resource "fixtures/resolution/provider-catalog.edn"))))
 
 (defn- loaded-genome
   "Load one malicious fixture bundle from
   test/fixtures/adversarial/authority/<name> with its in-memory program
-  registry attached (Task 2.3 choice (a))."
+  registry attached (component choice (a))."
   [name descriptor]
   (assoc (load/load-genome (str authority-fixture-root "/" name))
          :programs [descriptor]))
@@ -203,7 +203,7 @@
     [db path]))
 
 (defn- make-executor
-  "Assemble the Task 6.3 executor map for a compiled genome:
+  "Assemble the component executor map for a compiled genome:
 
     {:phenotype <instantiated Phenotype>
      :stores {:sqlite <migrated db> :cas <CAS root>}
@@ -320,7 +320,7 @@
 
 (defn- normalized-tool-request
   "The canonical normalized request for a :tool resource (the exact
-  form provider normalize-request returns, Task 4.3)."
+  form provider normalize-request returns, component)."
   [tool-id args]
   {:tool/id tool-id
    :resource {:kind :tool :id tool-id}

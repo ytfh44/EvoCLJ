@@ -1,5 +1,5 @@
 (ns evoclj.evolution.demo-mutator-test
-  "Task D1 tests — the built-in heuristic mutator and the :demo profile.
+  "component tests — the built-in heuristic mutator and the :demo profile.
 
   The demo mutator (evoclj.evolution.demo-mutator) is the NON-LLM
   Mutator adapter the :demo config profile injects through the CLI's
@@ -59,7 +59,7 @@
     p))
 
 (defn- route-descriptor
-  "The seed route program descriptor (Task 2.3 choice (a))."
+  "The seed route program descriptor (component choice (a))."
   []
   {:program/id :program/route
    :file "programs/route.clj"
@@ -75,7 +75,7 @@
          :programs [(route-descriptor)]))
 
 (defn- fixture-catalog
-  "The on-disk provider catalog fixture (Task 2.1 Resolution)."
+  "The on-disk provider catalog fixture (component Resolution)."
   []
   (edn/read-string (slurp (io/resource "fixtures/resolution/provider-catalog.edn"))))
 

@@ -3,7 +3,7 @@
 
   A :llm node only EMITS a typed :intent/model-call intent — it never
   calls a provider (Global Constraint 8: every external effect must
-  cross the kernel-owned Intent/Capability Broker, so the Task 6.3
+  cross the kernel-owned Intent/Capability Broker, so the component
   scheduler dispatches the emitted intent). The node config declares
   the model ALIAS (:model, e.g. :planner); the handler resolves it
   against the phenotype's compiled Resolution

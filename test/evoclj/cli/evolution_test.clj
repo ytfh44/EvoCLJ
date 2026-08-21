@@ -1,7 +1,7 @@
 (ns evoclj.cli.evolution-test
   "Roadmap E3 tests: `candidate inspect --diff <id>` — the per-file
   line diff of a candidate Genome vs its parent Genome (the candidate
-  diff report, Task E3).
+  diff report, component).
 
   The diff core (evoclj.cli.evolution/diff-genomes) is tested on
   hand-built loaded-Genome maps: a diff of two known genomes shows
@@ -337,7 +337,7 @@
         (is (= (UUID/fromString (:candidate-id ctx)) (:candidate/id data)))))))
 
 ;; ============================================================================
-;; the CLI wiring — loop command (Task A2) through main/run / execute
+;; the CLI wiring — loop command (component) through main/run / execute
 ;; ============================================================================
 
 (defn- provision-loop-store!

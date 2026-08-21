@@ -1,4 +1,4 @@
-;; Task 9.7 fixture — G1 Genome manifest (test/fixtures/evolution-e2e/route-a).
+;; component fixture — G1 Genome manifest (test/fixtures/evolution-e2e/route-a).
 ;;
 ;; A closed-map manifest validated by evoclj.genome.schema at the
 ;; trust boundary. The evolution policy bounds the risk class the
@@ -20,4 +20,4 @@
  :evolution {:max-risk :behavioral
              :mutable #{:parameters :prompts :skills :programs}}
  :metadata {:name "e2e-route-a"
-            :description "Task 9.7 G1 — A-for-everything router fixture"}}
+            :description "component G1 — A-for-everything router fixture"}}

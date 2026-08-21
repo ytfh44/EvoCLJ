@@ -1,11 +1,11 @@
 (ns evoclj.evolution.mutation-schema
-  "Malli schemas for the Mutation IR (Task 7.3).
+  "Malli schemas for the Mutation IR (component).
 
   The Mutation is the evolution subsystem's declarative successor
   language: an immutable, closed-map IR that names its parent Genome,
   the evidence pack and hypothesis it answers, its risk class, a
   NON-EMPTY bounded :ops vector, and the expected effect it claims.
-  The normative shape (the plan's Task 7.3 interface):
+  The normative shape (the plan's component interface):
 
       {:mutation/id #uuid
        :parent/genome-id \"sha256:...\"

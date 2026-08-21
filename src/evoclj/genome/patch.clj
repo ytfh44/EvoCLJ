@@ -1,5 +1,5 @@
 (ns evoclj.genome.patch
-  "Deterministic mutation application (Task 7.4).
+  "Deterministic mutation application (component).
 
   `apply-mutation` turns a validated Mutation IR plus a loaded immutable
   parent Genome into a newly loaded immutable candidate Genome with a

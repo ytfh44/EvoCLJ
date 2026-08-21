@@ -1,9 +1,9 @@
 (ns evoclj.runtime.episode-test
-  "Task 6.5 tests for materialize-episode!.
+  "component tests for materialize-episode!.
 
-  materialize-episode! turns a TERMINAL session (the Task 6.3/6.4
+  materialize-episode! turns a TERMINAL session (the component/6.4
   scheduler leaves sessions :completed, :failed, or :budget-exhausted)
-  into an immutable Episode record: one SQLite row in the Task 5.1
+  into an immutable Episode record: one SQLite row in the component
   `episodes` table that REFERENCES the session's causal trace and its
   CAS artifacts instead of copying any payload (Global Constraint 21).
 
@@ -117,7 +117,7 @@
 ;; --- fixture topologies and programs ---------------------------------------
 
 (defn- chain-topology
-  "The Task 6.3 fixture graph: :sci router → :tool → :emit."
+  "The component fixture graph: :sci router → :tool → :emit."
   [limits]
   {:graph/id :graph/episode-fixture
    :entry :node/router

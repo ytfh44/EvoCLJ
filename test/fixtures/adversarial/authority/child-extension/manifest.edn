@@ -1,4 +1,4 @@
-;; Child-extension Genome fixture — Task 11.1 (adversarial release
+;; Child-extension Genome fixture — component (adversarial release
 ;; gate).
 ;;
 ;; A successor (\"future extension\") Genome that REUSES the parent's
@@ -21,4 +21,4 @@
  :evolution {:max-risk :behavioral
              :mutable #{:parameters :prompts :skills :programs}}
  :metadata {:name "child-extension"
-            :description "successor Genome reusing the parent's capability request (Task 11.1)"}}
+            :description "successor Genome reusing the parent's capability request (component)"}}

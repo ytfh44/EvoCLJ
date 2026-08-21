@@ -1,5 +1,5 @@
 (ns evoclj.capability.lease
-  "Lease semantics for the v0 CapabilityLease (Task 4.2).
+  "Lease semantics for the v0 CapabilityLease (component).
 
   A CapabilityLease is a bounded HOST-OWNED grant: the kernel issues a
   plain immutable map binding ONE subject, ONE resource grant, an
@@ -35,7 +35,7 @@
   covered. The pure path canonicalization lives here so coverage is
   always decided on canonical forms; provider-side normalization of
   user-facing requests (kinds, ids, paths, Windows drive/backslash
-  forms) is Task 4.3 (evoclj.provider). Unknown resource kinds fail
+  forms) is component (evoclj.provider). Unknown resource kinds fail
   closed: nothing is covered."
   (:require [clojure.string :as str]
             [evoclj.capability.schema :as schema]
@@ -53,7 +53,7 @@
   \"/work/../../etc\" -> \"/etc\" and never escapes the filesystem
   root. Returns nil for non-string input, so matching fails closed.
   Windows drive/backslash canonicalization is provider-side
-  normalization (Task 4.3); this helper is the pure segment-level
+  normalization (component); this helper is the pure segment-level
   canonical form coverage is decided on."
   [s]
   (when (string? s)

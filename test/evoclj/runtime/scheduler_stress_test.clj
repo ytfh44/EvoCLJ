@@ -1,5 +1,5 @@
 (ns evoclj.runtime.scheduler-stress-test
-  "Task R4 — scheduler concurrency semantics + stress test.
+  "component — scheduler concurrency semantics + stress test.
 
   N sessions × M events run CONCURRENTLY (real host threads behind a
   barrier) over ONE shared store: a single migrated sqlite db, a
@@ -232,7 +232,7 @@
 
 (defn- compiled-genome
   "A minimal CompiledGenome value carrying the stress topology —
-  constructed directly, exactly as the Task 6.3 scheduler tests do."
+  constructed directly, exactly as the component scheduler tests do."
   [fixture-topology]
   {:compiled/genome-id genome-id
    :compiled/resolution-id resolution-id

@@ -1,6 +1,6 @@
 (ns evoclj.evolution.loop-policy
   "Deterministic loop-continuation policy for the evolution runtime
-  (Task E5).
+  (component).
 
   `decide-continue?` is a PURE, DETERMINISTIC function: given the
   generation-summary `history` (a vector, NEWEST generation LAST) and a

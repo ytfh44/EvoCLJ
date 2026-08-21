@@ -5,7 +5,7 @@
   event log: every :provider/call-completed event whose payload (a
   CAS artifact) is a model-call result value carries :usage
   {:model-input-tokens n :model-output-tokens n} and/or
-  :model-cost-units — the Task 12.1 counters (evoclj.runtime.usage).
+  :model-cost-units — the component counters (evoclj.runtime.usage).
   Tool-call results (fixture echo etc.) carry no model counters and
   are skipped.
 
@@ -71,7 +71,7 @@
   "evoclj cost --generation <id|current>
 
   The model usage of one generation, aggregated from its causal event
-  log (Task 12.1 counters). Returns plain EDN-safe data:
+  log (component counters). Returns plain EDN-safe data:
 
     {:generation/id <id>
      :sessions n

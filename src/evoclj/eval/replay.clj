@@ -1,5 +1,5 @@
 (ns evoclj.eval.replay
-  "G4 historical replay with representative cases (Task 8.3).
+  "G4 historical replay with representative cases (component).
 
   run-replay! re-executes a candidate against replay cases built from
   stored Episodes and reports per-case outcomes plus aggregate
@@ -14,7 +14,7 @@
       ;;     :regressions [<regressed case outcomes>]
       ;;     :hard-failure? bool}
 
-  A REPLAY CASE (Step 1) is built from a stored Episode (Task 6.5)
+  A REPLAY CASE (Step 1) is built from a stored Episode (component)
   plus the episode's recorded intent trace — the tool calls the
   original run performed, their recorded effect class, and their
   recorded provider responses — and the evaluator's per-case oracle:
@@ -38,7 +38,7 @@
   external provider is FIXTURABLE: the evaluator supplies fixture
   providers (:replay/fixtures) and the replay-mode-aware wrapper
   evoclj.eval.replay/replay-provider (built on the Provider protocol,
-  Task 4.3) stands between the broker and the fixture. The three modes
+  component) stands between the broker and the fixture. The three modes
   (Step 2) define how the wrapper behaves per tool:
 
     :fixture       EVERY intent (read and write) is served its recorded
@@ -122,7 +122,7 @@
 ;; --- the three provider replay modes (Step 2) ------------------------------
 
 (def replay-modes
-  "The three provider replay modes (Task 8.3 Step 2)."
+  "The three provider replay modes (component Step 2)."
   #{:fixture :recorded-read :forbid-write})
 
 ;; --- canonicalization (Global Constraint 22) -------------------------------
@@ -198,9 +198,9 @@
 
 (defn build-replay-case
   "Build a validated replay case from a stored Episode and its recorded
-  intent trace (Task 8.3 Step 1).
+  intent trace (component Step 1).
 
-  `episode` is the stored Episode map (Task 6.5 contract); the case
+  `episode` is the stored Episode map (component contract); the case
   inherits its :episode/id and its terminal :outcome :status as
   :recorded/status — the baseline a later regression is measured
   against (a :completed baseline that now fails is a regression; a
@@ -305,7 +305,7 @@
 ;; --- Step 2: the replay-mode-aware provider wrapper ------------------------
 
 (defn replay-provider
-  "The replay-mode-aware provider wrapper (Task 8.3 Step 2). Wraps
+  "The replay-mode-aware provider wrapper (component Step 2). Wraps
   `fixture-provider` (an evoclj.provider.protocol/Provider) so the
   broker talks to replay instead of a real resource.
 
@@ -610,7 +610,7 @@
         intent-outcomes))
 
 (defn- case-outcome
-  "The per-case outcome (Task 8.3 Steps 3-5):
+  "The per-case outcome (component Steps 3-5):
 
       {:case/id ... :episode/id ... :mode ... :critical? ...
        :recorded/status ...
@@ -703,7 +703,7 @@
 
 (defn run-replay!
   "Run `candidate` (a Genome bundle root: path string or Path) on the
-  requested `replay-case-ids` and return the replay report (Task 8.3
+  requested `replay-case-ids` and return the replay report (component
   Step 6). The candidate Genome is loaded and compiled FROM SCRATCH
   (Global Constraints 4, 6); every case runs in a fresh session with a
   fresh isolated Phenotype against replay-provider-wrapped fixtures

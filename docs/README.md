@@ -15,7 +15,7 @@ winners through an atomic compare-and-set.
 | [`models-integration.md`](models-integration.md) | Real LLM support: models.dev catalog, dialect layer, OpenAI/Anthropic adapters, :llm node + tool loop, LLM-driven evolution, `evoclj cycle`, LM Studio deployment notes | You are wiring, using, or debugging real models |
 | [`roadmap.md`](roadmap.md) | Feature roadmap across five directions (evolution, evaluation, runtime, ops, security) with completion state | You want the current feature status and the future backlog |
 | [`semantic-verification.md`](semantic-verification.md) | Formal verification of the seven core semantic claims (no mocks, real namespaces, re-runnable scripts) | You are changing core invariants or auditing safety |
-| [`performance-baseline.md`](performance-baseline.md) | Measured benchmark baselines and regression ceilings (Task 12.2) | You are optimizing or changing hot paths |
+| [`performance-baseline.md`](performance-baseline.md) | Measured benchmark baselines and regression ceilings (component) | You are optimizing or changing hot paths |
 
 ## Suggested reading order
 

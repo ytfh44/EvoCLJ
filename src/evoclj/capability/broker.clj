@@ -1,6 +1,6 @@
 (ns evoclj.capability.broker
   "The kernel-owned capability broker: authorize as a pure decision
-  (Task 4.4).
+  (component).
 
   `authorize` is the NORMATIVE broker entry point of Milestone 4 and
   is deliberately PURE: it validates its inputs and composes the
@@ -8,7 +8,7 @@
   (evoclj.capability.lease / .schema) into a deterministic decision,
   performing no I/O — no provider invocation, no registry read, no
   state change. The effectful dispatcher that turns an :allow into a
-  real provider effect arrives in Task 4.5.
+  real provider effect arrives in component
 
   (authorize {:intent intent
               :normalized-request request
@@ -25,7 +25,7 @@
                         Constraint 20 attribution the decision
                         subject is derived from).
   - :normalized-request the CANONICAL resource descriptor produced by
-                        provider normalize-request (Task 4.3):
+                        provider normalize-request (component):
                         {:tool/id ... :resource {...} ...}. It must
                         carry :resource; authorization is decided on
                         this canonical form, never on raw user input
@@ -53,13 +53,13 @@
 
 (defn authorize
   "The pure broker authorization decision for one request (normative,
-  Task 4.4).
+  component).
 
   Validates the intent and the normalized request, then delegates the
   decision to evoclj.capability.policy/decide with the subject and
   action derived from the intent and the canonical resource taken
   from the normalized request. Pure: no I/O, no state change, no
-  provider invocation — the effectful dispatcher arrives in Task 4.5.
+  provider invocation — the effectful dispatcher arrives in component
 
   See the namespace docstring for the input contract and the stable
   deny reason codes."

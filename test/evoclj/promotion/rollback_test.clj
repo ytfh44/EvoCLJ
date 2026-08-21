@@ -1,9 +1,9 @@
 (ns evoclj.promotion.rollback-test
-  "Task 9.5 tests: explicit rollback semantics.
+  "component tests: explicit rollback semantics.
 
   rollback! is selection-only (Global Constraint 18): it changes ONLY
   which generation is chosen for FUTURE sessions. It moves the CURRENT
-  pointer back through the Task 9.2 CAS machinery
+  pointer back through the component CAS machinery
   (evoclj.promotion.current/cas-current! — the ONLY code path that
   changes CURRENT), marks the rolled-back generation :rolled-back and
   reactivates the target :active. Nothing is deleted: G43 events,
@@ -34,7 +34,7 @@
     provider, capability, or runtime namespace (asserted by
     construction).
 
-  Fixture: a real Task 9.2 promotion (promote!) makes G43 CURRENT over
+  Fixture: a real component promotion (promote!) makes G43 CURRENT over
   G42 ('retired'), a second operator session is created pinned to G43
   (the rollback event anchor), and G43-anchored episode/receipt rows
   are inserted before the rollback. Fresh temp databases are migrated
@@ -250,7 +250,7 @@
 
 (defn- rollback-fixture
   "Build the full stack: G42 is CURRENT (seed, 'active'), a real
-  Task 9.2 promotion (promote!) makes G43 CURRENT over G42 ('retired'),
+  component promotion (promote!) makes G43 CURRENT over G42 ('retired'),
   a second operator session is created pinned to G43 (the rollback
   event anchor), and G43-anchored episode/receipt rows are inserted.
   Returns a map of every id the tests need."

@@ -1,21 +1,21 @@
 (ns evoclj.promotion.state
-  "Task 9.1 — generation states and candidate deployment states as
+  "component — generation states and candidate deployment states as
   PURE, CLOSED transition tables.
 
   This namespace is data plus pure functions: it holds no SQL, holds
   no reference to any CURRENT pointer, and makes no writes anywhere
-  (Global Constraint 15 keeps promotion a separate subsystem; Task 9.2
+  (Global Constraint 15 keeps promotion a separate subsystem; component
   owns the atomic compare-and-set and its transaction). Callers read
   the tables, ask what a state may transition to, or validate one
   transition; every entry point is a pure function of its arguments.
 
-  GENERATION STATES (Task 9.1, normative): :seed :active :superseded
+  GENERATION STATES (component, normative): :seed :active :superseded
   :rolled-back, with the edges :seed → :active, :active → :superseded,
   :active → :rolled-back. A generation that was never active is never
   rolled back; :superseded and :rolled-back are terminal.
 
-  CANDIDATE DEPLOYMENT STATES (Task 9.1, normative): :rejected :stale
-  :canary :promoted :canary-failed. They extend the Task 7.6 candidate
+  CANDIDATE DEPLOYMENT STATES (component, normative): :rejected :stale
+  :canary :promoted :canary-failed. They extend the component candidate
   machine from evolution/candidate.clj (:proposed → :materialized →
   :evaluation-pending; M8 appends :evaluation-pending → #{:evaluated
   :invalid}); the M9 deployment edges are :evaluated → #{:canary
@@ -30,11 +30,11 @@
   into deployment. 'Eligible-only' is enforced by
   `deployment-transition` against the candidate's FINALIZED eligibility
   data (:eligibility {:eligible? bool :reasons [...]} from the
-  evaluator, Task 8.x): an ineligible evaluated candidate can ONLY
+  evaluator, component): an ineligible evaluated candidate can ONLY
   become :rejected — :canary, :promoted, and even :stale fail with
   :promotion/ineligible. Eligibility gates ENTRY only: a candidate
   already in :canary exits to :promoted/:canary-failed per the canary
-  guardrails (Task 9.4) and never re-checks entry eligibility.
+  guardrails (component) and never re-checks entry eligibility.
 
   ERROR CONTRACT (Global Constraint 22 — plain serializable data):
   :promotion/unknown-state (a state outside the vocabulary),
@@ -46,15 +46,15 @@
 ;; --- the state vocabularies ----------------------------------------------------
 
 (def generation-states
-  "The NORMATIVE Task 9.1 generation states."
+  "The NORMATIVE component generation states."
   #{:seed :active :superseded :rolled-back})
 
 (def deployment-states
-  "The NORMATIVE Task 9.1 candidate terminal/deployment states."
+  "The NORMATIVE component candidate terminal/deployment states."
   #{:rejected :stale :canary :promoted :canary-failed})
 
 (def candidate-states
-  "The full candidate state vocabulary: the Task 7.6 base machine plus
+  "The full candidate state vocabulary: the component base machine plus
   the M8 evaluation outcomes (:evaluated :invalid) and the M9
   deployment states."
   (into #{} (concat [:proposed :materialized :evaluation-pending
@@ -66,8 +66,7 @@
 (def generation-transitions
   "The closed generation transition table (data, no SQL). A generation
   is born :seed, becomes :active, and then either :superseded (a newer
-  generation won the CURRENT compare-and-set) or :rolled-back (Task
-  9.5 — future selection only, never reversing external effects,
+  generation won the CURRENT compare-and-set) or :rolled-back (component — future selection only, never reversing external effects,
   Global Constraint 18). :superseded and :rolled-back are terminal:
   nothing transitions out of them."
   {:seed #{:active}
@@ -76,7 +75,7 @@
    :rolled-back #{}})
 
 (def candidate-transitions
-  "The closed candidate state machine (data, no SQL): the Task 7.6
+  "The closed candidate state machine (data, no SQL): the component
   base fragment (:proposed → :materialized → :evaluation-pending,
   realized by evolution/candidate.clj), M8's evaluation outcomes
   (:evaluation-pending → #{:evaluated :invalid}), and the M9
@@ -150,14 +149,14 @@
 
 (defn eligible-deployment-states
   "THE KEY RULE as data: the deployment states an :evaluated candidate
-  may enter given its FINALIZED eligibility judgment (Task 8.x shape
+  may enter given its FINALIZED eligibility judgment (component shape
   {:eligible? bool :reasons [...]}).
 
   - :eligible? true  → #{:canary :promoted :stale} — may start a
-    canary rollout, promote directly, or become :stale (the Task 9.2
+    canary rollout, promote directly, or become :stale (the component
     sibling that lost the CURRENT compare-and-set).
   - :eligible? false → #{:rejected} — an ineligible candidate can ONLY
-    become :rejected (Task 9.1 Step 2). Missing or non-true :eligible?
+    become :rejected (component Step 2). Missing or non-true :eligible?
     is treated as ineligible (fail-closed): judgment is never guessed."
   [eligibility]
   (if (true? (:eligible? eligibility))
@@ -180,7 +179,7 @@
 
   `eligibility` is the finalized evaluator judgment consumed
   verbatim; it is consulted ONLY on the :evaluated → deployment entry
-  edges — a candidate already in :canary exits per the Task 9.4
+  edges — a candidate already in :canary exits per the component
   guardrails (:promoted / :canary-failed) and never re-checks entry
   eligibility."
   [candidate-state eligibility to]

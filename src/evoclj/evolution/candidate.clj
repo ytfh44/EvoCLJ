@@ -1,9 +1,9 @@
 (ns evoclj.evolution.candidate
   "Candidate records — creation, persistence, and the uniqueness rule
-  (Task 7.6). NO ACTIVATION RIGHTS: this namespace has no function
+  (component). NO ACTIVATION RIGHTS: this namespace has no function
   that reads or writes the generations CURRENT pointer and no
   dependency on any promotion/current namespace (Global Constraint 15
-  keeps promotion a separate subsystem; Task 9.x owns CURRENT).
+  keeps promotion a separate subsystem; component owns CURRENT).
 
   THE CANDIDATE RECORD (docs 'Detailed Public Data Contracts'):
 
@@ -17,7 +17,7 @@
        :state keyword?
        :created-at inst?}
 
-  STATE MACHINE (normative, Task 7.6):
+  STATE MACHINE (normative, component):
 
       :proposed → :materialized → :evaluation-pending → :evaluated
                                             └────→ :invalid
@@ -34,7 +34,7 @@
   Promotion in M9.
 
   STATE VOCABULARY DEVIATION (documented, per Repo Convention 5): the
-  Task 5.1 candidates.state CHECK constraint was written before the
+  component candidates.state CHECK constraint was written before the
   state machine and only admits ('materialized','evaluating',
   'eligible','promoted','rejected','stale'). The machine states are
   mapped at the row boundary: :materialized ↔ 'materialized',
@@ -63,7 +63,7 @@
   concurrent duplicate observes the first committed row and dedupes.
 
   MATERIALIZATION (persistence, Step 4): materialize-candidate!
-  writes the candidate row into the Task 5.1 candidates table with
+  writes the candidate row into the component candidates table with
   full lineage (composite FK (parent_generation_id, parent_genome_id)
   → generations, enforcing Database Invariant 8; mutation_id FK →
   mutations). As the FK's lineage precondition, the mutation row is
@@ -74,7 +74,7 @@
   :parent/genome-id, :evidence/id, :risk); a record that disagrees
   with its own lineage is rejected. The record stores only
   references (genome/evidence/mutation ids); the candidate Genome
-  BODY (Task 7.4 patch output) is put into the CAS by the
+  BODY (component patch output) is put into the CAS by the
   orchestrator, not by this namespace.
 
   `store` is the executor :stores map {:sqlite <db> :cas <CAS root>},
@@ -103,10 +103,10 @@
            (java.time.format DateTimeFormatter)
            (java.util Date UUID)))
 
-;; --- state machine (Task 7.6 fragment; M8 adds :evaluated/:invalid) ---------
+;; --- state machine (component fragment; M8 adds :evaluated/:invalid) ---------
 
 (def states
-  "The Task 7.6 candidate states. :proposed is the pre-persistence
+  "The component candidate states. :proposed is the pre-persistence
   record state; :materialized and :evaluation-pending are persisted.
   The :evaluated and :invalid states arrive with the evaluator in
   M8."
@@ -124,10 +124,10 @@
 
 (declare find-candidate)
 
-;; --- the Task 5.1 state vocabulary mapping (documented deviation) -----------
+;; --- the component state vocabulary mapping (documented deviation) -----------
 
 (def ^:private db-state->state
-  "Map from the Task 5.1 candidates.state CHECK vocabulary to the
+  "Map from the component candidates.state CHECK vocabulary to the
   plan's machine states. The 5.1 schema predates the machine, so the
   in-memory machine states are mapped at the row boundary; :proposed
   has no schema value (rows exist only from :materialized onward) and
@@ -300,7 +300,7 @@
 ;; --- Step 1: creation --------------------------------------------------------
 
 (defn create-candidate
-  "Create a NEW :proposed Candidate record (Task 7.6 Step 1).
+  "Create a NEW :proposed Candidate record (component Step 1).
 
   The record names the parent generation and parent Genome, the
   content-addressed candidate Genome, the mutation and evidence it
@@ -344,7 +344,7 @@
 
 (defn mutation-hash
   "The deterministic content hash of a Mutation IR — the uniqueness
-  rule's second component (Task 7.6 Step 3).
+  rule's second component (component Step 3).
 
   sha256 over the canonical pr-str of the mutation EXCLUDING
   :mutation/id: the uuid is proposal-assignment metadata, not
@@ -356,7 +356,7 @@
   (hash/text-digest (pr-str (canonical (dissoc mutation :mutation/id)))))
 
 (defn dedupe-key
-  "The normative candidate uniqueness rule (Task 7.6 Step 3): a
+  "The normative candidate uniqueness rule (component Step 3): a
   candidate is unique by (parent-genome-id, mutation-hash). The same
   parent + same mutation content materialized twice dedupes to the
   same auditable candidate (one row)."
@@ -383,7 +383,7 @@
 
 (defn- row->candidate
   "Convert a candidates DB row into the public Candidate record. The
-  Task 5.1 :state vocabulary is mapped to the machine states (see
+  component :state vocabulary is mapped to the machine states (see
   db-state->state); an unknown value fails loudly."
   [row]
   (let [state (get db-state->state (:state row))]
@@ -461,7 +461,7 @@
 
 (defn materialize-candidate!
   "Materialize the immutable Candidate record for a parent Genome and
-  Mutation IR (Task 7.6 Step 4) and return it with :state
+  Mutation IR (component Step 4) and return it with :state
   :materialized — or the EXISTING candidate when the uniqueness rule
   (parent-genome-id, mutation-hash) already has a row (Step 3: the
   same parent+mutation materialized twice is ONE auditable candidate).
@@ -473,7 +473,7 @@
   the candidate row insert. The candidate record must be :proposed
   and must AGREE with the mutation (same :mutation/id,
   :parent/genome-id, :evidence/id, :risk). The row stores only
-  references; the candidate Genome body (Task 7.4 patch output) is
+  references; the candidate Genome body (component patch output) is
   put into the CAS by the orchestrator, not here.
 
   Typed errors: :candidate/store-invalid, :candidate/invalid,
@@ -517,10 +517,9 @@
                                      (str (:candidate/id candidate))])))))))))
 
 (defn transition-candidate!
-  "Compare-and-set state transition for a persisted candidate (Task
-  7.6 Step 4). Changes :state alone via one atomic UPDATE matched on
+  "Compare-and-set state transition for a persisted candidate (component Step 4). Changes :state alone via one atomic UPDATE matched on
   the expected state, and returns the updated Candidate record. The
-  Task 7.6 machine has one persisted edge: :materialized →
+  component machine has one persisted edge: :materialized →
   :evaluation-pending (the :proposed → :materialized edge is realized
   by materialize-candidate!; :evaluated/:invalid arrive with M8).
 
@@ -541,7 +540,7 @@
                        :new-state new-state})))
   (when-not (contains? state->db-state new-state)
     (throw (err/error :candidate/invalid-transition
-                      "the target state has no Task 5.1 vocabulary value"
+                      "the target state has no component vocabulary value"
                       {:candidate/id (types/session-id candidate-id)
                        :expected-state expected-state
                        :new-state new-state})))
@@ -575,7 +574,7 @@
 
 (defn mark-evaluation-pending!
   "Transition a :materialized candidate to :evaluation-pending
-  (Task 7.6 Step 4, stored as 'evaluating' in the 5.1 vocabulary).
+  (component Step 4, stored as 'evaluating' in the 5.1 vocabulary).
   The transition is a compare-and-set: a candidate not currently
   :materialized (or already pending) fails with
   :candidate/invalid-transition."

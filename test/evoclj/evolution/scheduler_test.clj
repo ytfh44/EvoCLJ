@@ -1,5 +1,5 @@
 (ns evoclj.evolution.scheduler-test
-  "Tests for `evoclj.evolution.scheduler` (Task A2).
+  "Tests for `evoclj.evolution.scheduler` (component).
 
   The unit tests drive `run-cycles!` with an INJECTED mock
   `run-generation` fn (the one-generation step), so the loop wiring and
@@ -45,7 +45,7 @@
               :utility (double (nth xs i))}))}))
 
 
-;; --- cost-guard wiring (Task E3) ---------------------------------------------
+;; --- cost-guard wiring (component) ---------------------------------------------
 
 (defn- cost-run-generation
   "A mock `run-generation` that returns `:utility` and `:cost` from

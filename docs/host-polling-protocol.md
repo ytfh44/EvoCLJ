@@ -1,4 +1,4 @@
-# Host Polling Protocol (Task D2)
+# Host Polling Protocol (component)
 
 ## Overview
 

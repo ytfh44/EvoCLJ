@@ -4,7 +4,7 @@
   This adapter conforms to the Mutator protocol of
   evoclj.evolution.core: it consumes the FULL, closed per-cycle
   context (the generation id, the loaded parent Genome, the validated
-  Diagnosis, the Task 7.7 negative-history entries, and the budget
+  Diagnosis, the component negative-history entries, and the budget
   profile) and returns a finite vector of Mutation IR maps to propose
   this cycle, or nil when nothing is proposed.
 
@@ -12,7 +12,7 @@
        :parent/genome-id \"sha256:...\"
        :parent-genome <loaded Genome map (evoclj.genome.load/load-genome)>
        :diagnosis {:diagnosis/id ... :evidence/id ... :hypotheses [...]}
-       :history [<Task 7.7 history entries>]
+       :history [<component history entries>]
        :budget-profile <map from evoclj.evolution.budget/v0-profile>}
 
   It returns mutations carrying ONLY what the adapter owns — :risk
@@ -105,7 +105,7 @@
 (def mutator-tool-catalog
   "The tool catalog the LLM mutator declares: the two READ-ONLY
   evolution retrieval tools (:evolution/evidence and
-  :evolution/history) — the Task E1 broker tools, defined in
+  :evolution/history) — the component broker tools, defined in
   evoclj.capability.evolution-tools. The entries are the wire form the
   scheduler's tool loop consumes ({:name :description :parameters
   :tool}); a host :model-call closure that implements the tool-calling
@@ -662,7 +662,7 @@
   produces nothing usable throws a typed error (LLM-NOISE TOLERANCE
   POLICY).
 
-  TOOL CATALOG (Task E1): the adapter's tool catalog
+  TOOL CATALOG (component): the adapter's tool catalog
   (mutator-tool-catalog) declares the two READ-ONLY evolution
   retrieval tools (:evolution/evidence, :evolution/history) from
   evoclj.capability.evolution-tools, and the model-call options carry

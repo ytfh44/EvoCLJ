@@ -1,5 +1,5 @@
 (ns evoclj.capability.broker-test
-  "Tests for the pure capability broker decision (Task 4.4).
+  "Tests for the pure capability broker decision (component).
 
   authorize is the NORMATIVE broker entry point of Milestone 4: a
   pure function of plain data that composes the policy module
@@ -7,8 +7,8 @@
   (evoclj.capability.lease / .schema) into a deterministic
   {:decision :allow :lease-id ...} / {:decision :deny :reason ...}
   decision. It performs no I/O, so authorization can be tested
-  without invoking any provider effect (Task 4.4 acceptance); the
-  only providers touched are the Task 4.3 fixtures used to PRODUCE
+  without invoking any provider effect (component acceptance); the
+  only providers touched are the component fixtures used to PRODUCE
   normalized requests — exactly the 4.5 dispatcher pipeline minus the
   effect.
 

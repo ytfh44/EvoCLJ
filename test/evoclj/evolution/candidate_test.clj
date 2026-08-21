@@ -1,5 +1,5 @@
 (ns evoclj.evolution.candidate-test
-  "Task 7.6 tests for Candidate records (no activation rights).
+  "component tests for Candidate records (no activation rights).
 
   The Candidate is the evolution subsystem's immutable successor
   record: it names the parent generation and parent Genome, the
@@ -31,17 +31,17 @@
     (different uuids) land on the same candidate, while different
     content (or a different parent) yields a separate candidate.
   - Step 4: persistence — materialize-candidate! writes the row
-    (state 'materialized' in the Task 5.1 vocabulary), the
+    (state 'materialized' in the component vocabulary), the
     :materialized → :evaluation-pending transition is a
     compare-and-set, and read-back round-trips the record.
 
   FIXTURE DESIGN: the parent generation row is seeded exactly like the
-  Task 6.6 end-to-end test (current = 1 — the seed generation IS the
+  component end-to-end test (current = 1 — the seed generation IS the
   CURRENT pointer), so the composite FK (parent_generation_id,
   parent_genome_id) and Database Invariant 8 are exercised against a
   real CURRENT row, and the Step 2/4 assertions can prove the
   candidate pipeline leaves CURRENT untouched. Mutations are
-  hand-built fixtures (Task 7.3 style); candidate records come from
+  hand-built fixtures (component style); candidate records come from
   create-candidate."
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
@@ -63,7 +63,7 @@
   (str "sha256:" hex64))
 
 (def ^:private candidate-genome-id
-  "The content-addressed candidate Genome (Task 7.4 patch output)."
+  "The content-addressed candidate Genome (component patch output)."
   (str "sha256:" (apply str (repeat 64 "c"))))
 
 (def ^:private evidence-id
@@ -88,7 +88,7 @@
   (java.util.UUID/fromString (format "00000000-0000-0000-0000-%012d" n)))
 
 (defn- mutation*
-  "A schema-plausible Mutation IR fixture (Task 7.3 shape) carrying one
+  "A schema-plausible Mutation IR fixture (component shape) carrying one
   :set-edn op; an optional override map wins."
   [& [overrides]]
   (merge {:mutation/id (uuid 1)
@@ -257,7 +257,7 @@
     (testing "no dependency on promotion or current-generation namespaces"
       (is (not-any? #(re-find #"(?i)promotion|current" (str %))
                     (map str (keys (ns-aliases 'evoclj.evolution.candidate))))))
-    (testing "the state machine surface is the Task 7.6 subset"
+    (testing "the state machine surface is the component subset"
       (is (= #{:proposed :materialized :evaluation-pending} candidate/states))
       (is (= {:proposed #{:materialized}
               :materialized #{:evaluation-pending}}
@@ -372,7 +372,7 @@
     (testing "the returned candidate is :materialized with the same identity"
       (is (= (:candidate/id c) (:candidate/id persisted)))
       (is (= :materialized (:state persisted))))
-    (testing "the row is persisted with the Task 5.1 vocabulary and full lineage"
+    (testing "the row is persisted with the component vocabulary and full lineage"
       (let [rows (sqlite/query (:sqlite store)
                                ["SELECT * FROM candidates WHERE id = ?"
                                 (str (:candidate/id c))])]

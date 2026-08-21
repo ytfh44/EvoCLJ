@@ -1,4 +1,4 @@
-;; Seed Genome evolution policy (Task 6.6).
+;; Seed Genome evolution policy (component).
 ;;
 ;; The evolution module consumed by the Milestone 7+ evolution
 ;; subsystem. :max-risk :behavioral bounds the mutation risk class the

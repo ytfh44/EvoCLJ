@@ -1,5 +1,5 @@
 (ns evoclj.eval.replay-test
-  "G4 historical replay with representative cases (Task 8.3).
+  "G4 historical replay with representative cases (component).
 
   run-replay! re-executes a candidate against replay cases built from
   stored Episodes (evoclj.eval.replay). Each replay case carries a
@@ -116,12 +116,12 @@
      dir)))
 
 (defn- provider-catalog
-  "The on-disk provider catalog fixture (Task 2.1 resolution)."
+  "The on-disk provider catalog fixture (component resolution)."
   []
   (edn/read-string (slurp (io/resource "fixtures/resolution/provider-catalog.edn"))))
 
 (defn- route-descriptor
-  "The in-memory route program descriptor (Task 2.3 choice (a))."
+  "The in-memory route program descriptor (component choice (a))."
   []
   {:program/id :program/route
    :file "programs/route.clj"
@@ -150,7 +150,7 @@
         {:text (get-in authorized-request [:args :text])}))))
 
 (defn- episode
-  "A stored-Episode-shaped map (Task 6.5 Episode contract) for replay
+  "A stored-Episode-shaped map (component Episode contract) for replay
   case construction, with the given terminal :outcome :status."
   [status]
   {:episode/id (random-uuid)

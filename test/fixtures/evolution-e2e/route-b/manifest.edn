@@ -1,4 +1,4 @@
-;; Task 9.7 fixture — reference G2 Genome manifest
+;; component fixture — reference G2 Genome manifest
 ;; (test/fixtures/evolution-e2e/route-b).
 ;;
 ;; The REFERENCE successor the deterministic mutation must reproduce:
@@ -18,4 +18,4 @@
  :evolution {:max-risk :behavioral
              :mutable #{:parameters :prompts :skills :programs}}
  :metadata {:name "e2e-route-b"
-            :description "Task 9.7 reference G2 — B-aware router fixture"}}
+            :description "component reference G2 — B-aware router fixture"}}

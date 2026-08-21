@@ -1,5 +1,5 @@
 (ns evoclj.evolution.scheduler
-  "Long-horizon evolution loop controller (Task A2).
+  "Long-horizon evolution loop controller (component).
 
   `run-cycles!` makes the evolution runtime turn itself: it repeatedly
   executes ONE generation — evolve → eval → promote — through the
@@ -71,7 +71,7 @@
 ;; --- the loop controller -----------------------------------------------------
 
 (defn run-cycles!
-  "The long-horizon evolution loop controller (Task A2).
+  "The long-horizon evolution loop controller (component).
 
   `run-generation` — (fn [] -> summary-map). Executes ONE full generation
                      (evolve → eval → promote) starting from the current

@@ -1,5 +1,5 @@
 (ns evoclj.store.session-test
-  "Task 5.4 tests for session pinning and lifecycle transitions.
+  "component tests for session pinning and lifecycle transitions.
 
   Step 1: a session records immutable Genome/Resolution/Phenotype ids
   at creation. Step 2: illegal state transitions fail with the typed
@@ -291,10 +291,10 @@
       (is (= :resolving (:state (session/transition-session! db sid :created :resolving nil)))))))
 
 (deftest routing-is-persisted-with-the-allocation-version
-  ;; Task 9.3 (additive migration 003-routing.sql): the :routing map
+  ;; component (additive migration 003-routing.sql): the :routing map
   ;; {:deployment-version ... :bucket ...} that decided the session's
   ;; generation is written at insert and read back by get-session, so
-  ;; routing can be audited later. (Task 5.4 validated but did not
+  ;; routing can be audited later. (component validated but did not
   ;; persist :routing — the schema had no columns and migrations were
   ;; out of scope; 003-routing.sql closed that gap.)
   (let [db (fresh-db)

@@ -1,6 +1,6 @@
--- 003-routing.sql — session routing audit columns (Task 9.3)
+-- 003-routing.sql — session routing audit columns (component)
 --
--- Design decision (Task 9.3 Step 4): every NEW session persists the
+-- Design decision (component Step 4): every NEW session persists the
 -- allocation version and the stable routing bucket that decided its
 -- generation, so routing can be audited later. These columns are
 -- ADDITIVE: existing rows keep NULL (they were created before routing

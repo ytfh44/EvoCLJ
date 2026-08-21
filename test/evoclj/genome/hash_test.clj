@@ -1,5 +1,5 @@
 (ns evoclj.genome.hash-test
-  "Tests for deterministic Genome hashing (Task 1.3).
+  "Tests for deterministic Genome hashing (component).
 
   Genome identity must depend only on canonical logical content
   (Global Constraints 1 and 6): text is hashed as UTF-8 bytes with

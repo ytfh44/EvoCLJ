@@ -1,5 +1,5 @@
 (ns evoclj.runtime.nodes.sci
-  "The :sci node handler (Task 6.2).
+  "The :sci node handler (component).
 
   A :sci node invokes the node's :program inside the phenotype's
   isolated SCI runtime (evoclj.sci.execute/invoke!) with the
@@ -7,8 +7,7 @@
   decision value into validated, fully attributed intents via the pure
   evoclj.intent.core constructors. The handler performs NO external
   effect: the program runs sandboxed (no ambient authority, Global
-  Constraint 7) and the emitted intents are only requests — the Task
-  6.3 scheduler dispatches them through the broker (Global Constraint
+  Constraint 7) and the emitted intents are only requests — the component scheduler dispatches them through the broker (Global Constraint
   8). Attribution is a parameter, never guessed (Global Constraint
   20).
 

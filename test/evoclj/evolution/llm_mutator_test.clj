@@ -453,7 +453,7 @@
 
 
 ;; ============================================================================
-;; Task E1 — :evolution/evidence and :evolution/history broker tools
+;; component — :evolution/evidence and :evolution/history broker tools
 ;;
 ;; The two retrieval tools are READ-ONLY (Global Constraint 8: every
 ;; external effect crosses the broker; these tools only READ the frozen

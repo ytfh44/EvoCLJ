@@ -1,22 +1,22 @@
--- 001-init.sql — EvoCLJ initial schema (Milestone 5, Task 5.1)
+-- 001-init.sql — EvoCLJ initial schema (Milestone 5, component)
 --
--- Design decisions (normative, Task 5.1):
+-- Design decisions (normative, component):
 --   * Ids are stored as TEXT: uuid strings, stable generation ids, and
 --     content hashes ("sha256:<hex>").
 --   * Queryable metadata payloads are stored as TEXT EDN (pr-str format).
 --     Large immutable payloads are referenced by content hash and never
 --     duplicated in rows (Global Constraint 21); SQLite rows store
---     references, the bodies live in the filesystem CAS (Task 5.2).
+--     references, the bodies live in the filesystem CAS (component).
 --   * Timestamps are TEXT ISO-8601 (UTC).
 --   * Lineage foreign keys are added only where the referenced row is
 --     guaranteed to pre-exist by the plan's transaction orders AND where
---     enforcing the link cannot break append-only recovery (Task 5.1
+--     enforcing the link cannot break append-only recovery (component
 --     Step 4). Content-hash references to the CAS (genome_id, evidence_id,
 --     payload_ref, task_ref, ...) deliberately carry NO foreign key: the
 --     CAS is filesystem-backed and its rows are written by later tasks,
 --     so an FK there would block the append path.
 --   * The CURRENT pointer is a marker column + partial unique index (one
---     of the two options Task 5.1 sanctions; see generations below).
+--     of the two options component sanctions; see generations below).
 --
 -- NOTE: `PRAGMA foreign_keys = ON` is a per-connection setting and is NOT
 -- persisted. Every runtime connection MUST enable it (evoclj.store.sqlite
@@ -63,7 +63,7 @@ CREATE TABLE generations (
 
 -- Database Invariant 6 (CURRENT is exactly one row): a partial unique
 -- index over current = 1 enforces AT MOST ONE current row at the database
--- level. "Exactly one" is guaranteed by the promotion CAS (Task 9.x): the
+-- level. "Exactly one" is guaranteed by the promotion CAS (component): the
 -- seed generation is activated with current = 1 and every later promotion
 -- clears the parent and sets the child inside a single transaction, so a
 -- second current = 1 row can never be created.
@@ -97,7 +97,7 @@ CREATE TABLE mutations (
 -- ---------------------------------------------------------------------------
 -- candidates — materialized successor Genomes. parent_generation_id and
 -- mutation_id are lineage FKs: the parent generation and the mutation are
--- persisted before a candidate is materialized (Task 6.2 phase order), so
+-- persisted before a candidate is materialized (component phase order), so
 -- enforcing them cannot break recovery. Invariant 8 is enforced by the
 -- composite FK below.
 -- ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ CREATE INDEX candidates_mutation_idx ON candidates (mutation_id);
 -- sessions — every session is pinned to one Generation and one
 -- (genome_id, resolution_id, phenotype_id) for its whole lifetime
 -- (Global Constraint 2, Database Invariant 2). The pinned columns are
--- immutable after insert; Task 5.4's compare-and-set transition updates
+-- immutable after insert; component's compare-and-set transition updates
 -- only :state.
 -- ---------------------------------------------------------------------------
 CREATE TABLE sessions (
@@ -282,7 +282,7 @@ CREATE TABLE eval_results (
 CREATE INDEX eval_results_run_idx ON eval_results (eval_run_id);
 
 -- ---------------------------------------------------------------------------
--- capability_leases — bounded HOST-OWNED grants (Task 4.2). Leases are
+-- capability_leases — bounded HOST-OWNED grants (component). Leases are
 -- granted to a phenotype subject and are independent of session rows, so
 -- they carry no session FK.
 -- ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 (ns evoclj.eval.static
-  "Kernel-side registry of deterministic evaluation suites (Task 8.2).
+  "Kernel-side registry of deterministic evaluation suites (component).
 
   G3 invokes registered deterministic unit/property suites against a
   candidate's loaded data in a fresh workspace. The registry lives
@@ -92,7 +92,7 @@
 
 (defn clear-suites!
   "Remove every registered suite. Kernel/operator tooling (and the
-  Task 8.2 tests) use this to reset the registry between runs."
+  component tests) use this to reset the registry between runs."
   []
   (reset! suites [])
   nil)

@@ -1,5 +1,5 @@
 (ns evoclj.promotion.e2e-evolution-test
-  "Task 9.7 — Milestone 9 exit: the complete end-to-end evolutionary
+  "component — Milestone 9 exit: the complete end-to-end evolutionary
   promotion test.
 
   ONE black-box test (Step 1) walks the NORMATIVE scenario through
@@ -133,7 +133,7 @@
   (str (io/file "test" "fixtures" "evolution-e2e" "audit")))
 
 (defn- route-descriptor
-  "The route program descriptor (Task 2.3 choice (a): an in-memory
+  "The route program descriptor (component choice (a): an in-memory
   descriptor list riding on the loaded-genome value under :programs)."
   []
   {:program/id :program/route
@@ -143,7 +143,7 @@
    :output-schema :schema/intent-or-route})
 
 (defn- fixture-catalog
-  "The on-disk provider catalog fixture (Task 2.1 Resolution)."
+  "The on-disk provider catalog fixture (component Resolution)."
   []
   (edn/read-string (slurp (io/resource "fixtures/resolution/provider-catalog.edn"))))
 
@@ -293,7 +293,7 @@
 
 (defn- recording-diagnostician
   "The Diagnostician adapter under test: the REAL deterministic
-  pattern-diagnostician (Task 7.2), wrapped only to capture the exact
+  pattern-diagnostician (component), wrapped only to capture the exact
   evidence pack it receives (Step 2 isolation evidence)."
   [captured]
   (let [inner (diagnose/pattern-diagnostician
@@ -464,7 +464,7 @@
 
 (defn- candidate-bundle-root
   "The finalized candidate bundle directory under :candidates-dir
-  (the same name rule as Task 7.4 finalize: the content address with
+  (the same name rule as component finalize: the content address with
   ':' replaced)."
   [candidates-dir genome-id]
   (str candidates-dir java.io.File/separator (str/replace genome-id ":" "-")))
@@ -501,7 +501,7 @@
       :mode :fixture})))
 
 (defn- e2e-profile
-  "The Task 8.1 profile carrying the Task 8.5 thresholds. The three
+  "The component profile carrying the component thresholds. The three
   dataset :source keywords resolve — via the evaluator's :dataset/roots
   — to the fixture roots; the selection set is :kernel-only (Global
   Constraint 11) and the audit set :operator-only."
@@ -530,7 +530,7 @@
     (into {} (map (fn [c] [(:case/id c) c])) (loader))))
 
 (defn- build-evaluator
-  "The Task 8.7 evaluator value for one candidate: the selection set
+  "The component evaluator value for one candidate: the selection set
   is resolved ONLY through dataset/selection-loader over the fixture
   :dataset/roots (never mounted into any workspace); the replay case
   is derived from the recorded G1 A-class session; both sides are
@@ -878,7 +878,7 @@
                                                                 ["SELECT state FROM candidates
                                                                   WHERE id = ?"
                                                                  (str (:candidate/id g2c))]))))
-                        "the CAS-loser candidate is marked :stale (Task 9.1)")
+                        "the CAS-loser candidate is marked :stale (component)")
                     (is (= "promoted" (:state (first (sqlite/query db
                                                                    ["SELECT state FROM candidates
                                                                      WHERE id = ?"

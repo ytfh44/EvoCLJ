@@ -1,5 +1,5 @@
 (ns evoclj.store.cas-test
-  "Task 5.2 tests for filesystem content-addressed storage.
+  "component tests for filesystem content-addressed storage.
 
   Step 1: identical bytes yield identical IDs and exactly one logical
   artifact (the second put is a no-op, never a duplicate). Step 2: puts

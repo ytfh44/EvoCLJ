@@ -1,5 +1,5 @@
 (ns evoclj.store.sqlite
-  "SQLite connection helpers (Task 5.1).
+  "SQLite connection helpers (component).
 
   SQLite enforces foreign keys PER CONNECTION: `PRAGMA foreign_keys` is
   not persisted across connections, so a connection that does not turn it

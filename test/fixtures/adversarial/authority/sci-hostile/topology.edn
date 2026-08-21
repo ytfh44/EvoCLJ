@@ -1,4 +1,4 @@
-;; Hostile Genome topology — Task 11.1. A single :sci router running
+;; Hostile Genome topology — component A single :sci router running
 ;; the hostile program; the graph itself is innocuous (the threat is in
 ;; the program source). Compilation must reject the program BEFORE this
 ;; topology could ever run.

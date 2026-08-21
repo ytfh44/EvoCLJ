@@ -1,5 +1,5 @@
 (ns evoclj.eval.statistics-test
-  "Task 8.6 tests: repeated rollout statistics WITHOUT pretending
+  "component tests: repeated rollout statistics WITHOUT pretending
   certainty (descriptive statistics only).
 
   The normative interface:
@@ -26,7 +26,7 @@
     may appear.
   - Step 5 (profile-declared sample requirements): promotion-checks
     exposes :min-pairs and :max-candidate-failure-rate as data checks
-    returning reason data in the Task 8.5 shape; a check applies ONLY
+    returning reason data in the component shape; a check applies ONLY
     when the profile declares it."
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.eval.statistics :as statistics]))

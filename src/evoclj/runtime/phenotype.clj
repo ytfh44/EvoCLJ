@@ -1,5 +1,5 @@
 (ns evoclj.runtime.phenotype
-  "Phenotype construction and lifecycle (Task 6.1).
+  "Phenotype construction and lifecycle (component).
 
   instantiate turns a CompiledGenome (evoclj.compiler.core) plus a
   runtime-deps map into a live Phenotype:
@@ -26,7 +26,7 @@
   performs no effects and runs no programs.
 
   RUNTIME-DEPS CONTRACT (the map the host injects; designed here,
-  normative for Task 6.x):
+  normative for component):
 
     {:stores {:sqlite <db-spec-or-path>   ; OPTIONAL. Declared ONLY:
               :cas <cas-handle>}          ; instantiate never opens,
@@ -170,7 +170,7 @@
 (defn- validate-stores!
   "The declared stores pass through untouched; only the map shape is
   checked. instantiate NEVER opens, coerces, or inspects store values
-  (they belong to the host; the Task 6.x executor opens them)."
+  (they belong to the host; the component executor opens them)."
   [stores]
   (when-not (or (nil? stores) (map? stores))
     (throw (deps-error :stores-invalid
@@ -214,7 +214,7 @@
 
 (defn instantiate
   "Construct a live Phenotype from a CompiledGenome and runtime-deps
-  (Task 6.1).
+  (component).
 
   `compiled-genome` is the pure CompiledGenome from
   evoclj.compiler.core/compile-genome (which already carries the
@@ -260,7 +260,7 @@
      :stores (or (:stores runtime-deps) {})}))
 
 (defn halt!
-  "Release the resources OWNED by `phenotype` (Task 6.1).
+  "Release the resources OWNED by `phenotype` (component).
 
   In v0 a Phenotype owns exactly one in-memory resource — its isolated
   SCI runtime — and an SCI context has no OS handle to close; the

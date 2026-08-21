@@ -1,5 +1,5 @@
 (ns evoclj.cli.promotion
-  "The promotion-facing CLI commands (Task 10.2): `promote`,
+  "The promotion-facing CLI commands (component): `promote`,
   `rollback`, and `lineage`.
 
   `promote` and `rollback` are the ONLY cli commands that move the
@@ -12,13 +12,12 @@
   scan (evoclj.cli.session/current-generation-info) and the pointer
   moves only inside promote!/rollback!'s transactions. `lineage` is a
   read-only reconstruction through promotion.lineage/lineage, rendered
-  as the Task D2 per-generation report (genome ids, the file-level
+  as the component per-generation report (genome ids, the file-level
   diff summary vs the parent, the promotion reason, and the evidence
   provenance refs).
 
   The diff summary reuses evoclj.cli.evolution/diff-genomes — the
-  same deterministic LCS machinery `candidate inspect --diff` (Task
-  E3) uses — so the report never duplicates the diff algorithm; the
+  same deterministic LCS machinery `candidate inspect --diff` (component) uses — so the report never duplicates the diff algorithm; the
   full per-file line hunks belong to that command, and lineage shows
   only the stats + changed file paths (roadmap O5). cli.evolution
   does not require this namespace, so there is no require cycle."
@@ -139,7 +138,7 @@
                                       :reason (parse-keyword reason)})]
       result)))
 
-;; --- lineage report (Task D2, roadmap O5) ------------------------------------
+;; --- lineage report (component, roadmap O5) ------------------------------------
 ;;
 ;; `lineage` renders the reconstruction (promotion.lineage/lineage) as
 ;; a per-generation REPORT: every node carries the genome ids of the
@@ -173,7 +172,7 @@
   Genome (both loaded bundles): the parent/child genome ids,
   :diff/identical?, the stats, and the changed file paths in canonical
   order. A summary, not the full hunks — the per-file line diff
-  belongs to `candidate inspect --diff` (Task E3)."
+  belongs to `candidate inspect --diff` (component)."
   [parent child]
   (let [d (evolution/diff-genomes parent child)]
     {:parent/genome-id (:genome/id parent)
@@ -249,7 +248,7 @@
 
   Reconstruct the complete evolutionary history of a generation
   (promotion.lineage/lineage — strict integrity verification over
-  every referenced artifact) as the Task D2 per-generation report
+  every referenced artifact) as the component per-generation report
   (roadmap O5). Every node carries:
 
     :generation/id, :genome/id, :parent/genome-id,
@@ -260,7 +259,7 @@
         added/removed/changed/insertions/deletions) and :files (the
         changed file paths), computed from the bundles in the CLI
         genome store with the same machinery as `candidate inspect
-        --diff` (Task E3). Absent for the seed and for rejected
+        --diff` (component). Absent for the seed and for rejected
         candidate branches (their candidate Genome is not exposed by
         the lineage record). A bundle missing from the CLI store fails
         closed with :cli/genome-not-found — the diff cannot be shown.

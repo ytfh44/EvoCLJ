@@ -1,4 +1,4 @@
-;; Filesystem-escalation topology — Task 11.1. The :sci router emits a
+;; Filesystem-escalation topology — component The :sci router emits a
 ;; :fixture/path-resolve request for \"/\" — the filesystem root,
 ;; broader than the host grant of /protected/work. The broker decides
 ;; on the NORMALIZED resource and scope-denies it.

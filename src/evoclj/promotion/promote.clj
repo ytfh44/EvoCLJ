@@ -1,5 +1,5 @@
 (ns evoclj.promotion.promote
-  "Task 9.2 — the atomic CURRENT compare-and-set promotion.
+  "component — the atomic CURRENT compare-and-set promotion.
 
   promote! is the ONLY code path that moves the generations CURRENT
   pointer (Global Constraint 15; the pointer itself is written
@@ -9,7 +9,7 @@
   generations row, the parent generation is superseded, and the
   pointer moves — all in ONE SQL transaction.
 
-  THE PROMOTION TRANSACTION (normative order, Task 9.2):
+  THE PROMOTION TRANSACTION (normative order, component):
 
       read candidate/evaluation
       verify immutable eligibility
@@ -38,9 +38,9 @@
   write still commits or rolls back together; only the row-insertion
   order inside the transaction differs from the plan's step list.
 
-  FINALIZED-ELIGIBILITY ONLY (Task 9.2 Step 4): the decision is the
+  FINALIZED-ELIGIBILITY ONLY (component Step 4): the decision is the
   evaluation row's stored :eligibility map, consumed verbatim via
-  evoclj.promotion.state/deployment-transition (the Task 9.1 gate).
+  evoclj.promotion.state/deployment-transition (the component gate).
   promote! NEVER re-computes evaluator judgment from model text — an
   eval_runs row that is not status 'finalized' (Database Invariant 4:
   reruns create new IDs) or whose :eligible? is not exactly true is
@@ -54,8 +54,8 @@
   the new generation activates (Invariant 7).
 
   STATE VOCABULARY DEVIATION (documented, per Repo Convention 5): the
-  Task 5.1 generations.state CHECK admits ('active','retired',
-  'rolled-back') — it predates the Task 9.1 machine. The 9.1 machine
+  component generations.state CHECK admits ('active','retired',
+  'rolled-back') — it predates the component machine. The 9.1 machine
   states are mapped at the row boundary exactly like
   evoclj.evolution.candidate maps candidates: :superseded ↔ 'retired'
   (the 9.1 :seed state has no row value — the seed generation row is
@@ -78,11 +78,11 @@
   documents for its own event sink. The event's :generation/id is the
   session's pinned (parent) generation; the metadata carries
   :from/:to, and the promotions row carries the full lineage for
-  reconstruction (Task 9.6). The anchor is validated INSIDE the
+  reconstruction (component). The anchor is validated INSIDE the
   transaction so a promotion can never commit without an appendable
   event anchor.
 
-  INTERFACE (normative, Task 9.2):
+  INTERFACE (normative, component):
 
       (promote! promotion-system
         {:candidate-id C17
@@ -115,9 +115,9 @@
     :promotion/promoted event is appended.
   - :stale — the candidate's parent generation is no longer CURRENT
     (a sibling won the CAS). No promotions row is recorded (there is
-    no :to generation for a non-move; the Task 5.1 promotions
+    no :to generation for a non-move; the component promotions
     decision 'stale' is reserved for later host-level rejection
-    bookkeeping). The losing candidate is marked :stale (Task 9.1:
+    bookkeeping). The losing candidate is marked :stale (component:
     the CAS-loser edge), and the :promotion/stale event is appended.
 
   Typed errors (Global Constraint 22 — plain serializable data):
@@ -289,7 +289,7 @@
 
 (defn- read-candidate-row!
   "The candidates row for `candidate-id`, or a typed error when
-  absent. The row must be in state 'eligible' (the Task 9.1 machine's
+  absent. The row must be in state 'eligible' (the component machine's
   :evaluated — the only state with promotion edges; evaluated-only is
   structural)."
   [conn candidate-id]
@@ -402,7 +402,7 @@
      :violations violations}))
 
 (defn- record-stale!
-  "The CAS-loser path (Task 9.1: :evaluated → :stale, the sibling that
+  "The CAS-loser path (component: :evaluated → :stale, the sibling that
   lost the compare-and-set): mark the candidate :stale via a
   compare-and-set on 'eligible'. No promotions row is recorded — a
   non-move has no :to generation — the outcome is carried by the
@@ -440,7 +440,7 @@
                 ts]))
 
 (defn- mark-candidate-promoted!
-  "The Task 9.1 machine edge :evaluated → :promoted at the row
+  "The component machine edge :evaluated → :promoted at the row
   boundary, via compare-and-set on 'eligible'."
   [conn candidate-row]
   (let [n (raw-update! conn
@@ -453,8 +453,8 @@
                         {:candidate/id (:id candidate-row)})))))
 
 (defn- supersede-generation!
-  "The Task 9.1 machine edge :active → :superseded at the row
-  boundary ('retired' in the Task 5.1 vocabulary — documented
+  "The component machine edge :active → :superseded at the row
+  boundary ('retired' in the component vocabulary — documented
   deviation). The current=1 flag is NOT touched here: the CURRENT
   pointer is moved exclusively by current/cas-current!."
   [conn generation-id]
@@ -522,7 +522,7 @@
 ;; --- the public entry point --------------------------------------------------------
 
 (defn promote!
-  "Perform the atomic CURRENT compare-and-set promotion (Task 9.2).
+  "Perform the atomic CURRENT compare-and-set promotion (component).
   See the namespace docstring for the normative transaction order,
   the promotion-system contract, the outcome contract, and the typed
   error vocabulary."

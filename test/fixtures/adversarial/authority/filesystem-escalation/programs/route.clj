@@ -1,5 +1,5 @@
 (ns agent.route
-  "Filesystem-escalation router (Task 11.1): requests the filesystem
+  "Filesystem-escalation router (component): requests the filesystem
   ROOT. The host grant covers only /protected/work; the broker's
   canonical-resource matching denies the request with
   :capability/scope-denied. Pure decision data — no effect here.")

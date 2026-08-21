@@ -1,5 +1,5 @@
 (ns evoclj.eval.metrics
-  "Evaluation summary metrics (Task 8.5).
+  "Evaluation summary metrics (component).
 
   The NORMATIVE evaluation summary keeps every section SEPARATE —
   hard, utility, cost, and complexity never collapse into a single
@@ -53,7 +53,7 @@
    [:candidate number?]])
 
 (def EvalSummarySchema
-  "The NORMATIVE Task 8.5 evaluation summary contract (closed). Every
+  "The NORMATIVE component evaluation summary contract (closed). Every
   section stays separate; no section is ever folded into another."
   [:map {:closed true}
    [:hard [:map-of keyword? MetricEntrySchema]]
@@ -157,13 +157,13 @@
 ;; --- bridging the G5 paired runner ---------------------------------------------
 
 (defn summarize-utility
-  "The :utility section from a G5 paired run result (Task 8.4): the
+  "The :utility section from a G5 paired run result (component): the
   task/success rate per side — the side's total score over its cases,
   normalized to a 0..1 rate. Only the utility section is derivable
   from the paired result here; hard/cost/complexity observations
   arrive from their own measurement points (gates, scheduler
   telemetry, genome stats) and are merged into the summary by the
-  orchestrator (Task 8.7)."
+  orchestrator (component)."
   [paired-result]
   (letfn [(rate [side]
             (let [n (max 1 (long (or (:cases side) 0)))]

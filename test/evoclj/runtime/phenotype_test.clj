@@ -1,5 +1,5 @@
 (ns evoclj.runtime.phenotype-test
-  "Task 6.1 tests for Phenotype construction and lifecycle.
+  "component tests for Phenotype construction and lifecycle.
 
   instantiate turns a CompiledGenome (evoclj.compiler.core) plus
   runtime-deps — the map of stores/providers/capabilities/program
@@ -60,7 +60,7 @@
   (edn/read-string (slurp (io/resource "fixtures/resolution/provider-catalog.edn"))))
 
 (defn- route-descriptor
-  "The seed route program descriptor (Task 2.3)."
+  "The seed route program descriptor (component)."
   []
   {:program/id :program/route
    :file "programs/route.clj"
@@ -70,7 +70,7 @@
 
 (defn- seed-loaded-genome
   "The real minimal-valid bundle with the in-memory program registry
-  attached (Task 2.3 choice (a))."
+  attached (component choice (a))."
   []
   (assoc (load/load-genome (fixture-root "minimal-valid"))
          :programs [(route-descriptor)]))

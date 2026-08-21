@@ -1,5 +1,5 @@
 (ns evoclj.capability.lease-test
-  "Tests for capability resources and lease semantics (Task 4.2).
+  "Tests for capability resources and lease semantics (component).
 
   A CapabilityLease is a bounded HOST-OWNED grant: a plain immutable
   map validated by Malli, never a string name visible to the model.
@@ -23,7 +23,7 @@
   provider prefix, and a model lease never covers a tool or
   filesystem resource (kind mismatch fails closed).
 
-  Provider-side normalization of user-facing requests is Task 4.3
+  Provider-side normalization of user-facing requests is component
   (evoclj.provider); the filesystem matcher here canonicalizes the pure
   path forms itself, so the tests use canonical \"/\"-separated fixture
   paths and note that dependency."

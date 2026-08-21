@@ -1,6 +1,6 @@
 (ns evoclj.cli.evolution
-  "The evolution-facing CLI commands (Task 10.2): `evolve`,
-  `candidate list`, `candidate inspect` (with the Task E3 `--diff`
+  "The evolution-facing CLI commands (component): `evolve`,
+  `candidate list`, `candidate inspect` (with the component `--diff`
   report), and `eval`.
 
   `evolve` and `eval` are the MUTATING commands of the evolution
@@ -55,7 +55,7 @@
                            "expected a uuid"
                            {:value s})))))
 
-;; --- candidate diff report (Task E3, roadmap E3) -----------------------------
+;; --- candidate diff report (component, roadmap E3) -----------------------------
 ;;
 ;; `candidate inspect <id> --diff` shows the per-file LINE diff of the
 ;; candidate Genome vs its parent Genome. The comparison is the canonical
@@ -175,7 +175,7 @@
     ))
 
 (defn diff-genomes
-  "The per-file LINE diff of two loaded immutable Genomes (Task E3):
+  "The per-file LINE diff of two loaded immutable Genomes (component):
 
     {:diff/identical? <bool>
      :diff/files [{:file <canonical relative path>
@@ -211,7 +211,7 @@
     {:diff/identical? (empty? files)
      :diff/files files}))
 
-;; --- candidate record mapping (Task 5.1 vocabulary → public states) ----------
+;; --- candidate record mapping (component vocabulary → public states) ----------
 
 (def ^:private db-state->state
   "The candidates.state vocabulary → the machine states (the same
@@ -310,7 +310,7 @@
   One Candidate record, through the public read API
   (evolution.candidate/find-candidate). With --diff, the report also
   carries the per-file line diff of the parent Genome vs the candidate
-  Genome (Task E3): both bundles are loaded from the CLI genome store
+  Genome (component): both bundles are loaded from the CLI genome store
   and compared with diff-genomes, so the diff is read-only and
   deterministic.
 
@@ -336,7 +336,7 @@
 (defn eval!
   "evoclj eval <candidate-id> --profile <profile-id>
 
-  Run the full Task 8.7 evaluation pipeline for one candidate under
+  Run the full component evaluation pipeline for one candidate under
   one registered profile (eval.core/evaluate-candidate! — the public
   Evaluation API) and return the finalized Evaluation record. The
   evaluator's hidden selection/replay cases and fixture providers are
@@ -581,7 +581,7 @@
                   :eval evals
                   :promote promotes}}))))
 
-;; --- loop: the long-horizon operator command (Task A2) ----------------------
+;; --- loop: the long-horizon operator command (component) ----------------------
 
 (defn- load-loop-config
   "The F5 `:config/evolution-loop` section for `opts` — the loop-config
@@ -656,7 +656,7 @@
 (defn loop!
   "evoclj loop [--max-cycles <n>] [--no-promote] [--profile <profile-id>]
 
-  The long-horizon operator command (Task A2): repeatedly walk the full
+  The long-horizon operator command (component): repeatedly walk the full
   loop — evolve → eval → promote — through the EXISTING single-generation
   public APIs, exactly as `cycle` does, but across MANY generations until
   the loop policy (evoclj.evolution.loop-policy) stops it.

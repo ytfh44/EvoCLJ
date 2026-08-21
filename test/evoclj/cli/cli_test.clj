@@ -1,5 +1,5 @@
 (ns evoclj.cli.cli-test
-  "Task 10.2 — the CLI read/execute commands, tested in-process.
+  "component — the CLI read/execute commands, tested in-process.
 
   Every test drives the CLI through its PUBLIC entry points
   (evoclj.cli.main/execute and evoclj.cli.main/run) with an args
@@ -288,7 +288,7 @@
       :mode :fixture})))
 
 ;; ============================================================================
-;; evolution fixture: the deterministic mutator (mirrors the Task 9.7
+;; evolution fixture: the deterministic mutator (mirrors the component
 ;; e2e fixture) + the hidden selection cases
 ;; ============================================================================
 
@@ -893,7 +893,7 @@
             (is (= expected (:output rdata)))))))))
 
 ;; ============================================================================
-;; STEP 5 (Task A4) — validated config in CLI startup (foundation F5)
+;; STEP 5 (component) — validated config in CLI startup (foundation F5)
 ;;
 ;; build-config must route the CLI's config through evoclj.config/load-config
 ;; (validated merge + defaults), resolve-profile, and config-value; the

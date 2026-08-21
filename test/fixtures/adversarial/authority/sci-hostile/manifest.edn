@@ -1,4 +1,4 @@
-;; Hostile Genome fixture — Task 11.1 (adversarial release gate).
+;; Hostile Genome fixture — component (adversarial release gate).
 ;;
 ;; Every program in this bundle carries an ambient-authority form the
 ;; closed SCI context (Global Constraint 7) must deny: System/getenv,
@@ -20,4 +20,4 @@
  :evolution {:max-risk :behavioral
              :mutable #{:parameters :prompts :skills :programs}}
  :metadata {:name "sci-hostile"
-            :description "deliberately hostile Genome — ambient-authority forms (Task 11.1)"}}
+            :description "deliberately hostile Genome — ambient-authority forms (component)"}}

@@ -1,5 +1,5 @@
 (ns evoclj.security.patch-lint-test
-  "Task F7 tests for static patch lint (evoclj.security.patch-lint).
+  "component tests for static patch lint (evoclj.security.patch-lint).
 
   Coverage maps to the module contract:
 

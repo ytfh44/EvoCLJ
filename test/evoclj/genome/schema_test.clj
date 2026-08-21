@@ -1,5 +1,5 @@
 (ns evoclj.genome.schema-test
-  "Tests for the v1 Genome manifest schemas (Task 1.2).
+  "Tests for the v1 Genome manifest schemas (component).
 
   The manifest is a pure EDN contract evaluated at the trust boundary:
   the schema is a closed map, so unknown top-level keys are rejected

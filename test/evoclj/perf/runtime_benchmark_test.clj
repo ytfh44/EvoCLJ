@@ -1,5 +1,5 @@
 (ns evoclj.perf.runtime-benchmark-test
-  "Task 12.2 — benchmark fixtures and broad regression ceilings.
+  "component — benchmark fixtures and broad regression ceilings.
 
   This namespace MEASURES the runtime's hot paths on the REAL seed
   bundle and the REAL production modules (no test doubles):
@@ -133,7 +133,7 @@
     (cleanup!)))
 
 ;; ============================================================================
-;; the REAL seed bundle fixtures (Task 6.6 style, read-only inputs)
+;; the REAL seed bundle fixtures (component style, read-only inputs)
 ;; ============================================================================
 
 (def ^:private generation-id "generation-1")
@@ -165,7 +165,7 @@
          :programs [(route-descriptor)]))
 
 (defn- fixture-catalog
-  "The on-disk provider catalog fixture (Task 2.1 Resolution)."
+  "The on-disk provider catalog fixture (component Resolution)."
   []
   (edn/read-string (slurp (io/resource "fixtures/resolution/provider-catalog.edn"))))
 
@@ -216,7 +216,7 @@
     [db path]))
 
 (defn- build-executor
-  "Assemble the Task 6.3 executor map from the REAL seed genome:
+  "Assemble the component executor map from the REAL seed genome:
 
     {:phenotype <instantiated Phenotype>
      :stores {:sqlite <migrated db> :cas <CAS root>}
@@ -282,7 +282,7 @@
     sid))
 
 ;; ============================================================================
-;; candidate-evaluation fixtures (Task 8.7 minimal evaluator, self-contained)
+;; candidate-evaluation fixtures (component minimal evaluator, self-contained)
 ;; ============================================================================
 
 (def ^:private hex64

@@ -1,5 +1,5 @@
 (ns evoclj.evolution.diagnosis-schema
-  "Malli schemas for structured diagnosis (Task 7.2).
+  "Malli schemas for structured diagnosis (component).
 
   The schemas here are the trust-boundary contracts of the diagnosis
   path (evoclj.evolution.diagnose): the Diagnosis artifact
@@ -7,7 +7,7 @@
   bounded hypotheses), the Hypothesis contract, and the deterministic
   pattern adapter's constructor config.
 
-  Normative shape (the plan's Task 7.2 interface):
+  Normative shape (the plan's component interface):
 
       {:diagnosis/id \"sha256:...\"
        :evidence/id \"sha256:...\"

@@ -1,5 +1,5 @@
 (ns evoclj.perf.full-cycle-harness
-  "Task O4 — the full-cycle timing harness + performance baseline.
+  "component — the full-cycle timing harness + performance baseline.
 
   The harness runs evolve -> eval -> promote on a seed Genome through
   the SAME public subsystem APIs the `cycle` CLI command walks
@@ -26,7 +26,7 @@
        :f2/metrics [<metric records>]}
 
   The F2 metric records (evoclj.metrics.core, closed MetricSchema)
-  include the harness-level :cycle/* records AND the Task A2 eval
+  include the harness-level :cycle/* records AND the component eval
   envelope (:eval/<phase>-ms, :eval/<phase>-outcome, :eval/total-ms)
   that evaluate-candidate! records into the same collector.
 
@@ -104,7 +104,7 @@
   "test/fixtures/evolution-e2e/selection")
 
 (def ^:private catalog-source
-  "The Task 2.1 resolution provider-catalog fixture (the :fixture
+  "The component resolution provider-catalog fixture (the :fixture
   adapters; no real provider credentials ever appear — Global
   Constraint 22)."
   "test/fixtures/resolution/provider-catalog.edn")
@@ -514,7 +514,7 @@
 
 (defn- evaluate-one
   "EVAL one :evaluation-pending candidate under one profile, passing
-  the F2 collector into evaluate-candidate! (the Task A2 envelope)."
+  the F2 collector into evaluate-candidate! (the component envelope)."
   [system opts generation-id c collector profile-id]
   (let [cid (:candidate/id c)
         parent-gen-id (:parent/generation-id c)
@@ -621,7 +621,7 @@
     :cleanup?   delete the temp state dir afterwards (default true)
 
   Every phase is timed with System/nanoTime and every F2 metric record
-  (harness :cycle/* plus the Task A2 eval envelope) is collected into
+  (harness :cycle/* plus the component eval envelope) is collected into
   one collector, so the report's :f2/metrics round-trips as EDN."
   [opts]
   (let [state-dir (or (:state-dir opts) (temp-dir "evoclj-fullcycle-"))

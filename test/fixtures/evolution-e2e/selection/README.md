@@ -1,4 +1,4 @@
-# Selection dataset — Task 9.7 hidden fixture
+# Selection dataset — component hidden fixture
 
 This directory is the PHYSICALLY SEPARATED Selection dataset for the
 end-to-end evolutionary promotion test (Global Constraint 11). The

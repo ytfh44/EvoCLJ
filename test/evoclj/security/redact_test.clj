@@ -1,5 +1,5 @@
 (ns evoclj.security.redact-test
-  "Task F7 tests for write-path secret redaction
+  "component tests for write-path secret redaction
   (evoclj.security.redact).
 
   Coverage maps to the module contract:

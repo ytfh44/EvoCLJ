@@ -1,9 +1,9 @@
 (ns evoclj.intent.dispatch
-  "The effectful intent dispatcher (Task 4.5).
+  "The effectful intent dispatcher (component).
 
   dispatch! is the ONLY kernel code that turns an authorized Intent
   into a real provider effect. It implements the NORMATIVE dispatcher
-  order (Task 4.5 Step 5), exactly:
+  order (component Step 5), exactly:
 
     1. validate intent     — evoclj.intent.schema/validate-intent
     2. lookup provider     — evoclj.provider.registry
@@ -492,7 +492,7 @@
 
 (defn dispatch!
   "Execute intent through the broker pipeline in the NORMATIVE order
-  (Task 4.5 Step 5): validate intent -> lookup provider -> normalize
+  (component Step 5): validate intent -> lookup provider -> normalize
   resource -> authorize -> execute once/retry per policy -> validate
   output -> return a typed result. See the namespace docstring for the
   result contract and the effect-protocol extension points.

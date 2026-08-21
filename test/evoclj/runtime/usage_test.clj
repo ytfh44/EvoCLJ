@@ -1,5 +1,5 @@
 (ns evoclj.runtime.usage-test
-  "Task 12.1 tests for standard usage accounting.
+  "component tests for standard usage accounting.
 
   usage.clj standardizes usage accounting across the runtime: a pure,
   merge-based accumulator over immutable usage maps. Each usage sample

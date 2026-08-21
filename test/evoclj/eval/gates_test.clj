@@ -1,5 +1,5 @@
 (ns evoclj.eval.gates-test
-  "Candidate evaluation gates G0–G3 (Task 8.2).
+  "Candidate evaluation gates G0–G3 (component).
 
   G0 re-parses/re-compiles the candidate Genome from scratch
   (evoclj.genome.load/load-genome + evoclj.compiler.core/compile-genome
@@ -35,7 +35,7 @@
   {:kernel 1 :genome 1 :intent 1 :tool 1})
 
 (def ^:private result-keys
-  "The normative gate result key set (Task 8.2)."
+  "The normative gate result key set (component)."
   #{:gate/id :status :hard? :details-ref :duration-ms})
 
 (use-fixtures :each
@@ -88,7 +88,7 @@
                  (make-array java.nio.file.OpenOption 0))))
 
 (defn- route-descriptor
-  "The seed route program descriptor (Task 2.3)."
+  "The seed route program descriptor (component)."
   []
   {:program/id :program/route
    :file "programs/route.clj"
@@ -98,7 +98,7 @@
 
 (defn- programs-resolver
   "Registry resolver fn: every candidate declares the seed route
-  program (Task 2.3 choice (a) — the registry is in-memory, not a
+  program (component choice (a) — the registry is in-memory, not a
   bundle file)."
   []
   (fn [_loaded] [(route-descriptor)]))
