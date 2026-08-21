@@ -18,8 +18,6 @@
                              descriptor declares :retry {:safe? true}
                              and the provider reports a TRANSIENT
                              error (:provider/transient-error); a
-                             non-idempotent action is never blindly
-                             retried (Transaction Boundaries). A
                              non-pure write (:effect not :pure) must
                              carry an idempotency key in
                              :metadata {:idempotency/key ...} before
@@ -63,12 +61,17 @@
   (persist intent proposed -> normalized request -> authorization
   decision -> provider-call-started with idempotency key -> completed
   result OR ambiguous outcome) need in Milestone 5; each step below is
-  a separate function so those steps slot in without restructuring."
-  (:require [evoclj.capability.broker :as broker]
+  a separate function so those steps slot in without restructuring.
+
+  Generic Tool/Call Binding: dispatch now uses evoclj.binding.call/CallBinding
+  to freeze the descriptor snapshot. The flow is:
+    ToolSurface current entry -> capture-tool-binding -> CallBinding -> normalize -> authorize -> execute -> validate.
+  Cross-persistence/audit writes only pure data {:binding/id ... :tool/id ... :revision/id ... :revision/seq ...}."
+  (:require [evoclj.binding.call :as binding]
+            [evoclj.capability.broker :as broker]
             [evoclj.capability.schema :as capability-schema]
             [evoclj.intent.schema :as intent-schema]
             [evoclj.kernel.error :as err]
-            [evoclj.mcp.contract :as contract]
             [evoclj.provider.model-registry :as model-registry]
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]
@@ -113,9 +116,8 @@
                   :retry {:safe? true}.
   - :freshness    descriptor freshness policy :required | :best-effort | :pinned
                   (default :best-effort). :required fails closed when the
-                  descriptor is stale (nil :mcp/last-refreshed), :best-effort
-                  proceeds with stale? true in contract/audit, :pinned never
-                  refreshes.
+                  binding is stale, :best-effort proceeds with stale? true in
+                  binding audit, :pinned never refreshes.
 
   Returns a closed map. Malformed input throws
   :broker/context-invalid."
@@ -135,7 +137,7 @@
                                              {:value (err/sanitize model-registry)})))
                          model-registry)
         freshness (or freshness :best-effort)]
-    (when-not (contract/valid-freshness? freshness)
+    (when-not (binding/valid-freshness? freshness)
       (throw (err/error :broker/context-invalid
                         "freshness must be :required, :best-effort, or :pinned"
                         {:value (err/sanitize freshness)})))
@@ -160,43 +162,38 @@
      :model-registry model-registry
      :freshness freshness}))
 
-;; --- freshness / contract helpers ------------------------------------------
+;; --- freshness / binding helpers ------------------------------------------
 
-(defn- stale-descriptor?
-  "True when descriptor is stale for the given freshness policy.
-   Stale == nil :mcp/last-refreshed, never stale when :pinned."
+(defn- stale-binding?
+  "True when binding is stale for the given freshness policy.
+   Delegates to generic binding helper."
   [descriptor freshness]
-  (contract/stale? descriptor freshness))
+  (binding/stale? descriptor freshness))
 
-(defn- attach-contract-audit
-  "Enrich a dispatch result (ok or error) with contract generation and
-   stale? so audit is explicit per Step 1 spec."
-  [result contract]
-  (let [fragment (contract/contract->audit contract)]
-    (-> result
-        (assoc :contract/id (:contract/id contract)
-               :contract/generation (:contract/generation contract)
-               :contract/stale? (:contract/stale? contract)
-               :mcp/generation (:contract/generation contract))
-        (update :audit merge fragment))))
+(defn- attach-binding-audit
+  "Enrich a dispatch result with binding audit and persisted data.
+   Delegates to generic binding helper so dispatcher does not directly
+   mention MCP keys."
+  [result binding]
+  (binding/attach-audit-to-result result binding))
 
 (defn- enrich-value-audit
-  "When provider value is {:value ... :audit ...}, merge generation/stale
+  "When provider value is {:value ... :audit ...}, merge binding audit
    into its :audit so the envelope itself carries the snapshot info."
-  [value contract]
+  [value binding]
   (if (and (map? value) (contains? value :audit))
-    (update value :audit merge (contract/contract->audit contract))
+    (update value :audit merge (binding/binding->audit binding))
     value))
 
 (defn- effect-journal
-  "Lightweight effect journal: proposed->authorized->call-started(with idempotency/key+gen)
-   ->committed/rejected/ambiguous. Ambiguous on sent+committed+break never disguised as success;
-   no blind retry of non-idempotent; remote idempotency explicitly mapped else keep ambiguous."
-  [contract intent decision final-status]
+  "Lightweight effect journal: proposed->authorized->call-started(with idempotency/key+revision-seq)
+   ->committed/rejected/ambiguous."
+  [binding intent decision final-status]
   {:effect/proposed {:intent/id (:intent/id intent)}
    :effect/authorized {:decision (:decision decision) :lease-id (:lease-id decision)}
    :effect/call-started {:idempotency/key (get-in intent [:metadata :idempotency/key])
-                         :mcp/generation (:contract/generation contract)}
+                         :revision/seq (:revision/seq binding)
+                         :binding/id (:binding/id binding)}
    :effect/final final-status})
 
 ;; --- result construction ---------------------------------------------------
@@ -409,17 +406,18 @@
   REPLACE) by the provider, and no model-requested external write is
   involved.
 
-  Step 1 (CallContract): refresh-if-needed is checked BEFORE normalize
+  Step 1 (CallBinding): capture is checked BEFORE normalize
   and the descriptor snapshot is frozen for the entire effect.
   D_normalize = D_authorize = D_execute = D_validate is enforced by
-  capturing {:contract/generation ... :contract/descriptor} once and
-  reusing the same frozen-descriptor for all later steps; inline
-  refresh inside mcp_bridge execute-request! is forbidden after
-  call-started (deleted in Step 1).
+  capturing CallBinding once and reusing the same frozen-descriptor for all later steps; inline
+  refresh inside provider execute-request! is forbidden after
+  call-started.
 
   Freshness: :required fails closed as :provider/freshness-required when
-  stale; :best-effort proceeds with :contract/stale? true and audit marks
+  stale; :best-effort proceeds with :binding/stale? true and audit marks
   stale; :pinned never considers stale.
+
+  ToolSurface entry -> capture-tool-binding -> CallBinding -> normalize -> authorize -> execute -> validate.
 
   Returns the typed dispatch result (see the namespace docstring)."
   [broker-context intent tool-id require-idempotency-key?]
@@ -432,66 +430,65 @@
                     nil @usage-atom)
       (let [provider (:provider entry)
             freshness (or (:freshness broker-context) :best-effort)
-            raw-descriptor (proto/describe provider)
-            stale? (stale-descriptor? raw-descriptor freshness)]
+            ;; Capture CallBinding: ToolSurface current entry -> capture -> CallBinding
+            binding (binding/capture-tool-binding entry {:freshness freshness})
+            stale? (:binding/stale? binding)]
         (if (and stale? (= freshness :required))
-          (let [contract (contract/capture raw-descriptor nil nil freshness {:stale? true})
-                err-result (result-error intent :provider/freshness-required
+          (let [err-result (result-error intent :provider/freshness-required
                                          "descriptor is stale and freshness :required blocks execution"
                                          {:tool/id tool-id
                                           :freshness freshness
-                                          :generation (contract/generation raw-descriptor)
+                                          :revision/seq (:revision/seq binding)
                                           :reason :stale-descriptor}
                                          nil @usage-atom)]
-            (attach-contract-audit err-result contract))
-          (let [contract (contract/capture raw-descriptor nil nil freshness {:stale? stale?})
-                frozen-descriptor (:contract/descriptor contract)
+            (attach-binding-audit err-result binding))
+          (let [frozen-descriptor (:binding/descriptor binding)
                 normalized-step (normalize-request! broker-context provider intent)]
             (if-let [error-result (:error-result normalized-step)]
-              (attach-contract-audit error-result contract)
+              (attach-binding-audit error-result binding)
               (let [normalized (:normalized normalized-step)
-                    contract* (assoc contract :contract/normalized normalized)
+                    binding* (assoc binding :binding/normalized normalized :contract/normalized normalized)
                     decision (broker/authorize
                               {:intent intent
                                :normalized-request normalized
                                :leases (:leases broker-context)
                                :usage @usage-atom
                                :now ((:now broker-context))})
-                    contract** (assoc contract* :contract/decision decision)]
+                    binding** (assoc binding* :binding/decision decision :contract/decision decision)]
                 (if (= :deny (:decision decision))
-                  (attach-contract-audit
+                  (attach-binding-audit
                    (result-error intent :capability/denied
                                  "intent denied by the capability broker"
                                  {:reason (:reason decision)}
                                  decision @usage-atom)
-                   contract**)
+                   binding**)
                   (if (and require-idempotency-key?
                            (not= :pure (:effect frozen-descriptor))
                            (not= :model-call (:effect frozen-descriptor))
                            (nil? (get-in intent [:metadata :idempotency/key])))
-                    (attach-contract-audit
+                    (attach-binding-audit
                      (result-error intent :intent/idempotency-key-missing
                                    "non-pure writes require an idempotency key in :metadata before execution"
                                    {:tool/id tool-id :effect (:effect frozen-descriptor)}
                                    decision @usage-atom)
-                     contract**)
+                     binding**)
                     (let [execution (execute-with-retry!
                                      broker-context provider frozen-descriptor
                                      decision normalized)]
                       (if-let [value (:ok execution)]
-                        (let [tool-error? (= :error (:mcp/tool-status (:value value)))
-                              enriched-value (enrich-value-audit value contract**)]
+                        (let [tool-error? (binding/tool-error? value)
+                              enriched-value (enrich-value-audit value binding**)]
                           (if tool-error?
-                            (attach-contract-audit (result-ok intent enriched-value decision @usage-atom) contract**)
+                            (attach-binding-audit (result-ok intent enriched-value decision @usage-atom) binding**)
                             (let [ok-result (validate-output! intent frozen-descriptor decision
                                                                enriched-value @usage-atom)]
-                              (attach-contract-audit ok-result contract**))))
-                        (attach-contract-audit
+                              (attach-binding-audit ok-result binding**))))
+                        (attach-binding-audit
                          (result-error intent (:error-type execution)
                                        (:error-message execution)
                                        (:error-data execution)
                                        decision @usage-atom)
-                         contract**)))))))))))))
+                         binding**)))))))))))))
 
 (defn dispatch!
   "Execute intent through the broker pipeline in the NORMATIVE order

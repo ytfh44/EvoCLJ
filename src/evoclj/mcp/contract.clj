@@ -1,91 +1,44 @@
 (ns evoclj.mcp.contract
-  "CallContract — immutable, one per dispatch effect (Step 1).
+  "CallContract - now a thin wrapper around generic CallBinding (evoclj.binding.call).
 
-  Guarantees D_normalize = D_authorize = D_execute = D_validate by
-  freezing the descriptor snapshot at generation n before normalize.
-  Effect start (normalize) forbids further reset! of the descriptor
-  atom; refresh must happen BEFORE call-started.
+  Kept for backward compatibility. Delegates to evoclj.binding.call so existing
+  code and tests remain equivalent while generic dispatch no longer depends
+  on MCP-specific fields directly."
+  (:require [evoclj.binding.call :as binding]
+            [malli.core :as m]))
 
-  Freshness policy:
-    :required    — stale descriptor fails closed as :provider/freshness-required
-    :best-effort — stale allowed but contract :stale? true and audit marks stale
-    :pinned      — never treat as stale, generation pinned."
-  (:require [malli.core :as m]))
+(def freshness-values binding/freshness-values)
+(def FreshnessSchema binding/FreshnessSchema)
+(def CallContractSchema binding/CallBindingSchema)
 
-(def freshness-values #{:required :best-effort :pinned})
+(defn valid-freshness? [v] (binding/valid-freshness? v))
 
-(def FreshnessSchema [:enum :required :best-effort :pinned])
-
-(def CallContractSchema
-  [:map
-   [:contract/id uuid?]
-   [:contract/generation int?]
-   [:contract/descriptor map?]
-   [:contract/normalized {:optional true} any?]
-   [:contract/decision {:optional true} any?]
-   [:contract/freshness FreshnessSchema]
-   [:contract/stale? boolean?]
-   [:contract/captured-at {:optional true} int?]])
-
-(defn valid-freshness? [v] (contains? freshness-values v))
-
-(defn generation
-  "Extract :mcp/generation from a descriptor (or contract). Defaults to 0."
-  [x]
-  (or (:mcp/generation x)
-      (:contract/generation x)
-      0))
-
-(defn captured-at [descriptor]
-  (or (:mcp/captured-at descriptor) (:mcp/last-refreshed descriptor)))
+(defn generation [x] (binding/generation x))
+(defn captured-at [descriptor] (binding/captured-at descriptor))
 
 (defn stale?
-  "True when descriptor is stale: :mcp/last-refreshed is nil.
-   :pinned freshness never counts as stale."
-  ([descriptor] (nil? (:mcp/last-refreshed descriptor)))
-  ([descriptor freshness]
-   (and (not= freshness :pinned)
-        (nil? (:mcp/last-refreshed descriptor)))))
+  ([descriptor] (binding/stale? descriptor))
+  ([descriptor freshness] (binding/stale? descriptor freshness)))
 
 (defn capture
-  "Freeze a CallContract from a descriptor snapshot.
-  freshness must be :required/:best-effort/:pinned.
-  Options map may contain :stale? and :id."
   ([descriptor freshness]
    (capture descriptor nil nil freshness {}))
   ([descriptor normalized decision freshness]
    (capture descriptor normalized decision freshness {}))
   ([descriptor normalized decision freshness {:keys [stale? id captured-at]}]
-   (when-not (valid-freshness? freshness)
-     (throw (ex-info "invalid freshness" {:freshness freshness :allowed freshness-values})))
-   (let [gen (generation descriptor)
-         cid (or id (random-uuid))
-         now (or captured-at (System/currentTimeMillis))]
-     (cond-> {:contract/id cid
-              :contract/generation gen
-              :contract/descriptor descriptor
-              :contract/freshness freshness
-              :contract/stale? (boolean stale?)
-              :contract/captured-at now}
-       (some? normalized) (assoc :contract/normalized normalized)
-       (some? decision)   (assoc :contract/decision decision)))))
+   (let [opts (cond-> {:freshness freshness}
+                (some? stale?) (assoc :stale? stale?)
+                (some? id) (assoc :binding/id id)
+                (some? captured-at) (assoc :captured-at captured-at))]
+     (binding/capture descriptor normalized decision freshness opts))))
 
-(defn freeze
-  "Alias for capture — freeze descriptor snapshot into contract."
-  [& args]
-  (apply capture args))
+(defn freeze [& args] (apply binding/freeze args))
 
-(defn validate-contract
-  "Validate contract against CallContractSchema, throwing on invalid."
-  [c]
-  (when-not (m/validate CallContractSchema c)
+(defn validate-contract [c]
+  ;; Accept both old contract shape and new binding shape for compat
+  (when-not (or (m/validate CallContractSchema c)
+                (m/validate binding/CallBindingSchema c))
     (throw (ex-info "invalid CallContract" {:explanation (m/explain CallContractSchema c)})))
   c)
 
-(defn contract->audit
-  "Project contract generation/staleness into an audit map fragment."
-  [contract]
-  {:mcp/generation (:contract/generation contract)
-   :mcp/stale? (:contract/stale? contract)
-   :mcp/freshness (:contract/freshness contract)
-   :contract/id (:contract/id contract)})
+(defn contract->audit [contract] (binding/binding->audit contract))

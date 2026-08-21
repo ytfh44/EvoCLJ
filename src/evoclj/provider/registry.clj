@@ -42,10 +42,11 @@
   "The v0 tool descriptor contract (normative, Task 4.3): a closed
   map of the five required fields plus optional :retry and :version
   blocks. The top level is closed — no field may be missing, renamed,
-  or extended beyond these, except for optional :mcp/* extension
-  fields consumed by the MCP provider bridge. :input-schema and
-  :output-schema are only required to be present here; they are
-  separately validated as Malli schema VALUES by validate-descriptor."
+  or extended beyond these, except for optional MCP extension fields
+  consumed by the MCP provider bridge and generic binding. Lifecycle
+  MCP fields (generation, last-refreshed, captured-at) are allowed here
+  for validation but generic dispatch no longer depends on them;
+  they are treated as MCP-specific provenance in binding."
   [:map {:closed true}
    [:tool/id keyword?]
    [:effect keyword?]
