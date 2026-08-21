@@ -11,6 +11,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest testing is]]
             [evoclj.evolution.core :as evolution]
+            [evoclj.evolution.default-mutator :as default-mutator]
             [evoclj.evolution.diagnose :as diagnose]
             [evoclj.genome.types :as types]
             [evoclj.kernel.system :as sys]
@@ -21,7 +22,8 @@
             [integrant.core :as ig])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)
-           (java.nio.charset StandardCharsets)))
+           (java.nio.charset StandardCharsets)
+           evoclj.evolution.llm_mutator.LlmMutator))
 
 ;; --- temp helpers -----------------------------------------------------------------------------------------------------------------------
 
@@ -269,3 +271,73 @@
             (is (not (identical? (:provider/registry system)
                                  (:provider/registry system2)))))
           (sys/halt! system2))))))
+
+;; ============================================================================
+;; BT1 — :mutator injection shapes through the real host build
+;; ============================================================================
+
+(defn- evo-system-with-mutator
+  "The minimal host graph (:store/sqlite + :store/cas +
+  :evolution/system) built through the real host entry point (sys/init
+  → ig/init) with the given :mutator config value — the same path a
+  deploy/cost-style host takes when it injects a mutator object.
+  Returns the :evolution/system component; a mutator config the host
+  rejects propagates the build error."
+  ([mutator]
+   (evo-system-with-mutator mutator {}))
+  ([mutator evo-overrides]
+   (let [root (temp-dir)
+         cfg {:store/sqlite (resolve-path root "evoclj.db")
+              :store/cas {:root (resolve-path root "cas") :verify false}
+              :evolution/system (merge {:store {:sqlite (ig/ref :store/sqlite)
+                                                :cas (ig/ref :store/cas)}
+                                        :diagnostician {:task/success-threshold 1.0
+                                                        :max-hypotheses 3
+                                                        :confidence-band :medium}
+                                        :mutator mutator}
+                                       evo-overrides)}]
+     (:evolution/system (sys/init cfg)))))
+
+(deftest build-mutator-injection-shapes
+  (testing "a Mutator protocol object (DefaultMutator record) passes
+            through unchanged — records are maps, so this must be
+            checked before the map branch (BT1 regression)"
+    (let [record (default-mutator/default-mutator)
+          evo (evo-system-with-mutator record)]
+      (is (satisfies? evolution/Mutator (:mutator evo)))
+      (is (identical? record (:mutator evo)))))
+  (testing "an empty map means nothing configured: the no-op adapter"
+    (let [evo (evo-system-with-mutator {})]
+      (is (satisfies? evolution/Mutator (:mutator evo)))
+      (is (nil? (evolution/propose-mutations (:mutator evo) {})))))
+  (testing ":none yields the no-op adapter"
+    (let [evo (evo-system-with-mutator :none)]
+      (is (satisfies? evolution/Mutator (:mutator evo)))
+      (is (nil? (evolution/propose-mutations (:mutator evo) {})))))
+  (testing "a fn passes through wrapped and is called with the context"
+    (let [calls (atom 0)
+          evo (evo-system-with-mutator
+               (fn [_ctx] (swap! calls inc) []))]
+      (is (satisfies? evolution/Mutator (:mutator evo)))
+      (is (= [] (evolution/propose-mutations (:mutator evo) {:probe true})))
+      (is (= 1 @calls))))
+  (testing "a {:type :llm ...} map builds the LLM adapter shape
+            (closed over the host :model-call; no model is called at
+            build time)"
+    (let [evo (evo-system-with-mutator {:type :llm :model/id "x"}
+                                       {:model/registry {}
+                                        :dispatch {}})]
+      (is (instance? LlmMutator (:mutator evo)))))
+  (testing "a non-empty map without a :type fails closed (BT1 regression:
+            the DefaultMutator record / {} used to fall into the map
+            branch and throw)"
+    (let [ex (try
+               (evo-system-with-mutator {"foo" 1})
+               nil
+               ;; sys/init surfaces ig/init's wrapper; unwrap to the
+               ;; host's typed failure.
+               (catch clojure.lang.ExceptionInfo e (ex-cause e)))]
+      (is (some? ex))
+      (is (= :evolution/system-invalid
+             (:error/type (ex-data ex))))
+      (is (re-find #"unknown :mutator :type" (ex-message ex))))))

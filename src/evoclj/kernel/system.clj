@@ -378,11 +378,18 @@
 (defn- build-mutator
   "Build the Mutator from config:
     - nil / :none yield the no-op adapter (v0 default);
+    - an object already satisfying the Mutator protocol passes through
+      unchanged (dependency injection — e.g. a DefaultMutator record);
+      this branch is checked BEFORE the map branch because records ARE
+      maps (a record would otherwise fall into the map handling and be
+      rejected as an unknown :type);
     - a function passes through (wrapped into the protocol);
-    - a {:type :llm ...} map becomes the LLM adapter
-      (evoclj.evolution.llm-mutator) closed over the host-built
-      :model-call closure;
-    - an unknown :type fails closed (:evolution/system-invalid)."
+    - an EMPTY map means nothing configured — like :none, it yields
+      the no-op adapter;
+    - a NON-EMPTY map must be a {:type :llm ...} config and becomes
+      the LLM adapter (evoclj.evolution.llm-mutator) closed over the
+      host-built :model-call closure; a missing or unknown :type fails
+      closed (:evolution/system-invalid)."
   [config model-call]
   (cond
     (nil? config) (no-op-mutator)
@@ -390,6 +397,8 @@
     (fn? config) (reify evolution/Mutator
                    (propose-mutations [_ context]
                      (config context)))
+    (satisfies? evolution/Mutator config) config
+    (and (map? config) (empty? config)) (no-op-mutator)
     (map? config)
     (if (= :llm (:type config))
       (let [allowed #{:type :model/id :max-mutations :risk :system-prompt}
@@ -462,7 +471,12 @@
   (component contract, see evoclj.evolution.core) assembled from the
   config subtree and the injected store. The provider catalog is
   plain data; the diagnostician and mutator are constructed here
-  (or injected as objects/fns — Step 4).
+  (or injected as objects/fns — Step 4). The :mutator accepts a
+  Mutator protocol object (passed through unchanged), a fn (wrapped
+  into the protocol), :none / absent / an EMPTY map (nothing
+  configured — the no-op adapter), or a {:type :llm ...} map; a
+  non-empty map without a known :type fails closed
+  (:evolution/system-invalid).
 
   OPTIONAL LLM-DRIVEN ADAPTERS (opt-in): when :diagnostician or
   :mutator is a {:type :llm ...} map, the host builds ONCE a :model-call
