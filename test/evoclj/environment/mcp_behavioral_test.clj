@@ -38,15 +38,17 @@
           _ (registry/register! reg p)
           d0 (proto/describe p)
           c0 (contract/capture d0 nil nil :best-effort {:stale? false})
-          gen0 (:contract/generation c0)]
-      (mcp-bridge/refresh-provider! p)
-      (let [d1 (proto/describe p)
-            gen1 (:mcp/generation d1)]
-        (is (not= gen0 gen1) "refresh bumped generation")
+          gen0 (:contract/generation c0)
+          ;; refresh produces new immutable ToolEntry@1, original p stays @0
+          p1 (mcp-bridge/refresh-provider! p)
+          d1 (proto/describe p1)
+          gen1 (:mcp/generation d1)]
+        (is (not= gen0 gen1) "refresh bumped generation (new immutable entry)")
+        (is (= 0 (:mcp/generation (proto/describe p))) "original ToolEntry@0 unchanged (immutable)")
         (is (= gen0 (:contract/generation c0)))
         (is (= d0 (:contract/descriptor c0)))
         (let [c1 (contract/capture d1 nil nil :best-effort {:stale? false})]
-          (is (= gen1 (:contract/generation c1))))))))
+          (is (= gen1 (:contract/generation c1)))))))
 
 ;; ---- 2. removed tool no longer accepts new calls ----
 (deftest mcp-removed-tool-rejects-new-calls

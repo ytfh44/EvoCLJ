@@ -65,7 +65,14 @@
    [:mcp/output-schema {:optional true} any?]
    [:mcp/input-schema-json {:optional true} any?]
    [:mcp/output-schema-json {:optional true} any?]
-   [:mcp/schema-source {:optional true} [:enum :malli :json-schema-fallback]]])
+   [:mcp/schema-source {:optional true} [:enum :malli :json-schema-fallback]]
+   [:mcp/name {:optional true} string?]
+   [:mcp/title {:optional true} string?]
+   [:mcp/description {:optional true} string?]
+   [:mcp/status {:optional true} keyword?]
+   [:mcp/removed-at {:optional true} int?]
+   [:mcp/retry-safe? {:optional true} boolean?]
+   [:mcp/output-schema-kind {:optional true} keyword?]])
 
 (defn- ensure-schema-value!
   "Throw :provider/descriptor-invalid when s is not a valid Malli

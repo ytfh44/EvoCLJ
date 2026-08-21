@@ -151,7 +151,7 @@
       (is (= "server-1" (:mcp/server-id d))))))
 
 (deftest refresh-provider-resets-last-refreshed
-  (testing "refresh-provider! resets :mcp/last-refreshed to nil"
+  (testing "refresh-provider! returns new immutable entry with nil :mcp/last-refreshed; original unchanged"
     (let [p (mcp-bridge/mcp-provider
              {:transport-config {:type :stdio :command "echo" :args []}
               :tool/id           :mcp/echo
@@ -160,20 +160,32 @@
               :output-schema     [:map [:text :string]]
               :schema/refresh-interval-ms 60000})
           d1 (proto/describe p)
-          _ (mcp-bridge/refresh-provider! p)
-          d2 (proto/describe p)]
+          p2 (mcp-bridge/refresh-provider! p)
+          d2 (proto/describe p2)
+          d1-again (proto/describe p)]
       (is (some? (:mcp/last-refreshed d1)))
-      (is (nil? (:mcp/last-refreshed d2))))))
+      (is (nil? (:mcp/last-refreshed d2)))
+      (is (some? (:mcp/last-refreshed d1-again)) "original ToolEntry@0 still has timestamp (immutable)")
+      (is (= 0 (:mcp/generation d1)))
+      (is (= 1 (:mcp/generation d2))))))
 
 (deftest refresh-provider-noop-when-not-mcp
-  (testing "refresh-provider! on non-MCP provider is a no-op"
+  (testing "refresh-provider! on MCP provider returns new immutable entry (not nil) and does not mutate original"
     (let [p (mcp-bridge/mcp-provider
              {:transport-config {:type :stdio :command "echo" :args []}
               :tool/id           :mcp/echo/no-refresh
               :tool/mcp-name     "echo"
               :input-schema      [:map [:text :string]]
-              :output-schema     [:map [:text :string]]})]
-      (is (nil? (mcp-bridge/refresh-provider! p))))))
+              :output-schema     [:map [:text :string]]})
+          d0 (proto/describe p)
+          p2 (mcp-bridge/refresh-provider! p)
+          d0-again (proto/describe p)
+          d2 (proto/describe p2)]
+      (is (some? p2))
+      (is (= 0 (:mcp/generation d0)))
+      (is (= 0 (:mcp/generation d0-again)) "original unchanged")
+      (is (= 1 (:mcp/generation d2)))
+      (is (nil? (:mcp/last-refreshed d2))))))
 
 ;; ---------------------------------------------------------------------------
 ;; json-schema->malli

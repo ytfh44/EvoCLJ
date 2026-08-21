@@ -39,8 +39,8 @@
   (when-not (satisfies? src/LiveSource source)
     (throw (err/error :environment/invalid-source "source must satisfy LiveSource" {:source source})))
   (let [cn (.getName (class source))]
-    (when-not (or (.contains cn "FakeSource") (.contains cn "StaticSource"))
-      (throw (err/error :environment/unsupported-source "only FakeSource and StaticSource are supported" {:source-type cn}))))
+    (when-not (or (.contains cn "FakeSource") (.contains cn "StaticSource") (.contains cn "McpSource"))
+      (throw (err/error :environment/unsupported-source "only FakeSource, StaticSource and McpSource are supported" {:source-type cn}))))
   (let [sid (source-id-of source)]
     (when-not sid
       (throw (err/error :environment/invalid-source "source snapshot must contain :source/id" {})))

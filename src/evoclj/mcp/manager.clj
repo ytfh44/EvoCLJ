@@ -27,7 +27,7 @@
     [(:type cfg) cid ti cf]))
 
 (defn create-manager []
-  (atom {:pools {} :refresh-registry {}}))
+  (atom {:pools {}}))
 
 (defn- entry-metrics [entry] (:metrics entry {:call-count 0 :latency-ms nil}))
 
@@ -116,24 +116,10 @@
                 (deliver p ex)
                 (throw ex)))))))))
 
-(defn mark-removed! [mgr-atom tool-id]
-  (when-let [{:keys [descriptor-atom]} (get-in @mgr-atom [:refresh-registry tool-id])]
-    (swap! descriptor-atom assoc :mcp/status :removed :mcp/removed-at (System/currentTimeMillis))))
-
-(defn on-tools-changed! [mgr-atom prev-ids curr-ids]
-  (doseq [id (clojure.set/difference (set prev-ids) (set curr-ids))]
-    (mark-removed! mgr-atom id)))
-
-(defn mark-discovered-ungranted! [mgr-atom tool-id descriptor]
-  (swap! mgr-atom assoc-in [:refresh-registry tool-id] {:descriptor-atom (atom (assoc descriptor :mcp/status :discovered-ungranted))}))
-
-(defn tool-status [mgr-atom tool-id]
-  (get-in @mgr-atom [:refresh-registry tool-id :descriptor-atom]))
-
 (defn shutdown! [mgr-atom]
   (doseq [[_ e] (:pools @mgr-atom)]
     (when-let [c (:client e)] (try (mcp-client/close! c) (catch Throwable _ nil))))
-  (reset! mgr-atom {:pools {} :refresh-registry {}}))
+  (reset! mgr-atom {:pools {}}))
 
 (defmethod ig/init-key :mcp/manager [_ _] (create-manager))
 (defmethod ig/halt-key! :mcp/manager [_ mgr] (shutdown! mgr))

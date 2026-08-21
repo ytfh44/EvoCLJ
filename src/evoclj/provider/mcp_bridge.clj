@@ -45,13 +45,13 @@
 ;; defined later in this namespace (content-block -> EDN section)
 (declare java-value->edn)
 
-(defn- maybe-nilable
+(defn maybe-nilable
   "Wrap `node` in :maybe when the schema declares `nullable: true`.
    (:nilable is not registered in Malli 0.20.1; :maybe is.)"
   [node schema]
   (if (true? (get schema "nullable")) [:maybe node] node))
 
-(defn- object->malli
+(defn object->malli
   [schema]
   (let [props (get schema "properties" {})
         required (set (get schema "required" []))
@@ -66,7 +66,7 @@
             (into [:map] entries))]
     (maybe-nilable m schema)))
 
-(defn- string->malli
+(defn string->malli
   [schema]
   (let [min-l (get schema "minLength")
         max-l (get schema "maxLength")
@@ -77,7 +77,7 @@
                :else              :string)]
     (maybe-nilable node schema)))
 
-(defn- number->malli
+(defn number->malli
   [schema]
   (let [integer? (= "integer" (get schema "type"))
         min-v (get schema "minimum")
@@ -93,7 +93,7 @@
                (if (seq opts) [:or [:int opts] [:double opts]] [:or :int :double]))]
     (maybe-nilable node schema)))
 
-(defn- array->malli
+(defn array->malli
   [schema]
   (let [items (get schema "items")
         node (if (and items (map? items))
@@ -101,7 +101,7 @@
                [:vector :any])]
     (maybe-nilable node schema)))
 
-(defn- wrap-json-schema-validator
+(defn wrap-json-schema-validator
   "Fallback for schema constructs we cannot prove equivalent to a Malli
    primitive: preserve the (normalized string-keyed) schema and validate
    it with the native validator inside a Malli :fn. Fail-closed."
@@ -109,7 +109,7 @@
   [:fn {:error/message "json-schema"}
    (fn [v] (json-schema/validate schema v))])
 
-(defn- json-schema->malli
+(defn json-schema->malli
   "Convert a (string-keyed) JSON Schema map to an equivalent Malli schema.
 
    Operates on string-keyed maps (the shape produced by
@@ -199,8 +199,9 @@
                :mcp/schema-source (if mcp-in :json-schema-fallback :malli)
                :required-action :invoke
                :version         1
-               :mcp/generation  0
-               :mcp/captured-at (System/currentTimeMillis)}
+               :mcp/generation  (or (:mcp/generation opts) 0)
+               :mcp/captured-at (or (:mcp/captured-at opts) (System/currentTimeMillis))
+               :mcp/last-refreshed (or (:mcp/last-refreshed opts) (System/currentTimeMillis))}
         retry-safe? (assoc :retry {:safe? true})
         connection-id (assoc :mcp/connection-id connection-id)
         server-id (assoc :mcp/server-id server-id)))))
@@ -209,7 +210,7 @@
 ;; content-block result -> plain Clojure
 ;; ---------------------------------------------------------------------------
 
-(defn- content-block->edn
+(defn content-block->edn
   "Convert one MCP content-block map into a plain EDN value.
 
    Output sandboxing: binary/opaque blocks (`:image`, `:audio`,
@@ -238,7 +239,7 @@
                          :mcp/sandboxed true}))
     (:content/raw block)))
 
-(defn- java-value->edn
+(defn java-value->edn
   "Recursively convert a value returned by the MCP Java SDK 2.0
    (structuredContent is a java.util.Map with STRING keys) into plain
    persistent Clojure data:
@@ -266,7 +267,7 @@
 
     :else v))
 
-(defn- result->edn
+(defn result->edn
   "Convert the full call-tool result map into a plain EDN envelope.
 
    ALWAYS returns a plain-data map of the shape
@@ -300,172 +301,146 @@
 ;; the provider
 ;; ---------------------------------------------------------------------------
 
-(defn- build-refresh-fn
-  "Build a no-arg fn that forces this provider's descriptor to refresh
-   from the remote MCP server on the next call (by resetting the cached
-   :mcp/last-refreshed timestamp to nil) and atomically bumping
-   :mcp/generation so a frozen CallContract can detect staleness.
-   Generation bump is via swap! — no stale-read lost update."
-  [descriptor-atom]
-  (fn []
-    (swap! descriptor-atom
-           (fn [d]
-             (if (= :removed (:mcp/status d))
-               d
-               (-> d
-                   (assoc :mcp/last-refreshed nil)
-                   (update :mcp/generation (fnil inc 0))
-                   (assoc :mcp/captured-at (System/currentTimeMillis))))))))
+(defrecord ToolEntry [descriptor manager conn-key transport-config mcp-name tool-id connection-id server-id]
+  proto/Provider
+  (describe [_] descriptor)
+  (normalize-request [_ intent]
+    (let [payload (:payload intent)
+          raw-args (:args payload)
+          args (canonical/value->canonical raw-args)]
+      (when-not (boundary/edn-safe? raw-args)
+        (throw (err/error :provider/input-invalid
+                          "MCP provider input must be plain EDN-safe data"
+                          {:value (err/sanitize raw-args)})))
+      (when-not (m/validate (:provider/input-schema descriptor) raw-args)
+        (throw (err/error :provider/input-invalid
+                          "MCP provider input failed input-schema validation"
+                          {:value (err/sanitize raw-args)
+                           :explanation (err/sanitize (m/explain (:provider/input-schema descriptor) raw-args))})))
+      (when-not (json-schema/validate (:mcp/input-schema descriptor) args)
+        (throw (err/error :provider/input-invalid
+                          "MCP provider input failed JSON Schema validation"
+                          {:value (err/sanitize args)})))
+      {:tool/id    tool-id
+       :resource   (canonical/canonical-resource tool-id args)
+       :args       args}))
+  (execute-request! [_ authorized-request]
+    (when-not (and (map? authorized-request)
+                   (= tool-id (:tool/id authorized-request)))
+      (throw (err/error :provider/request-invalid
+                        "MCP provider received a non-normalized request"
+                        {:value (err/sanitize authorized-request)})))
+    (let [args (:args authorized-request)]
+      (try
+        (let [shared? (some? connection-id)
+              managed (if shared?
+                        (let [entry (manager/pool-get manager conn-key)
+                              c (:client entry)]
+                          (if c c
+                            (let [cl (manager/get-or-open! manager conn-key #(mcp-client/open! (manager/normalize-transport transport-config)))]
+                              {:client cl :transport-config transport-config})))
+                        (mcp-client/open! (manager/normalize-transport transport-config)))
+              managed (mcp-client/ensure-open managed default-max-reopen-attempts)]
+          (when (mcp-client/closed? managed)
+            (throw (err/error :mcp/client-closed
+                              "MCP managed client is closed"
+                              {:open-count (or (:open-count managed) 0)})))
+          (let [client (:client managed)
+                raw-result (mcp-client/call-tool client mcp-name args)
+                edn-result (result->edn raw-result)
+                audit {:mcp/tool-name mcp-name
+                       :mcp/connection-id connection-id
+                       :mcp/server-id server-id}
+                sc (get-in edn-result [:value :mcp/structured-content])
+                desc descriptor]
+            (when (some? sc)
+              (when-not (json-schema/validate (:mcp/output-schema desc) sc)
+                (throw (err/error :provider/output-invalid "structuredContent failed mcp/output-schema" {:value (err/sanitize sc)}))))
+            (let [env (:value edn-result)]
+              (when-not (m/validate (:provider/output-schema desc) env)
+                (throw (err/error :provider/output-invalid "envelope failed provider/output-schema" {:value (err/sanitize env)}))))
+            (when shared? (try (manager/set-metrics manager conn-key #(-> % (update :call-count (fnil inc 0)) (assoc :latency-ms 0))) (catch Exception _ nil)))
+            (update edn-result :audit merge audit)))
+        (catch Throwable ex
+          (if (= :mcp/tool-error (:error/type (ex-data ex)))
+            (throw ex)
+            (let [category (:error/type (mcp-client/classify-mcp-error ex))]
+              (if (or (= category :mcp/transport-error)
+                      (= category :mcp/protocol-error))
+                (throw (err/error :provider/transient-error
+                                  "MCP provider call-tool failed"
+                                  {:tool-name mcp-name
+                                   :mcp/connection-id connection-id
+                                   :mcp/server-id server-id
+                                   :mcp/transport-config (err/sanitize (manager/normalize-transport transport-config))
+                                   :cause (err/sanitize ex)}))
+                (throw (err/error :provider/execution-failed
+                                  "MCP provider call-tool failed"
+                                  {:tool-name mcp-name
+                                   :mcp/connection-id connection-id
+                                   :mcp/server-id server-id
+                                   :mcp/transport-config (err/sanitize (manager/normalize-transport transport-config))
+                                   :cause (err/sanitize ex)}))))))))))
+
+(defn make-tool-entry
+  "Create an immutable ToolEntry. Each entry is a distinct immutable value
+   sharing the same manager connection pool. Generation is part of the
+   descriptor and never mutated in place."
+  [opts]
+  (let [descriptor (mcp-tool-descriptor opts)
+        transport-cfg (:transport-config opts)
+        mcp-name (:tool/mcp-name opts)
+        tool-id (:tool/id descriptor)
+        connection-id (:connection/id opts)
+        server-id (:mcp/server-id opts)
+        mgr-atom (mgr opts)
+        ck (manager/connection-key (assoc transport-cfg :connection/id connection-id))]
+    (when (some? connection-id)
+      (manager/acquire mgr-atom ck tool-id))
+    (->ToolEntry descriptor mgr-atom ck transport-cfg mcp-name tool-id connection-id server-id)))
 
 (defn mcp-provider
-  "Build an MCP-backed provider.
-
-  Required opts:
-    :transport-config - transport config map accepted by transport/transport-for
-    :tool/id          - EvoCLJ tool id keyword
-    :tool/mcp-name    - server-side MCP tool name string
-    :input-schema     - Malli schema for normalized args
-    :output-schema    - Malli schema for result value
-
-  Optional:
-    :retry-safe?      - boolean, true when the tool is idempotent (default false)
-    :connection/id    - keyword; providers sharing this id share a single
-                        underlying McpSyncClient (connection pooling).
-    :mcp/server-id    - string; isolates this tool within a server
-                        namespace for multi-server setups."
+  "Build an MCP-backed provider (immutable ToolEntry). See make-tool-entry."
   [opts]
-  (when-not (contains? opts :transport-config)
-    (throw (err/error :provider/config-invalid
-                      "mcp-provider requires :transport-config"
-                      {:value (err/sanitize opts)})))
-  (when-not (contains? opts :tool/id)
-    (throw (err/error :provider/config-invalid
-                      "mcp-provider requires :tool/id"
-                      {:value (err/sanitize opts)})))
-  (when-not (contains? opts :tool/mcp-name)
-    (throw (err/error :provider/config-invalid
-                      "mcp-provider requires :tool/mcp-name"
-                      {:value (err/sanitize opts)})))
-  (let [descriptor    (mcp-tool-descriptor opts)
-        transport-cfg (:transport-config opts)
-        mcp-name      (:tool/mcp-name opts)
-        tool-id       (:tool/id descriptor)
-        connection-id (:connection/id opts)
-        shared?       (some? connection-id)
-        server-id     (:mcp/server-id opts)
-        refresh-ms    (:schema/refresh-interval-ms opts)
-        descriptor    (cond-> descriptor
-                        (not (contains? descriptor :mcp/generation)) (assoc :mcp/generation 0)
-                        (not (contains? descriptor :mcp/captured-at)) (assoc :mcp/captured-at (System/currentTimeMillis))
-                        refresh-ms (assoc :mcp/last-refreshed (System/currentTimeMillis))
-                        (and (not refresh-ms) (not (contains? descriptor :mcp/last-refreshed))) (assoc :mcp/last-refreshed (System/currentTimeMillis)))
-        descriptor-atom (atom descriptor)
-        client-atom   (atom nil)
-        refresh-fn    (build-refresh-fn descriptor-atom)
-        mgr-atom (mgr opts)
-        ck (manager/connection-key (assoc transport-cfg :connection/id connection-id))
-        _ (when shared? (manager/acquire mgr-atom ck tool-id))]
-    (swap! mgr-atom update :refresh-registry assoc tool-id {:refresh-fn refresh-fn :descriptor-atom descriptor-atom})
-    (reify proto/Provider
-      (describe [_]
-        @descriptor-atom)
+  (make-tool-entry opts))
 
-      (normalize-request [_ intent]
-        (let [descriptor @descriptor-atom
-              payload (:payload intent)
-              raw-args (:args payload)
-              args (canonical/value->canonical raw-args)]
-          (when-not (boundary/edn-safe? raw-args)
-            (throw (err/error :provider/input-invalid
-                              "MCP provider input must be plain EDN-safe data"
-                              {:value (err/sanitize raw-args)})))
-          (when-not (m/validate (:provider/input-schema descriptor) raw-args)
-            (throw (err/error :provider/input-invalid
-                              "MCP provider input failed input-schema validation"
-                              {:value (err/sanitize raw-args)
-                               :explanation (err/sanitize (m/explain (:provider/input-schema descriptor) raw-args))})))
-          (when-not (json-schema/validate (:mcp/input-schema descriptor) args)
-            (throw (err/error :provider/input-invalid
-                              "MCP provider input failed JSON Schema validation"
-                              {:value (err/sanitize args)})))
-          {:tool/id    tool-id
-           :resource   (canonical/canonical-resource tool-id args)
-           :args       args}))
+(def ^:private legacy-registry (atom {}))
 
-      (execute-request! [_ authorized-request]
-        (when (= :removed (:mcp/status @descriptor-atom))
-          (throw (err/error :provider/tool-removed "tool has been removed" {:tool/id tool-id})))
-        (when-not (and (map? authorized-request)
-                       (= tool-id (:tool/id authorized-request)))
-          (throw (err/error :provider/request-invalid
-                            "MCP provider received a non-normalized request"
-                            {:value (err/sanitize authorized-request)})))
-        (let [args (:args authorized-request)]
-          (try
-            (let [managed (if shared?
-                            (let [entry (manager/pool-get mgr-atom ck)
-                                  c (:client entry)]
-                              (if c c
-                                (let [cl (manager/get-or-open! mgr-atom ck #(mcp-client/open! (manager/normalize-transport transport-cfg)))]
-                                  {:client cl :transport-config transport-cfg})))
-                            (or @client-atom
-                                (let [m (mcp-client/open! (manager/normalize-transport transport-cfg))]
-                                  (reset! client-atom m) m)))
-                  managed (mcp-client/ensure-open managed default-max-reopen-attempts)]
-              (when (mcp-client/closed? managed)
-                (throw (err/error :mcp/client-closed
-                                  "MCP managed client is closed"
-                                  {:open-count (or (:open-count managed) 0)})))
-              (let [client (:client managed)
-                    ;; Step 1: inline refresh REMOVED — refresh must happen
-                    ;; BEFORE call-started (dispatch pipeline's refresh-if-needed).
-                    ;; Any reset! after managed acquisition would violate
-                    ;; D_normalize=D_authorize=D_execute=D_validate.
-                    ]
-                (let [raw-result (mcp-client/call-tool client mcp-name args)
-                      edn-result (result->edn raw-result)
-                      audit {:mcp/tool-name mcp-name
-                             :mcp/connection-id connection-id
-                             :mcp/server-id server-id}
-                      sc (get-in edn-result [:value :mcp/structured-content])
-                      desc @descriptor-atom]
-                  (when (some? sc)
-                    (when-not (json-schema/validate (:mcp/output-schema desc) sc)
-                      (throw (err/error :provider/output-invalid "structuredContent failed mcp/output-schema" {:value (err/sanitize sc)}))))
-                  (let [env (:value edn-result)]
-                    (when-not (m/validate (:provider/output-schema desc) env)
-                      (throw (err/error :provider/output-invalid "envelope failed provider/output-schema" {:value (err/sanitize env)}))))
-                  (when shared? (manager/set-metrics mgr-atom ck #(-> % (update :call-count (fnil inc 0)) (assoc :latency-ms 0))))
-                  (update edn-result :audit merge audit))))
-            (catch Throwable ex
-              (if (= :mcp/tool-error (:error/type (ex-data ex)))
-                (throw ex)
-                (let [category (:error/type (mcp-client/classify-mcp-error ex))]
-                  (if (or (= category :mcp/transport-error)
-                          (= category :mcp/protocol-error))
-                    ;; transient/retryable: transport or protocol failures
-                    (throw (err/error :provider/transient-error
-                                      "MCP provider call-tool failed"
-                                      {:tool-name mcp-name
-                                       :mcp/connection-id connection-id
-                                       :mcp/server-id server-id
-                                       :mcp/transport-config (err/sanitize (manager/normalize-transport transport-cfg))
-                                       :cause (err/sanitize ex)}))
-                    ;; permanent: business/config/unknown failures are NOT retried
-                    (throw (err/error :provider/execution-failed
-                                      "MCP provider call-tool failed"
-                                      {:tool-name mcp-name
-                                       :mcp/connection-id connection-id
-                                       :mcp/server-id server-id
-                                       :mcp/transport-config (err/sanitize (manager/normalize-transport transport-cfg))
-                                       :cause (err/sanitize ex)}))))))))))))
+(defn refresh-provider!
+  "Deprecated: previously mutated descriptor-atom in place. Now returns a new
+   immutable ToolEntry with bumped :mcp/generation and nil :mcp/last-refreshed.
+   The original provider instance is unchanged (immutable)."
+  [provider]
+  (let [desc (proto/describe provider)
+        tool-id (:tool/id desc)]
+    (when-not tool-id
+      (throw (err/error :provider/not-a-provider "provider missing :tool/id" {:provider (err/sanitize provider)})))
+    (let [new-desc (-> desc
+                       (assoc :mcp/last-refreshed nil)
+                       (update :mcp/generation (fnil inc 0))
+                       (assoc :mcp/captured-at (System/currentTimeMillis)))
+          opts {:tool/id tool-id
+                :tool/mcp-name (or (:mcp/name desc) (name tool-id))
+                :transport-config {}
+                :input-schema (:provider/input-schema desc)
+                :output-schema (:provider/output-schema desc)
+                :mcp/generation (:mcp/generation new-desc)
+                :mcp/captured-at (:mcp/captured-at new-desc)
+                :mcp/last-refreshed nil}]
+      (let [new-entry (make-tool-entry (merge opts {:mcp/input-schema (:mcp/input-schema desc)
+                                                    :mcp/output-schema (:mcp/output-schema desc)}))]
+        (let [bumped (assoc new-entry :descriptor new-desc)]
+          (swap! legacy-registry assoc tool-id bumped)
+          bumped)))))
 
-(defn refresh-provider! [provider]
-  (let [tool-id (-> provider proto/describe :tool/id)
-        entry (get (:refresh-registry @fallback-manager) tool-id)]
-    (when-let [f (:refresh-fn entry)] (f) nil)))
-(defn refresh-all-mcp-providers! []
-  (reduce-kv (fn [a k {:keys [refresh-fn descriptor-atom]}] (when refresh-fn (refresh-fn)) (assoc a k @descriptor-atom)) {} (:refresh-registry @fallback-manager)))
+(defn refresh-all-mcp-providers!
+  "Deprecated: previously mutated each descriptor. Now returns map of tool-id -> new descriptor."
+  []
+  (reduce-kv (fn [m k v]
+               (let [new-entry (refresh-provider! v)]
+                 (assoc m k (:descriptor new-entry))))
+             {}
+             @legacy-registry))
 (defn dispose! [provider] (let [tool-id (-> provider proto/describe :tool/id)
         desc (proto/describe provider)
         cid (:mcp/connection-id desc)]

@@ -37,18 +37,18 @@
               :output-schema [:map [:text :string]]})
           d0 (proto/describe p)
           gen0 (:mcp/generation d0)
-          c (contract/capture d0 nil nil :best-effort {:stale? false})]
-      ;; simulate concurrent refresh that bumps generation via refresh-provider! (swap! inc)
-      (mcp-bridge/refresh-provider! p)
-      (let [d1 (proto/describe p)
-            gen1 (:mcp/generation d1)]
+          c (contract/capture d0 nil nil :best-effort {:stale? false})
+          ;; refresh produces new immutable ToolEntry @1, original p stays @0
+          p1 (mcp-bridge/refresh-provider! p)
+          d1 (proto/describe p1)
+          gen1 (:mcp/generation d1)]
         (is (= 0 gen0) "initial generation 0")
-        (is (= 1 gen1) "after refresh, generation bumped via atomic swap!")
+        (is (= 1 gen1) "after refresh, new entry generation 1 (immutable ToolEntry@1)")
+        (is (= 0 (:mcp/generation (proto/describe p))) "original ToolEntry@0 unchanged (immutable)")
         (is (= gen0 (:contract/generation c)) "contract still holds frozen generation")
         (is (not= gen0 gen1) "generation drift occurred but contract did not follow")
         (is (= d0 (:contract/descriptor c)) "descriptor snapshot identity preserved")
-        ;; prove validate-contract accepts it
-        (is (some? (contract/validate-contract c)))))))
+        (is (some? (contract/validate-contract c))))))
 
 (deftest freshness-gating-best-effort-vs-required
   (testing ":required fails closed when descriptor stale, :best-effort proceeds with stale? true, :pinned ignores staleness"
@@ -58,8 +58,8 @@
               :tool/mcp-name "fresh-demo"
               :input-schema [:map [:text :string]]
               :output-schema [:map [:text :string]]})
-          _ (mcp-bridge/refresh-provider! p) ; makes descriptor stale (nil last-refreshed) and bumps gen
-          d-stale (proto/describe p)]
+          p-stale (mcp-bridge/refresh-provider! p) ; new immutable entry stale (nil last-refreshed) and bumps gen
+          d-stale (proto/describe p-stale)]
       (is (nil? (:mcp/last-refreshed d-stale)) "stale descriptor has nil last-refreshed")
       (is (true? (contract/stale? d-stale :required)))
       (is (true? (contract/stale? d-stale :best-effort)))
@@ -88,7 +88,9 @@
               :input-schema [:map [:text :string]]
               :output-schema [:map [:text :string]]})
           _ (registry/register! reg p)
-          _ (mcp-bridge/refresh-provider! p) ; make stale
+          p-stale (mcp-bridge/refresh-provider! p) ; new immutable stale entry
+          ;; replace registry entry with stale one to simulate McpSource refresh publishing new ToolSurface
+          _ (swap! reg assoc :mcp/gated {:descriptor (proto/describe p-stale) :provider p-stale})
           leases [(lease-for :mcp/gated)]
           ctx (dispatch/make-broker-context {:registry reg :leases leases :freshness :required :now (constantly now)})
           intent (intent/tool-call session-id phenotype-p1 :node/tool 42 {:tool/id :mcp/gated :args {:text "hi"}} budget)]
