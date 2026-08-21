@@ -50,6 +50,7 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [evoclj.fs.walk :as fs-walk]
             [evoclj.kernel.error :as err]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.path :as path]
@@ -199,72 +200,10 @@
                       "genome manifest is not a readable regular file"
                       {:path manifest-file-name}))))
 
-;; --- directory walk without following links --------------------------------
-
-(defn- outside-bundle?
-  "True when `dir`, resolved to its real path (following links), is not
-  inside `root-real`. Catches Windows junctions and any link-following
-  edge that isSymbolicLink misses; fail-closed on error. The explicit
-  empty LinkOption array is required: a zero-arg varargs call to
-  toRealPath is not resolved statically on all hosts."
-  [^Path root-real ^Path dir]
-  (try
-    (not (.startsWith (.toRealPath dir (make-array LinkOption 0)) root-real))
-    (catch Exception _ true)))
-
-(defn- make-walk-visitor
-  "SimpleFileVisitor that records every regular file as [file relative
-  path-string] and rejects symbolic links. Files/walkFileTree runs with
-  default options, so symbolic links are never followed; the visitor
-  still rejects them and verifies each directory resolves inside the
-  real root. Any entry that cannot be read rejects the whole bundle."
-  [^Path root acc]
-  (let [root-real (.toRealPath root (make-array LinkOption 0))]
-    (proxy [SimpleFileVisitor] []
-      (preVisitDirectory [dir _attrs]
-        (if (outside-bundle? root-real dir)
-          (throw (err/error :genome/symlink-rejected
-                            "genome bundle must not contain links outside the bundle"
-                            {:path (str (.relativize root dir))}))
-          FileVisitResult/CONTINUE))
-      (visitFile [file _attrs]
-        (if (Files/isSymbolicLink file)
-          (throw (err/error :genome/symlink-rejected
-                            "genome bundle must not contain symbolic links"
-                            {:path (str (.relativize root file))}))
-          (do (vswap! acc conj [file (str (.relativize root file))])
-              FileVisitResult/CONTINUE)))
-      (visitFileFailed [_file exc]
-        (throw (err/error :genome/unreadable
-                          "genome bundle contains an unreadable entry"
-                          {:message (.getMessage exc)}))))))
-
-(defn- walk-bundle!
-  "Depth-first walk of `root` without following symbolic links. Returns
-  a vector of [file Path, host-separator relative path string] pairs for
-  every regular file in the bundle."
-  [^Path root]
-  (let [acc (volatile! [])]
-    (Files/walkFileTree root (make-walk-visitor root acc))
-    @acc))
-
-;; --- normalization and duplicate detection ---------------------------------
-
-(defn- normalize-files
-  "Canonicalize each walked file's relative path and reject any pair of
-  on-disk files that normalize to the same canonical path."
-  [walked]
-  (let [normalized (mapv (fn [[file rel]]
-                           {:file file :path (path/normalize-relative-path rel)})
-                         walked)
-        dupes (->> normalized
-                   (group-by :path)
-                   (filter (fn [[_ entries]] (> (count entries) 1))))]
-    (when (seq dupes)
-      (throw (err/error :genome/duplicate-path
-                        "duplicate normalized paths in genome bundle"
-                        {:paths (mapv first dupes)})))
-    normalized))
+;; --- directory walk (delegated to generic safe walker) ---------------------
+;; Security rules (canonical path, no symlink/junction, no duplicate,
+;; unreadable -> fail closed) live in evoclj.fs.walk so Genome and Skill
+;; snapshots share one implementation.
 
 (defn- check-declared-modules!
   "Reject duplicate normalized declared module paths, then require every
@@ -411,7 +350,8 @@
          _ (check-manifest-entry! manifest-file)
          manifest-bytes (read-regular-file! manifest-file manifest-file-name)
          manifest (schema/validate-manifest (parse-edn manifest-file-name manifest-bytes))
-         walked (normalize-files (walk-bundle! root))
+         walked-raw (fs-walk/walk-tree-genome-compat root)
+         walked (mapv (fn [{:keys [path physical-path]}] {:file physical-path :path path}) walked-raw)
          walked-paths (into #{} (map :path) walked)
          _ (check-declared-modules! root manifest walked-paths)
          files (build-files walked (declared-parse-paths manifest))
