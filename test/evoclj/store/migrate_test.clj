@@ -23,10 +23,11 @@
 ;; --- shared fixtures -------------------------------------------------------
 
 (def ^:private expected-tables
-  "The 15 normative initial tables (Task 5.1)."
+  "The 16 normative tables (Task 5.1 + 006 session_bindings)."
   #{"meta" "generations" "candidates" "mutations" "sessions" "events"
     "artifacts" "model_calls" "tool_calls" "episodes" "eval_runs"
-    "eval_cases" "eval_results" "capability_leases" "promotions"})
+    "eval_cases" "eval_results" "capability_leases" "promotions"
+    "session_bindings"})
 
 (def ^:private now "2025-01-01T00:00:00Z")
 (def ^:private g1 "generation-1")
@@ -195,14 +196,14 @@
 
 (deftest fresh-database-applies-all-migrations
   (let [db (sqlite/spec (temp-db-path))]
-    (is (= {:status :applied :version 4} (migrate/migrate! db)))
-    (is (= 4 (migrate/current-version db)))
-    (testing "all 15 normative tables exist"
+    (is (= {:status :applied :version 5} (migrate/migrate! db)))
+    (is (= 5 (migrate/current-version db)))
+    (testing "all 16 normative tables exist"
       (is (every? (table-names db) expected-tables)))
     (testing "schema version and applied migrations are recorded in meta"
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
-      (is (= "4" (meta-value db "schema_version")))
-      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql"
+      (is (= "5" (meta-value db "schema_version")))
+      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql"
              (meta-value db "applied_migrations"))))
     (testing "003-routing.sql added the session routing audit columns"
       (let [cols (set (map :name (sqlite/query db
@@ -217,10 +218,10 @@
 (deftest second-apply-is-a-safe-noop
   (let [db (fresh-db)
         tables-before (table-names db)]
-    (is (= {:status :noop :version 4} (migrate/migrate! db)))
+    (is (= {:status :noop :version 5} (migrate/migrate! db)))
     (testing "no duplicate/schema damage"
       (is (= tables-before (table-names db)))
-      (is (= "4" (meta-value db "schema_version")))
+      (is (= "5" (meta-value db "schema_version")))
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
       ;; the migrated schema still works
       (insert-generation! db g1 {})
@@ -387,6 +388,9 @@
         ;; 005-deploy.sql effects are rewound too (S1-3): a v1 database
         ;; predates the deployment_decisions table entirely
         _ (sqlite/exec! db ["DROP TABLE IF EXISTS deployment_decisions"])
+        ;; 006-session-bindings.sql effects are rewound too (Phase 8): a v1
+        ;; database predates the session_bindings table entirely
+        _ (sqlite/exec! db ["DROP TABLE IF EXISTS session_bindings"])
         _ (sqlite/exec! db ["UPDATE meta SET value = '1' WHERE key = 'schema_version'"])
         _ (sqlite/exec! db ["UPDATE meta SET value = '001-init.sql'
                             WHERE key = 'applied_migrations'"])
@@ -403,12 +407,12 @@
                                      'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
                                      'created', '2025-01-01T00:00:00Z')"])
         result (migrate/migrate! db)]
-    (testing "only the pending migration runs; the version moves to 4"
-      (is (= {:status :applied :version 4} result)))
+    (testing "only the pending migration runs; the version moves to 5"
+      (is (= {:status :applied :version 5} result)))
     (testing "the old session row survives untouched with NULL routing columns"
       (let [row (first (sqlite/query db ["SELECT routing_deployment_version, routing_bucket
                                           FROM sessions WHERE id = 'old-session'"]))]
         (is (nil? (:routing_deployment_version row)))
         (is (nil? (:routing_bucket row)))))
     (testing "a third apply is a verified no-op"
-      (is (= {:status :noop :version 4} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 5} (migrate/migrate! db))))))
