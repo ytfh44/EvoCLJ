@@ -78,6 +78,33 @@
    :revision-ids catalog
    :captured-at (System/currentTimeMillis)})
 
+(defn capture-tool-catalog-binding
+  "Alias for pin-catalog for scheduler compatibility."
+  [catalog]
+  (pin-catalog catalog))
+
+(defn base-call-from-intent
+  "Extract BaseModelCall from an intent. Tolerates both new and legacy payload shapes."
+  [intent]
+  {:base/messages (or (get-in intent [:payload :base/messages])
+                      (get-in intent [:payload :messages]) [])
+   :requested-tools (or (get-in intent [:payload :requested-tools])
+                        (get-in intent [:payload :tools]) [])
+   :options (or (get-in intent [:payload :options]) {})
+   :model/id (get-in intent [:payload :model/id])})
+
+(defn assemble
+  "Scheduler-facing wrapper for base->prepared. Takes base-call and opts map with
+  :session-bindings, :tool-catalog/binding, :cas, :history, :policy, :catalog."
+  [base-call opts]
+  (let [session-bindings (:session-bindings opts)
+        tool-binding (:tool-catalog/binding opts)
+        catalog (:catalog opts)
+        cas (:cas opts)
+        history (:history opts)
+        policy (:policy opts)]
+    (base->prepared base-call (or session-bindings []) (or catalog {}) tool-binding (or history "") {:cas cas :policy policy})))
+
 (defn rebuild-context
   "Rebuild only the context portion for next round, keeping pinned
   tool catalog. Used when activate_skill was called in previous round."

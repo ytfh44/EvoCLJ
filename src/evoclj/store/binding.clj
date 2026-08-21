@@ -142,15 +142,23 @@
 
 (defn- sanitize-surface
   "Return an EDN-safe surface (strip non-serializable fns like :materializer).
-  Keeps only keys that round-trip via pr-str/edn/read-string."
+  Keeps only keys that round-trip via pr-str/edn/read-string.
+  Backend records are converted to plain serializable descriptors."
   [s]
-  (let [without-fn (dissoc s :materializer)]
-    ;; Try to round-trip; if fails, keep only known safe keys
+  (let [a (dissoc s :materializer)
+        b (if-let [backend (:backend a)]
+            (let [tree-id (or (:tree-id backend) (:tree/id backend) (:revision/id a))
+                  plain (cond
+                          (and (map? backend) (:tree/id backend)) backend
+                          (instance? clojure.lang.IRecord backend) {:type :cas-tree :tree/id (or (:tree-id backend) (:revision/id a))}
+                          :else {:type :cas-tree :tree/id (or tree-id (:revision/id a))})]
+              (assoc a :backend plain))
+            a)]
     (try
-      (edn/read-string (pr-str without-fn))
-      without-fn
+      (edn/read-string (pr-str b))
+      b
       (catch Exception _
-        (select-keys without-fn [:surface/id :surface/type :revision/id :bundle/id :logical/id :descriptor :entries :access/max :backend])))))
+        (select-keys b [:surface/id :surface/type :revision/id :bundle/id :logical/id :descriptor :entries :access/max :backend])))))
 
 (defn- bundle->metadata
   "Build metadata_edn value for storage — keeps sanitized surfaces for restore."
@@ -265,11 +273,12 @@
 (defn- publish-runtime!
   "Publish bundle's surfaces into mount-registry and context-store.
   Both are optional atoms. No-op if nil."
-  [bundle {:keys [mount-registry context-store]}]
+  [bundle {:keys [mount-registry context-store cas] :as opts}]
   (let [surfaces (bundle->surfaces bundle)
         logical-id (bundle->logical bundle)
         rev (bundle->revision bundle)
-        bid (bundle->bundle-id bundle)]
+        bid (bundle->bundle-id bundle)
+        cas-handle cas]
     (when context-store
       (doseq [s surfaces
               :when (= :context (:surface/type s))]
@@ -291,8 +300,36 @@
                                   (when f (f mount-registry mount-id)))
                                 (catch Exception _ nil))]
               (when-not existing
-                (let [backend {:type :cas-tree :tree/id rev :bundle/id bid}
-                      mount {:mount/id mount-id :backend backend :access/max (:access/max s)}]
+                (let [raw (:backend s)
+                      backend (cond
+                                (and raw
+                                     (try
+                                       (let [proto @(requiring-resolve 'evoclj.mount.backend/Backend)]
+                                         (satisfies? proto raw))
+                                       (catch Exception _ false))) raw
+                                (and raw (map? raw) (:tree/id raw) cas-handle)
+                                (try
+                                  (let [f (requiring-resolve 'evoclj.mount.backend/cas-tree-backend)]
+                                    (when f (f cas-handle (:tree/id raw))))
+                                  (catch Exception _ raw))
+                                (and raw (map? raw) (:tree-id raw) cas-handle)
+                                (try
+                                  (let [f (requiring-resolve 'evoclj.mount.backend/cas-tree-backend)]
+                                    (when f (f cas-handle (:tree-id raw))))
+                                  (catch Exception _ raw))
+                                cas-handle
+                                (try
+                                  (let [f (requiring-resolve 'evoclj.mount.backend/cas-tree-backend)]
+                                    (when f (f cas-handle rev)))
+                                  (catch Exception _ nil))
+                                :else raw)
+                      backend (or backend {:type :cas-tree :tree/id rev :bundle/id bid})
+                      mount (try
+                              (let [mk (requiring-resolve 'evoclj.mount.backend/make-mount)]
+                                (if mk
+                                  (mk {:mount-id mount-id :backend backend :access-max (:access/max s)})
+                                  {:mount/id mount-id :backend backend :access/max (:access/max s)}))
+                              (catch Exception _ {:mount/id mount-id :backend backend :access/max (:access/max s)}))]
                   (swap! mount-registry assoc mount-id mount)))))
           (catch Exception _ nil))))
     nil))
@@ -428,7 +465,7 @@
                                         "binding already active for this session + logical_id"
                                         {:session/id (types/session-id session-id) :logical/id logical-id}))
                       (throw e)))))]
-       (publish-runtime! bundle {:mount-registry mount-registry :context-store context-store})
+       (publish-runtime! bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
        (try
          (append-binding-event! db session-id :binding/activated
                                 {:logical/id logical-id :revision/id rev :bundle/id bid :binding/id id})
@@ -485,7 +522,7 @@
            (throw (err/error :store/binding-not-found "no active binding for this session + logical_id"
                              {:session/id (types/session-id session-id) :logical/id logical-id})))
          (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
-         (publish-runtime! new-bundle {:mount-registry mount-registry :context-store context-store})
+         (publish-runtime! new-bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
          (append-binding-event! db session-id :binding/reloaded
                                 {:logical/id logical-id :from-revision (:revision/id old-binding) :to-revision new-rev :bundle/id new-bid})
          (get-binding db session-id logical-id))))))
