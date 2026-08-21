@@ -3,7 +3,7 @@
 
   Each wrapper delegates to the context CLI and translates its exit
   exceptions into typed :cli/* errors the main CLI can handle uniformly."
-  (:require [evoclj.context.cli :as context-cli]
+  (:require [evoclj.context.compression.cli :as context-cli]
             [evoclj.kernel.error :as err]))
 
 (defn compress!
