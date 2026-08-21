@@ -36,17 +36,20 @@
             [evoclj.cli.eval-inspect :as eval-inspect]
             [evoclj.cli.evolution :as evolution]
             [evoclj.cli.genome :as genome]
+            [evoclj.cli.mcp :as mcp]
             [evoclj.cli.model :as model]
             [evoclj.cli.promotion :as promotion]
             [evoclj.cli.recovery :as recovery]
             [evoclj.cli.session :as session]
+            [evoclj.cli.skill :as skill]
+            [evoclj.cli.source :as source]
             [evoclj.kernel.error :as err]))
 
 ;; --- the hand-rolled option parser -------------------------------------------
 
 (def ^:private flag-options
   "Options that take no value (present => true)."
-  #{:pretty :evolve :no-promote :tree})
+  #{:pretty :evolve :no-promote :tree :all})
 
 (defn- option-value?
   "True when the next token can be this option's value."
@@ -104,7 +107,16 @@
    ["context" "recompress"]   {:fn context/recompress! :arity 0}
    ["context" "loop"]         {:fn context/loop! :arity 0}
    ["context" "inspect"]      {:fn context/inspect! :arity 0}
-   ["mcp" "refresh-providers"] {:fn session/mcp-refresh-providers! :arity 0}})
+   ["source" "list"]          {:fn source/list! :arity 0}
+   ["source" "inspect"]       {:fn source/inspect! :arity 1}
+   ["source" "refresh"]       {:fn source/refresh! :arity 0}
+   ["skill" "list"]           {:fn skill/list! :arity 0}
+   ["skill" "inspect"]        {:fn skill/inspect! :arity 1}
+   ["skill" "validate"]       {:fn skill/validate! :arity 1}
+   ["skill" "vendor"]         {:fn skill/vendor! :arity 1}
+   ["mcp" "status"]           {:fn mcp/status! :arity 0}
+   ["mcp" "diagnose"]         {:fn mcp/diagnose! :arity 1}
+   ["mcp" "ping"]             {:fn mcp/ping! :arity 1}})
 
 (defn- command-for
   "The command entry for a positional vector, or nil."

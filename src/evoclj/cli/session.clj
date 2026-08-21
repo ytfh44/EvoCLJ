@@ -879,7 +879,7 @@
            (filter #(= :intent/denied (:event/type %)) events))}))
 
 (defn mcp-refresh-providers!
-  "evoclj mcp refresh-providers
+  "evoclj mcp refresh-providers (deprecated — use source refresh).
 
   Force a schema refresh for all registered MCP providers in the
   current host config. Each MCP bridge provider's cached
@@ -887,7 +887,17 @@
   execute-request! re-fetches the descriptor from the remote server
   (when :schema/refresh-interval-ms is configured).
 
-  Returns a map of refreshed tool ids to their current descriptors."
+  Returns a map of refreshed tool ids to their current descriptors.
+  Kept for backwards compatibility of direct calls; CLI now prefers
+  generic source refresh."
   [opts]
-  (let [system (build-system opts)]
-    (mcp-bridge/refresh-all-mcp-providers!)))
+  (let [system (build-system opts)
+        legacy (mcp-bridge/refresh-all-mcp-providers!)
+        reg (:provider/registry system)
+        from-registry (when reg
+                        (into {}
+                              (keep (fn [[tool-id {:keys [descriptor]}]]
+                                      (when (= :remote (:effect descriptor))
+                                        [tool-id descriptor]))
+                                    @reg)))]
+    (merge legacy from-registry)))
