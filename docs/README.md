@@ -16,6 +16,7 @@ winners through an atomic compare-and-set.
 | [`roadmap.md`](roadmap.md) | Feature roadmap across five directions (evolution, evaluation, runtime, ops, security) with completion state | You want the current feature status and the future backlog |
 | [`semantic-verification.md`](semantic-verification.md) | Formal verification of the seven core semantic claims (no mocks, real namespaces, re-runnable scripts) | You are changing core invariants or auditing safety |
 | [`performance-baseline.md`](performance-baseline.md) | Measured benchmark baselines and regression ceilings (component) | You are optimizing or changing hot paths |
+| [`invariants.md`](invariants.md) | Shared invariant checklist: inherited Global Constraints GC-01–GC-24 plus repair invariants INV-01–INV-09, each with incident evidence, violation consequences, and its guarding test/script | You are implementing or adversarially reviewing a repair work item (PROTOCOL-B step 5) |
 
 ## Suggested reading order
 
