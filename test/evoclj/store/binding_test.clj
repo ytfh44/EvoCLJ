@@ -130,10 +130,10 @@
 (deftest migration-creates-session-bindings-table
   (let [db (fresh-db)
         tables (set (map :name (sqlite/query db ["SELECT name FROM sqlite_master WHERE type='table'"])))]
-    (testing "session_bindings table exists after migrate! to latest (5)"
+    (testing "session_bindings table exists after migrate! to latest (6)"
       (is (contains? tables "session_bindings"))
-      (is (= 5 migrate/latest-version))
-      (is (= 5 (:version (migrate/migrate! db))) "migrate is noop on fresh db"))
+      (is (= 6 migrate/latest-version))
+      (is (= 6 (:version (migrate/migrate! db))) "migrate is noop on fresh db"))
     (testing "columns exist"
       (let [cols (set (map :name (sqlite/query db ["PRAGMA table_info(session_bindings)"])))]
         (doseq [c ["id" "session_id" "binding_type" "logical_id" "revision_id" "bundle_id" "state" "activated_at" "deactivated_at" "metadata_edn"]]

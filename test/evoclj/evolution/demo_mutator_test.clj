@@ -217,8 +217,10 @@
     (testing "config/demo-profile loads into a valid envelope"
       (is (some? c))
       (is (contains? (:config/profiles c) :demo)))
-    (testing "resolve-profile :demo applies the demo's section overrides"
-      (is (= {:max-candidates 3} (:config/budget r))))
+    (testing "resolve-profile :demo applies the demo's section overrides
+              (the demo cap merges over the base budget keys)"
+      (is (= {:max-candidates 3 :max-cost 0.0 :max-tokens 0}
+             (:config/budget r))))
     (testing "an unknown profile still fails closed"
       (is (= :config/profile-not-found
              (:error/type (ex-data (try (config/resolve-profile c :nope)

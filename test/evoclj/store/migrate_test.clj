@@ -10,7 +10,10 @@
   present AND actually enforced (the connection pragma is on), and the
   append-only event triggers reject updates/deletes. Step 5: a
   schema-version mismatch fails cleanly with a typed
-  :store/schema-mismatch error and changes nothing.
+  :store/schema-mismatch error and changes nothing. Step 6: the B0
+  version-reconciliation matrix — databases stamped by the previous
+  build (5) with and without the 006 record, a version-3 upgrade, and
+  a database stamped ahead of the code.
 
   Temp databases live in the system temp directory (created via
   java.nio.file.Files/createTempFile) and are deleted after each test;
@@ -81,6 +84,11 @@
   (-> (sqlite/query db ["SELECT value FROM meta WHERE key = ?" key])
       first
       :value))
+
+(defn- set-meta!
+  "Overwrite the value recorded for `key` in the meta table."
+  [db key value]
+  (sqlite/exec! db ["UPDATE meta SET value = ? WHERE key = ?" value key]))
 
 (defn- insert!
   "Insert `row` into `table` on a fresh connection with FK pragma on."
@@ -196,13 +204,13 @@
 
 (deftest fresh-database-applies-all-migrations
   (let [db (sqlite/spec (temp-db-path))]
-    (is (= {:status :applied :version 5} (migrate/migrate! db)))
-    (is (= 5 (migrate/current-version db)))
+    (is (= {:status :applied :version 6} (migrate/migrate! db)))
+    (is (= 6 (migrate/current-version db)))
     (testing "all 16 normative tables exist"
       (is (every? (table-names db) expected-tables)))
     (testing "schema version and applied migrations are recorded in meta"
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
-      (is (= "5" (meta-value db "schema_version")))
+      (is (= "6" (meta-value db "schema_version")))
       (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql"
              (meta-value db "applied_migrations"))))
     (testing "003-routing.sql added the session routing audit columns"
@@ -218,10 +226,10 @@
 (deftest second-apply-is-a-safe-noop
   (let [db (fresh-db)
         tables-before (table-names db)]
-    (is (= {:status :noop :version 5} (migrate/migrate! db)))
+    (is (= {:status :noop :version 6} (migrate/migrate! db)))
     (testing "no duplicate/schema damage"
       (is (= tables-before (table-names db)))
-      (is (= "5" (meta-value db "schema_version")))
+      (is (= "6" (meta-value db "schema_version")))
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
       ;; the migrated schema still works
       (insert-generation! db g1 {})
@@ -366,6 +374,97 @@
       (is (= :missing-migration-record (:reason (ex-data e)))))))
 
 ;; ============================================================================
+;; Step 6 — the version-reconciliation matrix (B0)
+;;
+;; latest-version tracks the six migration files on the classpath. The
+;; interesting databases are the ones stamped by the PREVIOUS build
+;; (schema_version = 5): one whose applied record already covers 006
+;; (the field shape — the incremental branch finds no pending work and
+;; merely brings the version record forward), and a true legacy one
+;; whose applied record stops at 005. Before the bump that legacy shape
+;; hit the version==latest verify branch and failed with
+;; :missing-migration-record; post-bump the incremental branch is
+;; reachable at latest and applies ONLY 006.
+;; ============================================================================
+
+(deftest stamped-five-with-full-record-is-brought-forward
+  ;; Field shape: migrated under the previous build (stamped 5, all six
+  ;; files applied and recorded). Rewind only the version stamp.
+  (let [db (fresh-db)
+        _ (set-meta! db "schema_version" "5")]
+    (is (= {:status :noop :version 6} (migrate/migrate! db)))
+    (testing "the version record was brought forward to 6"
+      (is (= "6" (meta-value db "schema_version"))))
+    (testing "the schema was not touched"
+      (is (every? (table-names db) expected-tables)))))
+
+(deftest true-legacy-stamped-five-applies-pending-006
+  ;; True legacy shape: stamped 5 but the applied record stops at 005 —
+  ;; session_bindings never made it onto disk. Regression anchor: this
+  ;; exact shape used to throw :missing-migration-record; now 006
+  ;; applies additively.
+  (let [db (fresh-db)
+        _ (insert-generation! db g1 {})
+        _ (sqlite/exec! db ["DROP TABLE session_bindings"])
+        _ (set-meta! db "applied_migrations"
+                     "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql")
+        _ (set-meta! db "schema_version" "5")
+        result (migrate/migrate! db)]
+    (testing "only 006 runs; status :applied at version 6"
+      (is (= {:status :applied :version 6} result)))
+    (testing "session_bindings exists again"
+      (is (contains? (table-names db) "session_bindings")))
+    (testing "the records agree with the classpath"
+      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql"
+             (meta-value db "applied_migrations")))
+      (is (= "6" (meta-value db "schema_version"))))
+    (testing "pre-existing data survives the additive upgrade"
+      (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
+    (testing "a follow-up apply is a verified no-op"
+      (is (= {:status :noop :version 6} (migrate/migrate! db))))))
+
+(deftest version-three-database-upgrades-additively-through-six
+  ;; A version-3 database predates the enrichment store, deploy log,
+  ;; and session bindings entirely: rewinding those tables plus the
+  ;; meta records simulates one. 004-006 apply additively.
+  (let [db (fresh-db)
+        _ (insert-generation! db g1 {})
+        _ (sqlite/exec! db ["DROP TABLE enrichments"])
+        _ (sqlite/exec! db ["DROP TABLE deployment_decisions"])
+        _ (sqlite/exec! db ["DROP TABLE session_bindings"])
+        _ (set-meta! db "applied_migrations"
+                     "001-init.sql 002-memory.sql 003-routing.sql")
+        _ (set-meta! db "schema_version" "3")
+        result (migrate/migrate! db)]
+    (testing "004-006 run; status :applied at version 6"
+      (is (= {:status :applied :version 6} result)))
+    (testing "the three later tables are back"
+      (let [tables (table-names db)]
+        (is (contains? tables "enrichments"))
+        (is (contains? tables "deployment_decisions"))
+        (is (contains? tables "session_bindings"))))
+    (testing "pre-existing rows survive untouched"
+      (let [row (first (sqlite/query db
+                                     ["SELECT id FROM generations WHERE id = 'generation-1'"]))]
+        (is (= g1 (:id row)))))
+    (testing "the records agree with the classpath"
+      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql"
+             (meta-value db "applied_migrations")))
+      (is (= "6" (meta-value db "schema_version"))))))
+
+(deftest version-seven-ahead-of-code-fails-cleanly
+  ;; Exactly one past the new latest-version: still never guessed at.
+  (let [db (fresh-db)
+        _ (set-meta! db "schema_version" "7")
+        e (migrate-error db)]
+    (is (some? e))
+    (is (= :store/schema-mismatch (:error/type (ex-data e))))
+    (is (= :version-ahead (:reason (ex-data e))))
+    (is (= 7 (:actual (ex-data e))))
+    (testing "the failed attempt changed nothing"
+      (is (= "7" (meta-value db "schema_version"))))))
+
+;; ============================================================================
 ;; component — an existing version-1 database upgrades additively
 ;; ============================================================================
 
@@ -407,12 +506,12 @@
                                      'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
                                      'created', '2025-01-01T00:00:00Z')"])
         result (migrate/migrate! db)]
-    (testing "only the pending migration runs; the version moves to 5"
-      (is (= {:status :applied :version 5} result)))
+    (testing "only the pending migration runs; the version moves to 6"
+      (is (= {:status :applied :version 6} result)))
     (testing "the old session row survives untouched with NULL routing columns"
       (let [row (first (sqlite/query db ["SELECT routing_deployment_version, routing_bucket
                                           FROM sessions WHERE id = 'old-session'"]))]
         (is (nil? (:routing_deployment_version row)))
         (is (nil? (:routing_bucket row)))))
     (testing "a third apply is a verified no-op"
-      (is (= {:status :noop :version 5} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 6} (migrate/migrate! db))))))

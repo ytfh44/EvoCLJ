@@ -20,7 +20,7 @@
 
 (def latest-version
   "The schema version this codebase knows how to migrate to."
-  5)
+  6)
 
 (def ^:private version-key "schema_version")
 (def ^:private applied-key "applied_migrations")

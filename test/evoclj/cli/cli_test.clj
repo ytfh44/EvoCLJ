@@ -915,14 +915,14 @@
   (let [dir (temp-dir "evoclj-cli-config-")]
     (testing "no config source — the base evolution budget-profile cap stays"
       (let [cfg (cli-session/build-config {:state-dir dir})]
-        (is (= {:max-candidates 3}
+        (is (= {:max-candidates 3 :max-cost 0.0 :max-tokens 0}
                (get-in cfg [:evolution/system :budget-profile])))))
     (testing ":config opts as a map validates through load-config and feeds
               the :config/budget section into the host budget-profile"
       (let [cfg (cli-session/build-config {:state-dir dir
                                        :config {:config/budget {:max-candidates 7}}})]
         (is (= 7 (get-in cfg [:evolution/system :budget-profile :max-candidates])))
-        (is (= {:max-candidates 7}
+        (is (= {:max-candidates 7 :max-cost 0.0 :max-tokens 0}
                (get-in cfg [:evolution/system :budget-profile])))))
     (testing ":config opts as an EDN string parses through load-config"
       (let [cfg (cli-session/build-config {:state-dir dir
