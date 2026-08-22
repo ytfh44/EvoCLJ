@@ -43,14 +43,19 @@
    [:options {:optional true} :map]])
 
 (def ModelCallOutputSchema
-  "The model-call output contract: text output and usage counters."
+  "The model-call output contract: text output and usage counters.
+   Usage also carries an optional :model-reasoning-tokens int
+   (provider-reported reasoning token count, may be 0): the shared
+   dialect/provider-result constructor always emits the key while
+   legacy results predate it."
   [:map {:closed true}
    [:model/output [:map {:closed false}
                    [:text string?]
                    [:reasoning {:optional true} string?]]]
    [:usage [:map {:closed true}
             [:model-input-tokens :int]
-            [:model-output-tokens :int]]]
+            [:model-output-tokens :int]
+            [:model-reasoning-tokens {:optional true} :int]]]
    [:model-cost-units {:optional true} double?]])
 
 (defn- descriptor-for
