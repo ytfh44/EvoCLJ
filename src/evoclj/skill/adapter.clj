@@ -35,7 +35,8 @@
             [evoclj.context.offer :as offer]
             [evoclj.context.binding :as ctx-binding]
             [evoclj.store.binding :as store-binding]
-            [evoclj.store.cas :as cas])
+            [evoclj.store.cas :as cas]
+            [evoclj.support.failpoint :as fault])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file Files LinkOption Path Paths)
            (java.nio.file.attribute FileAttribute)))
@@ -130,19 +131,31 @@
 (defn derive-and-publish!
   "Snapshot skill-dir to CAS, parse SKILL.md from snapshot, validate, derive bundle, publish atomically.
   Returns {:skill/name ... :tree/id ... :bundle bundle :frontmatter ... :body ...}
-  Throws on strict validation failure. In lenient mode, caller decides to skip or throw."
-  [skill-dir cas registry mode]
-  (let [dir-name (skill-name-for-dir skill-dir)
-        {:keys [tree/id manifest] :as snap} (snapshot-skill-dir! skill-dir cas)
-        parsed (parse-skill-from-snapshot cas manifest mode)
-        fm (:frontmatter parsed)
-        skill-name (or (:name fm) dir-name)
-        ;; normalize frontmatter for surface: ensure name present
-        fm-with-name (if (:name fm) fm (assoc fm :name skill-name))
-        bundle (surface/skill->bundle {:skill/name skill-name :tree/id id :frontmatter fm-with-name :body (:body parsed) :cas cas})]
-    ;; atomic publish via environment registry
-    (bundle/publish-bundle! registry bundle)
-    {:skill/name skill-name :tree/id id :manifest manifest :parsed parsed :frontmatter fm-with-name :body (:body parsed) :bundle bundle :snapshot snap}))
+  Throws on strict validation failure. In lenient mode, caller decides to skip or throw.
+
+  Optional 5th arg opts may carry {:failpoints {...}} seams
+  (:after-snapshot-tree / :after-parse / :after-bundle-publish) — see
+  evoclj.support.failpoint. A hook throw propagates to the caller."
+  ([skill-dir cas registry mode]
+   (derive-and-publish! skill-dir cas registry mode nil))
+  ([skill-dir cas registry mode {:as opts}]
+   (let [dir-name (skill-name-for-dir skill-dir)
+         {:keys [tree/id manifest] :as snap} (snapshot-skill-dir! skill-dir cas)]
+     ;; T2 seam: tree snapshotted to CAS, not yet parsed
+     (fault/trigger! opts :after-snapshot-tree)
+     (let [parsed (parse-skill-from-snapshot cas manifest mode)]
+       ;; T2 seam: SKILL.md parsed from snapshot; bundle not yet derived/published
+       (fault/trigger! opts :after-parse)
+       (let [fm (:frontmatter parsed)
+             skill-name (or (:name fm) dir-name)
+             ;; normalize frontmatter for surface: ensure name present
+             fm-with-name (if (:name fm) fm (assoc fm :name skill-name))
+             bundle (surface/skill->bundle {:skill/name skill-name :tree/id id :frontmatter fm-with-name :body (:body parsed) :cas cas})]
+         ;; atomic publish via environment registry
+         (bundle/publish-bundle! registry bundle)
+         ;; T2 seam: bundle published into the registry
+         (fault/trigger! opts :after-bundle-publish)
+         {:skill/name skill-name :tree/id id :manifest manifest :parsed parsed :frontmatter fm-with-name :body (:body parsed) :bundle bundle :snapshot snap})))))
 
 ;; ---------------------------------------------------------------------------
 ;; SkillSource LiveSource

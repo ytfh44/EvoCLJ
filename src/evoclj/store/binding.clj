@@ -46,7 +46,8 @@
             [evoclj.kernel.error :as err]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
-            [evoclj.store.sqlite :as sqlite])
+            [evoclj.store.sqlite :as sqlite]
+            [evoclj.support.failpoint :as fault])
   (:import (java.time Instant)
            (java.time.format DateTimeFormatter)
            (java.util Date UUID)))
@@ -429,7 +430,10 @@
    (when-not bundle
      (throw (err/error :store/binding-invalid "bundle/offer required" {:bundle bundle})))
    (let [opts (if (and (map? opts) (not (contains? opts :registry)) (not (contains? opts :cas))
-                       (not (contains? opts :mount-registry)) (not (contains? opts :context-store)))
+                       (not (contains? opts :mount-registry)) (not (contains? opts :context-store))
+                       ;; T2: an opts map carrying failpoint seams is a
+                       ;; legitimate opts map — do not normalize it away
+                       (not (contains? opts :failpoints)))
                 (if (instance? clojure.lang.Atom opts) {:registry opts} {})
                 opts)
          registry (:registry opts)
@@ -465,12 +469,21 @@
                                         "binding already active for this session + logical_id"
                                         {:session/id (types/session-id session-id) :logical/id logical-id}))
                       (throw e)))))]
+       ;; T2 seam: durable row inserted; sits outside every catch around
+       ;; the insert, so a hook throw propagates to the caller unchanged
+       (fault/trigger! opts :after-db-insert)
        (publish-runtime! bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
+       ;; T2 seam: runtime mount/context state published
+       (fault/trigger! opts :after-publish-runtime)
+       ;; T2 seam: last point before the auditable event append
+       (fault/trigger! opts :before-event-append)
        (try
          (append-binding-event! db session-id :binding/activated
                                 {:logical/id logical-id :revision/id rev :bundle/id bid :binding/id id})
          (catch Exception e
            (throw e)))
+       ;; T2 seam: event appended successfully
+       (fault/trigger! opts :after-event-append)
        (get-binding db session-id logical-id)))))
 
 (defn reload!
@@ -521,10 +534,18 @@
          (when-not (= 1 cnt)
            (throw (err/error :store/binding-not-found "no active binding for this session + logical_id"
                              {:session/id (types/session-id session-id) :logical/id logical-id})))
+         ;; T2 seam: durable row updated (revision/bundle/metadata)
+         (fault/trigger! opts :after-db-insert)
          (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
          (publish-runtime! new-bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
+         ;; T2 seam: runtime state republished at the new revision
+         (fault/trigger! opts :after-publish-runtime)
+         ;; T2 seam: last point before the auditable event append
+         (fault/trigger! opts :before-event-append)
          (append-binding-event! db session-id :binding/reloaded
                                 {:logical/id logical-id :from-revision (:revision/id old-binding) :to-revision new-rev :bundle/id new-bid})
+         ;; T2 seam: reloaded event appended successfully
+         (fault/trigger! opts :after-event-append)
          (get-binding db session-id logical-id))))))
 
 (defn deactivate!
@@ -559,6 +580,8 @@
        (throw (err/error :store/binding-not-found "no active binding to deactivate"
                          {:session/id (types/session-id session-id) :logical/id logical-id})))
      (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
+     ;; T2 seam: runtime state removed (row already flipped to inactive)
+     (fault/trigger! opts :after-unpublish)
      (append-binding-event! db session-id :binding/deactivated
                             {:logical/id logical-id})
      (let [row (first (sqlite/query db ["SELECT * FROM session_bindings WHERE session_id = ? AND logical_id = ? ORDER BY activated_at DESC LIMIT 1" sid lid]))]

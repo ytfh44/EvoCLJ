@@ -8,7 +8,8 @@
   Currently supports FakeSource and StaticSource only."
   (:require [evoclj.environment.revision :as rev]
             [evoclj.environment.source :as src]
-            [evoclj.kernel.error :as err]))
+            [evoclj.kernel.error :as err]
+            [evoclj.support.failpoint :as fault]))
 
 (declare refresh! refresh-async!)
 
@@ -81,8 +82,17 @@
   snapshot)
 
 (defn refresh!
-  ([registry] (refresh! registry nil))
+  ([registry]
+   (refresh! registry nil))
   ([registry source-id]
+   ;; T2 failpoint seams: pass an opts map, e.g.
+   ;; {:failpoints {:after-snapshot (fn [] ...)}} — see
+   ;; evoclj.support.failpoint. The pipeline below deliberately stays
+   ;; inside this fn's own degradation catch (unchanged by T2), so an
+   ;; injected fault surfaces as {:status :error ...} with the registry
+   ;; marked :degraded rather than as a thrown exception.
+   (refresh! registry source-id nil))
+  ([registry source-id {:as opts}]
    (let [lock (registry-lock registry)]
      (locking lock
        (swap! registry assoc :dirty? true)
@@ -92,42 +102,48 @@
          (when-not source
            (throw (err/error :environment/no-source "no source registered" {:source-id source-id})))
          (try
-           (let [snapshot (src/snapshot! source)
-                 _ (validate-snapshot snapshot)
-                 sid (:source/id snapshot)
-                 payload (:payload snapshot)
-                 candidate-id (rev/payload->id payload)
-                 cur (:current @registry)
-                 cur-id (:revision/id cur)]
-             (if (and cur-id (= candidate-id cur-id))
-               (do
-                 (swap! registry assoc :status :ok :dirty? false :last-refresh-error nil)
-                 {:status :noop :revision cur})
-               (let [prev @registry
-                     prev-current (:current prev)
-                     prev-seq (:seq prev)
-                     next-seq (inc prev-seq)
-                     new-rev (rev/make-revision sid payload next-seq)]
-                 (loop []
-                   (let [cur-state @registry
-                         cur-seq (:seq cur-state)]
-                     (if (not= cur-seq prev-seq)
-                       (let [new-cur (:current cur-state)
-                             new-id (:revision/id new-cur)]
-                         (if (= candidate-id new-id)
-                           (do
-                             (swap! registry assoc :status :ok :dirty? false :last-refresh-error nil)
-                             {:status :noop :revision new-cur})
-                           {:status :noop :revision new-cur}))
-                       (let [new-state (-> cur-state
-                                           (assoc :current new-rev :last-good new-rev :seq next-seq :status :ok :dirty? false :last-refresh-error nil)
-                                           (update :history (fnil conj []) new-rev))]
-                         (if (compare-and-set! registry cur-state new-state)
-                           (do
-                             (doseq [[_ listener] (:listeners cur-state)]
-                               (try (listener {:prev prev-current :curr new-rev}) (catch Exception _ nil)))
-                             {:status :published :revision new-rev})
-                           (recur)))))))))
+           (let [snapshot (src/snapshot! source)]
+             ;; T2 seam: snapshot captured, not yet validated
+             (fault/trigger! opts :after-snapshot)
+             (let [_ (validate-snapshot snapshot)]
+               ;; T2 seam: snapshot valid; candidate not yet derived/published
+               (fault/trigger! opts :after-validate)
+               (let [sid (:source/id snapshot)
+                     payload (:payload snapshot)
+                     candidate-id (rev/payload->id payload)
+                     cur (:current @registry)
+                     cur-id (:revision/id cur)]
+                 (if (and cur-id (= candidate-id cur-id))
+                   (do
+                     (swap! registry assoc :status :ok :dirty? false :last-refresh-error nil)
+                     {:status :noop :revision cur})
+                   (let [prev @registry
+                         prev-current (:current prev)
+                         prev-seq (:seq prev)
+                         next-seq (inc prev-seq)
+                         new-rev (rev/make-revision sid payload next-seq)]
+                     (loop []
+                       (let [cur-state @registry
+                             cur-seq (:seq cur-state)]
+                         (if (not= cur-seq prev-seq)
+                           (let [new-cur (:current cur-state)
+                                 new-id (:revision/id new-cur)]
+                             (if (= candidate-id new-id)
+                               (do
+                                 (swap! registry assoc :status :ok :dirty? false :last-refresh-error nil)
+                                 {:status :noop :revision new-cur})
+                               {:status :noop :revision new-cur}))
+                           (let [new-state (-> cur-state
+                                               (assoc :current new-rev :last-good new-rev :seq next-seq :status :ok :dirty? false :last-refresh-error nil)
+                                               (update :history (fnil conj []) new-rev))]
+                             (if (compare-and-set! registry cur-state new-state)
+                               (do
+                                 ;; T2 seam: CAS swap done; listeners not yet notified
+                                 (fault/trigger! opts :mid-publish)
+                                 (doseq [[_ listener] (:listeners cur-state)]
+                                   (try (listener {:prev prev-current :curr new-rev}) (catch Exception _ nil)))
+                                 {:status :published :revision new-rev})
+                               (recur)))))))))))
            (catch Throwable e
              (let [ed (err/error-data e)]
                (swap! registry assoc :status :degraded :dirty? true :last-refresh-error ed)
