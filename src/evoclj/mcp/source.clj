@@ -172,9 +172,11 @@
     (let [args (:args authorized-request)
           mcp-name (or (:mcp/name descriptor) (name (:tool/id descriptor)))
           connection-id (:mcp/connection-id descriptor)
-          server-id (:mcp/server-id descriptor)]
+          server-id (:mcp/server-id descriptor)
+          ;; WO-M3: hoisted so the failure-reporting catch below can see it
+          shared? (and manager conn-key)]
       (try
-        (let [managed (if (and manager conn-key)
+        (let [managed (if shared?
                         (let [entry (manager/pool-get manager conn-key)
                               c (:client entry)]
                           ;; WO-M1: get-or-open! returns the managed record
@@ -213,29 +215,42 @@
             (when (and manager conn-key)
               (try (manager/set-metrics manager conn-key #(-> % (update :call-count (fnil inc 0)) (assoc :latency-ms 0)))
                    (catch Exception _ nil)))
+            ;; WO-M3 failure reporting, success side: refresh health.last-ok
+            (when shared?
+              (try (manager/mark-ok manager conn-key) (catch Exception _ nil)))
             (update edn-result :audit merge {:mcp/tool-name mcp-name
                                              :mcp/connection-id connection-id
                                              :mcp/server-id server-id})))
         (catch Throwable ex
           (if (= :mcp/tool-error (:error/type (ex-data ex)))
             (throw ex)
-            (let [category (:error/type (mcp-client/classify-mcp-error ex))]
-              (if (or (= category :mcp/transport-error)
-                      (= category :mcp/protocol-error))
-                (throw (err/error :provider/transient-error
-                                  "MCP provider call-tool failed"
-                                  {:tool-name mcp-name
-                                   :mcp/connection-id connection-id
-                                   :mcp/server-id server-id
-                                   :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
-                                   :cause (err/sanitize ex)}))
-                (throw (err/error :provider/execution-failed
-                                  "MCP provider call-tool failed"
-                                  {:tool-name mcp-name
-                                   :mcp/connection-id connection-id
-                                   :mcp/server-id server-id
-                                   :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
-                                   :cause (err/sanitize ex)}))))))))))
+            (do
+              ;; WO-M3 failure reporting, failure side: transport-family
+              ;; failure on the shared pooled connection demotes the entry
+              ;; so the next caller heals instead of reusing a dead client.
+              ;; err-data is display-safe (sanitized + redacted, INV-01).
+              (when (and shared? (manager/broken-worthy? ex))
+                (try
+                  (manager/mark-broken manager conn-key
+                                       (manager/broken-err-data ex transport-config))
+                  (catch Exception _ nil)))
+              (let [category (:error/type (mcp-client/classify-mcp-error ex))]
+                (if (or (= category :mcp/transport-error)
+                        (= category :mcp/protocol-error))
+                  (throw (err/error :provider/transient-error
+                                    "MCP provider call-tool failed"
+                                    {:tool-name mcp-name
+                                     :mcp/connection-id connection-id
+                                     :mcp/server-id server-id
+                                     :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
+                                     :cause (err/sanitize ex)}))
+                  (throw (err/error :provider/execution-failed
+                                    "MCP provider call-tool failed"
+                                    {:tool-name mcp-name
+                                     :mcp/connection-id connection-id
+                                     :mcp/server-id server-id
+                                     :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
+                                     :cause (err/sanitize ex)})))))))))))
 
 (defn make-tool-entry
   "Create an immutable ToolEntry from a stable descriptor and manager.

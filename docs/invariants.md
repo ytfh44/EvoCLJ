@@ -75,30 +75,39 @@ A value used for human-facing display/redaction must never simultaneously
 serve as a connection-pool identity key or as the configuration handed to
 an executing component. Each role gets its own derivation.
 
-- **Motivation.** `evoclj.mcp.manager/normalize-transport`
-  (`src/evoclj/mcp/manager.clj:9-15`) replaces `:env`/`:headers` values
-  with the literal `"[REDACTED]"`. That single redacting function is then
-  reused for three incompatible roles: (a) it produces the config actually
-  passed to `mcp-client/open!` (`src/evoclj/provider/mcp_bridge.clj:340,342`;
-  `src/evoclj/mcp/source.clj:109,182,186`) — i.e. the *execution input*;
+- **Motivation.** `evoclj.mcp.manager`'s transport normalizer (the
+  pre-M2 `normalize-transport`, renamed `redact-transport` at
+  `src/evoclj/mcp/manager.clj:39`) replaces `:env`/`:headers` values
+  with the literal `"[REDACTED]"`. That single redacting function was
+  then reused for three incompatible roles: (a) it produced the config
+  actually passed to `mcp-client/open!`
+  (`src/evoclj/provider/mcp_bridge.clj:346,347`;
+  `src/evoclj/mcp/source.clj:110,188,190`) — i.e. the *execution input*;
   (b) `transport-identity`/`connection-key`
-  (`src/evoclj/mcp/manager.clj:20-27`) derive the *pool identity* from the
-  redacted form, so two transports differing only in env/header content
-  collapse onto one connection key; (c) the same output is embedded into
-  error payloads (`src/evoclj/provider/mcp_bridge.clj:375,382`;
-  `src/evoclj/mcp/source.clj:228,235`) as the *diagnostic representation*.
+  (`src/evoclj/mcp/manager.clj:93,112`) derived the *pool identity*
+  from the redacted form, so two transports differing only in
+  env/header content collapsed onto one connection key; (c) the same
+  output was embedded into error payloads
+  (`src/evoclj/provider/mcp_bridge.clj:395,402`;
+  `src/evoclj/mcp/source.clj:245,252`) as the *diagnostic
+  representation*.
 - **Violation consequence.** Two MCP servers whose configs differ only in
   credentials share one pooled client (wrong server silently reused), or a
   connection is opened against redacted placeholder values instead of the
   real environment; error reports meanwhile look correct, so nothing in
   the logs explains the misrouting.
-- **Enforcement.** To be closed by WO-M2 (split display-redact vs
-  identity-fingerprint; `open!` receives the real config). Mechanical
-  check after M2: targeted tests in the `evoclj.mcp.manager` /
-  `evoclj.provider.mcp-bridge` test namespaces assert that configs
-  differing only in `:env`/`:headers` yield *different* connection keys
-  while diagnostic payloads stay redacted; a grep audit must show no
-  production call site feeds `normalize-transport` output into `open!`.
+- **Enforcement.** Landed by WO-M2 (split display-redact vs
+  identity-fingerprint; `open!` receives the real config): targeted
+  tests in `evoclj.mcp.manager-identity-test` /
+  `evoclj.provider.mcp-bridge-test` assert that configs differing only
+  in `:env`/`:headers` yield *different* connection keys while
+  diagnostic payloads stay redacted, and a grep audit shows no
+  production call site feeds `redact-transport` output into `open!`.
+  NOTE the M2 key-format change: `connection-key` remains
+  `[type cid ti cf]`, but `ti` now carries per-field stable sha256
+  fingerprints of the secret fields (not whole-value "[REDACTED]"
+  placeholders) and `cf` is a stable sha256 digest of `:auth/ref` —
+  safe without migration because the pool is purely in-memory state.
   Adversarial reviewers attack this tuple with at least one
   differ-only-in-secret counterexample (PROTOCOL-B step 4).
 
