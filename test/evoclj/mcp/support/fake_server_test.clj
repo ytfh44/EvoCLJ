@@ -13,7 +13,11 @@
   against that mode (DEVIATION RECORD 3 in fake_server.clj).
 
   Wait discipline: every deref/join/poll in this file is bounded and
-  every bound is <= 10s (WO-T1 rule). infinite-cursor is probed ONLY
+  every bound is <= 10s (WO-T1 rule), with ONE dispatcher-approved
+  exception: orphan audits may use the baseline-diff helper's 15s poll
+  + 3s second-chance windows under sustained load (DEVIATION RECORD 4
+  in fake_server.clj; evidence docs/codebase/m1-full2.txt).
+  infinite-cursor is probed ONLY
   with bounded raw stdio JSON-RPC frames — SDK 2.0.0's listTools()
   auto-follows cursors internally, so even ONE production listing call
   is unbounded against that mode (see DEVIATION RECORD 3 in
@@ -185,15 +189,27 @@
 
 (deftest stop-kills-process-and-leaves-no-orphans
   (testing "stop! terminates the supervised process; no fake-server descendants survive"
-    (let [srv (fake/start! {:mode :ok :tool-count 1})]
+    ;; 负载鲁棒性加固 (M1-full2)：基线差集孤儿审计。pre-existing 在本测试
+    ;; spawn 任何进程之前采样；最终断言只统计"新增"匹配。为什么安全：
+    ;; m1-full2.txt 显示一个先于本套件残留的 node.exe 进程（同一 stale PID
+    ;; 31348）熬过了全部 stop!/kill 等待窗（Windows 异步终止 >5s/8s），
+    ;; 击穿了全套件所有孤儿断言（连 real-server 的不同 pattern 也命中——
+    ;; Windows 下 JDK 常不暴露 commandLine，审计退化为"任意存活 node 后代"）。
+    ;; 把它记在本测试头上检测不到本测试拥有的任何缺陷；基线差集恢复原语义
+    ;; 对象"本测试收割自己生成的整棵进程树"。等待窗 5000ms -> 15000ms，
+    ;; 另加一次有界 3s 二次机会复查以容忍 Windows 异步 kill 滞后
+    ;; (fake_server.clj DEVIATION RECORD 4, dispatcher-approved)。
+    (let [pre-existing (fake/processes-matching-pids
+                        fake/fake-server-process-pattern)
+          srv (fake/start! {:mode :ok :tool-count 1})]
       (try
         (is (fake/alive? srv) "supervised process alive right after start!")
         (finally
           (fake/stop! srv)))
       (is (not (fake/alive? srv)) "process dead after stop!")
-      (is (empty? (fake/await-no-process-matching
-                   fake/fake-server-process-pattern 5000))
-          "no fake-server node processes remain (no orphans)"))))
+      (is (empty? (fake/await-no-new-process-matching
+                   fake/fake-server-process-pattern pre-existing))
+          "no NEW fake-server node processes remain (this test's own tree fully reaped; pre-suite residue excluded by baseline diff)"))))
 
 ;; ---------------------------------------------------------------------------
 ;; slow knob — bounded-delay injection proof (approved deviation)
@@ -411,7 +427,14 @@
 
 (deftest crash-after-init-transport-error-then-clean-process-state
   (testing "crash-after-init: open! succeeds, next call fails typed with transport-timeout evidence, and no fake-server process survives close!"
-    (let [audit (atom nil)]
+    ;; 基线差集孤儿审计（同 stop-kills-process-and-leaves-no-orphans 的
+    ;; M1-full2 论证）：pre-existing 先于本测试采样，断言只看新增匹配；
+    ;; 等待窗 8000ms -> 15000ms + 一次有界 3s 二次机会（容忍 Windows
+    ;; 异步 kill 滞后；DEVIATION RECORD 4）。语义对象不变：本用例的
+    ;; client child 与 supervised twin 都被收割。
+    (let [pre-existing (fake/processes-matching-pids
+                        fake/fake-server-process-pattern)
+          audit (atom nil)]
       (fake/with-fake-server [srv {:mode :crash-after-init}]
         (let [managed (mcp/open! (:config srv))]
           (try
@@ -438,10 +461,10 @@
             (finally
               (mcp/close! managed)))))
       ;; after BOTH the client teardown and the wrapper stop!:
-      (reset! audit (fake/await-no-process-matching
-                     fake/fake-server-process-pattern 8000))
+      (reset! audit (fake/await-no-new-process-matching
+                     fake/fake-server-process-pattern pre-existing))
       (is (empty? @audit)
-          "crashed client child + supervised twin are both reaped (handle cleanup)"))))
+          "crashed client child + supervised twin are both reaped (handle cleanup; baseline-diffed against pre-suite residue)"))))
 
 ;; ---------------------------------------------------------------------------
 ;; no-response knob — bounded silence proof (M15 seed)
@@ -529,16 +552,22 @@
 
 (deftest five-start-stop-cycles-leave-no-orphan-processes
   (testing "five full start!/open!/close!/stop! cycles leave zero fake-server descendants"
-    (dotimes [_ 5]
-      (fake/with-fake-server [srv {:mode :ok :tool-count 1}]
-        (let [managed (mcp/open! (:config srv))]
-          (try
-            (is (pos? (mcp/ping! managed)) "server answers ping (via list-all-tools)")
-            (finally
-              (mcp/close! managed))))))
-    (is (empty? (fake/await-no-process-matching
-                 fake/fake-server-process-pattern 8000))
-        "zero fake-server node processes after five cycles")))
+    ;; 基线差集 + 窗口 8000ms -> 15000ms + 一次 3s 二次机会 —— 与
+    ;; stop-kills-process-and-leaves-no-orphans 相同的 M1-full2 论证：
+    ;; m1-full2.txt 中同一 stale PID（先于本套件残留）击穿本断言；
+    ;; 基线差集排除跨套件残留，语义对象"五个 cycle 自身收割干净"不变。
+    (let [pre-existing (fake/processes-matching-pids
+                        fake/fake-server-process-pattern)]
+      (dotimes [_ 5]
+        (fake/with-fake-server [srv {:mode :ok :tool-count 1}]
+          (let [managed (mcp/open! (:config srv))]
+            (try
+              (is (pos? (mcp/ping! managed)) "server answers ping (via list-all-tools)")
+              (finally
+                (mcp/close! managed))))))
+      (is (empty? (fake/await-no-new-process-matching
+                   fake/fake-server-process-pattern pre-existing))
+          "zero NEW fake-server node processes after five cycles (own tree fully reaped)"))))
 
 ;; ---------------------------------------------------------------------------
 ;; concurrency: two production clients against the same fake server config

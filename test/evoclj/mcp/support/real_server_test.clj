@@ -12,8 +12,10 @@
   - the availability contract itself is asserted both ways so the skip
     branch is first-class, tested behavior.
 
-  Every wait is bounded <= 10s (WO-T1 rule); node cold-start fits well
-  inside those bounds."
+  Every wait is bounded <= 10s (WO-T1 rule), except orphan audits which
+  may use the dispatcher-approved baseline-diff helper windows (15s poll
+  + 3s second chance — DEVIATION RECORD 4 in fake_server.clj); node
+  cold-start fits well inside those bounds."
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.mcp.client :as mcp]
             [evoclj.mcp.support.fake-server :as fake]
@@ -91,25 +93,35 @@
     (if-not (real/available?)
       (skip! "real-server-lifecycle-start-stop-restart-no-orphans")
       (do
-        (let [srv (real/start!)]
-          (try
-            (is (real/alive? srv) "supervised process alive right after start!")
-            (finally
-              (real/stop! srv)))
-          (is (not (real/alive? srv)) "process dead after stop!")
-          (is (nil? (real/stop! srv)) "second stop! is an idempotent no-op")
-          (is (empty? (fake/await-no-process-matching
-                       (real/process-matching-pattern) 8000))
-              "no sequential-thinking processes survive stop!"))
-        ;; restart reuse (docstring contract)
-        (real/with-real-server [srv2]
-          (let [cfg (:config srv2)
-                managed (mcp/open! cfg)]
+        ;; 基线差集孤儿审计（M1-full2 加固）：pre-existing 在第一次 start!
+        ;; 之前采样，两处审计都只统计"新增"匹配。为什么安全/必要：
+        ;; m1-full2.txt 显示同一 stale PID（31348）连本套件的真实服务器
+        ;; pattern 也命中——Windows 下 JDK 常不暴露 commandLine，
+        ;; processes-matching 退化为"任意存活 node 后代"，跨套件残留被
+        ;; 误记到本用例头上；基线差集恢复语义对象"本用例收割自己 spawn 的
+        ;; 全部进程"。等待窗 8000ms -> 15000ms + 一次有界 3s 二次机会
+        ;; （Windows 异步 kill 滞后；DEVIATION RECORD 4）。
+        (let [pre-existing (fake/processes-matching-pids
+                            (real/process-matching-pattern))]
+          (let [srv (real/start!)]
             (try
-              (is (pos? (count (:tools (mcp/list-tools (:client managed)))))
-                  "fresh instance serves through the production client")
+              (is (real/alive? srv) "supervised process alive right after start!")
               (finally
-                (mcp/close! managed)))))
-        (is (empty? (fake/await-no-process-matching
-                     (real/process-matching-pattern) 8000))
-            "zero orphans after full cycle including client children")))))
+                (real/stop! srv)))
+            (is (not (real/alive? srv)) "process dead after stop!")
+            (is (nil? (real/stop! srv)) "second stop! is an idempotent no-op")
+            (is (empty? (fake/await-no-new-process-matching
+                         (real/process-matching-pattern) pre-existing))
+                "no NEW sequential-thinking processes survive stop!"))
+          ;; restart reuse (docstring contract)
+          (real/with-real-server [srv2]
+            (let [cfg (:config srv2)
+                  managed (mcp/open! cfg)]
+              (try
+                (is (pos? (count (:tools (mcp/list-tools (:client managed)))))
+                    "fresh instance serves through the production client")
+                (finally
+                  (mcp/close! managed)))))
+          (is (empty? (fake/await-no-new-process-matching
+                       (real/process-matching-pattern) pre-existing))
+              "zero NEW orphans after full cycle including client children"))))))

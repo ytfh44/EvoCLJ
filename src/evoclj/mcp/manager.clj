@@ -75,7 +75,29 @@
   (swap! mgr-atom update-in [:pools k :metrics] (fn [m] (f (or m {:call-count 0})))))
 
 ;; single-flight: absent -> promise -> connecting -> ready/broken
-(defn get-or-open! [mgr-atom k open-fn]
+(defn get-or-open!
+  "Return the managed client record for pool key `k`, opening it via
+   `open-fn` (zero-arg; returns a managed record shaped like
+   evoclj.mcp.client/open!'s) when no live entry exists.
+
+   UNIFIED RETURN CONTRACT (WO-M1): every path returns the SAME KIND of
+   value — the managed record itself, never the raw underlying client,
+   never nil:
+
+   - ready hit     -> the managed record stored in the pool entry;
+   - first opener  -> open-fn's return value verbatim; it is stored as
+                      the entry's :client and delivered to concurrent
+                      waiters;
+   - concurrent
+     waiter        -> blocks on the single-flight promise, then returns
+                      that same managed record; if the opener failed the
+                      waiter THROWS the opener's Throwable (a Throwable
+                      is never returned as a value).
+
+   On open failure the pool entry is left :broken with its :promise
+   cleared so a later call starts a fresh attempt (the opener itself
+   rethrows); healing/retry policy is owned elsewhere."
+  [mgr-atom k open-fn]
   (let [slot (atom nil)]
     (swap! mgr-atom
            (fn [s]
@@ -94,25 +116,26 @@
     (let [{:keys [hit promise new?]} @slot]
       (cond
         hit (:client hit)
-        (and promise (not new?)) @promise
+        (and promise (not new?))
+        (let [v @promise]
+          (if (instance? Throwable v) (throw v) v))
         :else
         (let [p promise]
           (try
-            (let [managed (open-fn)
-                  client (:client managed)]
+            (let [managed (open-fn)]
               (swap! mgr-atom (fn [s] (-> s
                                           (assoc-in [:pools k :state] :ready)
                                           (assoc-in [:pools k :client] managed)
                                           (assoc-in [:pools k :health] {:last-ok (System/currentTimeMillis)})
-                                          (dissoc :promise))))
-              (deliver p client)
-              client)
+                                          (update-in [:pools k] dissoc :promise))))
+              (deliver p managed)
+              managed)
             (catch Throwable ex
               (let [ed (err/sanitize ex)]
                 (swap! mgr-atom (fn [s] (-> s
                                             (assoc-in [:pools k :state] :broken)
                                             (assoc-in [:pools k :health] {:last-error ed})
-                                            (dissoc :promise))))
+                                            (update-in [:pools k] dissoc :promise))))
                 (deliver p ex)
                 (throw ex)))))))))
 

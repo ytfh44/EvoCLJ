@@ -333,12 +333,14 @@
     (let [args (:args authorized-request)]
       (try
         (let [shared? (some? connection-id)
+              ;; WO-M1: get-or-open! returns the managed record itself
+              ;; (never a raw client), so it is used directly — same as
+              ;; the pool-hit value. No {:client ...} re-wrapping.
               managed (if shared?
                         (let [entry (manager/pool-get manager conn-key)
                               c (:client entry)]
                           (if c c
-                            (let [cl (manager/get-or-open! manager conn-key #(mcp-client/open! (manager/normalize-transport transport-config)))]
-                              {:client cl :transport-config transport-config})))
+                            (manager/get-or-open! manager conn-key #(mcp-client/open! (manager/normalize-transport transport-config)))))
                         (mcp-client/open! (manager/normalize-transport transport-config)))
               managed (mcp-client/ensure-open managed default-max-reopen-attempts)]
           (when (mcp-client/closed? managed)

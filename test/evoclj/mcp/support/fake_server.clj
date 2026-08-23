@@ -68,7 +68,9 @@
            [java.util.concurrent TimeUnit]))
 
 (def ^:const default-timeout-ms
-  "Upper bound for every wait in this ns (WO-T1 rule: <= 10 seconds)."
+  "Upper bound for every wait in this ns (WO-T1 rule: <= 10 seconds;
+   sole dispatcher-approved exception: the load-robustness orphan-audit
+   helper's 15s poll + 3s second-chance windows — DEVIATION RECORD 4)."
   10000)
 
 (def known-modes
@@ -258,6 +260,73 @@
          (if (or (empty? found) (>= (System/currentTimeMillis) deadline))
            found
            (do (Thread/sleep 100) (recur))))))))
+
+;; --- load-robustness audit (DEVIATION RECORD 4) ------------------------------
+;;
+;; Baseline-diff + second-chance variant of the absolute audit above.
+;; Motivating evidence (docs/codebase/m1-full2.txt): under the 35-minute
+;; hot-load full suite run, ONE pre-existing node.exe leftover (the same
+;; stale PID in all nine failures) tripped every orphan audit — including
+;; audits using a DIFFERENT pattern, because on this Windows host the JDK
+;; often hides process command lines and `processes-matching` then falls
+;; back to \"any live node.exe descendant\". Holding each lifecycle test
+;; accountable for residue that predates it detects nothing that test
+;; owns; diffing against a pre-test baseline restores the original
+;; semantic object (\"THIS test reaps everything IT spawned\") while
+;; eliminating cross-suite false positives.
+
+(defn processes-matching-pids
+  "PID set of a `processes-matching` snapshot. PIDs (not ProcessHandle
+  objects) are the stable cross-snapshot identity: the JDK hands out a
+  fresh handle object per query, so handle equality cannot express
+  \"same live process as at baseline time\"."
+  [^String s]
+  (into #{} (map #(.pid ^java.lang.ProcessHandle %)) (processes-matching s)))
+
+(defn- new-matches-since
+  "Live handles matching `s` whose PID is absent from `baseline-pids`
+  (captured before the test under audit spawned anything)."
+  [^String s baseline-pids]
+  (->> (processes-matching s)
+       (remove #(contains? baseline-pids (.pid ^java.lang.ProcessHandle %)))
+       vec))
+
+(defn await-no-new-process-matching
+  "Baseline-diff orphan audit: poll until no descendant matching `s`
+  exists whose PID was NOT already alive at baseline time. Returns the
+  final NEW-match snapshot: empty means this test's own tree is fully
+  reaped; non-empty is a deterministic failure.
+
+  Wait strategy (DEVIATION RECORD 4, dispatcher-approved):
+    - poll every 100ms up to `timeout-ms` (default 15000 — replaces the
+      historical 5s/8s call-site windows; Windows async termination of
+      destroyForcibly'd node.exe children was observed to exceed 8s
+      under sustained load);
+    - second chance: if the window elapses with survivors, sleep
+      `settle-ms` (default 3000), recheck ONCE, return that snapshot.
+  Total wait stays bounded (<= timeout-ms + settle-ms); nothing here
+  blocks forever."
+  ([^String s baseline-pids]
+   (await-no-new-process-matching s baseline-pids {}))
+  ([^String s baseline-pids {:keys [timeout-ms settle-ms]
+                             :or {timeout-ms 15000 settle-ms 3000}}]
+   (let [deadline (+ (System/currentTimeMillis) (long timeout-ms))]
+     (loop []
+       (let [found (new-matches-since s baseline-pids)]
+         (cond
+           ;; clean: nothing new since baseline — done immediately
+           (empty? found)
+           found
+
+           ;; still inside the poll window: keep waiting for async kills
+           (< (System/currentTimeMillis) deadline)
+           (do (Thread/sleep 100) (recur))
+
+           ;; window exhausted with survivors: ONE bounded grace window,
+           ;; then a single recheck decides pass/fail
+           :else
+           (do (Thread/sleep (long settle-ms))
+               (new-matches-since s baseline-pids))))))))
 
 (def fake-server-process-pattern
   "Command-line substring identifying fake-server node processes."

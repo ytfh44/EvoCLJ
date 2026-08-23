@@ -176,12 +176,13 @@
         (let [managed (if (and manager conn-key)
                         (let [entry (manager/pool-get manager conn-key)
                               c (:client entry)]
+                          ;; WO-M1: get-or-open! returns the managed record
+                          ;; itself; use it directly, no re-wrapping.
                           (if c c
-                            (let [cl (manager/get-or-open!
-                                      manager conn-key
-                                      #(mcp-client/open! (manager/normalize-transport transport-config)
-                                                         nil nil))]
-                              {:client cl :transport-config transport-config})))
+                            (manager/get-or-open!
+                             manager conn-key
+                             #(mcp-client/open! (manager/normalize-transport transport-config)
+                                                nil nil))))
                         ;; non-pooled fallback: open a fresh client for this call
                         (mcp-client/open! (manager/normalize-transport transport-config) nil nil))
               managed (mcp-client/ensure-open managed 2)]
