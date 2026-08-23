@@ -11,8 +11,13 @@
    Phase 1 (connection lifecycle): the bridge uses managed client
    records with auto-reconnect. When `:connection/id` is provided,
    providers with the same id share a single underlying McpSyncClient
-   (connection pooling). All values crossing the protocol boundary are
-   plain validated Clojure data (Global Constraint 22).
+   (connection pooling); the pool entry's lifecycle belongs to the
+   McpManager (healing / release). Providers WITHOUT :connection/id are
+   CALL-SCOPED instead: every execute-request! opens its own client and
+   guarantees it is closed before the call returns or throws (WO-M4),
+   so stdio subprocess handles can no longer accumulate across calls.
+   All values crossing the protocol boundary are plain validated
+   Clojure data (Global Constraint 22).
 
    Phase 5 (security boundaries): content-block output is sandboxed so
    binary image/audio data and opaque resource blobs never surface as
@@ -301,6 +306,35 @@
 ;; the provider
 ;; ---------------------------------------------------------------------------
 
+(defn- close-owned!
+  "WO-M4: best-effort close of a CALL-SCOPED (non-pooled) managed client
+  record. evoclj.mcp.client/close! is already graceful and idempotent;
+  the guard here only catches a Throwable escaping OUTSIDE that
+  contract, reports it on stderr (swallowed failures must stay visible,
+  not silent), and never masks the original call outcome.
+
+  Mirror of evoclj.mcp.source/close-owned! — keep in lockstep until M11."
+  [managed]
+  (when managed
+    (try
+      (mcp-client/close! managed)
+      (catch Throwable t
+        (try
+          (binding [*out* *err*]
+            (println "[evoclj.provider.mcp-bridge] non-pooled client close failed:"
+                     (pr-str (err/sanitize t))))
+          ;; R2 (m1): the report path itself is error-proof — an Error
+          ;; escaping this finally-position guard used to mask the real
+          ;; outcome. Catch it too and fall back to one raw PrintStream
+          ;; line (System/err cannot throw on IO failure); only what even
+          ;; THAT throws is swallowed.
+          (catch Throwable report-ex
+            (try
+              (.println System/err
+                        (str "[evoclj.provider.mcp-bridge] non-pooled client close-failure report also failed: "
+                             (pr-str (err/sanitize report-ex))))
+              (catch Throwable _ nil))))))))
+
 (defrecord ToolEntry [descriptor manager conn-key transport-config mcp-name tool-id connection-id server-id]
   proto/Provider
   (describe [_] descriptor)
@@ -332,20 +366,35 @@
                         {:value (err/sanitize authorized-request)})))
     (let [args (:args authorized-request)
           ;; WO-M3: hoisted so the failure-reporting catch below can see it
-          shared? (some? connection-id)]
+          shared? (some? connection-id)
+          ;; WO-M4: tracks the CALL-SCOPED client opened by this very call
+          ;; on the non-shared path, so the finally below can close it no
+          ;; matter how this scope exits. Shared records are pool-owned;
+          ;; they are never closed here.
+          owned (volatile! nil)]
       (try
         (let [;; WO-M1: get-or-open! returns the managed record itself
               ;; (never a raw client), so it is used directly — same as
               ;; the pool-hit value. No {:client ...} re-wrapping.
-              managed (if shared?
-                        (let [entry (manager/pool-get manager conn-key)
-                              c (:client entry)]
-                          ;; WO-M2 / INV-01: open! receives the REAL config —
-                          ;; no redaction wrapper on the execution path.
-                          (if c c
-                            (manager/get-or-open! manager conn-key #(mcp-client/open! transport-config))))
-                        (mcp-client/open! transport-config))
-              managed (mcp-client/ensure-open managed default-max-reopen-attempts)]
+              opened (if shared?
+                       (let [entry (manager/pool-get manager conn-key)
+                             c (:client entry)]
+                         ;; WO-M2 / INV-01: open! receives the REAL config —
+                         ;; no redaction wrapper on the execution path.
+                         (if c c
+                           (manager/get-or-open! manager conn-key #(mcp-client/open! transport-config))))
+                       ;; WO-M4: no :connection/id -> this client belongs to
+                       ;; THIS call only; opened here, closed in finally.
+                       (let [fresh (mcp-client/open! transport-config)]
+                         (vreset! owned fresh)
+                         fresh))
+              managed (mcp-client/ensure-open opened default-max-reopen-attempts)
+              ;; Re-track after ensure-open: a just-opened record has
+              ;; :closed? false, so ensure-open returns it unchanged and
+              ;; cannot throw here — there is no leak window between the
+              ;; two bindings; re-tracking simply keeps `owned` pointing
+              ;; at the record actually used below.
+              _ (when-not shared? (vreset! owned managed))]
           (when (mcp-client/closed? managed)
             (throw (err/error :mcp/client-closed
                               "MCP managed client is closed"
@@ -400,12 +449,23 @@
                                      :mcp/connection-id connection-id
                                      :mcp/server-id server-id
                                      :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
-                                     :cause (err/sanitize ex)})))))))))))
+                                     :cause (err/sanitize ex)})))))))
+        (finally
+          ;; WO-M4: success AND failure exits release the call-scoped
+          ;; client; close! is idempotent/graceful, close-owned! never
+          ;; masks the original outcome.
+          (when-not shared?
+            (close-owned! @owned)))))))
 
 (defn make-tool-entry
   "Create an immutable ToolEntry. Each entry is a distinct immutable value
    sharing the same manager connection pool. Generation is part of the
-   descriptor and never mutated in place."
+   descriptor and never mutated in place.
+
+   Lifecycle (WO-M4): an entry created WITH :connection/id executes over
+   its pooled managed client (manager-owned lifetime). An entry WITHOUT
+   :connection/id is CALL-SCOPED: every execute-request! opens a fresh
+   client and closes it before returning or throwing."
   [opts]
   (let [descriptor (mcp-tool-descriptor opts)
         transport-cfg (:transport-config opts)

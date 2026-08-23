@@ -88,10 +88,45 @@
 ;; discovery
 ;; ---------------------------------------------------------------------------
 
+(defn- close-owned!
+  "WO-M4: best-effort close of a CALL-SCOPED (non-pooled) managed client
+  record. evoclj.mcp.client/close! is already graceful and idempotent;
+  the guard here only catches a Throwable escaping OUTSIDE that
+  contract, reports it on stderr (swallowed failures must stay visible,
+  not silent), and never masks the original call outcome.
+
+  Mirror of evoclj.provider.mcp-bridge/close-owned! — keep in lockstep
+  until M11."
+  [managed]
+  (when managed
+    (try
+      (mcp-client/close! managed)
+      (catch Throwable t
+        (try
+          (binding [*out* *err*]
+            (println "[evoclj.mcp.source] non-pooled client close failed:"
+                     (pr-str (err/sanitize t))))
+          ;; R2 (m1): the report path itself is error-proof — an Error
+          ;; escaping this finally-position guard used to mask the real
+          ;; outcome. Catch it too and fall back to one raw PrintStream
+          ;; line (System/err cannot throw on IO failure); only what even
+          ;; THAT throws is swallowed.
+          (catch Throwable report-ex
+            (try
+              (.println System/err
+                        (str "[evoclj.mcp.source] non-pooled client close-failure report also failed: "
+                             (pr-str (err/sanitize report-ex))))
+              (catch Throwable _ nil))))))))
+
 (defn- discover-tools
   "Discover MCP tools. If :discover-fn is supplied in opts/Source, call it
-   (for tests / stubbing). Otherwise use the live MCP client via the
-   manager's pooled connection. Returns a vector of stable descriptors."
+   (for tests / stubbing). Otherwise use the live MCP client: through the
+   manager's POOLED connection when a manager/connection-key is available
+   (manager-owned lifetime, M1/M3 healing semantics), otherwise through a
+   CALL-SCOPED client that this function opens and guarantees to CLOSE
+   before returning or throwing — success and failure alike (WO-M4), so
+   non-pooled discovery leaks no stdio subprocess. Returns a vector of
+   stable descriptors."
   [source]
   (let [{:keys [transport-config manager discover-fn opts]} source
         ck (when (and manager transport-config)
@@ -110,14 +145,24 @@
                       (mcp-client/open! transport-config
                                         (fn [] (when tools-change-cb (tools-change-cb)))
                                         nil))]
-        (let [managed (if ck
-                        (manager/get-or-open! manager ck open-fn)
-                        (open-fn))
-              client (:client managed)]
-          (when-not client
-            (throw (err/error :mcp/discover-failed "no MCP client available" {:transport-config (err/sanitize transport-config)})))
-          (let [raw-tools (mcp-client/list-all-tools client)]
-            (mapv #(stable-descriptor % opts) raw-tools)))))))
+        (if ck
+          ;; pooled: the manager owns the client's lifetime; never closed here
+          (let [client (:client (manager/get-or-open! manager ck open-fn))]
+            (when-not client
+              (throw (err/error :mcp/discover-failed "no MCP client available" {:transport-config (err/sanitize transport-config)})))
+            (let [raw-tools (mcp-client/list-all-tools client)]
+              (mapv #(stable-descriptor % opts) raw-tools)))
+          ;; WO-M4: non-pooled discovery is call-scoped — the freshly opened
+          ;; client is closed in finally whether listing succeeds or throws.
+          (let [managed (open-fn)]
+            (try
+              (let [client (:client managed)]
+                (when-not client
+                  (throw (err/error :mcp/discover-failed "no MCP client available" {:transport-config (err/sanitize transport-config)})))
+                (let [raw-tools (mcp-client/list-all-tools client)]
+                  (mapv #(stable-descriptor % opts) raw-tools)))
+              (finally
+                (close-owned! managed)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; ToolEntry - immutable Provider
@@ -174,21 +219,33 @@
           connection-id (:mcp/connection-id descriptor)
           server-id (:mcp/server-id descriptor)
           ;; WO-M3: hoisted so the failure-reporting catch below can see it
-          shared? (and manager conn-key)]
+          shared? (and manager conn-key)
+          ;; WO-M4: tracks the CALL-SCOPED client opened by this very call
+          ;; on the non-shared path, so the finally below can close it no
+          ;; matter how this scope exits. Shared records are pool-owned;
+          ;; they are never closed here.
+          owned (volatile! nil)]
       (try
-        (let [managed (if shared?
-                        (let [entry (manager/pool-get manager conn-key)
-                              c (:client entry)]
-                          ;; WO-M1: get-or-open! returns the managed record
-                          ;; itself; use it directly, no re-wrapping.
-                          ;; WO-M2: real config into open! (execution input)
-                          (if c c
-                            (manager/get-or-open!
-                             manager conn-key
-                             #(mcp-client/open! transport-config nil nil))))
-                        ;; non-pooled fallback: open a fresh client for this call
-                        (mcp-client/open! transport-config nil nil))
-              managed (mcp-client/ensure-open managed 2)]
+        (let [opened (if shared?
+                       (let [entry (manager/pool-get manager conn-key)
+                             c (:client entry)]
+                         ;; WO-M1: get-or-open! returns the managed record
+                         ;; itself; use it directly, no re-wrapping.
+                         ;; WO-M2: real config into open! (execution input)
+                         (if c c
+                           (manager/get-or-open!
+                            manager conn-key
+                            #(mcp-client/open! transport-config nil nil))))
+                       ;; WO-M4 non-pooled fallback: this client belongs to
+                       ;; THIS call only; opened here, closed in finally.
+                       (let [fresh (mcp-client/open! transport-config nil nil)]
+                         (vreset! owned fresh)
+                         fresh))
+              managed (mcp-client/ensure-open opened 2)
+              ;; Re-track after ensure-open: a just-opened record has
+              ;; :closed? false, so ensure-open returns it unchanged and
+              ;; cannot throw here — no leak window between the bindings.
+              _ (when-not shared? (vreset! owned managed))]
           (when (mcp-client/closed? managed)
             (throw (err/error :mcp/client-closed
                               "MCP managed client is closed"
@@ -250,11 +307,19 @@
                                      :mcp/connection-id connection-id
                                      :mcp/server-id server-id
                                      :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
-                                     :cause (err/sanitize ex)})))))))))))
+                                     :cause (err/sanitize ex)})))))))
+        (finally
+          ;; WO-M4: success AND failure exits release the call-scoped
+          ;; client; close! is idempotent/graceful, close-owned! never
+          ;; masks the original outcome.
+          (when-not shared?
+            (close-owned! @owned)))))))
 
 (defn make-tool-entry
   "Create an immutable ToolEntry from a stable descriptor and manager.
-   Shares the same McpManager connection pool."
+   Shares the same McpManager connection pool. With a nil manager the
+   entry is CALL-SCOPED instead: every execute-request! opens a fresh
+   client and closes it before returning or throwing (WO-M4)."
   [descriptor manager transport-config]
   (let [ck (when (and manager transport-config)
              (manager/connection-key (assoc transport-config :connection/id (:mcp/connection-id descriptor))))]

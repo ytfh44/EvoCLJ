@@ -74,9 +74,13 @@
   10000)
 
 (def known-modes
-  "All FAKE_MODE values implemented by fake-mcp-server.mjs."
+  "All FAKE_MODE values implemented by fake-mcp-server.mjs.
+   :hang-after-spawn (WO-M4 R2) seeds the CE-1c initialize-failure leak
+   scenario: the subprocess answers nothing and never exits on its own,
+   so only a client that closes its transport reaps it."
   #{:ok :slow :malformed :huge :many-pages
-    :infinite-cursor :crash-after-init :no-response})
+    :infinite-cursor :crash-after-init :no-response
+    :hang-after-spawn})
 
 (def ^:private script-relpath
   "test/evoclj/mcp/support/server/fake-mcp-server.mjs")

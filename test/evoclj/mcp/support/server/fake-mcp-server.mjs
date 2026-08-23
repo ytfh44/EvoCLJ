@@ -12,7 +12,8 @@
  * launches subprocesses and argv is the most robust way to reach it):
  *
  *   FAKE_MODE        ok (default) | slow | malformed | huge | many-pages |
- *                    infinite-cursor | crash-after-init | no-response
+ *                    infinite-cursor | crash-after-init | no-response |
+ *                    hang-after-spawn
  *   FAKE_DELAY_MS    artificial latency applied to every response
  *                    (slow / no-response scenarios), default 0
  *   FAKE_TOOL_COUNT  number of tools generated (huge/many-pages/ok),
@@ -37,6 +38,11 @@
  *                                 text:<JSON of arguments>}]}
  *                no-response   -> never answers tools/call, never exits
  *                                 (M15 ambiguous-timeout scenario seed)
+ *   any request  hang-after-spawn -> never answers anything, never exits;
+ *                                 initialize() stalls to the client's
+ *                                 requestTimeout while the process stays
+ *                                 alive (initialize-failure leak seed,
+ *                                 WO-M4 R2 CE-1c)
  */
 
 import { createInterface } from "node:readline";
@@ -67,6 +73,7 @@ const PAGE_SIZE = Math.max(1, numOr(argValue("--page-size") ?? envOr("FAKE_PAGE_
 const KNOWN_MODES = new Set([
   "ok", "slow", "malformed", "huge", "many-pages",
   "infinite-cursor", "crash-after-init", "no-response",
+  "hang-after-spawn",
 ]);
 if (!KNOWN_MODES.has(MODE)) {
   process.stderr.write(
@@ -158,6 +165,15 @@ function toolsListResult(cursor) {
 
 async function handleMessage(msg) {
   if (!msg || typeof msg !== "object") return;
+
+  // hang-after-spawn: after spawn neither answer ANY request nor ever
+  // exit on its own. The client's initialize() stalls to its
+  // requestTimeout while this process stays alive — the silent-alive
+  // seed for closure-leak scenarios (initialize-failure cleanup, WO-M4
+  // R2 CE-1c). The process only leaves via stdin EOF (rl close below,
+  // i.e. a client that DOES close its transport) or an external kill.
+  if (MODE === "hang-after-spawn") return;
+
   const { id, method, params } = msg;
 
   // Notifications carry no id and are never answered.

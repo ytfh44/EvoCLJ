@@ -47,9 +47,41 @@
   [start end]
   (long (- end start)))
 
+(defn- abort-init-close!
+  "WO-M4 R2: best-effort shutdown of a McpSyncClient whose initialize()
+   just threw. The stdio transport has ALREADY spawned a server subprocess
+   whose only reliable exit is this client closing stdin, so skipping the
+   close strands the half-built client AND its child until JVM death.
+   Idempotent and error-proof: a secondary close failure is reported on
+   stderr and swallowed so it never masks the ORIGINAL initialize
+   failure the caller is about to see."
+  [^McpSyncClient client]
+  (when client
+    (try
+      (.closeGracefully client)
+      (catch Throwable t
+        (try
+          (binding [*out* *err*]
+            (println "[evoclj.mcp.client] post-initialize-failure client close failed:"
+                     (pr-str (err/sanitize t))))
+          (catch Throwable report-ex
+            ;; same discipline as close-owned!: even the *err* write may
+            ;; throw (an Error here must not escape and mask the original
+            ;; failure) — one raw PrintStream line keeps the swallow
+            ;; visible without risking another throw.
+            (try
+              (.println System/err
+                        (str "[evoclj.mcp.client] post-initialize-failure close-failure report also failed: "
+                             (pr-str (err/sanitize report-ex))))
+              (catch Throwable _ nil))))))))
+
 (defn- build-client
   "Build and initialize a McpSyncClient from a transport config map.
    Returns the live client, or throws :mcp/initialize-failed.
+
+   When initialize() throws, the half-built client is closed
+   best-effort first (its stdio subprocess would otherwise be leaked);
+   the thrown error's type and data shape are unchanged.
 
    `tools-change-consumer` is an optional zero-arg fn that the client
    will invoke when the server notifies of a tools list change.
@@ -86,6 +118,12 @@
       (.initialize sync-client)
       sync-client
       (catch Throwable ex
+        ;; WO-M4 R2: reap the half-built client's stdio subprocess FIRST
+        ;; (best-effort, error-proof — see abort-init-close!), THEN rethrow
+        ;; the original :mcp/initialize-failed wrapping. Type, message, and
+        ;; {:cause ...} data shape are byte-identical to the pre-cleanup
+        ;; contract; only the leak is gone.
+        (abort-init-close! sync-client)
         (throw (err/error :mcp/initialize-failed
                           "MCP client initialize failed"
                           {:cause (err/sanitize ex)})))))))
