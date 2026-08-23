@@ -1,12 +1,44 @@
 (ns evoclj.mcp.manager
+  "MCP connection-pool manager.
+
+   INV-01 (WO-M2): one transport config feeds THREE independent
+   derivations that must never be conflated:
+
+     - EXECUTION INPUT  — callers pass the REAL config to
+       evoclj.mcp.client/open!; nothing in this namespace may stand
+       between them (the pre-fix normalize-transport did exactly that).
+     - POOL IDENTITY    — connection-key derives from transport-identity
+       (per-field stable sha256 fingerprints of secret fields) plus
+       credential-fingerprint (stable sha256 of :auth/ref).
+     - DIAGNOSTIC FORM  — redact-transport replaces whole :env/:headers
+       values with \"[REDACTED]\" for error data / audit / descriptor
+       serialization boundaries only.
+
+   Fingerprint format follows evoclj.genome.hash: \"sha256:<64 lowercase
+   hex>\" over canonical EDN printing (map order normalized before
+   hashing). Fingerprints are stable across JVM restarts."
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.client :as mcp-client]
-            [integrant.core :as ig]))
+            [integrant.core :as ig])
+  (:import (java.nio.charset StandardCharsets)
+           (java.security MessageDigest)))
+
+;; --- diagnostic representation (display/audit ONLY) --------------------------
 
 (defn- redact-subtree [m k]
   (if (contains? m k) (assoc m k "[REDACTED]") m))
 
-(defn normalize-transport [cfg]
+(defn redact-transport
+  "Redacted DIAGNOSTIC view of a transport config: every :env / :headers
+   value (keyword or string key) is replaced by the literal
+   \"[REDACTED]\"; all other fields pass through unchanged.
+
+   SCOPE (WO-M2 / INV-01): error data, audit records, and descriptor
+   serialization boundaries ONLY. Never feed this output into
+   evoclj.mcp.client/open! (execution would lose env vars and auth
+   headers) and never derive pool identity from it (configs differing
+   only in secret values would collapse onto one key)."
+  [cfg]
   (let [cfg (or cfg {})]
     (-> cfg
         (redact-subtree :env)
@@ -14,13 +46,72 @@
         (redact-subtree "env")
         (redact-subtree "headers"))))
 
-(defn credential-fingerprint [cfg]
-  (hash (:auth/ref cfg)))
+;; --- pool identity (stable fingerprints) -------------------------------------
 
-(defn transport-identity [cfg]
-  (dissoc (normalize-transport cfg) :auth/ref))
+(defn- canonical-edn
+  "Order-stable transform of EDN data: maps become sorted maps (keys
+   ordered by their printed form), sets become vectors sorted by printed
+   element form, seqs become vectors; scalars pass through. Equal
+   contents therefore always print identically, regardless of map
+   construction order — the ordering guarantee the fingerprints below
+   depend on."
+  [v]
+  (cond
+    (map? v) (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
+                   (map (fn [[k x]] [(canonical-edn k) (canonical-edn x)]) v))
+    (set? v) (vec (sort-by pr-str (map canonical-edn (seq v))))
+    (seq? v) (mapv canonical-edn v)
+    :else v))
 
-(defn connection-key [cfg]
+(defn- stable-digest
+  "\"sha256:<64 lowercase hex>\" over the UTF-8 bytes of the canonical
+   EDN printing of `v` (evoclj.genome.hash style). Deterministic across
+   processes and JVM restarts; not reversible for practical purposes."
+  [v]
+  (let [ba (.getBytes (pr-str (canonical-edn v)) StandardCharsets/UTF_8)
+        ^bytes digest (.digest (MessageDigest/getInstance "SHA-256") ba)]
+    (str "sha256:" (apply str (map #(format "%02x" %) digest)))))
+
+(defn credential-fingerprint
+  "Stable \"sha256:<hex>\" fingerprint of the config's :auth/ref value.
+
+   NOT a security control: the input is a low-entropy reference string,
+   so this is trivially brute-forceable. Used ONLY to separate pooled
+   connections whose credential references differ — i.e. connection
+   grouping inside the in-memory pool key."
+  [cfg]
+  (stable-digest (:auth/ref (or cfg {}))))
+
+(defn transport-identity
+  "The identity-bearing projection of a transport config for the pool
+   key: non-secret fields verbatim, each present secret field
+   (:env/:headers, keyword or string key) replaced by its per-field
+   stable sha256 fingerprint. :auth/ref is excluded (it lives in the
+   cf slot of the key via credential-fingerprint).
+
+   Guarantees (INV-01): identical configs -> identical identities;
+   configs differing in ANY secret VALUE -> different identities;
+   missing and empty secret maps remain distinguishable."
+  [cfg]
+  (let [cfg (or cfg {})]
+    (reduce (fn [acc k]
+              (if (contains? cfg k)
+                (assoc acc k (stable-digest (get cfg k)))
+                acc))
+            (dissoc cfg :auth/ref)
+            [:env "env" :headers "headers"])))
+
+(defn connection-key
+  "Pool key [type cid ti cf]: transport type, connection id,
+   transport-identity, credential-fingerprint.
+
+   SHAPE UNCHANGED from the pre-M2 manager. The KEY FORMAT changed
+   (ti now carries per-field sha256 fingerprints instead of whole-value
+   \"[REDACTED]\" placeholders; cf is now a sha256 digest instead of a
+   Clojure hash) — safe with NO migration because the pool is purely
+   in-memory state: entries die with the process and every fresh key
+   simply starts a fresh entry."
+  [cfg]
   (let [cid (:connection/id cfg)
         ti (transport-identity cfg)
         cf (credential-fingerprint cfg)]

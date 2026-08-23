@@ -106,7 +106,8 @@
       ;; live path
       (let [tools-change-cb (get source :tools-change-cb)
             open-fn (fn []
-                      (mcp-client/open! (manager/normalize-transport transport-config)
+                      ;; WO-M2 / INV-01: real config into open! (execution input)
+                      (mcp-client/open! transport-config
                                         (fn [] (when tools-change-cb (tools-change-cb)))
                                         nil))]
         (let [managed (if ck
@@ -178,13 +179,13 @@
                               c (:client entry)]
                           ;; WO-M1: get-or-open! returns the managed record
                           ;; itself; use it directly, no re-wrapping.
+                          ;; WO-M2: real config into open! (execution input)
                           (if c c
                             (manager/get-or-open!
                              manager conn-key
-                             #(mcp-client/open! (manager/normalize-transport transport-config)
-                                                nil nil))))
+                             #(mcp-client/open! transport-config nil nil))))
                         ;; non-pooled fallback: open a fresh client for this call
-                        (mcp-client/open! (manager/normalize-transport transport-config) nil nil))
+                        (mcp-client/open! transport-config nil nil))
               managed (mcp-client/ensure-open managed 2)]
           (when (mcp-client/closed? managed)
             (throw (err/error :mcp/client-closed
@@ -226,14 +227,14 @@
                                   {:tool-name mcp-name
                                    :mcp/connection-id connection-id
                                    :mcp/server-id server-id
-                                   :mcp/transport-config (err/sanitize (manager/normalize-transport transport-config))
+                                   :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
                                    :cause (err/sanitize ex)}))
                 (throw (err/error :provider/execution-failed
                                   "MCP provider call-tool failed"
                                   {:tool-name mcp-name
                                    :mcp/connection-id connection-id
                                    :mcp/server-id server-id
-                                   :mcp/transport-config (err/sanitize (manager/normalize-transport transport-config))
+                                   :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
                                    :cause (err/sanitize ex)}))))))))))
 
 (defn make-tool-entry

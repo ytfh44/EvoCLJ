@@ -339,9 +339,11 @@
               managed (if shared?
                         (let [entry (manager/pool-get manager conn-key)
                               c (:client entry)]
+                          ;; WO-M2 / INV-01: open! receives the REAL config —
+                          ;; no redaction wrapper on the execution path.
                           (if c c
-                            (manager/get-or-open! manager conn-key #(mcp-client/open! (manager/normalize-transport transport-config)))))
-                        (mcp-client/open! (manager/normalize-transport transport-config)))
+                            (manager/get-or-open! manager conn-key #(mcp-client/open! transport-config))))
+                        (mcp-client/open! transport-config))
               managed (mcp-client/ensure-open managed default-max-reopen-attempts)]
           (when (mcp-client/closed? managed)
             (throw (err/error :mcp/client-closed
@@ -374,14 +376,14 @@
                                   {:tool-name mcp-name
                                    :mcp/connection-id connection-id
                                    :mcp/server-id server-id
-                                   :mcp/transport-config (err/sanitize (manager/normalize-transport transport-config))
+                                   :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
                                    :cause (err/sanitize ex)}))
                 (throw (err/error :provider/execution-failed
                                   "MCP provider call-tool failed"
                                   {:tool-name mcp-name
                                    :mcp/connection-id connection-id
                                    :mcp/server-id server-id
-                                   :mcp/transport-config (err/sanitize (manager/normalize-transport transport-config))
+                                   :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
                                    :cause (err/sanitize ex)}))))))))))
 
 (defn make-tool-entry
