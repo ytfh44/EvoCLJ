@@ -242,10 +242,27 @@
                          (vreset! owned fresh)
                          fresh))
               managed (mcp-client/ensure-open opened 2)
+              ;; WO-M5 gap (c) — mirror of evoclj.provider.mcp-bridge:
+              ;; ensure-open returns a DIFFERENT record when the pooled one
+              ;; came back closed and had to be LOCALLY reopened. Offer it
+              ;; back to the pool via adopt-client! (CAS against the stale
+              ;; record); if adoption is refused — entry already healed,
+              ;; stripped, or torn down — the record belongs to THIS call
+              ;; and is tracked in `owned` for the finally close.
+              locally-reopened? (not (identical? opened managed))
+              adopted? (when (and shared? locally-reopened?)
+                         (manager/adopt-client! manager conn-key opened managed))
               ;; Re-track after ensure-open: a just-opened record has
               ;; :closed? false, so ensure-open returns it unchanged and
               ;; cannot throw here — no leak window between the bindings.
-              _ (when-not shared? (vreset! owned managed))]
+              _ (vreset! owned
+                         (cond
+                           ;; call-scoped path: this call owns its client
+                           (not shared?) managed
+                           ;; local reopen the pool refused: orphaned product
+                           (and locally-reopened? (not adopted?)) managed
+                           ;; pooled hit or adopted reopen: pool owns it
+                           :else nil))]
           (when (mcp-client/closed? managed)
             (throw (err/error :mcp/client-closed
                               "MCP managed client is closed"
@@ -309,10 +326,11 @@
                                      :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
                                      :cause (err/sanitize ex)})))))))
         (finally
-          ;; WO-M4: success AND failure exits release the call-scoped
-          ;; client; close! is idempotent/graceful, close-owned! never
-          ;; masks the original outcome.
-          (when-not shared?
+          ;; WO-M4/WO-M5: success AND failure exits release the client THIS
+          ;; call owns (call-scoped always; a refused-adoption local reopen
+          ;; on the shared path). close! is idempotent/graceful,
+          ;; close-owned! never masks the original outcome.
+          (when @owned
             (close-owned! @owned)))))))
 
 (defn make-tool-entry

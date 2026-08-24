@@ -162,10 +162,20 @@
 
 (def ^:private default-max-reopen-attempts 2)
 
-;; Global atoms removed — state is host-owned via :mcp/manager. Fallback for non-Integrant use.
-(def ^:private fallback-manager (manager/create-manager))
-(defn- mgr [opts] (or (:manager opts) (:mcp/manager opts) fallback-manager))
-(defn shutdown-pool! [] (manager/shutdown! fallback-manager))
+;; Global atoms removed — state is host-owned via :mcp/manager (WO-M5).
+;; Fallback for non-Integrant use: created LAZILY on the first provider
+;; built without an injected manager, and reachable for shutdown via
+;; shutdown-pool! (invoked by evoclj.kernel.system/halt! and available to
+;; any embedder), so zero-config use still has a defined teardown path.
+(def ^:private fallback-manager (delay (manager/create-manager)))
+(defn- mgr [opts] (or (:manager opts) (:mcp/manager opts) @fallback-manager))
+(defn shutdown-pool!
+  "Shut down the LAZY fallback manager (zero-config embedders). No-op when
+   the fallback was never realized; idempotent. The Integrant-injected
+   :mcp/manager component shuts down through its own halt-key! instead."
+  []
+  (when (realized? fallback-manager)
+    (manager/shutdown! @fallback-manager)))
 
 ;; ---------------------------------------------------------------------------
 ;; descriptor helper
@@ -389,12 +399,30 @@
                          (vreset! owned fresh)
                          fresh))
               managed (mcp-client/ensure-open opened default-max-reopen-attempts)
+              ;; WO-M5 gap (c): ensure-open returns a DIFFERENT record when
+              ;; the pooled one came back closed and had to be LOCALLY
+              ;; reopened. That product used to be neither pooled nor closed
+              ;; (one stdio child leaked per occurrence). Now it is first
+              ;; offered back to the pool via adopt-client! (CAS against
+              ;; the stale record); if adoption is refused — entry already
+              ;; healed, stripped, or torn down — the record belongs to
+              ;; THIS call and is tracked in `owned` for the finally close.
+              locally-reopened? (not (identical? opened managed))
+              adopted? (when (and shared? locally-reopened?)
+                         (manager/adopt-client! manager conn-key opened managed))
               ;; Re-track after ensure-open: a just-opened record has
               ;; :closed? false, so ensure-open returns it unchanged and
               ;; cannot throw here — there is no leak window between the
-              ;; two bindings; re-tracking simply keeps `owned` pointing
-              ;; at the record actually used below.
-              _ (when-not shared? (vreset! owned managed))]
+              ;; two bindings; re-tracking keeps `owned` pointing at the
+              ;; record actually used below.
+              _ (vreset! owned
+                         (cond
+                           ;; call-scoped path: this call owns its client
+                           (not shared?) managed
+                           ;; local reopen the pool refused: orphaned product
+                           (and locally-reopened? (not adopted?)) managed
+                           ;; pooled hit or adopted reopen: pool owns it
+                           :else nil))]
           (when (mcp-client/closed? managed)
             (throw (err/error :mcp/client-closed
                               "MCP managed client is closed"
@@ -451,10 +479,11 @@
                                      :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
                                      :cause (err/sanitize ex)})))))))
         (finally
-          ;; WO-M4: success AND failure exits release the call-scoped
-          ;; client; close! is idempotent/graceful, close-owned! never
-          ;; masks the original outcome.
-          (when-not shared?
+          ;; WO-M4/WO-M5: success AND failure exits release the client THIS
+          ;; call owns (call-scoped always; a refused-adoption local reopen
+          ;; on the shared path). close! is idempotent/graceful,
+          ;; close-owned! never masks the original outcome.
+          (when @owned
             (close-owned! @owned)))))))
 
 (defn make-tool-entry
@@ -521,12 +550,18 @@
                  (assoc m k (:descriptor new-entry))))
              {}
              @legacy-registry))
-(defn dispose! [provider] (let [tool-id (-> provider proto/describe :tool/id)
-        desc (proto/describe provider)
-        cid (:mcp/connection-id desc)]
-    (when cid
-      (let [ck2 (manager/connection-key {:connection/id cid :type :stdio})]
-        (try (manager/release fallback-manager ck2 tool-id) (catch Throwable _ nil))
-        ;; also try generic type lookup via fallback pools
-        (doseq [[k _] (:pools @fallback-manager)]
-          (when (= cid (second k)) (try (manager/release fallback-manager k tool-id) (catch Throwable _ nil))))))))
+(defn dispose!
+  "Release this entry's pooled connection back to the manager it was BUILT
+   with. WO-M5: the ToolEntry record carries its own :manager atom and
+   :conn-key — dispose! uses exactly those, so an injected :mcp/manager is
+   returned its own pool entry under the real connection key. The previous
+   implementation reconstructed a lossy {:connection/id cid :type :stdio}
+   key and released against the global fallback, leaking the injected
+   pool's entry forever. Releasing an unknown/stale owner is inert by
+   manager contract (WO-M5), so dispose! is safe to call twice."
+  [provider]
+  (let [tool-id (:tool/id (proto/describe provider))
+        mgr (:manager provider)
+        k (:conn-key provider)]
+    (when (and mgr k)
+      (try (manager/release mgr k tool-id) (catch Throwable _ nil)))))

@@ -23,7 +23,25 @@
    call sites (mcp-bridge / mcp.source) report transport-family failures
    via mark-broken and successes via mark-ok; get-or-open! refuses to
    hand out :broken entries (it heals them through :reconnecting) and
-   refuses to hammer a persistently dead endpoint (:cooldown gate)."
+   refuses to hammer a persistently dead endpoint (:cooldown gate).
+
+   WO-M5 (refcount 收口): ownership becomes complete and honest —
+
+     - OWNERS NEVER VANISH: acquire against an ABSENT entry registers a
+       :pending-owners entry; every entry creation pre-seeds :owners from
+       that registry, so an owner acquired before the first open survives.
+     - TRANSITIONS PRESERVE HISTORY: installs merge into the existing
+       entry (owners/generation/metrics), never rebuild it bare.
+     - STALE RELEASES ARE INERT: releasing an owner that never registered
+       mutates nothing — a late release can therefore never close a
+       client installed after it fired (probe J).
+     - NO OWNERLESS RESURRECTION: the last release during an in-flight
+       open marks the entry :draining; the open outcome resolves it
+       WITHOUT installing an unowned live client.
+     - ZOMBIE HARVEST: dead clients stripped by mark-broken (and other
+       superseded records) move to an out-of-pool tombstone queue (the
+       :reaper agent) and are closed asynchronously — side effects never
+       run inside a swap!. shutdown! flushes the queue synchronously."
   (:require [clojure.walk :as walk]
             [evoclj.kernel.error :as err]
             [evoclj.mcp.client :as mcp-client]
@@ -153,6 +171,12 @@
      :or {max-reopen-failures default-max-reopen-failures
           cooldown-ms default-cooldown-ms}}]
    (atom {:pools {}
+          ;; WO-M5: owners registered while their entry does not exist yet
+          :pending-owners {}
+          ;; WO-M5 gap (a): out-of-pool tombstone queue. The agent's state
+          ;; is the queue of zombie managed records awaiting async close;
+          ;; actions run OFF the swap! path by construction.
+          :reaper (agent [] :error-mode :continue)
           :opts {:max-reopen-failures max-reopen-failures
                  :cooldown-ms cooldown-ms
                  :now-fn (or now-fn System/currentTimeMillis)}})))
@@ -163,6 +187,44 @@
   [s]
   ((get-in s [:opts :now-fn])))
 
+;; --- zombie client reaper (WO-M5 gap a) ----------------------------------------
+
+(defn- reap-action!
+  "Reaper agent action: close every queued tombstone record, then empty
+   the queue. Runs on the reaper's thread — NEVER inside a swap!. close!
+   is graceful and idempotent; a per-record failure is swallowed so one
+   dying zombie cannot wedge the queue."
+  [queue]
+  (doseq [m queue]
+    (try (mcp-client/close! m) (catch Throwable _ nil)))
+  [])
+
+(defn- enqueue-zombie!
+  "Move `managed` onto the OUT-OF-POOL tombstone queue (:reaper agent)
+   and schedule its asynchronous close. Called strictly AFTER the swap!
+   that removed/superseded the record — the atom only ever carries plain
+   data."
+  [mgr-atom managed]
+  (when managed
+    (when-let [r (:reaper @mgr-atom)]
+      (try
+        (send-off r (fn [q] (reap-action! (conj (vec q) managed))))
+        (catch Throwable _ nil)))))
+
+(defn quiesce-reaper!
+  "Test/diagnostic barrier: block until the reaper has serviced everything
+   dispatched before this call. Agent actions run in global dispatch
+   order, so harvests enqueued by other threads earlier are drained too;
+   an enqueue racing this sentinel can still land after it — tests that
+   need hard cross-thread guarantees poll process liveness instead.
+   Returns the manager atom unchanged."
+  [mgr-atom]
+  (when-let [r (:reaper @mgr-atom)]
+    (try
+      (do (send-off r identity) (await r))
+      (catch Throwable _ nil)))
+  mgr-atom)
+
 (defn pool-snapshot
   "Point-in-time READ-ONLY projection of the pool for tests and
    diagnostics (WO-M3). Per key it exposes only healing bookkeeping —
@@ -171,9 +233,11 @@
    record and the single-flight :promise are deliberately EXCLUDED so
    assertion messages never print opaque or pending objects. Shape:
 
-     {:pools {k {...}} :opts {:max-reopen-failures n :cooldown-ms n}}"
+     {:pools {k {...}}
+       :pending-owners {k #{owner ...}}
+       :opts {:max-reopen-failures n :cooldown-ms n}}"
   [mgr-atom]
-  (let [{:keys [pools opts]} @mgr-atom]
+  (let [{:keys [pools opts pending-owners]} @mgr-atom]
     {:pools (into {}
                   (map (fn [[k e]]
                          [k (cond-> {:state (:state e)
@@ -185,6 +249,7 @@
                               (:cooldown-until e) (assoc :cooldown-until (:cooldown-until e))
                               (some? (:client e)) (assoc :has-client? true))]))
                   pools)
+     :pending-owners (or pending-owners {})
      :opts (dissoc opts :now-fn)}))
 
 (defn- entry-metrics [entry] (:metrics entry {:call-count 0 :latency-ms nil}))
@@ -193,39 +258,130 @@
 (defn pool-get [mgr-atom k]
   (get-in @mgr-atom [:pools k]))
 
-(defn acquire [mgr-atom k owner-id]
+(defn acquire
+  "Register `owner-id` against pool key `k`; returns the CURRENT entry
+   (nil while the entry is absent — contract unchanged).
+
+   WO-M5: an owner arriving while NO entry exists is no longer dropped.
+   It is registered in the manager's :pending-owners registry, and every
+   entry creation (get-or-open! connect/reconnect transition, put-ready)
+   pre-seeds its :owners from that registry in the same atomic swap, so
+   an owner acquired before the first open still owns the connection."
+  [mgr-atom k owner-id]
   (let [res (atom nil)]
     (swap! mgr-atom
            (fn [s]
              (if-let [e (get-in s [:pools k])]
                (do (reset! res e)
                    (update-in s [:pools k :owners] (fnil conj #{}) owner-id))
-               (do (reset! res nil) s))))
+               (do (reset! res nil)
+                   (update-in s [:pending-owners k] (fnil conj #{}) owner-id)))))
     @res))
 
-(defn release [mgr-atom k owner-id]
-  (swap! mgr-atom
-         (fn [s]
-           (if-let [e (get-in s [:pools k])]
-             (let [owners (disj (or (:owners e) #{}) owner-id)]
-               (if (empty? owners)
-                 (do (when-let [c (:client e)] (try (mcp-client/close! c) (catch Throwable _ nil)))
-                     (update s :pools dissoc k))
-                 (assoc-in s [:pools k :owners] owners)))
-             s))))
+(defn release
+  "Remove `owner-id` from pool key `k`'s ownership (entry owners when the
+   entry exists, the :pending-owners registry otherwise).
 
-(defn put-ready [mgr-atom k managed]
-  (swap! mgr-atom
-         (fn [s]
-           (let [e (get-in s [:pools k])
-                 gen (inc (or (:generation e) 0))]
-             (assoc-in s [:pools k]
-                       {:state :ready :client managed :owners (or (:owners e) #{})
-                        :generation gen :fail-count 0
-                        :metrics (or (:metrics e) {:call-count 0})
-                        :transport-identity (transport-identity (:transport-config managed))
-                        :credential-identity (credential-fingerprint (:transport-config managed))
-                        :health {:last-ok (now-ms s)}})))))
+   WO-M5 refcount discipline:
+   - A release naming an owner that never registered is TWO-TIER: inert
+     while REGISTERED owners remain or an open attempt is in flight — a
+     stale release can therefore never close a client installed after it
+     fired, nor drain an attempt it knows nothing about (probe J) — but
+     it LEGACY-SWEEPS a settled entry with NO registered owners (direct
+     get-or-open!/put-ready callers, e.g. discover-tools, never acquire;
+     their orphaned entries stay releasable exactly as before M5).
+   - The LAST registered owner leaving tears the entry down. The pooled
+     client record is closed SYNCHRONOUSLY AFTER the swap! completes
+     (side effects never run inside swap!; close! is idempotent so even
+     a swap! retry storm stays safe).
+   - When the last owner leaves while an open attempt is IN FLIGHT (the
+     entry carries a single-flight promise), teardown DEFERS to the open
+     outcome: the entry is marked :draining and get-or-open!'s success /
+     failure swaps resolve it — success hands the fresh record to the
+     zombie reaper instead of installing an ownerless live entry; failure
+     simply drops the husk."
+  [mgr-atom k owner-id]
+  (let [torn-down (atom nil)]
+    (swap! mgr-atom
+           (fn [s]
+             (if-let [e (get-in s [:pools k])]
+               (let [total (into (or (:owners e) #{})
+                                 (get-in s [:pending-owners k] #{}))]
+                 (if-not (contains? total owner-id)
+                   ;; Unknown owner. Two tiers (WO-M5 + legacy cleanup):
+                   ;; - owners remain OR an open attempt is in flight ->
+                   ;;   strictly INERT: a stale release can never close a
+                   ;;   client installed after it fired, never drain an
+                   ;;   in-flight attempt it knows nothing about;
+                   ;; - the entry is SETTLED and has NO registered owners
+                   ;;   (direct get-or-open!/put-ready callers such as
+                   ;;   discover-tools never acquire) -> LEGACY SWEEP:
+                   ;;   tear down + close, as releases always did here.
+                   (if (and (empty? total) (nil? (:promise e)))
+                     (do (reset! torn-down (:client e))
+                         (-> s
+                             (update :pools dissoc k)
+                             (update :pending-owners dissoc k)))
+                     s)
+                   (let [remaining (disj total owner-id)]
+                     (if (seq remaining)
+                       ;; owners remain: fold any defensive pending into owners
+                       (-> s
+                           (assoc-in [:pools k :owners] remaining)
+                           (assoc-in [:pending-owners k] #{}))
+                       (if (:promise e)
+                         ;; last owner gone mid-open: defer to the outcome
+                         (-> s
+                             (assoc-in [:pools k :owners] #{})
+                              (assoc-in [:pools k :draining] true)
+                             (update :pending-owners dissoc k))
+                         (do (reset! torn-down (:client e))
+                             (-> s
+                                 (update :pools dissoc k)
+                                 (update :pending-owners dissoc k))))))))
+               ;; no entry: maybe a PENDING owner to unregister
+               (let [pend (get-in s [:pending-owners k] #{})]
+                 (if (contains? pend owner-id)
+                   (let [remaining (disj pend owner-id)]
+                     (if (seq remaining)
+                       (assoc-in s [:pending-owners k] remaining)
+                       (update s :pending-owners dissoc k)))
+                   ;; unknown owner, no entry: strict no-op
+                   s)))))
+    ;; post-swap side effect ONLY: best-effort close of the torn-down record
+    (when-let [c @torn-down]
+      (try (mcp-client/close! c) (catch Throwable _ nil)))
+    nil))
+
+(defn put-ready
+  "Install `managed` as a live :ready entry for key `k`. Production code
+   heals through get-or-open!; this seeds fixtures/tests (and hosts) with
+   an already-open managed record.
+
+   WO-M5: merges with any existing entry instead of replacing it blind —
+   :generation counts this attempt (++), :owners/:metrics are preserved
+   (pending owners fold in), health restarts at {:last-ok now}, and a
+   SUPERSEDED :client record moves to the zombie reaper instead of
+   leaking unowned. Returns the new entry."
+  [mgr-atom k managed]
+  (let [superseded (atom nil)]
+    (swap! mgr-atom
+           (fn [s]
+             (let [e (get-in s [:pools k])
+                   pending (get-in s [:pending-owners k] #{})]
+               (reset! superseded (:client e))
+               (assoc-in s [:pools k]
+                         {:state :ready
+                          :client managed
+                          :owners (into (or (:owners e) #{}) pending)
+                          :generation (inc (or (:generation e) 0))
+                          :fail-count 0
+                          :metrics (or (:metrics e) {:call-count 0})
+                          :transport-identity (transport-identity (:transport-config managed))
+                          :credential-identity (credential-fingerprint (:transport-config managed))
+                          :health {:last-ok (now-ms s)}}))))
+    (enqueue-zombie! mgr-atom @superseded)
+    (get-in @mgr-atom [:pools k])))
 
 (defn mark-broken
   "Report a CONNECTION-LEVEL failure against pool key `k`: demote a LIVE
@@ -238,9 +394,11 @@
    handed out forever and the entry would never heal. With it gone, the
    next caller's presence check falls through to get-or-open!, which
    owns the broken->reconnecting transition and the cooldown gate.
-   (The stripped record is intentionally NOT closed here: closing is a
-   side effect and must never run inside a swap!; lifecycle ownership
-   of superseded clients belongs to M4/M5.)
+   (WO-M5 gap (a): the stripped record is NOT closed inside this swap! —
+   closing is a side effect — it moves to the OUT-OF-POOL tombstone queue
+   (:reaper agent) right after the swap! and is closed asynchronously;
+   shutdown! flushes whatever remains. Previously a stripped zombie's
+   stdio child leaked until GC/JVM death.)
 
    WO-M3 gating: only a :ready entry can be demoted. Reporters fire from
    shared-path call failures; a report arriving against an entry already
@@ -253,14 +411,18 @@
    `err-data` must already be display-safe: the production call sites
    pass broken-err-data (sanitized + transport-redacted, INV-01)."
   [mgr-atom k err-data]
-  (swap! mgr-atom
-         (fn [s]
-           (if (= :ready (get-in s [:pools k :state]))
-             (-> s
-                 (update-in [:pools k] merge {:state :broken
-                                              :health {:last-error err-data}})
-                 (update-in [:pools k] dissoc :client))
-             s))))
+  (let [stripped (atom nil)]
+    (swap! mgr-atom
+           (fn [s]
+             (if (= :ready (get-in s [:pools k :state]))
+               (do (reset! stripped (get-in s [:pools k :client]))
+                   (-> s
+                       (update-in [:pools k] merge {:state :broken
+                                                    :health {:last-error err-data}})
+                       (update-in [:pools k] dissoc :client)))
+               s)))
+    ;; post-swap: dead record -> out-of-pool tombstone queue (async close)
+    (enqueue-zombie! mgr-atom @stripped)))
 
 (defn mark-ok
   "Refresh pool key `k`'s health to {:last-ok <now>} after a SUCCESSFUL
@@ -274,8 +436,17 @@
              (assoc-in s [:pools k :health] {:last-ok (now-ms s)})
              s))))
 
-(defn set-metrics [mgr-atom k f]
-  (swap! mgr-atom update-in [:pools k :metrics] (fn [m] (f (or m {:call-count 0})))))
+(defn set-metrics
+  "Apply `f` to key `k`'s :metrics (defaulting {:call-count 0}). WO-M5
+   guard: a key torn down mid-call stays gone — metrics are never written
+   onto an absent entry (which used to materialize a ghost {:metrics ...}
+   husk with no state)."
+  [mgr-atom k f]
+  (swap! mgr-atom
+         (fn [s]
+           (if (contains? (:pools s) k)
+             (update-in s [:pools k :metrics] (fn [m] (f (or m {:call-count 0}))))
+             s))))
 
 ;; --- failure reporting payload (INV-01 display safety) ------------------------
 
@@ -413,7 +584,15 @@
 
    On open failure the entry is left :broken (or :cooldown) with its
    :promise cleared so a later call starts a fresh attempt (the opener
-   itself rethrows)."
+   itself rethrows).
+
+   WO-M5 OWNERSHIP RESOLUTION: the success/failure swaps mutate only an
+   entry THIS attempt's promise still owns. When the last owner released
+   mid-open (:draining), success hands the freshly opened record to the
+   zombie reaper and DROPS the entry — no ownerless resurrection; failure
+   likewise drops the husk. Owners registered while absent
+   (:pending-owners) pre-seed the entry at creation and fold in at every
+   successful install."
   [mgr-atom k open-fn]
   (let [slot (atom nil)]
     (swap! mgr-atom
@@ -444,15 +623,23 @@
                  ;; an EXPIRED :cooldown): atomically claim the single-
                  ;; flight slot. broken->reopen IS the :reconnecting
                  ;; transition and bumps the generation once per attempt.
+                 ;; WO-M5: owners registered while the entry was absent
+                 ;; (:pending-owners) pre-seed / fold into the entry's
+                 ;; owner set in THIS swap — an acquire can no longer
+                 ;; vanish against the creation window.
                  (let [reopening? (some? e)
                        p (promise)]
                    (reset! slot {:promise p :new? true})
                    (cond-> (-> s
                                (assoc-in [:pools k :state]
                                          (if reopening? :reconnecting :connecting))
+                               (assoc-in [:pools k :owners]
+                                         (into (set (:owners e))
+                                               (get-in s [:pending-owners k])))
                                (assoc-in [:pools k :promise] p)
                                (assoc-in [:pools k :generation]
-                                         (inc (or (:generation e) 0))))
+                                         (inc (or (:generation e) 0)))
+                               (update :pending-owners dissoc k))
                      reopening? (update-in [:pools k] dissoc :cooldown-until)))))))
     (let [{:keys [hit promise new? cooldown]} @slot]
       (cond
@@ -472,40 +659,119 @@
         :else
         (let [p promise]
           (try
-            (let [managed (open-fn)]
-              (swap! mgr-atom (fn [s] (-> s
-                                          (assoc-in [:pools k :state] :ready)
-                                          (assoc-in [:pools k :client] managed)
-                                          (assoc-in [:pools k :health] {:last-ok (now-ms s)})
-                                          (assoc-in [:pools k :fail-count] 0)
-                                          (update-in [:pools k] dissoc :promise :cooldown-until))))
+            (let [managed (open-fn)
+                  orphaned (atom nil)]
+              ;; WO-M5: the success swap MERGES into the live entry instead
+              ;; of rebuilding one bare, and installs ONLY while THIS
+              ;; attempt still owns the single-flight slot. When the last
+              ;; owner released mid-flight (:draining), or the entry
+              ;; vanished / was replaced while we opened, the fresh record
+              ;; is UNOWNED — it goes to the zombie reaper; it is never
+              ;; resurrected as an ownerless :ready entry (probe J) nor
+              ;; installed into a foreign lifecycle.
+              (swap! mgr-atom
+                     (fn [s]
+                       (let [e (get-in s [:pools k])
+                             mine? (and e (identical? p (:promise e)))]
+                         (cond
+                           (and mine? (not (:draining e)))
+                           (-> s
+                               (assoc-in [:pools k :state] :ready)
+                               (assoc-in [:pools k :client] managed)
+                               (assoc-in [:pools k :health] {:last-ok (now-ms s)})
+                               (assoc-in [:pools k :fail-count] 0)
+                               (update-in [:pools k :owners]
+                                          (fn [o] (into (or o #{})
+                                                        (get-in s [:pending-owners k]))))
+                               (update-in [:pools k] dissoc :promise :cooldown-until)
+                               (update-in [:pools k] dissoc :draining)
+                               (update :pending-owners dissoc k))
+                           mine?
+                           ;; draining: nobody owns this outcome anymore
+                           (do (reset! orphaned managed)
+                               (-> s
+                                   (update :pools dissoc k)
+                                   (update :pending-owners dissoc k)))
+                           :else
+                           ;; entry gone (shutdown! or teardown won the race)
+                           (do (reset! orphaned managed) s)))))
+              (enqueue-zombie! mgr-atom @orphaned)
               (deliver p managed)
               managed)
             (catch Throwable ex
               (let [ed (err/sanitize ex)]
                 (swap! mgr-atom
                        (fn [s]
-                         (let [fc (inc (or (get-in s [:pools k :fail-count]) 0))
-                               base (-> s
-                                        (assoc-in [:pools k :state] :broken)
-                                        (assoc-in [:pools k :health] {:last-error ed})
-                                        (assoc-in [:pools k :fail-count] fc)
-                                        (update-in [:pools k] dissoc :promise))]
-                           (if (>= fc (get-in s [:opts :max-reopen-failures]))
-                             (-> base
-                                 (assoc-in [:pools k :state] :cooldown)
-                                 (assoc-in [:pools k :cooldown-until]
-                                           (+ (now-ms s)
-                                              (get-in s [:opts :cooldown-ms]))))
-                             base))))
+                         (let [e (get-in s [:pools k])
+                               mine? (and e (identical? p (:promise e)))]
+                           (cond
+                             ;; draining + failed open: drop the husk entirely
+                             (and mine? (:draining e))
+                             (-> s
+                                 (update :pools dissoc k)
+                                 (update :pending-owners dissoc k))
+                             ;; WO-M5: only mutate an entry THIS attempt owns;
+                             ;; a vanished/replaced entry stays untouched (a
+                             ;; bare assoc-in used to recreate ghost husks)
+                             mine?
+                             (let [fc (inc (or (:fail-count e) 0))
+                                   base (-> s
+                                            (assoc-in [:pools k :state] :broken)
+                                            (assoc-in [:pools k :health] {:last-error ed})
+                                            (assoc-in [:pools k :fail-count] fc)
+                                            (update-in [:pools k] dissoc :promise))]
+                               (if (>= fc (get-in s [:opts :max-reopen-failures]))
+                                 (-> base
+                                     (assoc-in [:pools k :state] :cooldown)
+                                     (assoc-in [:pools k :cooldown-until]
+                                               (+ (now-ms s)
+                                                  (get-in s [:opts :cooldown-ms]))))
+                                 base))
+                             :else s))))
                 (deliver p ex)
                 (throw ex)))))))))
 
-(defn shutdown! [mgr-atom]
-  (doseq [[_ e] (:pools @mgr-atom)]
-    (when-let [c (:client e)] (try (mcp-client/close! c) (catch Throwable _ nil))))
-  ;; preserve :opts — the configured clock/thresholds survive a pool reset
-  (reset! mgr-atom {:pools {} :opts (:opts @mgr-atom)}))
+(defn adopt-client!
+  "WO-M5 gap (c): return a LOCALLY REOPENED managed record (the product of
+   evoclj.mcp.client/ensure-open on the shared path) to the pool. CAS
+   semantics: the record is installed only when the entry still holds
+   EXACTLY the `stale` record the caller saw — identical? on the record,
+   so a concurrent mark-broken strip, healing reopen, or teardown can
+   never be clobbered. Returns true when adopted (the pool owns it again;
+   callers must NOT close it); false otherwise (the caller owns it and
+   must close it call-scoped). health.last-ok is refreshed; generation is
+   untouched (it counts get-or-open!/put-ready attempts only)."
+  [mgr-atom k stale managed]
+  (let [adopted? (atom false)]
+    (swap! mgr-atom
+           (fn [s]
+             (if (and (some? stale)
+                      (identical? stale (get-in s [:pools k :client])))
+               (do (reset! adopted? true)
+                   (-> s
+                       (assoc-in [:pools k :client] managed)
+                       (assoc-in [:pools k :health] {:last-ok (now-ms s)})))
+               s)))
+    @adopted?))
+
+(defn shutdown!
+  "Close every pooled client and reset pool state. WO-M5: the zombie
+   reaper queue is flushed SYNCHRONOUSLY first (await), so a stripped
+   dead client never outlives shutdown; :opts AND the reaper agent
+   survive so shutdown stays idempotent and the configured clock /
+   thresholds keep working."
+  [mgr-atom]
+  (let [{:keys [pools reaper]} @mgr-atom]
+    ;; flush queued tombstones FIRST: nothing outlives this call
+    (when reaper
+      (try
+        (do (send-off reaper reap-action!) (await reaper))
+        (catch Throwable _ nil)))
+    (doseq [[_ e] pools]
+      (when-let [c (:client e)] (try (mcp-client/close! c) (catch Throwable _ nil))))
+    ;; preserve :opts + :reaper — configured clock/thresholds survive a reset
+    (swap! mgr-atom assoc :pools {} :pending-owners {})
+    mgr-atom))
 
 (defmethod ig/init-key :mcp/manager [_ _] (create-manager))
 (defmethod ig/halt-key! :mcp/manager [_ mgr] (shutdown! mgr))

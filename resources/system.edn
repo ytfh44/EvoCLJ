@@ -61,6 +61,9 @@
   ;; per-session capability leases before any session runs
   :leases []}
 
+  :mcp/manager
+  {}
+
  ;; The scheduler host: stores + broker + run-session!. Per-session
  ;; executor maps are built from a compiled Phenotype at run time —
  ;; the Phenotype is never an Integrant component (Global Constraints
@@ -207,6 +210,10 @@
   ;; fails closed with :eval/system-invalid. The judge is attributed to
   ;; the deterministic kernel id "evoclj/eval-judge".
   ;; ==================================================================}
+
+
+  ;; WO-M5: close :eval/system map
+  }
 
  :promotion/system
  {:store {:sqlite #ig/ref :store/sqlite

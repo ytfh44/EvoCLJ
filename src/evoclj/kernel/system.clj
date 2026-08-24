@@ -236,8 +236,12 @@
   {:provider/type <keyword>}, injecting the resolved :store/sqlite spec
   store so kernel providers that CLOSE OVER a store can be
   built (feature R1). v0 ships the fixture adapters
-  (evoclj.provider.fixture); the type keyword names the constructor."
-  [entry store]
+  (evoclj.provider.fixture); the type keyword names the constructor.
+  WO-M5: the :mcp/manager component is injected into :mcp/bridge entries,
+  so pooled MCP providers share ONE host-owned connection manager whose
+  lifecycle halt! owns — the bridge's lazy fallback stays reserved for
+  zero-config, non-Integrant use."
+  [entry store mcp-manager]
   (let [type (:provider/type entry)
         opts (dissoc entry :provider/type)]
     (case type
@@ -246,8 +250,11 @@
       ;; :memory/kv closes over the SQLite spec so its store handle never
       ;; crosses the Provider protocol boundary (feature R1).
       :memory/kv (memory/memory-provider (assoc opts :store store))
-      ;; MCP bridge: remote tool provider, no store injection needed.
-      :mcp/bridge (mcp-bridge/mcp-provider opts)
+      ;; MCP bridge: remote tool provider; the host-owned pool manager is
+      ;; injected (WO-M5) so its stdio children die with the system.
+      :mcp/bridge (mcp-bridge/mcp-provider
+                   (cond-> opts
+                     (some? mcp-manager) (assoc :mcp/manager mcp-manager)))
       (throw (err/error :provider/catalog-invalid
                         (str "unknown :provider/type " type)
                         {:provider/type type
@@ -266,11 +273,13 @@
   fail-closed: a malformed or duplicate entry throws and changes
   nothing (Global Constraint 19 — the registry is kernel-owned). The
   resolved :store/sqlite component is injected into catalog entries
-  that name store-closing providers (:memory/kv, feature R1)."
+  that name store-closing providers (:memory/kv, feature R1); the
+  :mcp/manager component is injected into :mcp/bridge entries (WO-M5)."
   [system config]
   (let [store (:store/sqlite system)]
     (doseq [entry (get-in config [:provider/registry :providers])]
-      (registry/register! (:provider/registry system) (provider-for entry store))))
+      (registry/register! (:provider/registry system)
+                          (provider-for entry store (:mcp/manager system)))))
   system)
 
 (defn init
@@ -291,10 +300,18 @@
         (throw t)))))
 
 (defn halt!
-  "Tear the host system down: (ig/halt! system). Every halt-key! is
-  an honest no-op, so halt! is idempotent — calling it twice is safe."
+  "Tear the host system down: (ig/halt! system) — which halts every
+  Integrant component, including the :mcp/manager pool — then, for
+  zero-config compatibility (WO-M5), also shuts down the bridge's LAZY
+  fallback manager used by providers built WITHOUT an injected manager.
+  Both steps are idempotent, so calling halt! twice stays safe. Returns
+  nil (the ig/halt! contract pinned by evoclj.kernel.system-test)."
   [system]
-  (ig/halt! system))
+  (ig/halt! system)
+  ;; WO-M5: no-op unless some non-injected MCP provider realized the lazy
+  ;; fallback; never lets teardown errors mask the halt outcome.
+  (try (mcp-bridge/shutdown-pool!) (catch Throwable _ nil))
+  nil)
 
 ;; --- :store/* and :capability/broker -------------------------------------------
 ;; Owned by evoclj.runtime.system (single registration, deterministic);
