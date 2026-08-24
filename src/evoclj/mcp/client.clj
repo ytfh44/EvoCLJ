@@ -331,19 +331,66 @@
                          "MCP listTools failed"
                          {:cause (err/sanitize ex)}))))))
 
+(def ^:dynamic ^:private *default-max-tools*
+  "Hard ceiling on the number of tools `list-all-tools` will aggregate across
+   all pages before failing closed with `:mcp/pagination-exceeded`.
+
+   The MCP Java SDK 2.0.0 auto-follows `nextCursor` *inside a single*
+   `listTools` call (WO-T1: one production call already walks every server
+   page and returns the whole aggregate). A hostile or misconfigured server
+   advertising a huge tool set would therefore blow the caller's memory the
+   moment that one call returns, and — at the raw layer — a never-terminating
+   cursor would block the SDK-internal loop indefinitely. This EvoCLJ-layer
+   bound is the fail-closed guard (WO-M6; fail-closed per INV-04): it is
+   enforced in `list-all-tools`, NOT delegated to the SDK. Callers may pass a
+   tighter `:max-tools` via opts; configuration layers may rebind this var."
+   10000)
+
 (defn list-all-tools
   "Return a single vector of all plain Clojure tool-descriptor maps by
    following :next-cursor pagination until exhausted.
 
-   Throws :mcp/list-tools-failed on transport failure."
-  [^McpSyncClient client]
-  (loop [acc []
-         cursor nil]
-    (let [result (list-tools client cursor)
-          tools (:tools result)]
-      (if (:has-more? result)
-        (recur (into acc tools) (:next-cursor result))
-        (into acc tools)))))
+   `opts` may carry:
+     :max-tools <pos-int>  hard ceiling on the aggregated tool count; when
+       the running total would exceed it, throws `:mcp/pagination-exceeded`
+       (fail-closed). Defaults to `*default-max-tools*`.
+
+   Throws `:mcp/list-tools-failed` on transport failure and
+   `:mcp/pagination-exceeded` when the aggregated tool count exceeds the
+   configured cap (or the cap itself is not a positive integer)."
+  ([^McpSyncClient client]
+   (list-all-tools client {}))
+  ([^McpSyncClient client {:keys [max-tools] :or {max-tools *default-max-tools*}}]
+   ;; fail-closed on an unusable cap (e.g. cap = 0 / negative / nil): a
+   ;; non-positive ceiling would let the next page push the aggregate past
+   ;; any finite bound, so reject it up front rather than silently accept.
+   (when-not (pos-int? max-tools)
+     (throw (err/error :mcp/pagination-exceeded
+                       "list-all-tools max-tools must be a positive integer"
+                       {:max-tools (pr-str max-tools)
+                        :error/reason :invalid-max-tools})))
+   (loop [acc []
+          cursor nil
+          pages 0]
+     (let [result (list-tools client cursor)
+           tools (:tools result)
+           next (into acc tools)
+           pages (inc pages)]
+       (cond
+         ;; fail-closed: aggregated count exceeds the configured cap
+         (> (count next) max-tools)
+         (throw (err/error :mcp/pagination-exceeded
+                           "list-all-tools exceeded the pagination tool-count cap"
+                           {:max-tools max-tools
+                            :observed (count next)
+                            :pages pages
+                            :error/reason :tool-count-exceeded}))
+         ;; normal termination: no more pages
+         (not (:has-more? result))
+         next
+         ;; keep aggregating the next page
+         :else
+         (recur next (:next-cursor result) pages))))))
 
 ;; --- tool invocation ---------------------------------------------------------
 
