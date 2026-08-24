@@ -411,6 +411,11 @@
 
      {:mcp/content [<content-block-maps>]
       :mcp/is-error <boolean?>
+       :mcp/latency-ms <non-negative int> ; measured wall-clock elapsed
+                                        ; time (ms) of the real .callTool
+                                        ; SDK round-trip; always present on
+                                        ; the success path, never on the
+                                        ; failure path (fail-closed)
       :mcp/raw-size-bytes <int?>        ; total serialized size of the
                                        ; response content blocks in bytes,
                                        ; or nil when unknown}
@@ -432,8 +437,16 @@
                       {:args (pr-str args)})))
   (let [args (canonical/value->canonical args)]
     (try
-      (let [^McpSchema$CallToolResult result
+      (let [start (System/currentTimeMillis)
+            ^McpSchema$CallToolResult result
             (.callTool client (McpSchema$CallToolRequest. ^String tool-name args))
+            ;; M10: the ACTUAL measured wall-clock latency of the real
+            ;; .callTool SDK round-trip, in whole milliseconds. Captured
+            ;; immediately after the SDK returns (before any EDN
+            ;; conversion) so it reflects the transport cost, not the
+            ;; conversion work. `elapsed-ms` floors at 0 so a clock that
+            ;; does not advance never yields a negative value.
+            latency (max 0 (elapsed-ms start (System/currentTimeMillis)))
             content-block-maps
             (mapv (fn [^McpSchema$Content c]
                     (case (.type c)
@@ -475,7 +488,12 @@
                            (long (reduce + 0 (map #(alength (.getBytes (str %) "UTF-8")) content-block-maps)))))]
         (cond-> {:mcp/content content-block-maps
                  :mcp/is-error is-error
-                 :mcp/tool-status (if is-error :error :ok)}
+                 :mcp/tool-status (if is-error :error :ok)
+                 ;; M10 write-back: the measured latency travels WITH the
+                 ;; result so every consumer (managed wrapper, bridge,
+                 ;; source) can surface the real number instead of a
+                 ;; hardcoded placeholder. Never nil on the success path.
+                 :mcp/latency-ms latency}
           (some? structured-content) (assoc :mcp/structured-content structured-content)
           (pos? wire-bytes) (assoc :mcp/raw-size-bytes wire-bytes)))
       (catch Throwable ex
@@ -688,9 +706,14 @@
                          "MCP managed client is closed"
                          {:open-count (or (:open-count managed) 0)})))
      (try
-       (let [start (System/currentTimeMillis)
-             result (call-tool (:client managed) tool-name args)
-             latency (elapsed-ms start (System/currentTimeMillis))
+       (let [result (call-tool (:client managed) tool-name args)
+             ;; M10: reuse the latency `call-tool` already measured around
+             ;; the REAL SDK round-trip -- do NOT re-measure a wrapper
+             ;; (that would double-count the managed-record overhead and
+             ;; could disagree with the source of truth). Fail-closed: a
+             ;; successful result always carries :mcp/latency-ms (call-tool
+             ;; writes it on the success path), so this is never nil here.
+             latency (long (max 0 (or (:mcp/latency-ms result) 0)))
              updated (assoc managed
                             :call-count (inc (or (:call-count managed) 0))
                             :last-latency-ms latency

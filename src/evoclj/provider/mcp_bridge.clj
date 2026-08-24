@@ -472,7 +472,11 @@
                 edn-result (result->edn raw-result)
                 audit {:mcp/tool-name mcp-name
                        :mcp/connection-id connection-id
-                       :mcp/server-id server-id}
+                       :mcp/server-id server-id
+                        ;; M10: surface the real measured latency on the
+                        ;; provider audit trail (non-negative long; absent
+                        ;; only on a path that throws before reaching here).
+                        :mcp/latency-ms (long (max 0 (or (:mcp/latency-ms raw-result) 0)))}
                 sc (get-in edn-result [:value :mcp/structured-content])
                 desc descriptor]
             (when (some? sc)
@@ -481,7 +485,21 @@
             (let [env (:value edn-result)]
               (when-not (m/validate (:provider/output-schema desc) env)
                 (throw (err/error :provider/output-invalid "envelope failed provider/output-schema" {:value (err/sanitize env)}))))
-            (when shared? (try (manager/set-metrics manager conn-key #(-> % (update :call-count (fnil inc 0)) (assoc :latency-ms 0))) (catch Exception _ nil)))
+            ;; M10: write back the ACTUAL measured latency (carried on the
+            ;; call-tool result as :mcp/latency-ms) onto the pooled entry's
+            ;; runtime stats. This replaces the previous hardcoded
+            ;; `(assoc :latency-ms 0)` placeholder, which M10 forbids: a
+            ;; bogus zero is indistinguishable from a real sub-millisecond
+            ;; call and hides regressions. `(fnil ... 0)` only guards the
+            ;; (unreachable on the success path) absent case. Because this
+            ;; runs AFTER a successful call-tool, a failed/unmeasurable op
+            ;; never reaches here, so no bogus latency is ever persisted.
+            (when shared?
+              (try
+                (let [measured (long (max 0 (or (:mcp/latency-ms raw-result) 0)))]
+                  (manager/set-metrics manager conn-key
+                    #(-> % (update :call-count (fnil inc 0)) (assoc :latency-ms measured))))
+                (catch Exception _ nil)))
             ;; WO-M3 failure reporting, success side: a successful call on a
             ;; pooled connection refreshes health.last-ok (and clears any
             ;; stale :last-error).
