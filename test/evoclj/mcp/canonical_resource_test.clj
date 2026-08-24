@@ -63,7 +63,11 @@
             decision (broker/authorize {:intent intent :normalized-request normalized
                                          :leases [tool-lease] :usage {} :now #inst "2025-01-01"})]
         (is (= :deny (:decision decision)) "tool lease alone cannot cover declared fs resource")
-        (is (= :capability/scope-denied (:reason decision)))))))
+        ;; M14: the canonical projection sets :action :read on the resource,
+        ;; which is now a first-class tuple component; a :invoke-only tool
+        ;; lease does not grant :read, so the precise reason is
+        ;; :capability/action-denied (not a scope failure).
+        (is (= :capability/action-denied (:reason decision)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; 2. NEW BRANCH — pure-data projection DSL applies the declared spec

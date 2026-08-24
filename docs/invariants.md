@@ -265,14 +265,27 @@ level.
   (e.g. a memory tool's read and destructive write), making least-
   privilege grants unexpressible and audit reasoning coarser than the
   event log suggests (undermines GC-20 attribution quality).
-- **Enforcement.** To be closed by WO-M14 (resource action enters policy;
+- **Enforcement.** Closed by WO-M14 (resource action enters policy;
   broker dual authorization generalized into a resource-kind registry).
-  Mechanical check: `evoclj.capability.policy-property-test` and
-  `evoclj.capability.broker-test` extended with tuple-negativity
-  properties — denying on *any* unmatched component, monotone in the
-  lease set (removing leases never turns deny into allow, property
-  already established for the subject/resource axes), and no default
-  action synthesis anywhere in `authorize`.
+  Mechanical check: `evoclj.capability.broker-resource-action-registry-test`
+  (new, M14) drives `evoclj.capability.broker/authorize` through the
+  production path and asserts the six required behaviors: the
+  ResourceAction is a first-class tuple component (a `:filesystem`
+  request carrying `:action :read` is allowed only when the lease grants
+  `:read`, and `:read` vs `:write` are distinct); the broker dispatches
+  uniformly per registered kind via `default-resource-kind-registry`
+  (`src/evoclj/capability/broker.clj:95`), so the former hard-coded
+  `:filesystem/path` dual branch is gone (a custom registry with a
+  request-only target authorizes without a tool grant, while the
+  default still requires it); an unregistered resource kind is denied
+  fail-closed with `:capability/unknown-resource-kind`; an action absent
+  from the lease's `:actions` is denied with `:capability/action-denied`;
+  and `evoclj.capability.policy-property-test` / `evoclj.capability.broker-test`
+  remain green (deny on any unmatched component, monotone in the lease
+  set). No default action synthesis: a `:request` target uses the
+  resource's own `:action` (or the intent action only as explicit
+  fallback in `resolve-target-action`,
+  `src/evoclj/capability/broker.clj:112`), never an implicit `:invoke`.
 
 ### INV-08 — Documentation hashes must resolve
 
