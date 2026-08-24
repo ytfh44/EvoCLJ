@@ -80,7 +80,7 @@
    so only a client that closes its transport reaps it."
   #{:ok :slow :malformed :huge :many-pages
     :infinite-cursor :crash-after-init :no-response
-    :hang-after-spawn})
+    :hang-after-spawn :structured})
 
 (def ^:private script-relpath
   "test/evoclj/mcp/support/server/fake-mcp-server.mjs")

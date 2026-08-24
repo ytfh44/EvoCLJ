@@ -73,7 +73,7 @@ const PAGE_SIZE = Math.max(1, numOr(argValue("--page-size") ?? envOr("FAKE_PAGE_
 const KNOWN_MODES = new Set([
   "ok", "slow", "malformed", "huge", "many-pages",
   "infinite-cursor", "crash-after-init", "no-response",
-  "hang-after-spawn",
+  "hang-after-spawn", "structured",
 ]);
 if (!KNOWN_MODES.has(MODE)) {
   process.stderr.write(
@@ -157,11 +157,33 @@ function toolsListResult(cursor) {
       };
     }
 
+    case "structured":
+      return { tools: structuredTools() };
+
     default: // ok | slow | malformed(handled by caller) | crash-after-init |
-              // no-response
+              // no-response | structured
       return { tools: allTools() };
   }
 }
+
+/** structured mode: a single tool whose tools/call returns a structuredContent
+ *  payload (a JSON object -> the MCP Java SDK parses it into a
+ *  java.util.Map with String keys, Double/Integer/String values). This
+ *  exercises evoclj.mcp.client/call-tool's EDN boundary conversion of
+ *  structuredContent through the REAL production path (M9 fix round 2). */
+function structuredTools() {
+  return [
+    makeTool("emit-sc", "tool that returns a structuredContent object"),
+  ];
+}
+
+/** The structuredContent payload emitted by emit-sc (a plain JSON object). */
+const STRUCTURED_CONTENT = {
+  temperature: 0.7,
+  n: 2,
+  model: "claude",
+  nested: { ok: true },
+};
 
 async function handleMessage(msg) {
   if (!msg || typeof msg !== "object") return;
@@ -230,6 +252,17 @@ async function handleMessage(msg) {
         return;
       }
       await maybeDelay();
+      const toolName = params && params.name !== undefined ? params.name : "";
+      // structured mode: emit-sc returns a structuredContent object (which the
+      // MCP Java SDK deserializes into a java.util.Map) alongside a text block.
+      if (MODE === "structured" && toolName === "emit-sc") {
+        respondResult(id, {
+          content: [{ type: "text", text: JSON.stringify(STRUCTURED_CONTENT) }],
+          structuredContent: STRUCTURED_CONTENT,
+          isError: false,
+        });
+        return;
+      }
       const args = params && params.arguments !== undefined
         ? params.arguments
         : {};

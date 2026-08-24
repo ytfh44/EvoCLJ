@@ -108,8 +108,8 @@
    {:transport-config transport-config
     :tool/id          :m2/echo
     :tool/mcp-name    "echo"
-    :input-schema     :any
-    :output-schema    :any
+    :input-schema     [:map]
+    :output-schema    [:map]
     :connection/id    connection-id
     :manager          mgr}))
 

@@ -38,6 +38,16 @@
 
 (def ^:private default-max-reopen-attempts 2)
 
+(def singleton-object-mapper
+  "SHARED Jackson ObjectMapper used for wire-size computation in call-tool.
+   A single JVM-wide instance is correct and performant: ObjectMapper is
+   thread-safe for read/write after construction, and we never reconfigure
+   it. WO-M9 removes the previous per-call `(new ObjectMapper.)` allocation.
+   This is the SAME instance every caller receives (verified by
+   evoclj.mcp.structured-content-boundary-test); there is no per-call
+   construction anywhere in the call path."
+  (com.fasterxml.jackson.databind.ObjectMapper.))
+
 (defn- now-iso
   "Return the current instant as an ISO-8601 string."
   []
@@ -446,13 +456,21 @@
                        :content/raw (str c)}))
                   (.content result))
             is-error (boolean (.isError result))
-            structured-content (.structuredContent result)
+            structured-content (canonical/java-value->edn (.structuredContent result))
             wire-bytes (try
-                         (let [mapper (com.fasterxml.jackson.databind.ObjectMapper.)
-                               m {"content" content-block-maps
-                                  "structuredContent" structured-content
-                                  "isError" is-error}]
-                           (alength (.writeValueAsBytes mapper m)))
+                         ;; WO-M9: serialize the wire envelope with the SHARED
+                         ;; singleton ObjectMapper. NB: `mapper` and `envelope`
+                         ;; are distinct bindings - a previous edit shadowed the
+                         ;; mapper with the envelope, which silently fell through
+                         ;; to the byte-length fallback and defeated the
+                         ;; singleton entirely. Keeping them separate is what
+                         ;; makes Mutation C (per-call `new ObjectMapper.`) and
+                         ;; the singleton-usage test observable.
+                         (let [mapper singleton-object-mapper
+                               envelope {"content" content-block-maps
+                                          "structuredContent" structured-content
+                                          "isError" is-error}]
+                           (alength (.writeValueAsBytes mapper envelope)))
                          (catch Throwable _
                            (long (reduce + 0 (map #(alength (.getBytes (str %) "UTF-8")) content-block-maps)))))]
         (cond-> {:mcp/content content-block-maps

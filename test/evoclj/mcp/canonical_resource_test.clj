@@ -9,7 +9,9 @@
   (let [tool-id :mcp/read_file
         provider (mcp-bridge/mcp-provider {:transport-config {:type :stdio :command "echo"}
                                            :tool/id tool-id
-                                           :tool/mcp-name "read_file"})
+                                           :tool/mcp-name "read_file"
+                                           :input-schema [:map]
+                                           :output-schema [:map]})
         intent {:intent/id #uuid "00000000-0000-0000-0000-000000000001"
                 :intent/type :intent/tool-call
                 :phenotype/id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

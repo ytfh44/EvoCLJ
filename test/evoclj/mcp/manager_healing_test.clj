@@ -129,8 +129,8 @@
                  {:transport-config tcfg
                   :tool/id          :m3/echo
                   :tool/mcp-name    "echo"
-                  :input-schema     :any
-                  :output-schema    :any
+                  :input-schema     [:map]
+                  :output-schema    [:map]
                   :connection/id    :m3/ok
                   :manager          mgr})
               req (proto/normalize-request p {:payload {:tool/id :m3/echo :args {}}})]
@@ -170,8 +170,8 @@
              {:transport-config cfg
               :tool/id          :m3/heal
               :tool/mcp-name    "echo"
-              :input-schema     :any
-              :output-schema    :any
+              :input-schema     [:map]
+              :output-schema    [:map]
               :connection/id    :m3/heal
               :manager          mgr})
           req (proto/normalize-request p {:payload {:tool/id :m3/heal :args {:q 1}}})

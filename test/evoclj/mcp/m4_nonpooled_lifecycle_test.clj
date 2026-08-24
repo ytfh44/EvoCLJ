@@ -75,12 +75,12 @@
   NON-POOLED provider whose execute-request! must be call-scoped.
   `manager` is only meaningful together with connection-id (pooled)."
   ([tcfg] (bridge-provider tcfg nil))
-  ([tcfg {:keys [connection-id output-schema manager] :or {output-schema :any}}]
+  ([tcfg {:keys [connection-id output-schema manager] :or {output-schema [:map]}}]
    (mcp-bridge/mcp-provider
     (cond-> {:transport-config tcfg
              :tool/id          :m4/echo
              :tool/mcp-name    "echo"
-             :input-schema     :any
+             :input-schema     [:map]
              :output-schema    output-schema}
       connection-id (assoc :connection/id connection-id)
       manager       (assoc :manager manager)))))

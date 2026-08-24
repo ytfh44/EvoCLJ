@@ -236,8 +236,8 @@
                  {:transport-config tcfg
                   :tool/id          :wo-m1/echo
                   :tool/mcp-name    "echo"
-                  :input-schema     :any
-                  :output-schema    :any
+                  :input-schema     [:map]
+                  :output-schema    [:map]
                   :connection/id    :wo-m1/shared
                   :manager          mgr})
               req (proto/normalize-request p {:payload {:tool/id :wo-m1/echo :args {}}})

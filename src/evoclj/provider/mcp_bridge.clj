@@ -181,8 +181,54 @@
 ;; descriptor helper
 ;; ---------------------------------------------------------------------------
 
+(defn- real-schema?
+  "A schema value is REAL (fail-closed) only when it is an explicit,
+   declared schema — never `nil`, never the `:any` wildcard, never a bare
+   non-schema scalar.
+
+     - a vector  -> a Malli schema (e.g. [:map [:text :string]], [:or ...])
+     - a keyword -> a Malli primitive schema (:string, :int, :boolean, ...),
+                    EXCEPT `:any` which is the fail-open wildcard and is
+                    explicitly rejected.
+     - a map     -> either a Malli map schema (:map/:vector/...) or a
+                    JSON-schema map (string-keyed with constructors such as
+                    \"type\"/\"properties\"/\"$ref\"/...)
+     - anything else (nil, \"not-a-schema\", number) -> NOT a real schema.
+
+   WO-M9 deletes the previous `(or schema :any)` default: defaulting to
+   `:any` is a fail-open loophole (GC-14/INV-09), so a missing or `:any`
+   schema must be REJECTED, not silently accepted."
+  [s]
+  (cond
+    (vector? s) true
+    (keyword? s) (not= :any s)
+    (map? s)    (or (contains? s :map) (contains? s :vector)
+                    (contains? s :enum) (contains? s :maybe)
+                    (contains? s :or) (contains? s :and) (contains? s :fn)
+                    (some (fn [[k _]] (and (string? k)
+                                           (#{"type" "properties" "$ref"
+                                              "oneOf" "anyOf" "allOf"
+                                              "items" "enum" "const"}
+                                            k)))
+                          s))
+    :else false))
+
+(defn- require-real-schema!
+  "Fail-closed gate (WO-M9): throw :provider/schema-required unless `s` is
+   a REAL declared schema. Rejects nil / :any / garbage."
+  [which s opts]
+  (when-not (real-schema? s)
+    (throw (err/error :provider/schema-required
+                      (str which " must be a declared schema; missing or :any is not allowed (fail-closed)")
+                      {:value (err/sanitize s)
+                       :opts (err/sanitize opts)}))))
+
 (defn- mcp-tool-descriptor
-  "Build the static descriptor for an MCP-backed tool."
+  "Build the static descriptor for an MCP-backed tool.
+
+   Fail-closed on schemas (WO-M9): both :input-schema and :output-schema
+   MUST be explicitly declared real schemas. The old `(or schema :any)`
+   default is removed — `:any` was a fail-open loophole."
   [opts]
   (let [tool-id (:tool/id opts)
         mcp-name (:tool/mcp-name opts)]
@@ -201,17 +247,20 @@
           retry-safe?   (or (:retry-safe? opts) false)
           connection-id (:connection/id opts)
           server-id     (:mcp/server-id opts)]
+      ;; WO-M9 fail-closed: require explicit, declared schemas.
+      (require-real-schema! :input-schema input-schema opts)
+      (require-real-schema! :output-schema output-schema opts)
       (cond-> {:tool/id         tool-id
                :effect          :remote
-               :input-schema    (or input-schema :any)
-               :output-schema   (or output-schema :any)
-               :provider/input-schema (or input-schema :any)
-               :provider/output-schema (or output-schema :any)
+               :input-schema    input-schema
+               :output-schema   output-schema
+               :provider/input-schema input-schema
+               :provider/output-schema output-schema
                :mcp/input-schema (or mcp-in {})
-               :mcp/output-schema (or mcp-out :any)
+               :mcp/output-schema (or mcp-out {})
                :mcp/input-schema-json (or mcp-in {})
-               :mcp/output-schema-json (or mcp-out :any)
-               :mcp/schema-source (if mcp-in :json-schema-fallback :malli)
+               :mcp/output-schema-json (or mcp-out {})
+               :mcp/schema-source (if (or mcp-in mcp-out) :json-schema-fallback :malli)
                :required-action :invoke
                :version         1
                :mcp/generation  (or (:mcp/generation opts) 0)
@@ -255,9 +304,10 @@
     (:content/raw block)))
 
 (defn java-value->edn
-  "Recursively convert a value returned by the MCP Java SDK 2.0
-   (structuredContent is a java.util.Map with STRING keys) into plain
-   persistent Clojure data:
+  "Delegates to the single shared boundary converter
+   evoclj.mcp.canonical/java-value->edn (WO-M9 / INV-05). Recursively
+   converts a value returned by the MCP Java SDK 2.0 (structuredContent is
+   a java.util.Map with STRING keys) into plain persistent Clojure data:
 
      java.util.Map        -> persistent map (string keys preserved)
      java.util.List       -> vector
@@ -265,22 +315,12 @@
      java.util.Collection -> vector
      strings/numbers/bool -> passed through unchanged
 
-   The result is always plain EDN-safe data for the protocol boundary."
+   The result is always plain EDN-safe data for the protocol boundary.
+   This arity is kept as the public name used by result->edn; the real
+   implementation lives in evoclj.mcp.canonical so there is exactly one
+   converter (no parallel copy to drift)."
   [v]
-  (cond
-    (instance? java.util.Map v)
-    (into {} (map (fn [[k val]] [k (java-value->edn val)]) v))
-
-    (instance? java.util.List v)
-    (mapv java-value->edn v)
-
-    (instance? java.util.Set v)
-    (into #{} (map java-value->edn v))
-
-    (instance? java.util.Collection v)
-    (mapv java-value->edn v)
-
-    :else v))
+  (canonical/java-value->edn v))
 
 (defn result->edn
   "Convert the full call-tool result map into a plain EDN envelope.

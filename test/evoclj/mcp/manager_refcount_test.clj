@@ -156,8 +156,8 @@
                  {:transport-config tcfg
                   :tool/id          :r5/disp
                   :tool/mcp-name    "echo"
-                  :input-schema     :any
-                  :output-schema    :any
+                  :input-schema     [:map]
+                  :output-schema    [:map]
                   :connection/id    :r5/disp
                   :manager          mgr})
               req (proto/normalize-request p {:payload {:tool/id :r5/disp :args {}}})]
@@ -183,7 +183,8 @@
       ;; dispose of a CALL-SCOPED provider (no connection id) is a safe no-op
       (let [q (mcp-bridge/mcp-provider
                {:transport-config {:type :stdio :command "noop" :args []}
-                :tool/id :r5/scoped :tool/mcp-name "x"})]
+                :tool/id :r5/scoped :tool/mcp-name "x"
+                :input-schema [:map] :output-schema [:map]})]
         (is (nil? (mcp-bridge/dispose! q)) "dispose! without pooling is a no-op")))))
 
 (deftest r3b-stale-release-is-inert-by-construction
