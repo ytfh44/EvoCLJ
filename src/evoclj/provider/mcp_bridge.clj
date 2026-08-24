@@ -140,7 +140,8 @@
                :mcp/last-refreshed (or (:mcp/last-refreshed opts) (System/currentTimeMillis))}
         retry-safe? (assoc :retry {:safe? true})
         connection-id (assoc :mcp/connection-id connection-id)
-        server-id (assoc :mcp/server-id server-id)))))
+        server-id (assoc :mcp/server-id server-id)
+        (:mcp/param-projections opts) (assoc :mcp/param-projections (:mcp/param-projections opts))))))
 
 ;; ---------------------------------------------------------------------------
 ;; content-block result -> plain Clojure
@@ -255,7 +256,7 @@
                           "MCP provider input failed JSON Schema validation"
                           {:value (err/sanitize args)})))
       {:tool/id    tool-id
-       :resource   (canonical/canonical-resource tool-id args)
+       :resource   (canonical/canonical-resource descriptor args)
        :args       args}))
   (execute-request! [_ authorized-request]
     (when-not (and (map? authorized-request)

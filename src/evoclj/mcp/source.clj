@@ -162,7 +162,8 @@
       (:mcp/retry-safe? mcp-tool) (assoc :retry {:safe? true})
       (:mcp/server-id opts) (assoc :mcp/server-id (:mcp/server-id opts))
       (:connection/id opts) (assoc :mcp/connection-id (:connection/id opts))
-      (contains? mcp-tool :mcp/output-schema-kind) (assoc :mcp/output-schema-kind (:mcp/output-schema-kind mcp-tool)))))
+      (contains? mcp-tool :mcp/output-schema-kind) (assoc :mcp/output-schema-kind (:mcp/output-schema-kind mcp-tool))
+      (contains? mcp-tool :mcp/param-projections) (assoc :mcp/param-projections (:mcp/param-projections mcp-tool)))))
 
 (defn- payload->sorted
   "Return a stable payload map with :tools sorted by tool-id string for
@@ -293,7 +294,7 @@
                                 "MCP provider input failed JSON Schema validation"
                                 {:value (err/sanitize args) :cause (err/sanitize e)}))))))
       {:tool/id (:tool/id descriptor)
-       :resource (canonical/canonical-resource (:tool/id descriptor) args)
+       :resource (canonical/canonical-resource descriptor args)
        :args args}))
   (execute-request! [_ authorized-request]
     (when-not (and (map? authorized-request)
