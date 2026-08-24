@@ -252,7 +252,7 @@
 ;; (reactor TimeoutException). The honest typed shape through production
 ;; code is therefore :mcp/list-tools-failed carrying a
 ;; java.util.concurrent.TimeoutException cause-class — which client.clj's
-;; own known-transport-classes maps to the transport/timeout family. The
+;; classifier maps to the independent :mcp/timeout family. The
 ;; >10s wall is production behavior, covered by the dispatcher-approved
 ;; requestTimeout deviation (DEVIATION RECORD 1 in fake_server.clj);
 ;; M7 (requestTimeout config) will shorten this test.
@@ -446,18 +446,16 @@
               (is (= :mcp/call-tool-failed (:error/type d)) "typed failure")
               ;; SDK 2.0.0 + Windows pipe buffering: the tools/call write
               ;; succeeds into the dead child's pipe buffer, so the failure
-              ;; surfaces as the SDK requestTimeout (TimeoutException) — the
-              ;; transport/timeout family per client.clj's
-              ;; known-transport-classes. classify-mcp-error short-circuits
-              ;; on the stable :mcp/call-tool-failed wrapper type, so the
-              ;; transport evidence lives in the sanitized cause chain.
+              ;; surfaces as the SDK requestTimeout (TimeoutException). M7
+              ;; classifies this as the INDEPENDENT :mcp/timeout family (no
+              ;; longer folded into :mcp/call-tool-failed / :mcp/transport-error).
               (is (contains? (sanitized-cause-classes d)
                              "java.util.concurrent.TimeoutException")
                   "transport-timeout family evidence in sanitized cause chain")
-              (is (= :mcp/call-tool-failed
+              (is (= :mcp/timeout
                      (:error/type (try (mcp/classify-mcp-error t)
                                        (catch Throwable _ nil))))
-                  "production classifier assigns a stable MCP error type"))
+                  "production classifier reports the independent :mcp/timeout category"))
             (finally
               (mcp/close! managed)))))
       ;; after BOTH the client teardown and the wrapper stop!:

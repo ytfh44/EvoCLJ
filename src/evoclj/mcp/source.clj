@@ -309,8 +309,7 @@
                                        (manager/broken-err-data ex transport-config))
                   (catch Exception _ nil)))
               (let [category (:error/type (mcp-client/classify-mcp-error ex))]
-                (if (or (= category :mcp/transport-error)
-                        (= category :mcp/protocol-error))
+                (if (mcp-client/transient-error-type? category)
                   (throw (err/error :provider/transient-error
                                     "MCP provider call-tool failed"
                                     {:tool-name mcp-name

@@ -449,66 +449,30 @@
              s))))
 
 ;; --- failure reporting payload (INV-01 display safety) ------------------------
-
-(def ^:private transport-family-types
-  "Stable error types that mean the CONNECTION (not the tool, not the
-   input) failed."
-  #{:mcp/transport-error :mcp/protocol-error})
-
-(def ^:private transport-family-classes
-  "Java exception classes treated as connection-level evidence. KEPT IN
-   LOCKSTEP with evoclj.mcp.client's private known-transport-classes /
-   known-protocol-classes until M7 (error classification v2) unifies
-   the two lists."
-  #{"java.io.IOException"
-    "java.net.SocketException"
-    "java.net.ConnectException"
-    "java.net.SocketTimeoutException"
-    "java.util.concurrent.TimeoutException"
-    "com.fasterxml.jackson.core.JsonParseException"
-    "com.fasterxml.jackson.databind.JsonMappingException"})
-
-(defn- gather-signatures!
-  "Accumulate every [:type kw] / [:class str] signature reachable in
-   bounded sanitized error data into volatile set `acc` (recurses
-   through maps/vectors/seqs; sanitize already bounded depth and size)."
-  [v acc]
-  (cond
-    (map? v)
-    (do (when (keyword? (:error/type v)) (vswap! acc conj [:type (:error/type v)]))
-        (when (string? (:error/class v)) (vswap! acc conj [:class (:error/class v)]))
-        (doseq [[_ x] v] (gather-signatures! x acc)))
-    (or (vector? v) (seq? v)) (run! #(gather-signatures! % acc) v)
-    :else nil))
+;;
+;; M7 unified the connection-level family with evoclj.mcp.client. The single
+;; source of truth is mcp-client/transient-error-type?; the duplicate
+;; class list and the sanitized-tree signature walker that used to live here
+;; are deleted (INV-05 — single implementation principle). A failure is
+;; healing-worthy iff the production classifier assigns it a transient family
+;; type (:mcp/timeout / :mcp/transport-error / :mcp/protocol-error).
 
 (defn broken-worthy?
   "True when Throwable `ex` is a connection-level failure that warrants
    mark-broken on a pooled entry (WO-M3 failure reporting).
 
-   Two admission routes:
-     1. evoclj.mcp.client/classify-mcp-error assigns the direct stable
-        family type (:mcp/transport-error / :mcp/protocol-error); or
-     2. the sanitized cause/data tree carries transport-family EVIDENCE.
-
-   Route 2 exists because WO-T1 wire-verified that crash/malformed
-   fake-server failures surface as the SDK requestTimeout
-   (java.util.concurrent.TimeoutException) WRAPPED in the stable
-   :mcp/call-tool-failed type — and the classifier short-circuits on
-   that wrapper's stable type before its cause-chain scan. Unwrapping
-   belongs to M7; until then the evidence walk keeps crash-style deaths
-   on the healing path."
+   The verdict comes entirely from the production classifier
+   (evoclj.mcp.client/classify-mcp-error): any transient family type —
+   :mcp/timeout, :mcp/transport-error, or :mcp/protocol-error — is
+   healing-worthy. WO-T1 wire-verified that crash/malformed fake-server
+   deaths surface as the SDK requestTimeout (TimeoutException) wrapped in
+   :mcp/call-tool-failed; M7's classifier now unwraps that wrapper and
+   reports the timeout/transport evidence, so broken-worthy? needs no
+   separate evidence walk."
   [ex]
   (when (instance? Throwable ex)
-    (let [acc (volatile! #{})]
-      (gather-signatures! (err/sanitize ex) acc)
-      (boolean
-       (or (contains? transport-family-types
-                      (:error/type (mcp-client/classify-mcp-error ex)))
-           (some (fn [[tag v]]
-                   (case tag
-                     :type (contains? transport-family-types v)
-                     :class (contains? transport-family-classes v)))
-                 @acc))))))
+    (mcp-client/transient-error-type?
+      (:error/type (mcp-client/classify-mcp-error ex)))))
 
 (defn- redact-embedded-transports
   "Replace EVERY :mcp/transport-config value anywhere inside sanitized

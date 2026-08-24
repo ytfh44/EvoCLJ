@@ -24,7 +24,8 @@
             [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.transport :as transport])
   (:import [io.modelcontextprotocol.client McpClient McpSyncClient]
-           [io.modelcontextprotocol.spec McpClientTransport]
+           [io.modelcontextprotocol.spec McpClientTransport McpError]
+            [io.modelcontextprotocol.spec McpSchema$JSONRPCResponse$JSONRPCError]
            [io.modelcontextprotocol.spec McpSchema$CallToolRequest
             McpSchema$CallToolResult
             McpSchema$ListToolsResult
@@ -460,53 +461,153 @@
           (some? structured-content) (assoc :mcp/structured-content structured-content)
           (pos? wire-bytes) (assoc :mcp/raw-size-bytes wire-bytes)))
       (catch Throwable ex
-        (throw (err/error :mcp/call-tool-failed
-                          (str "MCP callTool " tool-name " failed")
-                          {:tool-name tool-name
-                           :args (err/sanitize args)
-                           :cause (err/sanitize ex)}))))))
+        (let [mcp-code (when (instance? McpError ex)
+                         (some-> ex .getJsonRpcError .code))]
+          (throw (err/error :mcp/call-tool-failed
+                            (str "MCP callTool " tool-name " failed")
+                            (cond-> {:tool-name tool-name
+                                     :args (err/sanitize args)
+                                     :cause (err/sanitize ex)}
+                              (some? mcp-code) (assoc :mcp/error-code mcp-code)))))))))
 
-;; --- observability ------------------------------------------------------------
+;; --- error classification v2 (M7) --------------------------------------------
+;;
+;; classify-mcp-error turns a raw Throwable (or an EvoCLJ ExceptionInfo that
+;; wraps one) into a sanitized, typed error map. The classification is
+;; fail-closed and produces INDEPENDENT, machine-readable categories:
+;;
+;;   :mcp/timeout        — TimeoutException / SocketTimeoutException, AND the
+;;                         MCP JSON-RPC request-timeout code -32001. Timeouts
+;;                         are their OWN family and are never folded into the
+;;                         generic :mcp/transport-error bucket.
+;;   :mcp/transport-error— IOException / SocketException / ConnectException,
+;;                         and the JSON-RPC connection-closed code -32000.
+;;   :mcp/protocol-error — Jackson parse/mapping failures, and the JSON-RPC
+;;                         parse/invalid-request codes -32700 / -32600.
+;;   :mcp/method-not-found / :mcp/invalid-params / :mcp/internal-error —
+;;                         typed JSON-RPC codes -32601 / -32602 / -32603.
+;;   :mcp/json-rpc-error — any other MCP JSON-RPC error code (carries :mcp/error-code).
+;;   :mcp/unknown-error  — nothing above matched (fail-closed default).
+;;
+;; JSON-RPC evidence is read from two sources:
+;;   1. a :mcp/error-code stashed in ex-data when an McpError is wrapped at the
+;;      call-tool boundary (so the numeric code survives sanitization);
+;;   2. the cause chain, walked through the SANITIZED error tree because the
+;;      production wrappers store the original throwable as a :cause map (the
+;;      live .getCause is nil after err/error wraps it).
+;;
+;; The classifier is pure: no shared mutable state is touched (INV-05).
 
-(def ^:private known-transport-classes
-  #{"java.io.IOException" "java.net.SocketException" "java.net.ConnectException"
-    "java.net.SocketTimeoutException" "java.util.concurrent.TimeoutException"})
+(def ^:private timeout-classes
+  "Java exception classes that mean a wall-clock deadline was exceeded."
+  #{"java.util.concurrent.TimeoutException" "java.net.SocketTimeoutException"})
 
-(def ^:private known-protocol-classes
+(def ^:private transport-classes
+  "Java exception classes that mean the CONNECTION (not the tool/input) failed."
+  #{"java.io.IOException" "java.net.SocketException" "java.net.ConnectException"})
+
+(def ^:private protocol-classes
+  "Java exception classes that mean a malformed JSON payload on the wire."
   #{"com.fasterxml.jackson.core.JsonParseException" "com.fasterxml.jackson.databind.JsonMappingException"})
 
-(defn- cause-chain-types
+(def ^:private transient-error-types
+  "Error types that represent a retryable, connection-level failure. A timeout,
+   transport break, or protocol break on a shared pooled connection should be
+   healed (mark-broken / reopen) rather than treated as a terminal business
+   error."
+  #{:mcp/timeout :mcp/transport-error :mcp/protocol-error})
+
+(defn transient-error-type?
+  "True when `error-type` is a retryable connection-level (transient) MCP
+   failure family."
+  [error-type]
+  (contains? transient-error-types error-type))
+
+(defn- json-rpc-code->type
+  "Map a JSON-RPC error `code` to a typed MCP error category. Unknown codes
+   fall back to :mcp/json-rpc-error (the code is still carried on the map)."
+  [code]
+  (case code
+    -32700 :mcp/protocol-error
+    -32600 :mcp/protocol-error
+    -32601 :mcp/method-not-found
+    -32602 :mcp/invalid-params
+    -32603 :mcp/internal-error
+    -32000 :mcp/transport-error
+    -32001 :mcp/timeout
+    :mcp/json-rpc-error))
+
+(defn- walk-classes-and-code
+  "Walk the SANITIZED error tree collecting every :error/class string and the
+   first :mcp/error-code encountered. The production wrappers keep the
+   original throwable as a :cause map (under ex-data :cause) and stash JSON-RPC
+   codes under :error/data, so the whole bounded sanitized tree is visited."
+  [node]
+  (loop [stack [node] classes #{} code nil]
+    (if (seq stack)
+      (let [n (first stack)]
+        (cond
+          (map? n)
+          (recur (into (rest stack) (vals n))
+                 (cond-> classes
+                   (string? (:error/class n)) (conj (:error/class n)))
+                 (or code (:mcp/error-code n)))
+          (or (vector? n) (seq? n))
+          (recur (into (rest stack) (vec n)) classes code)
+          :else (recur (rest stack) classes code)))
+      {:classes classes :code code})))
+(defn- live-mcp-code
+  "Walk the LIVE throwable cause chain and return the first JSON-RPC error
+   code carried by an io.modelcontextprotocol.spec.McpError, or nil. A raw
+   McpError (the SDK's JSON-RPC error response) is not yet wrapped, so its
+   code lives on the instance — not in ex-data."
   [^Throwable ex]
-  (lazy-seq
-   (when ex
-     (cons (:error/type (ex-data ex))
-           (cause-chain-types (.getCause ex))))))
+  (loop [t ex]
+    (when t
+      (if (instance? McpError t)
+        (some-> t .getJsonRpcError .code)
+        (recur (.getCause t))))))
 
 (defn- categorize-error
+  "Return a map with :error/type (and, for JSON-RPC errors, :mcp/error-code)
+   for the given Throwable. Priority: explicit JSON-RPC code > timeout class >
+   transport class > protocol class > already-typed EvoCLJ error > unknown.
+   The JSON-RPC code is read from two sources: a live McpError instance in the
+   cause chain, and a :mcp/error-code stashed in ex-data when an McpError is
+   wrapped at the call-tool boundary."
   [^Throwable ex]
-  (let [stable (:error/type (ex-data ex))]
+  (let [data (err/error-data ex)
+        {:keys [classes code]} (walk-classes-and-code data)
+        code (or code (live-mcp-code ex))
+        stable (:error/type (ex-data ex))]
     (cond
-      (and stable (not= stable :error/unknown)) stable
-      (contains? known-transport-classes (.getName (.getClass ex))) :mcp/transport-error
-      (contains? known-protocol-classes (.getName (.getClass ex))) :mcp/protocol-error
-      :else
-      (let [cause-types (remove nil? (cause-chain-types (.getCause ex)))
-            first-cause (first cause-types)]
-        (cond
-          (some #{:mcp/transport-error} cause-types) :mcp/transport-error
-          (some #{:mcp/protocol-error} cause-types) :mcp/protocol-error
-          (some #{:mcp/tool-error} cause-types) :mcp/tool-error
-          first-cause first-cause
-          :else :mcp/unknown-error)))))
+      ;; 1. JSON-RPC code wins even when wrapped in :mcp/call-tool-failed.
+      (some? code)
+      {:error/type (json-rpc-code->type code) :mcp/error-code code}
+      ;; 2. timeout is its own family (never folded into transport).
+      (some timeout-classes classes) {:error/type :mcp/timeout}
+      ;; 3. transport break.
+      (some transport-classes classes) {:error/type :mcp/transport-error}
+      ;; 4. protocol (wire) break.
+      (some protocol-classes classes) {:error/type :mcp/protocol-error}
+      ;; 5. an already-typed EvoCLJ error keeps its identity.
+      (and stable (not= stable :error/unknown)) {:error/type stable}
+      ;; 6. fail-closed default.
+      :else {:error/type :mcp/unknown-error})))
 
 (defn classify-mcp-error
-  "Return a sanitized error map with an enriched :error/type for the
-   given Throwable. Wraps the throwable's class, message, and cause
-   chain without leaking Java objects across the Agent boundary."
+  "Return a sanitized error map with an enriched :error/type for the given
+   Throwable. For MCP-originated JSON-RPC errors the map also carries
+   :mcp/error-code (the numeric JSON-RPC code). Timeouts are reported as the
+   independent :mcp/timeout category — they are never folded into
+   :mcp/transport-error. Wraps the throwable's class, message, and cause chain
+   without leaking Java objects across the Agent boundary."
   [^Throwable ex]
   (err/sanitize
-    (assoc (err/error-data ex)
-           :error/type (categorize-error ex))))
+    (let [cat (categorize-error ex)]
+      (assoc (err/error-data ex)
+             :error/type (:error/type cat)
+             :mcp/error-code (:mcp/error-code cat)))))
 
 (defn reduce-content-blocks
   "Honest rename for legacy non-streaming block reduction. Was call-tool-streaming which falsely promised protocol-level streaming. For true async streaming use adapter async channel."
