@@ -17,10 +17,14 @@
   (:require [clojure.string :as str]
             [evoclj.environment.source :as src]
             [evoclj.kernel.error :as err]
+            [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.client :as mcp-client]
+            [evoclj.mcp.codec :as codec]
+            [evoclj.mcp.json-schema :as json-schema]
             [evoclj.mcp.manager :as manager]
-            [evoclj.provider.mcp-bridge :as mcp-bridge]
-            [evoclj.provider.protocol :as proto]))
+            [evoclj.provider.protocol :as proto]
+            [evoclj.sci.boundary :as boundary]
+            [malli.core :as m]))
 
 ;; ---------------------------------------------------------------------------
 ;; helpers - stable tool-id from MCP name
@@ -42,33 +46,52 @@
 (defn- stable-descriptor
   "Convert a raw MCP tool map (from mcp-client/list-all-tools, string-keyed
    JSON schema) into a stable tool descriptor for payload hashing.
+
    Volatile fields :mcp/generation, :mcp/captured-at, :mcp/last-refreshed
    are NOT stored in the payload - they are derived from the Revision
    when a ToolSurface is materialized, so identical tool sets stay
-   identical revisions."
+   identical revisions.
+
+   FAIL-CLOSED (WO-M11 / INV-05 / INV-09): a tool MUST declare a real
+   input and output schema. A missing or empty schema is NOT silently
+   accepted as `:any` (that was a fail-open loophole). When the declared
+   JSON schema cannot be expressed as a Malli primitive, the converter
+   preserves it as a native-validated schema (never `:any`). When no
+   schema is declared at all, this throws :mcp/schema-required so the
+   discovery path cannot register a schema-less (wildcard) tool."
   [mcp-tool opts]
   (let [mcp-name (:mcp/name mcp-tool)
         tool-id (or (:tool/id opts) (mcp-name->tool-id mcp-name))
         input-json (:mcp/input-schema mcp-tool)
         output-json (:mcp/output-schema mcp-tool)
-        ;; mcp-bridge json-schema->malli is private; resolve if present else :any
-        malli-fn (try (deref (ns-resolve 'evoclj.provider.mcp-bridge 'json-schema->malli))
-                      (catch Exception _ nil))
-        input-malli (if (and malli-fn (map? input-json) (seq input-json))
-                      (try (malli-fn input-json) (catch Exception _ :any))
-                      :any)
-        output-malli (if (and malli-fn (map? output-json) (seq output-json))
-                       (try (malli-fn output-json) (catch Exception _ :any))
-                       :any)]
+        ;; Real schema declared? (non-nil, non-empty map). Missing/empty is
+        ;; a fail-closed condition, not a `:any` default.
+        input-present? (and (map? input-json) (seq input-json))
+        output-present? (and (map? output-json) (seq output-json))
+        _ (when-not input-present?
+            (throw (err/error :mcp/schema-required
+                              "MCP tool declares no input schema; schema-less tools are not allowed (fail-closed)"
+                              {:tool (err/sanitize mcp-name)
+                               :input-schema (err/sanitize input-json)})))
+        _ (when-not output-present?
+            (throw (err/error :mcp/schema-required
+                              "MCP tool declares no output schema; schema-less tools are not allowed (fail-closed)"
+                              {:tool (err/sanitize mcp-name)
+                               :output-schema (err/sanitize output-json)})))
+        ;; Single codec implementation (INV-05). json-schema->malli returns a
+        ;; REAL schema here because the JSON is present; it never yields :any
+        ;; for a non-empty schema.
+        input-malli (codec/json-schema->malli input-json)
+        output-malli (codec/json-schema->malli output-json)]
     (cond-> {:tool/id tool-id
              :effect :remote
-             :input-schema (if (= :any input-malli) :any input-malli)
-             :output-schema (if (= :any output-malli) :any output-malli)
+             :input-schema input-malli
+             :output-schema output-malli
              :required-action :invoke
              :version 1
              :mcp/name mcp-name
-             :mcp/input-schema (or input-json {})
-             :mcp/output-schema (or output-json :any)}
+             :mcp/input-schema input-json
+             :mcp/output-schema output-json}
       (:mcp/title mcp-tool) (assoc :mcp/title (:mcp/title mcp-tool))
       (:mcp/description mcp-tool) (assoc :mcp/description (:mcp/description mcp-tool))
       (:mcp/retry-safe? mcp-tool) (assoc :retry {:safe? true})
@@ -175,27 +198,26 @@
     (let [payload (:payload intent)
           raw-args (:args payload)
           args (evoclj.mcp.canonical/value->canonical raw-args)]
-      (when-not (evoclj.sci.boundary/edn-safe? raw-args)
+      (when-not (boundary/edn-safe? raw-args)
         (throw (err/error :provider/input-invalid
                           "MCP provider input must be plain EDN-safe data"
                           {:value (err/sanitize raw-args)})))
-      (when-not (try (require 'malli.core) true (catch Exception _ false))
-        nil)
-      ;; malli validation when available
+      ;; The descriptor is guaranteed (fail-closed, stable-descriptor) to
+      ;; carry a REAL input schema — never :any. Validate it directly via
+      ;; the single Malli implementation; no reflection / ns-resolve.
       (let [schema (:input-schema descriptor)]
-        (when (and (not= :any schema) (not= schema :any))
-          (try
-            (when-not ((resolve 'malli.core/validate) schema raw-args)
-              (throw (err/error :provider/input-invalid
-                                "MCP provider input failed input-schema validation"
-                                {:value (err/sanitize raw-args)})))
-            (catch Exception e
-              (when (= :provider/input-invalid (:error/type (ex-data e))) (throw e))))))
-      ;; json-schema validation when present
+        (try
+          (when-not (m/validate schema raw-args)
+            (throw (err/error :provider/input-invalid
+                              "MCP provider input failed input-schema validation"
+                              {:value (err/sanitize raw-args)})))
+          (catch Exception e
+            (when (= :provider/input-invalid (:error/type (ex-data e))) (throw e)))))
+      ;; native JSON-Schema validation of the declared input schema
       (when-let [js (:mcp/input-schema descriptor)]
         (when (and (map? js) (seq js))
           (try
-            (when-not (evoclj.mcp.json-schema/validate js args)
+            (when-not (json-schema/validate js args)
               (throw (err/error :provider/input-invalid
                                 "MCP provider input failed JSON Schema validation"
                                 {:value (err/sanitize args)})))
@@ -206,7 +228,7 @@
                                 "MCP provider input failed JSON Schema validation"
                                 {:value (err/sanitize args) :cause (err/sanitize e)}))))))
       {:tool/id (:tool/id descriptor)
-       :resource (evoclj.mcp.canonical/canonical-resource (:tool/id descriptor) args)
+       :resource (canonical/canonical-resource (:tool/id descriptor) args)
        :args args}))
   (execute-request! [_ authorized-request]
     (when-not (and (map? authorized-request)
@@ -269,23 +291,23 @@
                               {:open-count (or (:open-count managed) 0)})))
           (let [client (:client managed)
                 raw-result (mcp-client/call-tool client mcp-name args)
-                edn-result ((deref (ns-resolve 'evoclj.provider.mcp-bridge 'result->edn))
-                            raw-result)]
+                edn-result (codec/result->edn raw-result)]
             ;; structured output validation when present
             (let [sc (get-in edn-result [:value :mcp/structured-content])
                   out-schema (:mcp/output-schema descriptor)]
               (when (and (some? sc) (map? out-schema) (seq out-schema))
-                (when-not (evoclj.mcp.json-schema/validate out-schema sc)
+                (when-not (json-schema/validate out-schema sc)
                   (throw (err/error :provider/output-invalid "structuredContent failed mcp/output-schema" {:value (err/sanitize sc)})))))
-            ;; provider output-schema validation
+            ;; provider output-schema validation. The descriptor carries a
+            ;; REAL output schema (fail-closed), so validate it directly via
+            ;; the single Malli implementation — no reflection / ns-resolve.
             (let [env (:value edn-result)
                   out (:output-schema descriptor)]
-              (when (and (not= :any out) (not= out :any))
-                (try
-                  (when-not ((resolve 'malli.core/validate) out env)
-                    (throw (err/error :provider/output-invalid "envelope failed provider/output-schema" {:value (err/sanitize env)})))
-                  (catch Exception e
-                    (when (= :provider/output-invalid (:error/type (ex-data e))) (throw e))))))
+              (try
+                (when-not (m/validate out env)
+                  (throw (err/error :provider/output-invalid "envelope failed provider/output-schema" {:value (err/sanitize env)})))
+                (catch Exception e
+                  (when (= :provider/output-invalid (:error/type (ex-data e))) (throw e)))))
             (when (and manager conn-key)
               (try (manager/set-metrics manager conn-key #(-> % (update :call-count (fnil inc 0)) (assoc :latency-ms 0)))
                    (catch Exception _ nil)))

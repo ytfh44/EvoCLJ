@@ -35,9 +35,10 @@
 (defn freeze [& args] (apply binding/freeze args))
 
 (defn validate-contract [c]
-  ;; Accept both old contract shape and new binding shape for compat
-  (when-not (or (m/validate CallContractSchema c)
-                (m/validate binding/CallBindingSchema c))
+  ;; Single-sourced validation: CallContractSchema IS binding/CallBindingSchema
+  ;; (aliased above), so validating both was a redundant double-check (M11).
+  ;; One validation, one error path.
+  (when-not (m/validate CallContractSchema c)
     (throw (ex-info "invalid CallContract" {:explanation (m/explain CallContractSchema c)})))
   c)
 

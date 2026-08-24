@@ -289,7 +289,7 @@
                                        ; (or {} when absent); the bridge's
                                        ; json-schema->malli converts it
       :mcp/output-schema <map|vector|  ; normalized remote outputSchema,
-                            :any>       ; :any when absent, or a vector
+                            nil>        ; nil when absent (FAIL CLOSED, never
                                        ; Malli schema (legacy 2025-11-25)
       :mcp/output-schema-kind <kw?>    ; :json-schema when output-schema is
                                        ; a map, :malli when a vector
@@ -313,9 +313,13 @@
            tools (.tools result)
            next-cursor (.nextCursor result)]
        {:tools (mapv (fn [^McpSchema$Tool t]
-                       (let [schema (or (.inputSchema ^McpSchema$JsonSchema t) {})
-                             output-schema (or (.outputSchema ^McpSchema$JsonSchema t) :any)
-                             input-schema (if (instance? java.util.Map schema)
+                        (let [schema (or (.inputSchema ^McpSchema$JsonSchema t) {})
+                              ;; M11: a missing outputSchema yields nil (FAIL CLOSED).
+                              ;; We deliberately do NOT default to :any -- that was a
+                              ;; fail-open loophole silently widening an unknown schema
+                              ;; to an accepting wildcard.
+                              output-schema (.outputSchema ^McpSchema$JsonSchema t)
+                              input-schema (if (instance? java.util.Map schema)
                                            (java-schema->clj schema)
                                            {})
                              out-schema (cond

@@ -15,6 +15,7 @@
             [evoclj.environment.revision :as rev]
             [evoclj.mcp.manager :as manager]
             [evoclj.mcp.source :as mcp-source]
+            [evoclj.provider.mcp-bridge]
             [evoclj.provider.protocol :as proto]))
 
 (defn- mcp-tool [name]

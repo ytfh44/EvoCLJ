@@ -28,6 +28,7 @@
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.client :as mcp-client]
+            [evoclj.mcp.codec :as codec]
             [evoclj.mcp.json-schema :as json-schema]
             [evoclj.mcp.manager :as manager]
             [evoclj.provider.protocol :as proto]
@@ -35,126 +36,27 @@
             [malli.core :as m]))
 
 ;; ---------------------------------------------------------------------------
-;; JSON Schema -> Malli conversion
+;; JSON Schema -> Malli conversion (single implementation in evoclj.mcp.codec)
 ;; ---------------------------------------------------------------------------
-
-(def ^:private unsupported-json-schema-keys
-  "JSON Schema keywords the converter cannot prove equivalent to a Malli
-   primitive. When present, the original schema is preserved and validated
-   by the native validator (fail-closed), never degraded to :any."
-  #{"oneOf" "anyOf" "allOf" "$ref" "$defs"
-    "pattern" "format" "dependentSchemas" "unevaluatedProperties"})
+;;
+;; The converter lives in evoclj.mcp.codec so the bridge, the MCP source,
+;; and the CLI paths all share ONE implementation (INV-05). No caller may
+;; reflectively reach into another module for it (ns-resolve /
+;; requiring-resolve), and there is no hand-copied parallel variant. The
+;; public alias below delegates to the single codec implementation.
 
 (declare json-schema->malli)
 
 ;; defined later in this namespace (content-block -> EDN section)
 (declare java-value->edn)
 
-(defn maybe-nilable
-  "Wrap `node` in :maybe when the schema declares `nullable: true`.
-   (:nilable is not registered in Malli 0.20.1; :maybe is.)"
-  [node schema]
-  (if (true? (get schema "nullable")) [:maybe node] node))
-
-(defn object->malli
-  [schema]
-  (let [props (get schema "properties" {})
-        required (set (get schema "required" []))
-        closed? (false? (get schema "additionalProperties" true))
-        entries (map (fn [[k v]]
-                       (if (contains? required k)
-                         [k (json-schema->malli v)]
-                         [k {:optional true} (json-schema->malli v)]))
-                     props)
-        m (if closed?
-            (into [:map {:closed true}] entries)
-            (into [:map] entries))]
-    (maybe-nilable m schema)))
-
-(defn string->malli
-  [schema]
-  (let [min-l (get schema "minLength")
-        max-l (get schema "maxLength")
-        node (cond
-               (and min-l max-l) [:string {:min min-l :max max-l}]
-               (some? min-l)      [:string {:min min-l}]
-               (some? max-l)      [:string {:max max-l}]
-               :else              :string)]
-    (maybe-nilable node schema)))
-
-(defn number->malli
-  [schema]
-  (let [integer? (= "integer" (get schema "type"))
-        min-v (get schema "minimum")
-        max-v (get schema "maximum")
-        opts (cond-> {}
-               (some? min-v) (assoc :min min-v)
-               (some? max-v) (assoc :max max-v))
-        ;; "integer" -> :int. JSON "number" accepts both integers and
-        ;; floats; Malli's :number is not registered, so union :int and
-        ;; :double (both honor :min/:max).
-        node (if integer?
-               (if (seq opts) [:int opts] :int)
-               (if (seq opts) [:or [:int opts] [:double opts]] [:or :int :double]))]
-    (maybe-nilable node schema)))
-
-(defn array->malli
-  [schema]
-  (let [items (get schema "items")
-        node (if (and items (map? items))
-               [:vector (json-schema->malli items)]
-               [:vector :any])]
-    (maybe-nilable node schema)))
-
-(defn wrap-json-schema-validator
-  "Fallback for schema constructs we cannot prove equivalent to a Malli
-   primitive: preserve the (normalized string-keyed) schema and validate
-   it with the native validator inside a Malli :fn. Fail-closed."
-  [schema]
-  [:fn {:error/message "json-schema"}
-   (fn [v] (json-schema/validate schema v))])
-
 (defn json-schema->malli
-  "Convert a (string-keyed) JSON Schema map to an equivalent Malli schema.
-
-   Operates on string-keyed maps (the shape produced by
-   evoclj.mcp.client/java-schema->clj) and also accepts a
-   java.util.Map with string keys.
-
-   Handles the common MCP subset: object (properties + required +
-   additionalProperties), string, integer, number, boolean, array (items),
-   enum, const, null/nullable, and minLength/maxLength/minimum/maximum.
-
-   Fail-closed: constructs the converter cannot prove equivalent to a
-   Malli primitive (oneOf/anyOf/allOf/$ref/$defs/pattern/format/
-   dependentSchemas/unevaluatedProperties) preserve the original schema
-   and validate it with the native validator. :any is returned ONLY when
-   the schema is genuinely empty or absent."
+  "Public alias delegating to evoclj.mcp.codec/json-schema->malli — the
+   single implementation (INV-05). See that namespace for the contract:
+   :any is returned ONLY when a schema is genuinely empty or absent, and
+   callers MUST treat that as a fail-closed signal."
   [schema]
-  (let [s (cond
-            (instance? java.util.Map schema) (java-value->edn schema)
-            (map? schema) schema
-            :else nil)]
-    (cond
-      (nil? s) :any
-      (empty? s) :any
-      (some #(contains? s %) unsupported-json-schema-keys)
-      (wrap-json-schema-validator s)
-      (contains? s "enum")
-      (maybe-nilable (into [:enum] (get s "enum")) s)
-      (contains? s "const")
-      (maybe-nilable [:enum (get s "const")] s)
-      (= "object"  (get s "type")) (object->malli s)
-      (= "string"  (get s "type")) (string->malli s)
-      (= "integer" (get s "type")) (number->malli s)
-      (= "number"  (get s "type")) (number->malli s)
-      (= "boolean" (get s "type")) (maybe-nilable :boolean s)
-      (= "array"   (get s "type")) (array->malli s)
-      (= "null"    (get s "type")) (maybe-nilable :nil s)
-      :else
-      (if (seq s)
-        (wrap-json-schema-validator s)
-        :any))))
+  (codec/json-schema->malli schema))
 
 ;; ---------------------------------------------------------------------------
 ;; connection pool
@@ -182,47 +84,17 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- real-schema?
-  "A schema value is REAL (fail-closed) only when it is an explicit,
-   declared schema — never `nil`, never the `:any` wildcard, never a bare
-   non-schema scalar.
-
-     - a vector  -> a Malli schema (e.g. [:map [:text :string]], [:or ...])
-     - a keyword -> a Malli primitive schema (:string, :int, :boolean, ...),
-                    EXCEPT `:any` which is the fail-open wildcard and is
-                    explicitly rejected.
-     - a map     -> either a Malli map schema (:map/:vector/...) or a
-                    JSON-schema map (string-keyed with constructors such as
-                    \"type\"/\"properties\"/\"$ref\"/...)
-     - anything else (nil, \"not-a-schema\", number) -> NOT a real schema.
-
-   WO-M9 deletes the previous `(or schema :any)` default: defaulting to
-   `:any` is a fail-open loophole (GC-14/INV-09), so a missing or `:any`
-   schema must be REJECTED, not silently accepted."
+  "MCP-bridge view of the REAL-schema predicate. Delegates to the single
+   implementation in evoclj.mcp.codec (INV-05) so the rule is defined
+   exactly once and cannot drift between the bridge and the MCP source."
   [s]
-  (cond
-    (vector? s) true
-    (keyword? s) (not= :any s)
-    (map? s)    (or (contains? s :map) (contains? s :vector)
-                    (contains? s :enum) (contains? s :maybe)
-                    (contains? s :or) (contains? s :and) (contains? s :fn)
-                    (some (fn [[k _]] (and (string? k)
-                                           (#{"type" "properties" "$ref"
-                                              "oneOf" "anyOf" "allOf"
-                                              "items" "enum" "const"}
-                                            k)))
-                          s))
-    :else false))
-
+  (codec/real-schema? s))
 (defn- require-real-schema!
-  "Fail-closed gate (WO-M9): throw :provider/schema-required unless `s` is
-   a REAL declared schema. Rejects nil / :any / garbage."
+  "Fail-closed gate (WO-M9 / M11): throw :provider/schema-required unless
+   `s` is a REAL declared schema. Delegates to the single codec
+   implementation (INV-05). Rejects nil / :any / garbage."
   [which s opts]
-  (when-not (real-schema? s)
-    (throw (err/error :provider/schema-required
-                      (str which " must be a declared schema; missing or :any is not allowed (fail-closed)")
-                      {:value (err/sanitize s)
-                       :opts (err/sanitize opts)}))))
-
+  (codec/require-real-schema! which s opts))
 (defn- mcp-tool-descriptor
   "Build the static descriptor for an MCP-backed tool.
 
@@ -275,33 +147,10 @@
 ;; ---------------------------------------------------------------------------
 
 (defn content-block->edn
-  "Convert one MCP content-block map into a plain EDN value.
-
-   Output sandboxing: binary/opaque blocks (`:image`, `:audio`,
-   `:resource-link`) are replaced with safe placeholders so base64
-   binary data and opaque resource blobs never reach the EDN layer;
-   `:text` blocks pass through as strings."
+  "Convert one MCP content-block map into a plain EDN value. Delegates to
+   the single implementation in evoclj.mcp.codec (INV-05)."
   [block]
-  (case (:content/type block)
-    :text (:content/text block)
-    :image {:mcp/content-type :image
-            :mcp/sandboxed true
-            :mime-type (:content/mime-type block)}
-    :audio {:mcp/content-type :audio
-            :mcp/sandboxed true
-            :mime-type (:content/mime-type block)}
-    :resource-link {:mcp/content-type :resource-link
-                    :mcp/sandboxed true
-                    :uri (:content/uri block)
-                    :mime-type (:content/mime-type block)}
-    :resource (let [uri (:content/uri block)
-                    mime (:content/mime-type block)]
-                (cond
-                  (and uri mime) {:uri uri :mimeType mime}
-                  uri {:uri uri}
-                  :else {:mcp/content-type :resource
-                         :mcp/sandboxed true}))
-    (:content/raw block)))
+  (codec/content-block->edn block))
 
 (defn java-value->edn
   "Delegates to the single shared boundary converter
@@ -320,7 +169,7 @@
    implementation lives in evoclj.mcp.canonical so there is exactly one
    converter (no parallel copy to drift)."
   [v]
-  (canonical/java-value->edn v))
+  (codec/java-value->edn v))
 
 (defn result->edn
   "Convert the full call-tool result map into a plain EDN envelope.
