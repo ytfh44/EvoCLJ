@@ -308,6 +308,9 @@
                       {:source/id        :wo-m1/live-disc
                        :transport-config tcfg
                        :manager          mgr
+                       ;; M12: every discovered tool needs a server-id to form
+                       ;; its deterministic composite [server remote] tool-id.
+                       :mcp/server-id    "live-disc"
                        ;; top-level key: discover-tools derives the SAME
                        ;; connection key from (:connection/id opts)
                        :connection/id    :wo-m1/live})]
@@ -315,12 +318,12 @@
           (let [snap (env-src/snapshot! source)
                 tools (get-in snap [:payload :tools])]
             (is (= 2 (count tools)) (pr-str (keys tools)))
-            (is (contains? tools :mcp/fake-tool-0) "fake-server tool 0 discovered under its stable tool-id")
-            (is (contains? tools :mcp/fake-tool-1) "fake-server tool 1 discovered under its stable tool-id")
-            (is (= "fake-tool-0" (get-in tools [:mcp/fake-tool-0 :mcp/name])))
-            (is (= "fake-tool-1" (get-in tools [:mcp/fake-tool-1 :mcp/name])))
+            (is (contains? tools ["live-disc" "fake-tool-0"]) "fake-server tool 0 discovered under its composite tool-id")
+            (is (contains? tools ["live-disc" "fake-tool-1"]) "fake-server tool 1 discovered under its composite tool-id")
+            (is (= "fake-tool-0" (get-in tools ["live-disc" "fake-tool-0" :mcp/name])))
+            (is (= "fake-tool-1" (get-in tools ["live-disc" "fake-tool-1" :mcp/name])))
             (is (= {"type" "object" "properties" {} "required" []}
-                   (get-in tools [:mcp/fake-tool-0 :mcp/input-schema]))
+                   (get-in tools ["live-disc" "fake-tool-0" :mcp/input-schema]))
                 "raw remote inputSchema normalized to string-keyed EDN")
             (let [entry (manager/pool-get mgr @ck)]
               (is (= :ready (:state entry)) (pr-str entry))

@@ -16,10 +16,21 @@
     (set? v) (into #{} (map value->canonical v))
     :else v))
 
+(defn- read-file-tool?
+  "True when `tool-id` denotes an MCP read_file tool. tool-id may be the
+   legacy keyword :mcp/read_file / :read_file OR the M12 composite tuple
+   [server-id \"read_file\"]. Kept in lockstep with evoclj.mcp.source's
+   composite-id shape so file-tool authorization still applies after M12."
+  [tool-id]
+  (or (#{:mcp/read_file :read_file} tool-id)
+      (and (vector? tool-id)
+           (= 2 (count tool-id))
+           (= "read_file" (second tool-id)))))
+
 (defn canonical-resource [tool-id args]
   (let [args (value->canonical args)]
     (cond
-      (and (string? (get args "path")) (#{:mcp/read_file :read_file} tool-id))
+      (and (string? (get args "path")) (read-file-tool? tool-id))
       {:kind :filesystem/path :path (normalize-path (get args "path")) :action :read}
       (string? (get args "path"))
       {:kind :filesystem/path :path (normalize-path (get args "path")) :action :read}

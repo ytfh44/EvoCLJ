@@ -124,7 +124,8 @@
   fresh one (host-owned pools are the normal case); every other field
   matches the factory's output. snapshot!/discover-tools run unchanged."
   [tcfg]
-  (->(mcp-source/->McpSource :m4/src-disc tcfg nil (atom {}) (atom false) {} nil)
+  (->(mcp-source/->McpSource :m4/src-disc tcfg nil (atom {}) (atom false)
+      {:mcp/server-id "src-disc"} nil)
      (assoc :tools-change-cb (fn []))))
 
 (defn- assert-no-new-children!

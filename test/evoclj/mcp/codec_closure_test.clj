@@ -85,10 +85,11 @@
                   {:source/id :mcp/happy
                    :transport-config {:type :stdio :command "echo" :args []}
                    :manager mgr
+                   :mcp/server-id "happy"
                    :discover-fn discover-fn})
           snap (evoclj.environment.source/snapshot! source)
           payload (:payload snap)
-          desc (get-in payload [:tools :mcp/tool-a])]
+          desc (get-in payload [:tools ["happy" "tool-a"]])]
       (is (some? desc))
       (is (not= :any (:input-schema desc)) "real input schema, not :any")
       (is (not= :any (:output-schema desc)) "real output schema, not :any")
@@ -124,6 +125,7 @@
                   {:source/id :mcp/missing-in
                    :transport-config {:type :stdio :command "echo" :args []}
                    :manager mgr
+                   :mcp/server-id "missing-in"
                    :discover-fn discover-fn})
           d (capture-throw #(evoclj.environment.source/snapshot! source))]
       ;; discovery fails (snapshot! wraps the schema failure as :mcp/discover-failed),
@@ -144,6 +146,7 @@
                   {:source/id :mcp/missing-out
                    :transport-config {:type :stdio :command "echo" :args []}
                    :manager mgr
+                   :mcp/server-id "missing-out"
                    :discover-fn discover-fn})
           d (capture-throw #(evoclj.environment.source/snapshot! source))]
       (is (some? d) "discovery must fail, not silently produce a :any descriptor")

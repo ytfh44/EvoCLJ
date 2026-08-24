@@ -7,10 +7,10 @@
   never mutates registry directly.
 
   Snapshot payload is a pure, stable EDN map:
-    {:tools {\"mcp/read_file\" {:tool/id :mcp/read_file ...} ...}}
-
-  Revision hashing uses pr-str of the sorted payload, so identical tool sets
-  are identical revisions (no churn). Generation / captured-at are derived
+  Snapshot payload is a pure, stable EDN map. Each tool's :tool/id is the
+  deterministic composite [server-id remote-name] tuple (M12), never the
+  collision-prone bare keyword :mcp/<name>:
+    {:tools {[\"server-a\" \"read_file\"] {:tool/id [\"server-a\" \"read_file\"] ...}} ...}}
   from the Revision, not stored in the payload, so ToolEntry immutability
   is preserved and each Revision's ToolEntries share the same manager
   connection."
@@ -27,17 +27,76 @@
             [malli.core :as m]))
 
 ;; ---------------------------------------------------------------------------
-;; helpers - stable tool-id from MCP name
+;; helpers - deterministic composite tool-id (M12)
+;;
+;; Each MCP tool's LOCAL tool-id is a STABLE COMPOSITE of
+;; [server-id, remote-name]. This guarantees tools from different servers
+;; never alias, even when they share a remote name.
+;;
+;; Remote names are sanitized INJECTIVELY (single-valued): distinct remote
+;; names ALWAYS map to distinct sanitized names, so the local id can never
+;; silently merge two distinct remote tools. The sanitizer is a bijection on
+;; strings (percent-encode the three unsafe chars % / space), so it has an
+;; exact inverse and cannot produce a collision.
+;;
+;; If two DISTINCT remote tools STILL resolve to the same local tool-id,
+;; discovery fails CLOSED with a typed :mcp/tool-id-collision error. We
+;; never silently overwrite one tool with the other.
 ;; ---------------------------------------------------------------------------
 
-(defn- mcp-name->tool-id
-  "Stable keyword for an MCP tool name. `:mcp/<name>` with slashes and
-   spaces sanitized to '-'. Uses string name as-is to stay reversible."
-  [mcp-name]
-  (let [n (-> (str mcp-name)
-              (str/replace #"/" "-")
-              (str/replace #"\s+" "-"))]
-    (keyword "mcp" n)))
+(defn- sanitize-remote-name
+  "INJECTIVE (single-valued) sanitization of an MCP remote tool name.
+
+   Distinct remote names map to DISTINCT sanitized names, so the local
+   id never silently collapses two distinct remote tools. Implemented as
+   a BIJECTION: the three unsafe characters (%, space, /) are
+   percent-encoded with a fixed, non-overlapping encoding, and the
+   encoding of '%' guarantees the mapping stays one-to-one. The result is
+   therefore fully reversible (no information lost, no two inputs merge)."
+  [remote-name]
+  (let [s (str remote-name)]
+    ;; str/escape performs a single left-to-right pass: each matched char
+    ;; is replaced by its literal value and the replacement is NOT re-scanned,
+    ;; so '%' -> "%25" cannot itself re-trigger. Because no replacement
+    ;; string shares a leading char with another key and every original
+    ;; char maps to a unique output, the overall map is injective.
+    (str/escape s {\% "%25" \space "%20" \/ "%2F"})))
+
+(defn- composite-tool-id
+  "Deterministic composite LOCAL tool-id for an MCP tool.
+
+   Returns the stable tuple [server-id sanitized-remote-name]. The
+   server-id and the (injectively sanitized) remote name are kept as two
+   SEPARATE components so a tool named the same on two servers yields two
+   distinct tuples and never aliases."
+  [server-id remote-name]
+  (let [sid (or server-id "unknown")
+        sn (sanitize-remote-name remote-name)]
+    [sid sn]))
+
+(defn- detect-collisions!
+  "Fail-closed collision guard (M12). Given the discovered raw tool maps
+   and the computed local tool-id for each, throw :mcp/tool-id-collision
+   when two DISTINCT remote tools resolve to the SAME local tool-id.
+
+   `id-for` is the production function [server-id remote-name] -> local
+   id, applied with the per-tool server-id. Returns the seq of
+   [local-id raw-tool] pairs on success."
+  [tools server-id id-for]
+  (let [pairs (mapv (fn [t]
+                      (let [rn (:mcp/name t)]
+                        [(id-for server-id rn) t]))
+                    tools)
+        by-id (group-by first pairs)]
+    (doseq [[lid group] by-id]
+      ;; >1 DISTINCT tool entry sharing one local id => silent merge risk
+      (when (> (count group) 1)
+        (throw (err/error :mcp/tool-id-collision
+                          "distinct MCP remote tools resolved to the same local tool-id; refusing to silently merge"
+                          {:mcp/local-id (err/sanitize lid)
+                           :mcp/server-id (err/sanitize server-id)
+           :mcp/collisions (err/sanitize (distinct (map #(:mcp/name (second %)) group)))}))))
+    pairs))
 
 ;; ---------------------------------------------------------------------------
 ;; descriptor conversion (stable, no volatile timestamps)
@@ -61,7 +120,13 @@
    discovery path cannot register a schema-less (wildcard) tool."
   [mcp-tool opts]
   (let [mcp-name (:mcp/name mcp-tool)
-        tool-id (or (:tool/id opts) (mcp-name->tool-id mcp-name))
+         server-id (:mcp/server-id opts)
+         ;; M12 (fail-closed): every discovered tool MUST carry a server-id.
+         _ (when (nil? server-id)
+             (throw (err/error :mcp/config-invalid
+                               "MCP tool requires :mcp/server-id to form a stable composite tool-id"
+                               {:tool (err/sanitize mcp-name)})))
+         tool-id (composite-tool-id server-id mcp-name)
         input-json (:mcp/input-schema mcp-tool)
         output-json (:mcp/output-schema mcp-tool)
         ;; Real schema declared? (non-nil, non-empty map). Missing/empty is
@@ -397,6 +462,18 @@
                           (throw (err/error :mcp/discover-failed
                                             "MCP discover failed"
                                             {:source/id source-id :cause (err/sanitize e)}))))
+          ;; M12 (fail-closed): before the discovered tool set is accepted,
+          ;; verify no two DISTINCT remote tools collapsed onto one local
+          ;; composite id. detect-collisions! throws :mcp/tool-id-collision
+          ;; on a genuine collision instead of silently dropping a tool.
+          ;; M12 (fail-closed): before the discovered tool set is accepted,
+          ;; verify no two DISTINCT remote tools collapsed onto one local
+          ;; composite id. detect-collisions! throws :mcp/tool-id-collision
+          ;; on a genuine collision instead of silently dropping a tool.
+          _ (detect-collisions!
+             (map (fn [d] {:mcp/name (:mcp/name d)}) descriptors)
+             (:mcp/server-id opts)
+             composite-tool-id)
           payload (payload->sorted descriptors)]
       {:source/id source-id
        :payload payload
