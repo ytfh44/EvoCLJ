@@ -694,18 +694,122 @@
                               :open-count (or (:open-count managed) 0)}))))))))
 
 (defn ping!
-  "Validate liveness of a managed MCP client by calling list-tools and
-   returning the tool count. Throws :mcp/ping-failed when the client
-   is closed or listTools throws."
+  "Validate liveness of a managed MCP client over the REAL transport by
+   calling the MCP Java SDK's `McpSyncClient.ping()` — a genuine JSON-RPC
+   `ping` request is sent across the wire and must round-trip, so liveness
+   is actually verified (not faked by counting tools).
+
+   Returns a plain EDN liveness map on success:
+
+       {:mcp/ping :ok
+        :mcp/ping-roundtrip-ms <pos-int>
+        :mcp/ping-at <ISO-8601 string>}
+
+   Throws :mcp/ping-failed when the managed record is closed/nil or the
+   live ping request fails. The thrown error carries
+   `:mcp/ping-cause-type` — the underlying error category produced by
+   `classify-mcp-error` (e.g. :mcp/timeout / :mcp/transport-error) — so a
+   failed liveness probe is itself typed and fail-closed."
   [managed]
   (if (closed? managed)
     (throw (err/error :mcp/ping-failed
                       "MCP client is closed"
                       {:open-count (or (:open-count managed) 0)}))
-    (let [client (:client (ensure-open managed default-max-reopen-attempts))]
+    (let [client (:client (ensure-open managed default-max-reopen-attempts))
+          start (System/currentTimeMillis)]
       (try
-        (count (list-all-tools client))
+        (.ping ^McpSyncClient client)
+        (let [rt (elapsed-ms start (System/currentTimeMillis))]
+          {:mcp/ping :ok
+           :mcp/ping-roundtrip-ms (long (max 0 rt))
+           :mcp/ping-at (now-iso)})
         (catch Throwable ex
-          (throw (err/error :mcp/ping-failed
-                            "MCP ping failed"
-                            {:cause (err/sanitize ex)})))))))
+          (let [classified (classify-mcp-error ex)]
+            (throw (err/error :mcp/ping-failed
+                              "MCP ping failed"
+                              {:mcp/ping-cause-type (:error/type classified)
+                               :mcp/ping-roundtrip-ms (long (max 0 (elapsed-ms start (System/currentTimeMillis))))
+                               :cause (err/sanitize ex)}))))))))
+
+;; --- optional keepalive (M8) -------------------------------------------------
+;;
+;; Keepalive is OPT-IN: callers must pass :keepalive? true to
+;; `start-keepalive!`. The default (no opt-in) returns nil and starts NO
+;; background thread, so liveness probing never happens unless explicitly
+;; requested. When enabled, a daemon thread pings the live client on a
+;; fixed interval and records the result in a shared liveness atom that the
+;; caller owns (returned in the control map), so external code can observe
+;; connection health without being coupled to the ping loop.
+
+(defn- keepalive-step!
+  "One ping cycle: update `liveness` with the result of `ping!`. Never
+   throws out of the loop — a failed ping is recorded as :failed so the
+   loop keeps running (and the failure is observable)."
+  [managed liveness]
+  (let [snapshot (try
+                   (ping! managed)
+                   (catch Throwable ex
+                     {:mcp/ping :failed
+                      :mcp/ping-cause-type (:error/type (ex-data ex))}))
+        verdict (if (= :ok (:mcp/ping snapshot)) :ok :failed)]
+    (swap! liveness assoc
+           :mcp/keepalive verdict
+           :mcp/keepalive-at (now-iso)
+           :mcp/last-ping snapshot)
+    snapshot))
+
+(defn start-keepalive!
+  "Start OPTIONAL periodic liveness probing for a managed MCP client.
+
+   opts:
+     :keepalive?        <boolean>  enable the loop (DEFAULT false — opt-in only)
+     :interval-ms      <pos-int>  ping period (default 30000)
+     :liveness         <atom?>    caller-owned atom to record health into;
+                                   a fresh atom is created when omitted
+
+   Returns nil when keepalive is NOT enabled (default-off, nothing runs).
+   When enabled, returns a control map:
+
+       {:keepalive? true
+        :stop!      <fn>      ; halts the loop and joins the thread (bounded)
+        :liveness   <atom>    ; {:mcp/keepalive :ok|:failed ...}
+        :thread     <Thread>}
+
+   The loop is a daemon thread that pings on `:interval-ms` and updates the
+   liveness atom. Fail-closed: a failed ping records :failed (with the
+   classified cause type) rather than terminating the loop or masking the
+   failure. stop! is idempotent and bounded — it interrupts the thread and
+   joins with a timeout, never blocking forever."
+  ([managed] (start-keepalive! managed {}))
+  ([managed {:keys [keepalive? interval-ms liveness]
+             :or {keepalive? false interval-ms 30000}}]
+   ;; OPTIONAL by contract: without explicit opt-in, do nothing — return
+   ;; nil and start NO background thread (default safe/off).
+   (when keepalive?
+     (let [liveness (or liveness (atom {:mcp/keepalive :unknown}))
+           interval-ms (long (max 1 (or interval-ms 30000)))
+           stop? (atom false)
+           thread (Thread.
+                    (fn []
+                      (while (not @stop?)
+                        (try
+                          (keepalive-step! managed liveness)
+                          (catch Throwable _ nil))
+                        (let [deadline (+ (System/currentTimeMillis) interval-ms)]
+                          (while (and (not @stop?)
+                                      (< (System/currentTimeMillis) deadline))
+                            (try (Thread/sleep 20) (catch Throwable _ nil))))))
+                    (str "evoclj-mcp-keepalive-" (java.util.UUID/randomUUID)))]
+       (.setDaemon thread true)
+       (.start thread)
+       {:keepalive? true
+        :stop! (fn stop!
+                 ([]
+                  (stop! 5000))
+                 ([join-ms]
+                  (when (compare-and-set! stop? false true)
+                    (try (.interrupt thread) (catch Throwable _ nil))
+                    (try (.join thread (long join-ms)) (catch Throwable _ nil)))
+                  nil))
+        :liveness liveness
+        :thread thread}))))

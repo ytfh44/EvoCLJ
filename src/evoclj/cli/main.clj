@@ -79,8 +79,10 @@
 
 ;; --- the command table --------------------------------------------------------
 
-(def ^:private commands
-  "Command path -> {:fn <command fn> :arity <positional count>}."
+(def commands
+  "Command path -> {:fn <command fn> :arity <positional count>}.
+   Public so tests can assert doc/behavior consistency (arity vs. the
+   command fn's real contract) without introspecting private plumbing."
   {["genome" "validate"]      {:fn genome/validate! :arity 1}
    ["genome" "inspect"]       {:fn genome/inspect! :arity 1}
    ["genome" "diff"]          {:fn genome/diff! :arity 2}
@@ -116,7 +118,7 @@
    ["skill" "vendor"]         {:fn skill/vendor! :arity 1}
    ["mcp" "status"]           {:fn mcp/status! :arity 0}
    ["mcp" "diagnose"]         {:fn mcp/diagnose! :arity 1}
-   ["mcp" "ping"]             {:fn mcp/ping! :arity 1}})
+   ["mcp" "ping"]             {:fn mcp/ping! :arity 0}})
 
 (defn- command-for
   "The command entry for a positional vector, or nil."

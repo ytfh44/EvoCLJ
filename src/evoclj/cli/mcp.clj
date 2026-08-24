@@ -8,8 +8,10 @@
 
   Delegates to evoclj.mcp.manager for pool visibility; does not
   perform generic refresh."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [evoclj.kernel.error :as err]
+            [evoclj.mcp.client :as client]
             [evoclj.mcp.manager :as manager]))
 
 ;; --- manager resolution ------------------------------------------------------
@@ -36,7 +38,7 @@
   "evoclj mcp status
 
   Protocol/connection diagnostics: pool states, health, and metrics.
-  Returns {:mcp/status :ok :count n :pools [...]}."
+  Returns {:mcp/status :ok :count n :pools [...]}"
   [opts]
   (let [mgr (manager-for opts)
         pools (:pools @mgr)]
@@ -82,9 +84,74 @@
          :count (count pools)}))))
 
 (defn ping!
-  "evoclj mcp ping <connection-id>
+  "evoclj mcp ping [<connection-id>] [--transport-config <edn>]
 
-  Alias for diagnose — checks if a connection is reachable (pool entry exists and is :ready)."
+  Real outbound liveness probe (M8).
+
+  When `--transport-config <edn>` is supplied, this opens a managed MCP
+  client against that transport config (a stdio/tcp/http config launching or
+  reaching a real server), drives the production `evoclj.mcp.client/ping!`
+  (which sends a genuine JSON-RPC `ping` over the transport), and reports:
+
+      {:mcp/ping :ok
+       :mcp/ping-roundtrip-ms <pos-int>
+       :mcp/ping-at <ISO-8601 string>
+       :transport-config <sanitized>}
+
+  A connection that cannot be opened OR whose ping fails throws a typed
+  :mcp/ping-failed (fail-closed) — it does NOT silently report :unreachable.
+  The thrown error carries `:mcp/ping-cause-type` (the underlying classified
+  error category, e.g. :mcp/timeout / :mcp/transport-error) so the liveness
+  failure is itself diagnosable.
+
+  Without `--transport-config`, the legacy pool behavior is preserved: a
+  positional <connection-id> is matched against the live manager pool and
+  its :ready state reported as :ok / :unreachable (no outbound probe)."
   [opts]
-  (let [res (diagnose! opts)]
-    (assoc res :mcp/ping (if (= :ready (:state res)) :ok :unreachable))))
+  (let [raw-tc (some-> opts :options :transport-config)
+        tc (when raw-tc (edn/read-string raw-tc))]
+    (if tc
+      ;; --- real outbound path (open! + ping! both inside the try so any
+      ;;     failure of the outbound ping operation is reported as
+      ;;     :mcp/ping-failed, fail-closed + typed) ---
+      (try
+        (let [managed (client/open! tc)
+              result (try
+                       (client/ping! managed)
+                       (finally (client/close! managed)))]
+          {:mcp/ping (:mcp/ping result)
+           :mcp/ping-roundtrip-ms (:mcp/ping-roundtrip-ms result)
+           :mcp/ping-at (:mcp/ping-at result)
+           :transport-config (err/sanitize tc)})
+        (catch Throwable ex
+          ;; A failed outbound ping operation is ALWAYS reported as
+          ;; :mcp/ping-failed (fail-closed + typed), with the underlying
+          ;; classified cause type preserved so the failure is still
+          ;; diagnosable (timeout / transport / protocol / etc).
+          (let [data (ex-data ex)
+                ;; The failure is ALWAYS typed :mcp/ping-failed, and it
+                ;; MUST carry a cause-type so the liveness failure is itself
+                ;; diagnosable. Prefer the ping!-classified type
+                ;; (:mcp/ping-cause-type); when the failure came from open!
+                ;; instead of ping! (e.g. an unspawnable server), the
+                ;; underlying :error/type of the thrown error is used as the
+                ;; cause-type fallback.
+                cause-type (or (:mcp/ping-cause-type data)
+                               (:error/type data))
+                base {:transport-config (err/sanitize tc)
+                      :mcp/ping-cause-type cause-type}
+                enriched (cond-> base
+                           (:mcp/ping-cause-type data)
+                           (assoc :mcp/ping-cause-type (:mcp/ping-cause-type data))
+
+                           (:error/type data)
+                           (assoc :mcp/ping-failed-from (:error/type data))
+
+                           (:cause data)
+                           (assoc :cause (:cause data)))]
+            (throw (err/error :mcp/ping-failed
+                              (.getMessage ex)
+                              enriched)))))
+      ;; --- legacy pool-diagnose path (no outbound) ---
+      (let [res (diagnose! opts)]
+        (assoc res :mcp/ping (if (= :ready (:state res)) :ok :unreachable))))))
