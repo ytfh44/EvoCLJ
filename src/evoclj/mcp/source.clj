@@ -472,7 +472,8 @@
 ;; McpSource
 ;; ---------------------------------------------------------------------------
 
-(defrecord McpSource [source-id transport-config manager closed? opts discover-fn]
+(defrecord McpSource [source-id transport-config manager closed? opts discover-fn
+             last-refreshed cached-payload]
   src/LiveSource
   (snapshot! [this]
     (when @closed?
@@ -528,6 +529,50 @@
       nil)
     nil))
 
+(defn refresh-schema-now!
+  "Re-fetch the remote tool schema for `source` and update the source's
+   in-memory/source descriptor set. Fail-closed: any error thrown by the
+   production discovery path (connection failure, adapter version
+   unsupported, tool-id collision, JSON-schema validation) propagates and
+   leaves the prior production state (last-refreshed atom + cached
+   payload) intact — no partial/clobbered update.
+
+   Returns the refreshed snapshot map of the same shape as `snapshot!`
+   `{:source/id :payload :captured-at}`.
+
+   M18: records `:mcp/last-refreshed` on the PRODUCTION side (the source's
+   own `last-refreshed` atom), so stale?/binding code can observe a concrete
+   refresh time rather than a test-only seam. This is NOT a snapshot
+   (INV-06) — it is the explicit refresh action and is allowed to mutate
+   production refresh state."
+  [source]
+  (when @(:closed? source)
+    (throw (err/error :mcp/source-closed "McpSource is closed" {:source/id (:source-id source)})))
+  (let [descriptors (try
+                      (discover-tools source)
+                      ;; M16: preserve typed, fail-closed discovery errors
+                      ;; (e.g. :mcp/unsupported, :mcp/tool-id-collision) instead
+                      ;; of masking them as a generic :mcp/discover-failed.
+                      (catch Throwable e
+                        (if (:error/type (ex-data e))
+                          (throw e)
+                          (throw (err/error :mcp/discover-failed
+                                            "MCP refresh failed"
+                                            {:source/id (:source-id source) :cause (err/sanitize e)})))))
+        ;; M12 (fail-closed): same collision guard the snapshot path uses.
+        _ (detect-collisions!
+           (map (fn [d] {:mcp/name (:mcp/name d)}) descriptors)
+           (:mcp/server-id (:opts source))
+           composite-tool-id)
+        payload (payload->sorted descriptors)
+        now (System/currentTimeMillis)]
+    ;; --- production-side state update (M18) ---
+    (reset! (:cached-payload source) payload)
+    (reset! (:last-refreshed source) now)
+    {:source/id (:source-id source)
+     :payload payload
+     :captured-at now}))
+
 (defn make-mcp-source
   "Create an McpSource LiveSource.
 
@@ -556,7 +601,8 @@
         invalidate-all (fn []
                         (manager/publish! mgr {:event/type :mcp/tools-changed
                                                :source/id id}))]
-    (let [source (->McpSource id transport-config mgr closed? opts discover-fn)]
+    (let [source (->McpSource id transport-config mgr closed? opts discover-fn
+                              (atom nil) (atom nil))]
       ;; transient client-wiring callback read by discover-tools; the actual
       ;; subscription registry is the manager, not this record.
       (assoc source :tools-change-cb invalidate-all))))

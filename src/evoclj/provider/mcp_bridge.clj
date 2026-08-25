@@ -425,10 +425,18 @@
 (defn refresh-provider!
   "Deprecated: previously mutated descriptor-atom in place. Now returns a new
    immutable ToolEntry with bumped :mcp/generation and nil :mcp/last-refreshed.
-   The original provider instance is unchanged (immutable)."
+   The original provider instance is unchanged (immutable).
+
+   M18: PRESERVES the existing `:transport-config` of the incoming provider
+   (read from the ToolEntry record). The old implementation clobbered it to
+   `{}`, which dropped the connection config and broke any subsequent
+   call-scoped execution. The refresh must only invalidate the schema
+   (last-refreshed -> nil) and bump generation, never discard the transport
+   config."
   [provider]
   (let [desc (proto/describe provider)
-        tool-id (:tool/id desc)]
+        tool-id (:tool/id desc)
+        transport-cfg (:transport-config provider)]
     (when-not tool-id
       (throw (err/error :provider/not-a-provider "provider missing :tool/id" {:provider (err/sanitize provider)})))
     (let [new-desc (-> desc
@@ -437,12 +445,14 @@
                        (assoc :mcp/captured-at (System/currentTimeMillis)))
           opts {:tool/id tool-id
                 :tool/mcp-name (or (:mcp/name desc) (name tool-id))
-                :transport-config {}
+                :transport-config transport-cfg
                 :input-schema (:provider/input-schema desc)
                 :output-schema (:provider/output-schema desc)
                 :mcp/generation (:mcp/generation new-desc)
                 :mcp/captured-at (:mcp/captured-at new-desc)
-                :mcp/last-refreshed nil}]
+                :mcp/last-refreshed nil
+                :mcp/connection-id (:mcp/connection-id desc)
+                :mcp/server-id (:mcp/server-id desc)}]
       (let [new-entry (make-tool-entry (merge opts {:mcp/input-schema (:mcp/input-schema desc)
                                                     :mcp/output-schema (:mcp/output-schema desc)}))]
         (let [bumped (assoc new-entry :descriptor new-desc)]
