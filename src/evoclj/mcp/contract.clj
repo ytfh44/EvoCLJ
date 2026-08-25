@@ -27,19 +27,33 @@
    (capture descriptor normalized decision freshness {}))
   ([descriptor normalized decision freshness {:keys [stale? id captured-at]}]
    (let [opts (cond-> {:freshness freshness}
-                (some? stale?) (assoc :stale? stale?)
-                (some? id) (assoc :binding/id id)
-                (some? captured-at) (assoc :captured-at captured-at))]
-     (binding/capture descriptor normalized decision freshness opts))))
+                 (some? stale?) (assoc :stale? stale?)
+                 (some? id) (assoc :binding/id id)
+                 (some? captured-at) (assoc :captured-at captured-at))
+         b (binding/capture descriptor normalized decision freshness opts)]
+     ;; The contract wrapper is the sanctioned compat surface: it decorates the
+     ;; canonical CallBinding record with legacy :contract/* / :mcp/* alias keys
+     ;; (single source of truth lives in evoclj.binding.call; the record itself
+     ;; carries only canonical :binding/* + :revision/* keys — M21).
+     (assoc b
+            :contract/id (:binding/id b)
+            :contract/generation (:revision/seq b)
+            :contract/descriptor (:binding/descriptor b)
+            :contract/freshness (:binding/freshness b)
+            :contract/stale? (:binding/stale? b)
+            :contract/captured-at (:binding/captured-at b)
+            :mcp/generation (:revision/seq b)
+            :mcp/stale? (:binding/stale? b)
+            :mcp/freshness (:binding/freshness b)))))
 
 (defn freeze [& args] (apply binding/freeze args))
 
 (defn validate-contract [c]
   ;; Single-sourced validation: CallContractSchema IS binding/CallBindingSchema
   ;; (aliased above), so validating both was a redundant double-check (M11).
-  ;; One validation, one error path.
-  (when-not (m/validate CallContractSchema c)
-    (throw (ex-info "invalid CallContract" {:explanation (m/explain CallContractSchema c)})))
+  ;; One validation, one error path. The contract record is decorated with
+  ;; compat :contract/* / :mcp/* aliases, so we validate the canonical subset.
+  (binding/validate-binding (select-keys c binding/canonical-binding-keys))
   c)
 
 (defn contract->audit [contract] (binding/binding->audit contract))
