@@ -45,6 +45,7 @@
   (:require [clojure.walk :as walk]
             [evoclj.kernel.error :as err]
             [evoclj.mcp.client :as mcp-client]
+            [evoclj.store.event :as event]
             [integrant.core :as ig])
   (:import (java.nio.charset StandardCharsets)
            (java.security MessageDigest)))
@@ -156,6 +157,23 @@
    waiting this out)."
   5000)
 
+(def ^:private default-subscription-cap
+  "Hard ceiling on the number of live subscriptions the manager will hold
+   (M17). Subscriptions are BOUNDED: a subscribe! that would push the count
+   past this cap is rejected fail-closed with :mcp/subscription-limit-exceeded
+   rather than growing the set without limit. The cap lives on the manager
+   atom so it cannot be bypassed by any caller."
+  64)
+
+(def ^:private default-progress-event-cap
+  "Hard ceiling on the number of progress events retained in the manager's
+   in-process progress journal (M17). The journal is append-only and bounded:
+   once it reaches this size the OLDEST entry is evicted on each new append,
+   so a long-running stream cannot make the manager's memory grow unbounded.
+   (The real evoclj.store.event log, when wired, is the durable record and is
+   NOT subject to this in-process cap.)"
+  1024)
+
 (defn create-manager
   "Create a fresh manager atom.
 
@@ -165,11 +183,27 @@
      :cooldown-ms          duration of the :cooldown window (default 5000)
      :now-fn               zero-arg millisecond clock; defaults to
                            System/currentTimeMillis (tests inject a
-                           controllable clock)"
+                           controllable clock)
+     :subscription-cap     max number of live subscriptions the manager
+                           holds (M17; default 64). Exceeding it rejects the
+                           new subscription fail-closed.
+     :progress-event-cap   max progress events kept in the in-process journal
+                           (M17; default 1024); oldest evicted when exceeded.
+     :event-store          optional evoclj.store.event handle (a SQLite path
+                           or jdbc spec). When present, publish-progress! also
+                           persists each progress event to the real append-only
+                           event store (M17: progress enters the event store).
+     :event-store-ctx      zero-arg fn returning the per-append session pin
+                           {:session/id :generation/id :phenotype/id
+                            :cause/event-id} required by evoclj.store.event.
+                           Only consulted when :event-store is set."
   ([] (create-manager {}))
-  ([{:keys [max-reopen-failures cooldown-ms now-fn]
+  ([{:keys [max-reopen-failures cooldown-ms now-fn
+            subscription-cap progress-event-cap event-store event-store-ctx]
      :or {max-reopen-failures default-max-reopen-failures
-          cooldown-ms default-cooldown-ms}}]
+          cooldown-ms default-cooldown-ms
+          subscription-cap default-subscription-cap
+          progress-event-cap default-progress-event-cap}}]
    (atom {:pools {}
           ;; WO-M5: owners registered while their entry does not exist yet
           :pending-owners {}
@@ -177,6 +211,20 @@
           ;; is the queue of zombie managed records awaiting async close;
           ;; actions run OFF the swap! path by construction.
           :reaper (agent [] :error-mode :continue)
+          ;; M17: the manager is the CANONICAL owner of subscriptions. Every
+          ;; subscriber registered through subscribe! lands here and is fanned
+          ;; out by publish!/publish-progress!. Bounded by :subscription-cap.
+          :subscriptions {}
+          :subscription-cap (int subscription-cap)
+          ;; M17: bounded in-process journal of progress events — the durable
+          ;; (while-live) record of progress that always exists even when no
+          ;; external event store is wired. Bounded by :progress-event-cap.
+          :progress-events []
+          :progress-event-cap (int progress-event-cap)
+          ;; M17: optional real event store (evoclj.store.event) + its
+          ;; per-append session pin. nil when not wired.
+          :event-store event-store
+          :event-store-ctx event-store-ctx
           :opts {:max-reopen-failures max-reopen-failures
                  :cooldown-ms cooldown-ms
                  :now-fn (or now-fn System/currentTimeMillis)}})))
@@ -740,4 +788,139 @@
 (defmethod ig/init-key :mcp/manager [_ _] (create-manager))
 (defmethod ig/halt-key! :mcp/manager [_ mgr] (shutdown! mgr))
 
+;; ---------------------------------------------------------------------------
+;; M17 — manager-owned subscriptions + fan-out + progress -> event store
+;;
+;; The manager is the SINGLE owner of the subscription set. A progress / event
+;; published through publish! / publish-progress! is fanned out to EVERY live
+;; subscriber. Subscriptions are BOUNDED by :subscription-cap; exceeding it is
+;; rejected fail-closed. Progress events are durably recorded: always in the
+;; manager's bounded in-process journal, and additionally in the real
+;; evoclj.store.event append-only log when :event-store is wired.
+;; ---------------------------------------------------------------------------
+
+(defn subscription-count
+  "The number of live subscriptions currently held by the manager (M17)."
+  [mgr-atom]
+  (count (:subscriptions @mgr-atom)))
+
+(declare unsubscribe!)
+
+(defn configured-event-store?
+  "True when the manager has a real event store wired for progress
+   persistence (M17)."
+  [mgr-atom]
+  (some? (:event-store @mgr-atom)))
+
+(defn subscribe!
+  "Register `sub-fn` (a one-arg fn receiving every event published through
+   the manager) as a subscription OWNED BY the manager (M17). Returns a
+   subscription handle {:subscription/id <uuid> :close! <fn>}; calling
+   :close! removes the subscription from the manager.
+
+   BOUNDED, fail-closed (M17): when the new subscription would push the live
+   count past :subscription-cap, the request is REJECTED with a typed
+   :mcp/subscription-limit-exceeded error and NOTHING is registered — the
+   subscription set can never grow unbounded, and a rejected attempt never
+   leaks a half-registered entry."
+  [mgr-atom sub-fn]
+  (when-not (fn? sub-fn)
+    (throw (err/error :mcp/subscription-invalid
+                      "subscribe! requires a one-arg subscriber fn"
+                      {:subscriber (err/sanitize sub-fn)})))
+  (let [id (random-uuid)
+        close-fn (fn [] (unsubscribe! mgr-atom id))]
+    (let [rejected (atom false)]
+      (swap! mgr-atom
+             (fn [s]
+               (let [cap (int (:subscription-cap s))
+                     n (count (:subscriptions s))]
+                 (if (>= n cap)
+                   (do (reset! rejected true) s)
+                   (assoc-in s [:subscriptions id] sub-fn)))))
+      (when @rejected
+        (throw (err/error :mcp/subscription-limit-exceeded
+                          "subscription count would exceed the manager cap"
+                          {:subscription-cap (int (:subscription-cap @mgr-atom))
+                           :current (subscription-count mgr-atom)
+                           :error/reason :subscription-cap-exceeded})))
+      {:subscription/id id :close! close-fn})))
+
+(defn unsubscribe!
+  "Remove subscription `id` from the manager (M17). Idempotent: removing an
+   unknown id is a no-op (fail-closed — it must never throw on a stray close)."
+  [mgr-atom id]
+  (swap! mgr-atom update :subscriptions dissoc id)
+  nil)
+
+(defn publish!
+  "Fan out `event` to EVERY live subscriber held by the manager (M17).
+
+   FAIL-CLOSED per subscriber: each subscriber is invoked inside its own
+   try/catch so one throwing subscriber cannot prevent delivery to the others,
+   and cannot corrupt the manager atom (no swap! side effects). Publishing to
+   an empty subscription set is a NO-OP (returns nil, does not throw) — a
+   publisher must not fail merely because nobody is listening.
+
+   Returns the number of subscribers the event was delivered to."
+  [mgr-atom event]
+  (let [subs (vals (:subscriptions @mgr-atom))]
+    (doseq [f subs]
+      (try (f event)
+           (catch Throwable _ nil)))
+    (count subs)))
+
+(defn- record-progress!
+  "Append `progress-event` (tagged :mcp/progress) to the manager's bounded
+   in-process journal, evicting the OLDEST entry when the cap is exceeded
+   (M17). Bounded by :progress-event-cap so a long stream cannot grow the
+   manager's memory without limit. Runs inside a swap! — no side effects."
+  [mgr-atom progress-event]
+  (swap! mgr-atom
+         (fn [s]
+           (let [cap (int (:progress-event-cap s))
+                 stamped (assoc progress-event :event/type :mcp/progress
+                                :event/at (java.time.Instant/now))
+                 next (conj (vec (:progress-events s)) stamped)]
+             (assoc s :progress-events
+                    (if (> (count next) cap)
+                      (subvec next (- (count next) cap))  ; drop oldest
+                      next))))))
+
+(defn progress-events
+  "The manager's in-process progress journal, as a vector of events in
+   append order (M17). Bounded and append-only within the manager's lifetime."
+  [mgr-atom]
+  (vec (:progress-events @mgr-atom)))
+
+(defn publish-progress!
+  "Record a progress event and fan it out through the manager (M17).
+
+   The progress event is appended to the manager's bounded in-process journal
+   and fanned out to every live subscriber via publish!. When a real event
+   store is wired via :event-store and :event-store-ctx, the event is also
+   persisted to evoclj.store.event/append-event! (fail-closed: a persistence
+   failure throws). The :event-store-ctx fn supplies the session pin and a
+   valid :cause/event-id.
+
+   progress-event is a plain EDN map; it becomes the persisted event metadata."
+  [mgr-atom progress-event]
+  (record-progress! mgr-atom progress-event)
+  (publish! mgr-atom (assoc progress-event :event/type :mcp/progress))
+  (when-let [store (:event-store @mgr-atom)]
+    (let [ctx (when-let [f (:event-store-ctx @mgr-atom)] (f))]
+      (when-not ctx
+        (throw (err/error :mcp/progress-store-unconfigured
+                          "event store wired but no :event-store-ctx pin available"
+                          {})))
+      (event/append-event!
+       store
+       {:session/id (:session/id ctx)
+        :generation/id (:generation/id ctx)
+        :phenotype/id (:phenotype/id ctx)
+        :event/type :mcp/progress
+        :cause/event-id (:cause/event-id ctx)
+        :payload-ref nil
+        :metadata (or progress-event {})}))))
 ;; # ponytail: global-lock ceiling — per-key locking would reduce contention but single atom swap! is sufficient for current scale
+

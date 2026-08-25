@@ -203,10 +203,12 @@
           original-id (:revision/id original-current)
           ;; track whether invalidate was called
           invalidate-called (atom false)
-          ;; our source's trigger should call the registry's invalidate path (dirty + async refresh)
-          ;; we simulate by directly calling trigger-tools-changed! which should invoke subscribers
-          _ (let [subs @(:subs source)]
-              (is (= 1 (count subs)) "one subscriber (registry)"))
+          ;; M17: the source's invalidate callback is registered with the MANAGER,
+          ;; not a source-local subscription atom. The registry subscribed via
+          ;; src/subscribe! -> manager/subscribe!, so the manager holds exactly
+          ;; one subscription for this source.
+          _ (is (nil? (:subs source)) "source carries no local subscription atom (M17)")
+          _ (is (= 1 (manager/subscription-count mgr)) "one subscriber held by the manager")
           before-dirty (:dirty? (env-reg/status env))]
       ;; trigger notification
       (mcp-source/trigger-tools-changed! source)

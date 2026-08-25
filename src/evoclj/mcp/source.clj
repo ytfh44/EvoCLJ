@@ -472,7 +472,7 @@
 ;; McpSource
 ;; ---------------------------------------------------------------------------
 
-(defrecord McpSource [source-id transport-config manager subs closed? opts discover-fn]
+(defrecord McpSource [source-id transport-config manager closed? opts discover-fn]
   src/LiveSource
   (snapshot! [this]
     (when @closed?
@@ -507,18 +507,23 @@
        :payload payload
        :captured-at (System/currentTimeMillis)}))
   (subscribe! [this invalidate-fn]
+    ;; M17: the manager is the CANONICAL owner of subscriptions. The source's
+    ;; invalidate callback is registered with the manager; on a
+    ;; :mcp/tools-changed fan-out the manager delivers it. This removes the
+    ;; ad-hoc per-source subscription atom (the old `subs`). The returned
+    ;; handle is the manager's subscription handle, so closing it removes the
+    ;; callback from the manager.
     (when @closed?
       (throw (err/error :mcp/source-closed "McpSource is closed" {:source/id source-id})))
-    (let [id (random-uuid)
-          close-fn (fn [] (swap! subs dissoc id))]
-      (swap! subs assoc id invalidate-fn)
-      ;; store a callback that will be invoked on tools/list_changed
-      ;; the actual wiring happens inside discover-tools via get-or-open!
-      {:subscription/id id :close! close-fn}))
+    (manager/subscribe!
+     manager
+     (fn [ev]
+       (when (= :mcp/tools-changed (:event/type ev))
+         (try (invalidate-fn)
+              (catch Throwable _ nil))))))
   (close! [this]
     (when-not @closed?
       (reset! closed? true)
-      (reset! subs {})
       ;; do not shutdown manager here - it is host-owned; just release if needed
       nil)
     nil))
@@ -543,29 +548,24 @@
   (when-not transport-config
     (throw (err/error :mcp/config-invalid "McpSource requires :transport-config" {:opts (err/sanitize opts)})))
   (let [mgr (or manager (manager/create-manager))
-        subs (atom {})
         closed? (atom false)
-        ;; tools-change callback that only calls invalidate, never mutates registry
+        ;; M17: tools-changed wiring publishes a :mcp/tools-changed event
+        ;; through the manager (which fans it out to every subscriber, i.e.
+        ;; each registered registry's invalidate callback). No per-source
+        ;; subscription atom — the manager is the single owner.
         invalidate-all (fn []
-                          (doseq [f (vals @subs)]
-                            (try (f) (catch Exception _ nil))))]
-    ;; we store the invalidate fn in a way that discover-tools can close over it
-    ;; easiest: create source then assoc tools-change-cb via metadata
-    (let [source (->McpSource id transport-config mgr subs closed? opts discover-fn)]
-      ;; attach the callback via a separate atom field on the record's extra map
-      ;; Clojure records allow assoc for extra fields if not defined? Use with-meta
-      ;; Instead, store in a side atom that discover-tools reads
-      ;; We use an atom inside source map via assoc
+                        (manager/publish! mgr {:event/type :mcp/tools-changed
+                                               :source/id id}))]
+    (let [source (->McpSource id transport-config mgr closed? opts discover-fn)]
+      ;; transient client-wiring callback read by discover-tools; the actual
+      ;; subscription registry is the manager, not this record.
       (assoc source :tools-change-cb invalidate-all))))
 
 (defn trigger-tools-changed!
   "Test helper: simulate a tools/list_changed notification, which should
    only call invalidate (mark dirty + trigger registry refresh), not
-   directly mutate registry. Calls all subscribers' invalidate fns."
+   directly mutate registry. Fans out through the manager (M17)."
   [source]
-  (when-let [cb (:tools-change-cb source)]
-    (cb))
-  ;; also directly call subs for sources created without :tools-change-cb assoc
-  (doseq [f (vals @(:subs source))]
-    (try (f) (catch Exception _ nil)))
+  (manager/publish! (:manager source) {:event/type :mcp/tools-changed
+                                       :source/id (:source/id source)})
   nil)
