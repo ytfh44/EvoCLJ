@@ -22,6 +22,7 @@
             [evoclj.mcp.codec :as codec]
             [evoclj.mcp.json-schema :as json-schema]
             [evoclj.mcp.manager :as manager]
+            [evoclj.mcp.adapter :as adapter]
             [evoclj.provider.protocol :as proto]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m]))
@@ -215,18 +216,37 @@
    CALL-SCOPED client that this function opens and guarantees to CLOSE
    before returning or throwing — success and failure alike (WO-M4), so
    non-pooled discovery leaks no stdio subprocess. Returns a vector of
-   stable descriptors."
+   stable descriptors.
+
+   M16 wiring (ProtocolAdapter): discovery is routed through the negotiated
+   ProtocolAdapter. The version is negotiated from `:mcp/version` in opts
+   (default `:mcp-2025-11`, preserving the pre-change behavior). Adapter
+   selection is FAIL-CLOSED: an unsupported/unimplemented version (e.g. a
+   2026 surface) throws a typed `:mcp/unsupported` error before any client
+   is opened. The 2025 adapter performs the SAME raw listTools call and the
+   SAME schema normalization the pre-change path used, so the internal tool
+   model is byte-identical; the only additive difference is the
+   `:adapter/version` stamp each discovered descriptor receives (via
+   `wire-request`), which is what lets the kernel later branch on protocol
+   version without re-coupling the wire model."
   [source]
   (let [{:keys [transport-config manager discover-fn opts]} source
         ck (when (and manager transport-config)
-             (manager/connection-key (assoc transport-config :connection/id (:connection/id opts))))]
+             (manager/connection-key (assoc transport-config :connection/id (:connection/id opts))))
+        ;; M16: negotiate the version and select the adapter fail-closed.
+        ;; Throws :mcp/unsupported for any 2026/unimplemented/malformed
+        ;; version BEFORE touching a client (fail-closed, no silent fallback).
+        version (or (:mcp/version opts) adapter/default-version)
+        _ (adapter/select-adapter version ck)
+        a (adapter/adapter-for-connection ck version)
+        stamp (fn [d] (merge d (select-keys (adapter/wire-request a {:tool/id (:tool/id d)}) [:adapter/version])))]
     (if discover-fn
       ;; test stub path - discover-fn returns raw MCP tool maps or stable descriptors
       (let [raw (discover-fn)]
         ;; if raw already looks like stable descriptors (has :tool/id), use as-is
         (if (and (seq raw) (:tool/id (first raw)))
-          raw
-          (mapv #(stable-descriptor % opts) raw)))
+          (mapv stamp raw)
+          (mapv (comp stamp #(stable-descriptor % opts)) raw)))
       ;; live path
       (let [tools-change-cb (get source :tools-change-cb)
             open-fn (fn []
@@ -239,8 +259,8 @@
           (let [client (:client (manager/get-or-open! manager ck open-fn))]
             (when-not client
               (throw (err/error :mcp/discover-failed "no MCP client available" {:transport-config (err/sanitize transport-config)})))
-            (let [raw-tools (mcp-client/list-all-tools client)]
-              (mapv #(stable-descriptor % opts) raw-tools)))
+            (let [raw-tools (adapter/discover a {:client client})]
+              (mapv (comp stamp #(stable-descriptor % opts)) raw-tools)))
           ;; WO-M4: non-pooled discovery is call-scoped — the freshly opened
           ;; client is closed in finally whether listing succeeds or throws.
           (let [managed (open-fn)]
@@ -248,8 +268,8 @@
               (let [client (:client managed)]
                 (when-not client
                   (throw (err/error :mcp/discover-failed "no MCP client available" {:transport-config (err/sanitize transport-config)})))
-                (let [raw-tools (mcp-client/list-all-tools client)]
-                  (mapv #(stable-descriptor % opts) raw-tools)))
+                (let [raw-tools (adapter/discover a {:client client})]
+                  (mapv (comp stamp #(stable-descriptor % opts)) raw-tools)))
               (finally
                 (close-owned! managed)))))))))
 
@@ -459,10 +479,17 @@
       (throw (err/error :mcp/source-closed "McpSource is closed" {:source/id source-id})))
     (let [descriptors (try
                         (discover-tools this)
+                        ;; M16: preserve typed, fail-closed errors thrown inside
+                        ;; discovery (e.g. :mcp/unsupported from adapter version
+                        ;; selection) instead of masking them as a generic
+                        ;; :mcp/discover-failed. Only genuinely untyped failures
+                        ;; are wrapped as :mcp/discover-failed.
                         (catch Throwable e
-                          (throw (err/error :mcp/discover-failed
-                                            "MCP discover failed"
-                                            {:source/id source-id :cause (err/sanitize e)}))))
+                          (if (:error/type (ex-data e))
+                            (throw e)
+                            (throw (err/error :mcp/discover-failed
+                                              "MCP discover failed"
+                                              {:source/id source-id :cause (err/sanitize e)})))))
           ;; M12 (fail-closed): before the discovered tool set is accepted,
           ;; verify no two DISTINCT remote tools collapsed onto one local
           ;; composite id. detect-collisions! throws :mcp/tool-id-collision
