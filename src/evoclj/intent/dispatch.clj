@@ -82,6 +82,7 @@
 
 (def ^:private default-max-attempts 2)
 (def ^:private transient-error-type :provider/transient-error)
+(def ^:private ambiguous-error-type :provider/call-ambiguous)
 
 (defn- validate-lease-collection!
   [leases]
@@ -186,15 +187,46 @@
     value))
 
 (defn- effect-journal
-  "Lightweight effect journal: proposed->authorized->call-started(with idempotency/key+revision-seq)
-   ->committed/rejected/ambiguous."
+  "The single canonical effect journal (INV-05 — one implementation).
+   Records the Transaction Boundaries protocol transition:
+
+     proposed -> authorized -> call-started(with idempotency/key +
+     revision/seq + binding/id) -> final(:effect/committed |
+     :effect/rejected | :effect/ambiguous).
+
+   It is attached to EVERY dispatch result so the durable persistence /
+   audit steps (Milestone 5) have one consistent journal shape across
+   all production paths (tool-call, memory-*, model-call). `binding`
+   may be nil (model-call has no CallBinding) — call-started then omits
+   the binding-derived fields but keeps the idempotency key. `decision`
+   is the broker decision; for pre-authorization failures it is nil and
+   the journal records :decision :none."
   [binding intent decision final-status]
   {:effect/proposed {:intent/id (:intent/id intent)}
-   :effect/authorized {:decision (:decision decision) :lease-id (:lease-id decision)}
+   :effect/authorized (or decision {:decision :none})
    :effect/call-started {:idempotency/key (get-in intent [:metadata :idempotency/key])
-                         :revision/seq (:revision/seq binding)
-                         :binding/id (:binding/id binding)}
+                         :revision/seq (when binding (:revision/seq binding))
+                         :binding/id (when binding (:binding/id binding))}
    :effect/final final-status})
+
+(defn- final-status-for
+  "Map a typed dispatch result to its journal final status. A successful
+   execution finalizes as :effect/committed; an ambiguous outcome
+   (typed :effect/ambiguous) finalizes as :effect/ambiguous; every other
+   error finalizes as :effect/rejected."
+  [result]
+  (if (= :ok (:result/status result))
+    :effect/committed
+    (if (= :effect/ambiguous (:error/type result))
+      :effect/ambiguous
+      :effect/rejected)))
+
+(defn- attach-journal
+  "Attach the canonical effect journal to a typed result, deriving the
+   final status from the result itself."
+  [result binding intent decision]
+  (assoc result :effect-journal
+         (effect-journal binding intent decision (final-status-for result))))
 
 ;; --- result construction ---------------------------------------------------
 
@@ -259,6 +291,21 @@
   (and (instance? clojure.lang.ExceptionInfo t)
        (= transient-error-type (:error/type (ex-data t)))))
 
+(defn- ambiguous-error?
+  "True when the thrown value is the provider's AMBIGUOUS outcome signal:
+   an ExceptionInfo whose ex-data carries :error/type
+   :provider/call-ambiguous. This means the request was sent and the
+   remote effect MAY have committed, but the definitive result never
+   came back (e.g. connection broke after send). Per the Transaction
+   Boundaries protocol an ambiguous outcome is NEVER blindly retried —
+   not even for a provider declaring :retry {:safe? true} — because a
+   re-execution could duplicate a non-idempotent external effect. It
+   fails closed as :effect/ambiguous (manual review / explicit
+   disambiguation required)."
+  [t]
+  (and (instance? clojure.lang.ExceptionInfo t)
+       (= ambiguous-error-type (:error/type (ex-data t)))))
+
 (defn- execute-with-retry!
   "Step 5: execute the authorized, normalized request once, or retry
   per policy.
@@ -281,14 +328,25 @@
       (let [outcome (try
                       {:value (proto/execute-request! provider normalized)}
                       (catch clojure.lang.ExceptionInfo e
-                        (if (transient-error? e)
-                          {:transient e}
-                          {:failed e}))
+                        (cond
+                          (ambiguous-error? e) {:ambiguous e}
+                          (transient-error? e) {:transient e}
+                          :else {:failed e}))
                       (catch Throwable t
                         {:failed t}))]
         (cond
           (contains? outcome :value)
           {:ok (:value outcome)}
+
+          ;; An ambiguous outcome is NEVER retried, even for a provider
+          ;; declaring :retry {:safe? true}. The effect may already have
+          ;; committed remotely; a blind re-execution would duplicate a
+          ;; non-idempotent action. Fail closed as :effect/ambiguous.
+          (contains? outcome :ambiguous)
+          {:error-type :effect/ambiguous
+           :error-message (ex-message (:ambiguous outcome))
+           :error-data {:cause (err/error-data (:ambiguous outcome))
+                        :attempt attempt}}
 
           (contains? outcome :transient)
           (if (and safe? (< attempt max-attempts))
@@ -339,32 +397,40 @@
   (let [usage-atom (:usage broker-context)
         model-id (get-in intent [:payload :model/id])
         full-id (if (keyword? model-id) (name model-id) model-id)
-        registry (:model-registry broker-context)]
+        registry (:model-registry broker-context)
+        ;; model-call has no CallBinding; the journal still records the
+        ;; transition (binding-derived fields are nil). `decision` is set
+        ;; once authorize runs; pre-authorization errors leave it nil.
+        emit (fn [result decision]
+               (attach-journal result nil intent decision))]
     (if-not registry
-      (result-error intent :provider/not-found
-                    "no model registry in the broker context"
-                    {:model/id full-id :reason :no-model-registry}
-                    nil @usage-atom)
+      (emit (result-error intent :provider/not-found
+                           "no model registry in the broker context"
+                           {:model/id full-id :reason :no-model-registry}
+                           nil @usage-atom)
+            nil)
       (let [entry (model-registry/lookup registry full-id)]
         (cond
           (nil? entry)
-          (result-error intent :provider/not-found
-                        (str "unknown model " full-id)
-                        {:model/id full-id :reason :unknown-model}
-                        nil @usage-atom)
+          (emit (result-error intent :provider/not-found
+                               (str "unknown model " full-id)
+                               {:model/id full-id :reason :unknown-model}
+                               nil @usage-atom)
+                nil)
 
           (nil? (:provider entry))
-          (result-error intent :provider/not-configured
-                        (str "model " full-id " is not configured: " (:reason entry))
-                        {:model/id full-id :reason (:reason entry)}
-                        nil @usage-atom)
+          (emit (result-error intent :provider/not-configured
+                               (str "model " full-id " is not configured: " (:reason entry))
+                               {:model/id full-id :reason (:reason entry)}
+                               nil @usage-atom)
+                nil)
 
           :else
           (let [provider (:provider entry)
                 descriptor (proto/describe provider)
                 normalized-step (normalize-request! broker-context provider intent)]
             (if-let [error-result (:error-result normalized-step)]
-              error-result
+              (emit error-result nil)
               (let [normalized (:normalized normalized-step)
                     decision (broker/authorize
                               {:intent intent
@@ -373,20 +439,23 @@
                                :usage @usage-atom
                                :now ((:now broker-context))})]
                 (if (= :deny (:decision decision))
-                  (result-error intent :capability/denied
-                                "intent denied by the capability broker"
-                                {:reason (:reason decision)}
-                                decision @usage-atom)
+                  (emit (result-error intent :capability/denied
+                                       "intent denied by the capability broker"
+                                       {:reason (:reason decision)}
+                                       decision @usage-atom)
+                        decision)
                   (let [execution (execute-with-retry!
                                    broker-context provider descriptor
                                    decision normalized)]
                     (if-let [value (:ok execution)]
-                      (validate-output! intent descriptor decision
-                                        value @usage-atom)
-                      (result-error intent (:error-type execution)
-                                    (:error-message execution)
-                                    (:error-data execution)
-                                    decision @usage-atom))))))))))))
+                      (emit (validate-output! intent descriptor decision
+                                               value @usage-atom)
+                            decision)
+                      (emit (result-error intent (:error-type execution)
+                                          (:error-message execution)
+                                          (:error-data execution)
+                                          decision @usage-atom)
+                            decision))))))))))))
 
 (defn- dispatch-registered!
   "Dispatch an intent whose provider is resolved by the kernel-owned
@@ -422,7 +491,15 @@
   Returns the typed dispatch result (see the namespace docstring)."
   [broker-context intent tool-id require-idempotency-key?]
   (let [usage-atom (:usage broker-context)
-        entry (registry/lookup (:registry broker-context) tool-id)]
+        entry (registry/lookup (:registry broker-context) tool-id)
+        ;; Single journaling wrapper for this dispatch path (INV-05 —
+        ;; one implementation). It attaches both the binding audit and
+        ;; the canonical effect journal. `binding` is the frozen
+        ;; CallBinding (nil when no provider was found), `decision` the
+        ;; broker decision (nil for pre-authorization failures).
+        emit (fn [result binding decision]
+               (attach-journal (attach-binding-audit result binding)
+                               binding intent decision))]
     (if-not entry
       (result-error intent :provider/not-found
                     (str "no provider registered for tool " tool-id)
@@ -441,11 +518,11 @@
                                           :revision/seq (:revision/seq binding)
                                           :reason :stale-descriptor}
                                          nil @usage-atom)]
-            (attach-binding-audit err-result binding))
+            (emit err-result binding nil))
           (let [frozen-descriptor (:binding/descriptor binding)
                 normalized-step (normalize-request! broker-context provider intent)]
             (if-let [error-result (:error-result normalized-step)]
-              (attach-binding-audit error-result binding)
+              (emit error-result binding nil)
               (let [normalized (:normalized normalized-step)
                     binding* (assoc binding :binding/normalized normalized :contract/normalized normalized)
                     decision (broker/authorize
@@ -456,22 +533,22 @@
                                :now ((:now broker-context))})
                     binding** (assoc binding* :binding/decision decision :contract/decision decision)]
                 (if (= :deny (:decision decision))
-                  (attach-binding-audit
+                  (emit
                    (result-error intent :capability/denied
                                  "intent denied by the capability broker"
                                  {:reason (:reason decision)}
                                  decision @usage-atom)
-                   binding**)
+                   binding** decision)
                   (if (and require-idempotency-key?
                            (not= :pure (:effect frozen-descriptor))
                            (not= :model-call (:effect frozen-descriptor))
                            (nil? (get-in intent [:metadata :idempotency/key])))
-                    (attach-binding-audit
+                    (emit
                      (result-error intent :intent/idempotency-key-missing
                                    "non-pure writes require an idempotency key in :metadata before execution"
                                    {:tool/id tool-id :effect (:effect frozen-descriptor)}
                                    decision @usage-atom)
-                     binding**)
+                     binding** decision)
                     (let [execution (execute-with-retry!
                                      broker-context provider frozen-descriptor
                                      decision normalized)]
@@ -479,16 +556,16 @@
                         (let [tool-error? (binding/tool-error? value)
                               enriched-value (enrich-value-audit value binding**)]
                           (if tool-error?
-                            (attach-binding-audit (result-ok intent enriched-value decision @usage-atom) binding**)
+                            (emit (result-ok intent enriched-value decision @usage-atom) binding** decision)
                             (let [ok-result (validate-output! intent frozen-descriptor decision
                                                                enriched-value @usage-atom)]
-                              (attach-binding-audit ok-result binding**))))
-                        (attach-binding-audit
+                              (emit ok-result binding** decision))))
+                        (emit
                          (result-error intent (:error-type execution)
                                        (:error-message execution)
                                        (:error-data execution)
                                        decision @usage-atom)
-                         binding**)))))))))))))
+                         binding** decision)))))))))))))
 
 (defn dispatch!
   "Execute intent through the broker pipeline in the NORMATIVE order
