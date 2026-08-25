@@ -501,10 +501,21 @@
                (attach-journal (attach-binding-audit result binding)
                                binding intent decision))]
     (if-not entry
-      (result-error intent :provider/not-found
-                    (str "no provider registered for tool " tool-id)
-                    {:tool/id tool-id}
-                    nil @usage-atom)
+      ;; M19: a tool that was REGISTERED and later REMOVED is a distinct
+      ;; failure class from a tool that never existed. The registry's
+      ;; tombstone set records removals so the dispatcher can report the
+      ;; precise, typed :provider/tool-removed instead of the generic
+      ;; :provider/not-found. This is fail-closed: the result is always a
+      ;; typed error map — never a bare nil, never an uncaught NPE.
+      (if (registry/removed? (:registry broker-context) tool-id)
+        (result-error intent :provider/tool-removed
+                      (str "tool " tool-id " was registered and has been removed")
+                      {:tool/id tool-id}
+                      nil @usage-atom)
+        (result-error intent :provider/not-found
+                      (str "no provider registered for tool " tool-id)
+                      {:tool/id tool-id}
+                      nil @usage-atom))
       (let [provider (:provider entry)
             freshness (or (:freshness broker-context) :best-effort)
             ;; Capture CallBinding: ToolSurface current entry -> capture -> CallBinding

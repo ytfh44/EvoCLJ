@@ -18,6 +18,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.environment.registry :as env-reg]
             [evoclj.environment.revision :as rev]
+            [evoclj.intent.core :as intent]
             [evoclj.mcp.manager :as manager]
             [evoclj.mcp.source :as mcp-source]
             [evoclj.provider.mcp-bridge]
@@ -325,3 +326,38 @@
       (is (= 1 (count entries)))
       (is (contains? entries ["equiv-srv" "equiv"]))
       )))
+
+(deftest mcp-removed-tool-entry-fails-closed-with-typed-error
+  (testing "an MCP ToolEntry whose descriptor carries :mcp/removed-at fails closed"
+    (let [mgr (manager/create-manager)
+          removed-desc
+          {:tool/id ["srv" "removed"]
+           :effect :remote
+           :input-schema [:map [:text :string]]
+           :output-schema [:map [:text :string]]
+           :required-action :invoke
+           :version 1
+           :mcp/name "removed"
+           :mcp/input-schema {"type" "object" "properties" {"text" {"type" "string"}} "required" ["text"]}
+           :mcp/output-schema {"type" "object" "properties" {"text" {"type" "string"}}}
+           :mcp/server-id "srv"
+           :mcp/removed-at 12345}
+          entry (mcp-source/make-tool-entry removed-desc mgr {:type :stdio :command "echo"})
+          intent {:payload {:tool/id ["srv" "removed"] :args {:text "hi"}}}]
+      (testing "normalize-request throws the typed :provider/tool-removed"
+        (let [e (try
+                  (proto/normalize-request entry intent)
+                  (catch clojure.lang.ExceptionInfo ex ex))]
+          (is (some? e) "normalize-request does not return a silent value")
+          (is (= :provider/tool-removed (:error/type (ex-data e)))
+              "removed MCP tool yields typed :provider/tool-removed")
+          (is (= ["srv" "removed"] (:tool/id (ex-data e)))
+              "the removed tool id is identified in the error data")
+          (is (= 12345 (:mcp/removed-at (ex-data e)))
+              "the removal timestamp is carried in the error data")))
+      (testing "a present (non-removed) MCP ToolEntry normalizes fine"
+        (let [present-desc (dissoc removed-desc :mcp/removed-at)
+              present-entry (mcp-source/make-tool-entry present-desc mgr {:type :stdio :command "echo"})]
+          (is (some? (proto/normalize-request present-entry intent))
+              "non-removed descriptor normalizes without error"))))))
+

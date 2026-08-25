@@ -284,6 +284,23 @@
     (let [payload (:payload intent)
           raw-args (:args payload)
           args (evoclj.mcp.canonical/value->canonical raw-args)]
+      ;; M19: a tool marked removed (e.g. the catalog dropped it but an
+      ;; in-flight ToolSurface still holds its immutable descriptor) must
+      ;; fail-closed with a typed :provider/tool-removed — never a silent
+      ;; passthrough to the live client, never an NPE. The descriptor's
+      ;; :mcp/removed-at is the production signal set by the surface when
+      ;; the discovered set no longer contains this tool.
+      ;; M19: a tool marked removed (e.g. the catalog dropped it but an
+      ;; in-flight ToolSurface still holds its immutable descriptor) must
+      ;; fail-closed with a typed :provider/tool-removed — never a silent
+      ;; passthrough to the live client, never an NPE. The descriptor's
+      ;; :mcp/removed-at is the production signal set by the surface when
+      ;; the discovered set no longer contains this tool.
+      (when (contains? descriptor :mcp/removed-at)
+        (throw (err/error :provider/tool-removed
+                          (str "MCP tool " (:tool/id descriptor) " has been removed")
+                          {:tool/id (:tool/id descriptor)
+                           :mcp/removed-at (:mcp/removed-at descriptor)})))
       (when-not (boundary/edn-safe? raw-args)
         (throw (err/error :provider/input-invalid
                           "MCP provider input must be plain EDN-safe data"

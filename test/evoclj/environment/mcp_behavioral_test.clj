@@ -64,10 +64,14 @@
           leases [(lease :mcp/removable)]
           ctx (dispatch/make-broker-context {:registry reg :leases leases :freshness :required :now (constantly now-val)})
           intent-ok (intent/tool-call sid phenotype :node/tool 1 {:tool/id :mcp/removable :args {:text "hi"}} budget)]
-      ;; simulate catalog disappearance
-      (swap! reg dissoc :mcp/removable)
+      ;; simulate catalog disappearance via the production unregister! path
+      ;; (records a removal tombstone so the dispatcher reports the typed
+      ;; :provider/tool-removed rather than the generic :provider/not-found)
+      (registry/unregister! reg :mcp/removable)
       (let [res (dispatch/dispatch! ctx intent-ok)]
-        (is (= :provider/not-found (:error/type res)) "removed tool not found for new call")))))
+        (is (= :provider/tool-removed (:error/type res))
+            "removed tool is reported as :provider/tool-removed for new call")
+        (is (= {:tool/id :mcp/removable} (:error/data res)))))))
 
 ;; ---- 3. newly discovered tool does not auto-grant ----
 (deftest mcp-newly-discovered-does-not-auto-grant

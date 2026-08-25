@@ -35,6 +35,10 @@
             [evoclj.provider.protocol :as proto]
             [malli.core :as m]))
 
+;; --- forward declarations --------------------------------------------------
+
+(declare lookup)
+
 ;; --- the normative descriptor contract -------------------------------------
 
 (def ToolDescriptorSchema
@@ -107,12 +111,29 @@
 
 ;; --- the registry ----------------------------------------------------------
 
+(def ^:private removed-key
+  "Namespaced tombstone key. Stored inside the (deliberately flat)
+  registry atom so it can NEVER collide with a registered tool-id (all
+  tool-ids are caller-chosen keywords, and this key is namespaced to
+  evoclj.provider.registry). Keeping the atom flat preserves the
+  long-standing contract that `(get @registry tool-id)` yields an entry
+  and that tests may `(swap! reg assoc tool-id entry)` directly."
+  ::removed)
+
 (defn create-registry
   "Create a fresh, empty provider registry. The registry is a
   kernel-owned mutable component (Global Constraint 19); the
   descriptors it stores are plain validated data (Global Constraint
   22), while the provider instances are host objects that never cross
-  the boundary."
+  the boundary.
+
+  The atom is a flat map: tool-id -> {:descriptor ... :provider ...},
+  plus a single namespaced tombstone set under `removed-key` recording
+  the tool-ids that were REGISTERED and then later UNREGISTERED. That
+  tombstone lets the dispatcher distinguish a REMOVED tool (was
+  registered, then taken away) from a tool that NEVER existed — they
+  are different failure classes and must be reported with different
+  typed errors (M19: :provider/tool-removed vs :provider/not-found)."
   []
   (atom {}))
 
@@ -142,8 +163,38 @@
                (throw (err/error :provider/duplicate-tool-id
                                  (str "tool " tool-id " is already registered")
                                  {:tool/id tool-id})))
-             (assoc m tool-id {:descriptor descriptor :provider provider})))
+             ;; (Re-)registering clears any prior removal tombstone: the tool
+             ;; is live again, so it must NOT be misreported as removed (M19).
+             (-> m
+                 (assoc tool-id {:descriptor descriptor :provider provider})
+                 (update removed-key (fnil disj #{}) tool-id))))
     tool-id))
+
+(defn unregister!
+  "Remove the provider registered under `tool-id` (if any) and record the
+  tool-id in the tombstone set so that a LATER reference to it is reported
+  as `:provider/tool-removed` rather than the generic
+  `:provider/not-found` (M19 — tool-removal semantics recovery,
+  fail-closed and typed).
+
+  - a tool that was registered: removed from the registry, tool-id added to
+    the tombstone set.
+  - a tool that was NEVER registered: no entry change, but the tool-id is
+    still added to the tombstone set (the caller believes it removed it, so
+    any future reference must report removal, never a silent nil
+    passthrough).
+  - a tool that is ALREADY removed: idempotent — the tombstone is unchanged.
+
+  Returns the removed tool-id. Fail-closed: this never throws on a missing
+  entry; it always leaves the registry in a consistent state and is safe
+  to call concurrently with register!/lookup."
+  [registry tool-id]
+  (swap! registry
+         (fn [m]
+           (-> m
+               (dissoc tool-id)
+               (update removed-key (fnil conj #{}) tool-id))))
+  tool-id)
 
 (defn lookup
   "Return the registry entry for `tool-id`: {:descriptor ... :provider
@@ -152,3 +203,25 @@
   visible-but-ungranted tool means for authorization."
   [registry tool-id]
   (get @registry tool-id))
+
+(defn removed?
+  "True when `tool-id` was registered and later unregistered (M19). A tool
+  that has never existed returns false here — use lookup for presence."
+  [registry tool-id]
+  (contains? (get @registry removed-key #{}) tool-id))
+
+(defn lookup-or-removed
+  "Discriminate the three reference outcomes for `tool-id` (M19):
+
+    [:present <entry>]   the tool is currently registered
+    [:removed tool-id]   the tool was registered then unregistered (tombstone)
+    [:absent  tool-id]   the tool was never registered
+
+  Pure read; calls `lookup` internally so the dispatch path can branch on
+  removed vs absent without a second deref."
+  [registry tool-id]
+  (if-let [entry (lookup registry tool-id)]
+    [:present entry]
+    (if (removed? registry tool-id)
+      [:removed tool-id]
+      [:absent tool-id])))
