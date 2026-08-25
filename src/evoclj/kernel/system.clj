@@ -73,6 +73,8 @@
   locations. Tests never go through load-config: they build the config
   map directly with temp paths (dependency injection, Step 4)."
   (:require [clojure.java.io :as io]
+            [evoclj.environment.source :as env-src]
+            [evoclj.mcp.source :as mcp-source]
             [clojure.string :as str]
             [evoclj.eval.profile :as profile]
             [evoclj.evolution.budget :as budget]
@@ -722,4 +724,52 @@
 (defmethod ig/halt-key! :model/registry
   [_ _component]
   "The registry is a host atom; nothing to close."
+  nil)
+
+;; --- :mcp/source (M20) ---------------------------------------------------------
+;;
+;; The MCP dynamic-environment source as a real Integrant component, behind a
+;; SWITCH. The :mcp/source config carries :enabled?; the shipped
+;; resources/system.edn leaves it :enabled? false (fail-safe), so the host
+;; starts WITHOUT an McpSource and the legacy static MCP path (:mcp/bridge
+;; providers in :provider/registry) is completely untouched. Flipping the
+;; switch to true makes the production system instantiate a real
+;; evoclj.mcp.source/McpSource via its own constructor (no test-only seams):
+;;   - :source/id and :transport-config are REQUIRED when enabled; a missing
+;;     value fails closed with :mcp/config-invalid (the host never starts
+;;     with a broken source);
+;;   - :manager may be injected (e.g. #ig/ref :mcp/manager) so the source
+;;     shares the host-owned connection pool;
+;;   - :mcp/server-id tags the discovered tools' composite [server remote]
+;;     tool-ids (M12).
+
+(defmethod ig/init-key :mcp/source
+  [_ config]
+  "Build the :mcp/source component: a production McpSource LiveSource when the
+   switch is enabled. When :enabled? is false (the shipped default) the
+   component yields nil and the system starts with no McpSource.
+
+   INV-05 — no duplicate fail-closed logic: the :source/id and
+   :transport-config REQUIRED checks are enforced by the SINGLE ownership
+   point evoclj.mcp.source/make-mcp-source (it throws :mcp/config-invalid for
+   either missing value). This init-key only forwards the config to the
+   constructor; it does NOT re-assert those invariants. A missing value
+   therefore fails closed with :mcp/config-invalid via make-mcp-source, never
+   via this component."
+  (when (:enabled? config)
+    (mcp-source/make-mcp-source
+     (cond-> {:source/id (:source/id config)
+              :transport-config (:transport-config config)
+              :mcp/server-id (:mcp/server-id config)}
+       (:manager config) (assoc :manager (:manager config))
+       (:connection/id config) (assoc :connection/id (:connection/id config))
+       (:discover-fn config) (assoc :discover-fn (:discover-fn config))))))
+
+(defmethod ig/halt-key! :mcp/source
+  [_ source]
+  "Close the McpSource if one was built (it is nil when the switch was off).
+   The manager it shares is owned by :mcp/manager and is closed there."
+  (when source
+    (try (env-src/close! source)
+         (catch Throwable _ nil)))
   nil)

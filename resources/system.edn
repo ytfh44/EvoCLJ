@@ -61,6 +61,31 @@
   ;; per-session capability leases before any session runs
   :leases []}
 
+  ;; WO-M20 (P0, e2e#1): McpSource PRODUCTION WIRING - an Integrant SWITCH.
+  ;;
+  ;; When :enabled? is false (the SHIPPED DEFAULT, fail-safe), the host starts
+  ;; WITHOUT an McpSource and the legacy static MCP path (:mcp/bridge
+  ;; providers in :provider/registry) is completely untouched. Flip it to true
+  ;; to have the production system instantiate a real McpSource
+  ;; (evoclj.mcp.source/McpSource) through the host's ig/init path.
+  ;;
+  ;; When enabled, the following are REQUIRED and validated fail-closed by
+  ;; evoclj.kernel.system/ig/init-key :mcp/source:
+  ;;   :source/id        - keyword identifying the source
+  ;;   :transport-config - map accepted by evoclj.mcp.transport/transport-for
+  ;; :manager is injected so the source shares the host-owned connection pool
+  ;; (M5); :mcp/server-id tags the discovered tools' composite tool-ids (M12).
+  ;;
+  ;; Example (uncomment to enable a real MCP source):
+  ;;
+  ;;   :mcp/source
+  ;;   {:enabled? true
+  ;;    :source/id :mcp/production
+  ;;    :transport-config {:type :stdio :command "npx"}
+  ;;    :mcp/server-id "production"
+  ;;    :manager #ig/ref :mcp/manager}
+  :mcp/source
+  {:enabled? false}
   :mcp/manager
   {}
 
