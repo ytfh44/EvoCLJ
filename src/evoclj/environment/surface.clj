@@ -31,11 +31,6 @@
    append-only, no-delete, write-existing-only, execute."
   #{:append-only :no-delete :write-existing-only :execute})
 
-(def known-access-sets
-  "Common access sets in use today."
-  [#{:read :list :stat}
-   #{:read :list :stat :write :create :delete}])
-
 (defn valid-access-max?
   [access]
   (and (set? access)
@@ -154,12 +149,3 @@
     (if-let [rev (:revision/id opts)]
       (assoc m :revision/id rev)
       m)))
-
-(defn co-versioned?
-  "True when all surfaces share the same :revision/id (if present)."
-  [surfaces]
-  (let [revs (set (map :revision/id surfaces))]
-    (or (empty? revs)
-        (= 1 (count (remove nil? revs)))
-        ;; if all have revision/id they must be equal; if none have it, vacuously true
-        (and (every? some? revs) (= 1 (count revs))))))

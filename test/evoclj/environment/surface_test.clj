@@ -170,3 +170,16 @@
       (is (surf/surface? d))
       (is (not= (:surface/type c) (:surface/type t)))
       (is (not= (:surface/type t) (:surface/type d))))))
+
+(deftest dead-surface-helpers-removed
+  (testing "S2: known-access-sets and co-versioned? are dead code and must be gone"
+    (let [public-vars (set (keys (ns-publics 'evoclj.environment.surface)))]
+      (is (not (contains? public-vars 'known-access-sets)))
+      (is (not (contains? public-vars 'co-versioned?))))
+    ;; behavior preserved: valid surfaces still construct/validate through the
+    ;; production path and co-version enforcement still lives in bundle (tested
+    ;; separately by sibling-co-version-enforced).
+    (let [rev "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          s (surf/make-context-surface {:id :ctx/x :descriptor {:p "a"} :materializer identity :revision/id rev})]
+      (is (surf/context-surface? s))
+      (is (= rev (:revision/id s))))))
