@@ -30,7 +30,17 @@
   lookup returns the entry {:descriptor ... :provider ...} for a tool
   id, or nil when no such tool is registered — the broker (component/4.5) decides what an unknown or visible-but-ungranted tool
   means for authorization (Global Constraint 9: merely registering a
-  tool never authorizes it)."
+  tool never authorizes it).
+
+  S14 (pin→provider resolution enforced): a tool catalog pins a set of
+  tool ids that a consumer will advertise and execute. `resolve-tool-catalog`
+  resolves EVERY pinned id to its registered provider entry (a resolved
+  reference — never a dangling id). A pinned id that is ABSENT (never
+  registered) or REMOVED (registered then unregistered) fails closed with a
+  typed :provider/catalog-unresolved-tool. The resolution is deterministic
+  (sorted ids, sorted result), typed, and fail-closed — a catalog consumer
+  either gets a fully-resolved reference map or a typed error, never a
+  partial map with a dangling id left in."
   (:require [evoclj.kernel.error :as err]
             [evoclj.provider.protocol :as proto]
             [malli.core :as m]))
@@ -225,3 +235,94 @@
     (if (removed? registry tool-id)
       [:removed tool-id]
       [:absent tool-id])))
+
+;; --- S14: tool catalog pin→provider resolution -----------------------------
+
+(defn- tool-id-of-reference
+  "The tool id a single catalog reference pins. A keyword reference is a
+  bare tool id; a map reference carries :tool (the wire form — e.g. the
+  llm-mutator tool catalog entries {:name ... :tool :evolution/evidence})
+  or :tool/id (the assembler form). Anything that does not pin a keyword
+  tool id is :provider/catalog-invalid — a malformed catalog reference is
+  NEVER silently skipped (partial resolution of a dangling catalog is
+  forbidden)."
+  [ref]
+  (let [id (cond
+             (keyword? ref) ref
+             (and (map? ref) (contains? ref :tool)) (:tool ref)
+             (and (map? ref) (contains? ref :tool/id)) (:tool/id ref)
+             :else (throw (err/error :provider/catalog-invalid
+                                     "tool catalog entry must be a keyword tool-id or a map carrying :tool / :tool/id"
+                                     {:value (err/sanitize ref)})))]
+    (when-not (keyword? id)
+      (throw (err/error :provider/catalog-invalid
+                        "a catalog tool reference must resolve to a keyword tool-id"
+                        {:value (err/sanitize ref) :tool/id id})))
+    id))
+
+(defn catalog-tool-ids
+  "The distinct tool ids pinned by a `catalog`, in deterministic sorted
+  order (INV-05 — single implementation of the catalog-shape grammar; the
+  resolution path calls this and nothing else re-derives it).
+
+  `catalog` is a collection of tool references: a bare keyword tool id, or
+  a map carrying :tool (wire form) / :tool/id (assembler form). Duplicate
+  pins collapse. A malformed catalog (not a collection, or an entry that
+  does not pin a keyword tool id) throws :provider/catalog-invalid.
+
+  The returned sorted-set is the deterministic iteration order
+  `resolve-tool-catalog` resolves in, so equal catalogs always produce
+  equal results."
+  [catalog]
+  (when-not (coll? catalog)
+    (throw (err/error :provider/catalog-invalid
+                      "tool catalog must be a collection of tool references"
+                      {:value (err/sanitize catalog)})))
+  (reduce (fn [acc ref]
+            (conj acc (tool-id-of-reference ref)))
+          (sorted-set)
+          catalog))
+
+(defn resolve-tool-catalog
+  "Resolve EVERY tool id pinned in `catalog` against `registry`.
+
+  This is the S14 pin→provider enforcement point: a tool catalog (a
+  collection of pinned tool references, see `catalog-tool-ids`) that a
+  consumer advertises and executes must not carry a SILENT DANGLING TOOL
+  REFERENCE — every pinned id must resolve to a real registered provider.
+
+  Returns a deterministic (sorted) map tool-id -> registry entry
+  {:descriptor ... :provider ...}:
+  - the RESOLVED REFERENCE a consumer gets, never a dangling id;
+  - identical (catalog, registry) always yields an identical map.
+
+  Fail-closed: a pinned tool id that is ABSENT (never registered) or
+  REMOVED (registered then unregistered) throws a typed
+  :provider/catalog-unresolved-tool carrying the :unresolved vector
+  ([{:tool/id <id> :status :absent|:removed} ...]) and the :tool/ids. A
+  successful result is never partial — it contains only tool ids that were
+  present, each mapped to a full registry entry.
+
+  Throws ExceptionInfo with a stable :error/type:
+    :provider/catalog-invalid          — a malformed catalog entry.
+    :provider/catalog-unresolved-tool  — a pinned tool id without a
+                                         resolvable provider (absent/removed)."
+  [registry catalog]
+  (let [ids (catalog-tool-ids catalog)
+        outcomes (mapv (fn [id]
+                         (let [[status value] (lookup-or-removed registry id)]
+                           [id status value]))
+                       ids)
+        unresolved (->> outcomes
+                        (keep (fn [[id status _]]
+                                (when-not (= :present status)
+                                  {:tool/id id :status status})))
+                        vec)]
+    (when (seq unresolved)
+      (throw (err/error :provider/catalog-unresolved-tool
+                        "tool catalog pins one or more tool ids that do not resolve to a registered provider"
+                        {:unresolved unresolved
+                         :tool/ids (mapv :tool/id unresolved)})))
+    (into (sorted-map)
+          (map (fn [[id _ entry]] [id entry]))
+          outcomes)))

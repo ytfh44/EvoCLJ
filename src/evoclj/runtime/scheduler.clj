@@ -134,6 +134,7 @@
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
             [evoclj.provider.dialect :as dialect]
+            [evoclj.provider.registry :as registry]
             [evoclj.runtime.assembler :as assembler]
             [evoclj.runtime.node :as node]
             [evoclj.sci.boundary :as boundary]
@@ -507,6 +508,18 @@
                                (when (instance? clojure.lang.Atom a) @a))
                             (catch Throwable _ nil))
           pinned-source (or live-catalog initial-tools)
+          ;; S14 (pin→provider resolution ENFORCED, not merely
+          ;; implemented): the wire catalog the assembler will advertise to
+          ;; the model must not carry a SILENT DANGLING TOOL REFERENCE. Before
+          ;; the loop runs, resolve every pinned tool id against the
+          ;; kernel-owned provider registry and FAIL CLOSED on a dangling id
+          ;; (:provider/catalog-unresolved-tool) — a catalog consumer either
+          ;; gets a fully-resolved reference or a typed error, never a partial
+          ;; reference with a dangling id handed to the model/broker. Guarded
+          ;; so a host that carries no registry atom (pure broker test) is
+          ;; still safe: no registry, no S14 enforcement gate.
+          _ (when-let [provider-registry (:registry (:dispatch executor))]
+              (registry/resolve-tool-catalog provider-registry pinned-source))
           pinned (try (assembler/capture-tool-catalog-binding pinned-source)
                       (catch Throwable _
                         (assembler/capture-tool-catalog-binding initial-tools)))]
