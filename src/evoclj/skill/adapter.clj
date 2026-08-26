@@ -12,6 +12,19 @@
 
   Each skill is a directory containing SKILL.md. Name defaults to directory name when frontmatter :name missing (lenient mode).
 
+  S12 (same-name collision): when the same skill name is discoverable from more
+  than one scope (:project, :user, :extra), it resolves by the FIXED precedence
+  project > user > extra — never by registration order and never by an arbitrary
+  tie-break. The scope of each root is explicit (see :root-scopes below); when
+  the legacy :roots / :extra-roots options are used, a root matching
+  <project>/.agents/skills is :project, a root matching ~/.agents/skills is
+  :user, all other :roots are :user, and :extra-roots are :extra. An OPTIONAL
+  `:on-collision :error` mode turns a cross-scope same-name collision into a
+  typed :skill/name-collision error (fail-closed) instead of a precedence pick;
+  the default :precedence resolves deterministically. Scope and collision-mode
+  validation is fail-closed (typed :skill/invalid-root-scope /
+  :skill/invalid-collision-mode).
+
   ContextSurface progressive disclosure:
   - catalog projection -> Offer with name+description (descriptor)
   - activation -> full SKILL.md exact revision via CAS materializer
@@ -39,6 +52,7 @@
             [evoclj.fs.walk :as walk]
             [evoclj.kernel.error :as err]
             [evoclj.skill.parser :as parser]
+            [evoclj.skill.collect :as collect]
             [evoclj.skill.surface :as surface]
             [evoclj.context.offer :as offer]
             [evoclj.context.binding :as ctx-binding]
@@ -104,6 +118,45 @@
   "Derive skill name from directory name (fallback)."
   [^Path dir]
   (str (.getFileName dir)))
+
+;; ---------------------------------------------------------------------------
+;; Scope assignment (S12): project > user > extra precedence
+;; ---------------------------------------------------------------------------
+
+(defn- scoped-roots-for
+  "Build the vector of {:path <Path> :scope <keyword>} discovery roots from the
+   source's configured roots.
+
+   When :root-scopes is supplied (map scope -> [paths]) it is authoritative and
+   order-independent: each root's scope is explicit, so reordering the map (or
+   the paths within a scope) never changes which skill resolves.
+
+   Otherwise the legacy flat :roots / :extra-roots are used and each root gets a
+   deterministic scope by path identity: a root equal to the project
+   .agents/skills root -> :project; every other :root -> :user; every
+   :extra-root -> :extra. This is path-based (never order-based)."
+  [roots extra-roots root-scopes]
+  (if (seq root-scopes)
+    (vec (for [[scope paths] root-scopes
+               p paths]
+           {:path (path-of p) :scope scope}))
+    (let [roots (or roots [])
+          project-roots (filter #(= (str (path-of %)) (str (project-skills-root))) roots)
+          user-roots (remove #(= (str (path-of %)) (str (project-skills-root))) roots)]
+      (vec (concat
+            (map (fn [p] {:path (path-of p) :scope :project}) project-roots)
+            (map (fn [p] {:path (path-of p) :scope :user}) user-roots)
+            (map (fn [p] {:path (path-of p) :scope :extra}) (or extra-roots [])))))))
+
+(defn- scoped-skill-dirs
+  "Discover skill dirs per scoped root. `scoped-roots` is a vector of
+   {:path <Path> :scope <keyword>}; returns a vector of
+   {:dir <Path> :scope <keyword>}."
+  [scoped-roots]
+  (vec (mapcat (fn [{:keys [path scope]}]
+                 (map (fn [dir] {:dir dir :scope scope})
+                      (discover-skill-dirs [path])))
+               scoped-roots)))
 
 ;; ---------------------------------------------------------------------------
 ;; Snapshot + parse FROM SNAPSHOT (must not parse live)
@@ -180,7 +233,7 @@
 ;; SkillSource LiveSource
 ;; ---------------------------------------------------------------------------
 
-(defrecord SkillSource [source-id roots cas registry subs closed? strict? extra-roots]
+(defrecord SkillSource [source-id roots cas registry subs closed? strict? extra-roots root-scopes collision]
   src/LiveSource
   (snapshot! [this]
     ;; PURE capture (INV-06): discover skill dirs and snapshot each to CAS +
@@ -197,21 +250,28 @@
     ;; skill is reported in the snapshot payload under :rejected-skills
     ;; ({:skill/name <dir> :reason <typed reason>}) with a matching
     ;; :skill/rejected-count. :strict mode still aborts on the first rejection.
+    ;; S12 (same-name collision): each discovered skill is tagged with the scope
+    ;; of the root it came from, then same-name skills across scopes are
+    ;; resolved deterministically (project > user > extra) — or, when
+    ;; :on-collision :error, the whole snapshot fails closed with a typed
+    ;; :skill/name-collision instead of picking a winner.
     (when @closed?
       (throw (err/error :skill/source-closed "SkillSource is closed" {:source/id source-id})))
     (let [mode (if strict? :strict :lenient)
-          all-roots (vec (concat (or roots []) (or extra-roots [])))
-          skill-dirs (discover-skill-dirs all-roots)
-          ;; Per-skill capture + parse. Each entry is either a well-formed skill
-          ;; (accepted) or, in lenient mode, a rejected skill with its reason.
+          scoped-roots (scoped-roots-for roots extra-roots root-scopes)
+          scoped-dirs (scoped-skill-dirs scoped-roots)
+          ;; Per-skill capture + parse, tagged with the root's scope. Each entry
+          ;; is either a well-formed skill (accepted) or, in lenient mode, a
+          ;; rejected skill with its reason.
           {:keys [results rejected]}
-          (reduce (fn [acc dir]
+          (reduce (fn [acc {:keys [dir scope]}]
                     (try
                       (let [{:keys [tree/id manifest]} (snapshot-skill-dir! dir cas)
                             parsed (parse-skill-from-snapshot cas manifest mode)
                             fm (:frontmatter parsed)
                             skill-name (or (:name fm) (skill-name-for-dir dir))]
                         (update acc :results conj {:skill/name skill-name
+                                                   :scope scope
                                                    :tree/id id
                                                    :frontmatter (if (:name fm) fm (assoc fm :name skill-name))
                                                    :body (:body parsed)}))
@@ -223,16 +283,21 @@
                           (update acc :rejected conj {:skill/name (skill-name-for-dir dir)
                                                       :reason (rejection-reason e)})))))
                   {:results [] :rejected []}
-                  skill-dirs)
+                  scoped-dirs)
           results (vec (or results []))
           rejected (vec (or rejected []))
-          payload {:skills (into {} (map (fn [{n :skill/name t :tree/id fm :frontmatter}]
-                                           [n {:tree/id t :revision/id t :frontmatter fm}])
-                                         results))
-                   :skill/count (count results)
+          ;; S12: collapse same-name across scopes by fixed precedence, or
+          ;; fail closed on a cross-scope collision when :on-collision :error.
+          resolved (collect/resolve-skills results collision)
+          payload {:skills (into {} (map (fn [[n entry]]
+                                           [n {:tree/id (:tree/id entry)
+                                               :revision/id (:tree/id entry)
+                                               :frontmatter (:frontmatter entry)}])
+                                         resolved))
+                   :skill/count (count resolved)
                    :rejected-skills rejected
                    :skill/rejected-count (count rejected)
-                   :roots (mapv str all-roots)
+                   :roots (mapv #(str (:path %)) scoped-roots)
                    :mode (name mode)}]
       {:source/id source-id
        :payload payload
@@ -278,11 +343,18 @@
   :cas — CAS handle (required, string path or {:root ...} map)
   :registry — environment registry atom (optional, created if not supplied)
   :strict? — boolean, false = lenient external discovery, true = strict vendored/evolution compile
+  :root-scopes — map scope -> [paths] making each root's precedence scope
+    explicit (:project / :user / :extra). Order-independent and authoritative.
+    When omitted, scopes derive from the legacy :roots / :extra-roots by path
+    identity (see scoped-roots-for).
+  :on-collision — :precedence (default; same-name resolves project > user >
+    extra deterministically) or :error (a cross-scope same-name collision
+    raises a typed :skill/name-collision and the snapshot fails closed).
 
   The source's snapshot! will:
    filesystem event -> mark dirty -> snapshot whole skill dir to CAS -> parse SKILL.md FROM SNAPSHOT -> validate -> derive SurfaceBundle -> atomic publish.
   It must not parse live then snapshot."
-  [{:keys [source/id roots cas registry strict? extra-roots] :as opts}]
+  [{:keys [source/id roots cas registry strict? extra-roots root-scopes on-collision] :as opts}]
   (when-not cas
     (throw (err/error :skill/invalid-opts "SkillSource requires :cas" {:opts opts})))
   (let [sid (or id :skills/all)
@@ -291,7 +363,9 @@
         subs (atom {})
         closed? (atom false)
         strict? (boolean strict?)
-        source (->SkillSource sid roots cas registry subs closed? strict? (or extra-roots []))]
+        collision (collect/validate-collision-mode on-collision)
+        root-scopes (collect/validate-root-scopes (or root-scopes {}))
+        source (->SkillSource sid roots cas registry subs closed? strict? (or extra-roots []) root-scopes collision)]
     ;; attach registry for external access
     (assoc source :registry registry)))
 
