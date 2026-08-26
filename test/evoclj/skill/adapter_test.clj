@@ -175,15 +175,10 @@
         (is (= (:revision/id activated) (:revision/id (first active)))))
       ;; next round materializer returns full SKILL.md A (not just hint)
       (let [bindings (store-binding/active-bindings db sid)
-            ;; materialize via CAS map (binding revision -> content via CAS tree)
-            ;; adapter's materializer reads from CAS tree; we simulate via materializer/materialize with CAS func that reads from tree
-            ;; Use a CAS fn that reads SKILL.md bytes from the published tree.
-            cas-fn (fn [rev]
-                     ;; rev is tree id; load manifest and get SKILL.md
-                     (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                           ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                       (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
-            content (read-via-materializer (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) bindings) cas-fn)]
+            ;; materialize via REAL CAS (the same handle as activation): the
+            ;; generic materializer detects the CAS tree and hydrates SKILL.md
+            ;; itself — no injected resolver fn (INV-09: cas-fn banned).
+            content (read-via-materializer (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) bindings) cas)]
         (is (str/includes? content "Body A original") "activated body is A"))
       ;; generic mounted directory via mount filesystem provider (RO)
       (let [provider (mount-fs/make-provider mount-reg)
@@ -245,13 +240,9 @@
         (is (= rev-a (:revision/id (first active))) "binding still pinned to A"))
       ;; materializer for existing binding still returns A
       (let [active (store-binding/active-bindings db sid)
-            cas-fn (fn [rev]
-                     (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                           ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                       (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
             ;; need to convert stored binding to ctx-binding shape for materializer
             bindings (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) active)
-            content (read-via-materializer bindings cas-fn)]
+            content (read-via-materializer bindings cas)]
         (is (str/includes? content body-a) "materialized still A")
         (is (not (str/includes? content "Body B")) "must not yet see B"))
       ;; new activation (different session) would see B
@@ -292,12 +283,8 @@
           compressed "compressed: short"
           active (store-binding/active-bindings db sid)
           bindings (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) active)
-          cas-fn (fn [rev]
-                   (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                         ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                     (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
-          before (materializer/materialize {:history long-history :bindings bindings :catalog (adapter/catalog-snapshot registry) :policy nil :cas cas-fn})
-          after (materializer/materialize {:history compressed :bindings bindings :catalog (adapter/catalog-snapshot registry) :policy nil :cas cas-fn})]
+          before (materializer/materialize {:history long-history :bindings bindings :catalog (adapter/catalog-snapshot registry) :policy nil :cas cas})
+          after (materializer/materialize {:history compressed :bindings bindings :catalog (adapter/catalog-snapshot registry) :policy nil :cas cas})]
       (is (= rev-a (:segment/revision-id (first (:effective/segments before)))) "before compaction still A")
       (is (= rev-a (:segment/revision-id (first (:effective/segments after)))) "after compaction still A")
       (is (str/includes? (:segment/content (first (:effective/segments after))) "Body A pinned"))
@@ -367,12 +354,8 @@
           (is (str/includes? txt "old updated"))))
       ;; materializer now returns B
       (let [active (store-binding/active-bindings db sid)
-            cas-fn (fn [rev]
-                     (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                           ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                       (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
             bindings (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) active)
-            content (read-via-materializer bindings cas-fn)]
+            content (read-via-materializer bindings cas)]
         (is (str/includes? content "Body B reloaded"))
         (is (not (str/includes? content "Body A")))))))
 
@@ -506,13 +489,9 @@
       (is (= 1 (count (mount-backend/list-mounts new-mount))))
       (is (= 1 (count (ctx-binding/list-active new-ctx))))
       ;; materializer via new mount still returns B body via CAS
-      (let [cas-fn (fn [rev]
-                     (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                           ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                       (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
-            active (store-binding/active-bindings new-db sid)
+      (let [active (store-binding/active-bindings new-db sid)
             bindings (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) active)
-            content (read-via-materializer bindings cas-fn)]
+            content (read-via-materializer bindings cas)]
         (is (str/includes? content "Revision B for restart"))
         (is (not (str/includes? content "Revision A"))))
       ;; also prove that even if we delete skill dir before restart, restore still works (CAS retains B)
@@ -556,13 +535,9 @@
       (let [active (store-binding/active-bindings db sid)]
         (is (= 1 (count active)))
         (is (= rev-a (:revision/id (first active)))))
-      (let [cas-fn (fn [rev]
-                     (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                           ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                       (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
-            active (store-binding/active-bindings db sid)
+      (let [active (store-binding/active-bindings db sid)
             bindings (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) active)
-            content (read-via-materializer bindings cas-fn)]
+            content (read-via-materializer bindings cas)]
         (is (str/includes? content "A persists after removal")))
       ;; filesystem provider still servable via CAS tree even though live dir gone
       (let [provider (mount-fs/make-provider mount-reg)

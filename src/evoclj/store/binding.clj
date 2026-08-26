@@ -398,11 +398,17 @@
               :when (= :context (:surface/type s))]
         ;; WO-B1: no catch-and-continue. A failing publication surfaces
         ;; typed; the caller's staged transaction compensates.
-        (let [offer {:offer/logical-id logical-id
-                     :offer/revision-id rev
-                     :offer/bundle-id bid
-                     :offer/name (str logical-id)
-                     :offer/description (str "binding " logical-id)}]
+        (let [desc (:descriptor s)
+              mat (when (map? desc) (:materializer desc))
+              offer (cond-> {:offer/logical-id logical-id
+                             :offer/revision-id rev
+                             :offer/bundle-id bid
+                             :offer/name (str logical-id)
+                             :offer/description (str "binding " logical-id)}
+                      ;; WO-S1: carry the materializer descriptor (e.g.
+                      ;; {:type :cas-tree-file :path \"SKILL.md\"}) so a
+                      ;; binding created from it routes tree->file correctly.
+                      (some? mat) (assoc :offer/descriptor mat))]
           (try
             (context-binding/activate! context-store offer)
             (catch Exception e

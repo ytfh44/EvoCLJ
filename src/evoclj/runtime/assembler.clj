@@ -8,7 +8,8 @@
   tool-loop; context is rebuilt each round so activate_skill becomes
   visible immediately."
   (:require [evoclj.context.materializer :as mat]
-            [evoclj.environment.revision :as rev]))
+            [evoclj.environment.revision :as rev]
+            [evoclj.kernel.error :as err]))
 
 (defn base->prepared
   "Assemble PreparedModelCall.
@@ -18,7 +19,7 @@
   catalog: map source-id -> revision-id (current catalog)
   tool-catalog-binding: {:binding/id :revision/ids ...} or nil
   history: string or vector of messages
-  opts: {:cas <cas-config-or-fn> :policy <host-policy>}"
+  opts: {:cas <cas-config-or-map-or-path> :policy <host-policy>}"
 
   ([base-call session-bindings catalog tool-catalog-binding]
    (base->prepared base-call session-bindings catalog tool-catalog-binding nil {}))
@@ -32,18 +33,23 @@
                           {:binding/id (random-uuid)
                            :revision-ids catalog})
          ;; context materialization: rebuild each time
-         effective (if (and (seq session-bindings) cas)
-                     (mat/materialize {:history history
-                                       :bindings session-bindings
-                                       :catalog catalog
-                                       :policy policy
-                                       :cas cas})
+         effective (if (seq session-bindings)
+                     (if cas
+                       (mat/materialize {:history history
+                                         :bindings session-bindings
+                                         :catalog catalog
+                                         :policy policy
+                                         :cas cas})
+                       ;; WO-S1 / INV-04: an unresolved placeholder (a
+                       ;; skill/artifact reference we cannot resolve) FAILS
+                       ;; CLOSED — never emit a degraded "binding:..."
+                       ;; placeholder segment.
+                        (throw (err/error :assembler/placeholder-unresolved
+                                          "cannot resolve session binding placeholders without a CAS resolver"
+                                          {:bindings (mapv :logical/id session-bindings)})))
                      {:effective/history history
-                      :effective/segments (mapv (fn [b] {:segment/logical-id (:logical/id b)
-                                                         :segment/revision-id (:revision/id b)
-                                                         :segment/content (str "binding:" (:logical/id b))})
-                                                session-bindings)
-                      :effective/bindings session-bindings})
+                      :effective/segments []
+                      :effective/bindings []})
          segments (:effective/segments effective [])
          ;; inject segments as system messages before base messages
          seg-messages (mapv (fn [seg] {:role "system"

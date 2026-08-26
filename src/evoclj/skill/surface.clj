@@ -25,13 +25,16 @@
   [:skill skill-name])
 
 (defn- descriptor-for
-  "Catalog descriptor (small, for Offer). Progressive disclosure: catalog only shows name+description."
+  "Catalog descriptor (small, for Offer). Progressive disclosure: catalog only shows name+description.
+  Carries the :materializer descriptor (WO-S1) telling the generic materializer
+  to read SKILL.md from the CAS tree named by the surface's :revision/id."
   [skill-name frontmatter]
   {:name skill-name
    :description (or (:description frontmatter) "")
    :allowed-tools (:allowed-tools frontmatter)
    :allowed-tools-parsed (:allowed-tools-parsed frontmatter)
-   :skill/name skill-name})
+   :skill/name skill-name
+   :materializer {:type :cas-tree-file :path "SKILL.md"}})
 
 (defn- materializer-for
   "Materializer function for ContextSurface. It reads exact SKILL.md bytes

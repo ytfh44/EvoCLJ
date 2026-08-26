@@ -23,6 +23,24 @@
 ;; Binding validation
 ;; ---------------------------------------------------------------------------
 
+(defn validate-materializer-descriptor
+  "Validate an optional :binding/descriptor controlling how the
+  materializer reads this binding's content (WO-S1). Supported kinds:
+    {:type :cas-leaf}                       — read the artifact at :revision/id as content
+    {:type :cas-tree-file :path <string>}   — read file :path out of the CAS tree at :revision/id
+  An unknown kind, non-map, or non-string :path throws :context/binding-invalid
+  (fail-closed at the boundary, never silently degraded). Returns the descriptor."
+  [desc]
+  (when-not (map? desc)
+    (throw (err/error :context/binding-invalid "binding descriptor must be a map" {:descriptor desc})))
+  (case (:type desc)
+    :cas-leaf nil
+    :cas-tree-file
+    (when-not (or (nil? (:path desc)) (string? (:path desc)))
+      (throw (err/error :context/binding-invalid "cas-tree-file descriptor :path must be a string" {:descriptor desc})))
+    (throw (err/error :context/binding-invalid "binding descriptor has unknown :type" {:descriptor desc})))
+  desc)
+
 (defn binding?
   "True when x is a valid ContextBinding map."
   [x]
@@ -34,7 +52,11 @@
        (string? (:bundle/id x))
        (= :session (:scope x))
        (= :active (:state x))
-       (int? (:binding/activated-at x))))
+       (int? (:binding/activated-at x))
+       (let [d (:binding/descriptor x)]
+         (or (nil? d)
+             (and (map? d)
+                  (contains? #{:cas-leaf :cas-tree-file} (:type d)))))))
 
 (defn validate-binding
   "Validate binding, throwing :context/binding-invalid on failure."
@@ -51,18 +73,22 @@
     (throw (err/error :context/binding-invalid "scope must be :session" {:binding b})))
   (when-not (= :active (:state b))
     (throw (err/error :context/binding-invalid "state must be :active" {:binding b})))
+  (when (contains? b :binding/descriptor)
+    (validate-materializer-descriptor (:binding/descriptor b)))
   b)
 
 (defn make-binding
   "Create a ContextBinding from explicit parts. Validates and returns binding."
-  [{:keys [logical-id revision-id bundle-id scope state activated-at binding-id]}]
-  (let [b {:binding/id (or binding-id (random-uuid))
-           :logical/id logical-id
-           :revision/id revision-id
-           :bundle/id bundle-id
-           :scope (or scope :session)
-           :state (or state :active)
-           :binding/activated-at (or activated-at (System/currentTimeMillis))}]
+  [{:keys [logical-id revision-id bundle-id scope state activated-at binding-id descriptor]}]
+  (let [b (cond-> {:binding/id (or binding-id (random-uuid))
+                   :logical/id logical-id
+                   :revision/id revision-id
+                   :bundle/id bundle-id
+                   :scope (or scope :session)
+                   :state (or state :active)
+                   :binding/activated-at (or activated-at (System/currentTimeMillis))}
+            ; optional materializer descriptor (WO-S1): controls tree/leaf routing
+            (some? descriptor) (assoc :binding/descriptor descriptor))]
     (validate-binding b)
     b))
 
@@ -84,7 +110,8 @@
       (throw (err/error :context/binding-invalid "offer missing :offer/bundle-id" {:offer offer})))
     (make-binding {:logical-id logical-id
                    :revision-id revision-id
-                   :bundle-id bundle-id})))
+                   :bundle-id bundle-id
+                   :descriptor (:offer/descriptor offer)})))
 
 ;; ---------------------------------------------------------------------------
 ;; In-memory binding store

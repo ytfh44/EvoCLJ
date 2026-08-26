@@ -305,7 +305,7 @@
                     ctx (first (filter #(= :context (:surface/type %)) surfaces))
                     desc (:descriptor ctx)
                     name (or (:name desc) (second logical-id))]
-                (offer/make-offer {:logical-id logical-id :revision-id rev :bundle-id bid :name (or name (str logical-id)) :description (or (:description desc) "")}))) 
+                (offer/make-offer {:logical-id logical-id :revision-id rev :bundle-id bid :name (or name (str logical-id)) :description (or (:description desc) "") :descriptor (when (map? desc) (:materializer desc))}))) 
             logical-index)
       ;; fallback when logical-index empty (e.g., registry created without bundle publish): scan all bundles and deduplicate by logical-id
       (let [bundles (bundle/list-bundles registry)
@@ -318,7 +318,7 @@
                       ctx (first (filter #(= :context (:surface/type %)) surfaces))
                       desc (:descriptor ctx)
                       name (or (:name desc) (second logical-id))]
-                  (offer/make-offer {:logical-id logical-id :revision-id rev :bundle-id bid :name (or name (str logical-id)) :description (or (:description desc) "")})))
+                  (offer/make-offer {:logical-id logical-id :revision-id rev :bundle-id bid :name (or name (str logical-id)) :description (or (:description desc) "") :descriptor (when (map? desc) (:materializer desc))})))
               by-logical)))))
 
 (defn current-offer-for
