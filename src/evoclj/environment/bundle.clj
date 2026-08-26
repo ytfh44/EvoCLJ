@@ -94,27 +94,46 @@
     bundle))
 
 (defn- check-collision-against-registry
+  "Collision check against the *current* registry state, before any mutation.
+
+  Fail-closed semantics (no torn state):
+    - A bundle/id already present with the SAME content identity
+      (:revision/id) is a legitimate re-publish/update (the noop path) and is
+      NOT a collision.
+    - A bundle/id already present with a DIFFERENT content identity is a
+      genuine ownership collision — someone else owns that id with different
+      content — and must fail the whole publication (typed :bundle/collision).
+    - A surface id that already exists in the registry, bound to a DIFFERENT
+      bundle (a different logical source) than the candidate, is a genuine
+      conflict and must fail (you cannot overwrite another bundle's surface).
+  Reusing the same surface id WITHIN the same bundle (same revision/id) is the
+  normal update case and is allowed."
   [registry bundle]
-  (let [existing-surfaces (or (:surfaces @registry) {})
-        new-ids (set (map :surface/id (:surfaces bundle)))]
-    ;; duplicate surface ids within bundle already checked in validate-bundle,
-    ;; but also check against existing index if needed: if any new surface id
-    ;; already exists in registry under a different bundle/revision we treat as
-    ;; collision only when ids duplicate within the same logical publication?
-    ;; For this phase, collision is defined as duplicate surface ids within the
-    ;; candidate bundle. We also guard against duplicate bundle/id.
-    (when (contains? (or (:bundles @registry) {}) (:bundle/id bundle))
-      (throw (err/error :bundle/collision "duplicate bundle id"
-                        {:bundle/id (:bundle/id bundle)})))
-    ;; if existing surfaces contain same id but different revision, that is also a collision
-    ;; when publishing a new bundle that reuses an existing surface id in a way that would
-    ;; require replacing it, we consider it a collision for the transaction test.
-    ;; To keep semantics simple, we allow surface id reuse only if bundle is replacing?
-    ;; For now, treat any duplicate surface id already present as collision so test can
-    ;; demonstrate atomic failure.
-    ;; However to avoid breaking legitimate second publication with same logical id,
-    ;; we only treat as collision when new-ids intersect existing and bundle logical differs?
-    ;; This check is intentionally strict for the phase-3 transaction test.
+  (let [candidate-rev (:revision/id bundle)
+        bundles (or (:bundles @registry) {})
+        existing (get bundles (:bundle/id bundle))]
+    ;; 1. bundle/id ownership conflict: same id, different content
+    (when (and existing (not= candidate-rev (:revision/id existing)))
+      (throw (err/error :bundle/collision "bundle id already exists with different content"
+                        {:bundle/id (:bundle/id bundle)
+                         :existing-revision/id (:revision/id existing)
+                         :candidate-revision/id candidate-rev})))
+    ;; 2. surface-id ownership conflict across DISTINCT sources.
+    ;; A surface id whose existing owner shares THIS candidate's :logical/id
+    ;; (same source rebinding its stable surface to a new revision) is allowed.
+    ;; A surface id already bound to a DIFFERENT :logical/id is a genuine
+    ;; ownership conflict and must fail.
+    (let [existing-surfaces (or (:surfaces @registry) {})
+          new-ids (set (map :surface/id (:surfaces bundle)))
+          lid (:logical/id bundle)]
+      (doseq [sid new-ids]
+        (when-let [bound (get existing-surfaces sid)]
+          ;; owned by a different source -> conflict.
+          (when-not (= (:logical/id bound) lid)
+            (throw (err/error :bundle/collision "surface id already bound to a different source"
+                              {:surface/id sid
+                               :bound-logical/id (:logical/id bound)
+                               :candidate-logical/id lid}))))))
     nil))
 
 (defn- check-index-projection
@@ -129,13 +148,94 @@
     (throw (err/error :bundle/index-projection-failed "bundle missing :bundle/id for index" {:bundle bundle})))
   (when-not (:logical/id bundle)
     (throw (err/error :bundle/index-projection-failed "bundle missing :logical/id for index" {:bundle bundle})))
-  ;; project indexes and ensure no nil keys
-  (let [surface-index (into {} (map (fn [s] [(:surface/id s) s]) (:surfaces bundle)))
-        bundle-index {(:bundle/id bundle) bundle}
-        logical-index {(:logical/id bundle) (:bundle/id bundle)}]
+  ;; project indexes and ensure no nil keys. Each surface in the surface-index
+  ;; is stamped with its owning :logical/id (stable per-source identity) and
+  ;; :bundle/id so the collision check (and the published registry state) can
+  ;; tell "same source, new revision" (allowed) from "another source owns this
+  ;; surface id" (collision). bundle/id changes with content, so :logical/id
+  ;; is the stable ownership key.
+  (let [bid (:bundle/id bundle)
+        lid (:logical/id bundle)
+        surface-index (into {} (map (fn [s] [(:surface/id s) (assoc s :logical/id lid :bundle/id bid)]) (:surfaces bundle)))
+        bundle-index {bid bundle}
+        logical-index {lid bid}]
     (when (some nil? (keys surface-index))
       (throw (err/error :bundle/index-projection-failed "surface index contains nil key" {:bundle bundle})))
     {:surface-index surface-index :bundle-index bundle-index :logical-index logical-index}))
+
+(defn prepare-bundle
+  "Pure preparation step of the bundle publication transaction.
+
+  Resolves/constructs the candidate bundle and runs all pre-mutation checks
+  (validate bundle + co-versioning, check collision against the *current*
+  registry state, validate each surface, check index projection). Returns a
+  data map describing the publication:
+
+    {:status :noop|:published
+     :bundle <resolved bundle>
+     :revision-id <content identity of the bundle>
+     :indexes {:surface-index :bundle-index :logical-index}
+     :revision <the revision value that would be published (for :published)
+      :prev-seq <seq of the registry at prepare time (for seq allocation>}
+
+  This function performs NO mutation of the registry. It may throw a typed
+  error (e.g. :bundle/collision, :bundle/co-version-violation,
+  :bundle/index-projection-failed) — that throw is the fail-closed signal used
+  by the Source -> Revision -> Projector -> Bundle single-transaction path:
+  if preparation fails, NOTHING is published.
+
+  Callers that want a standalone atomic publication use `publish-bundle!`,
+  which wraps this in a single swap."
+  [registry bundle-or-opts]
+  (let [registry (or registry (throw (err/error :bundle/invalid-registry "registry required" {})))
+        ;; construct candidate bundle if opts given
+        bundle (if (and (map? bundle-or-opts) (contains? bundle-or-opts :bundle/id) (contains? bundle-or-opts :surfaces))
+                 bundle-or-opts
+                 ;; allow opts map with :logical/id :payload :surfaces etc to construct bundle+revision internally
+                 (let [{:keys [logical-id payload surfaces bundle-id revision-id]} bundle-or-opts]
+                   (if (and logical-id payload)
+                     (let [rev-id (or revision-id (rev/payload->id payload))
+                           bid (or bundle-id (str "bundle:" rev-id ":" (str logical-id)))]
+                       (make-bundle {:bundle-id bid :revision-id rev-id :logical-id logical-id :surfaces surfaces}))
+                     (throw (err/error :bundle/invalid "publish-bundle! requires bundle map or {:logical-id :payload :surfaces}" {:opts bundle-or-opts})))))
+        ;; 1-4 checks before mutation
+        _ (validate-bundle bundle)
+        _ (check-collision-against-registry registry bundle)
+        ;; descriptor validity already done in validate-bundle, but explicit for ordering
+        _ (doseq [s (:surfaces bundle)] (surf/validate-surface s))
+        indexes (check-index-projection bundle)
+        candidate-id (:revision/id bundle)
+        cur (:current @registry)
+        cur-id (:revision/id cur)
+        prev-seq (:seq @registry)
+        ;; Source-bundle-opts (e.g. from a LiveSource's project) may carry the
+        ;; raw source :payload. When present we publish it as the revision
+        ;; :payload to preserve the E1 single-source contract (the revision
+        ;; :payload is the source payload, see registry-test). For the raw
+        ;; bundle-map path (publish-bundle! with a constructed SurfaceBundle)
+        ;; there is no separate :payload, so we fall back to the bundle-derived
+        ;; payload (bundle/id + logical/id + surfaces), matching E1 publish-bundle!.
+        src-payload (:payload bundle-or-opts)]
+    (if (and cur-id (= candidate-id cur-id))
+      {:status :noop
+       :bundle bundle
+       :revision-id candidate-id
+       :indexes indexes
+       :revision cur
+       :prev-seq prev-seq}
+      (let [next-seq (inc (or prev-seq 0))
+            source-id (or (:logical/id bundle) :bundle/source)
+            payload (if (some? src-payload)
+                      src-payload
+                      {:bundle/id (:bundle/id bundle) :logical/id (:logical/id bundle) :surfaces (:surfaces bundle)})
+            new-rev (-> (rev/make-revision source-id payload next-seq)
+                        (assoc :revision/id candidate-id))]
+        {:status :published
+         :bundle bundle
+         :revision-id candidate-id
+         :indexes indexes
+         :revision new-rev
+         :prev-seq prev-seq}))))
 
 (defn publish-bundle!
   "Publication transaction for a SurfaceBundle.
@@ -150,78 +250,51 @@
   Any failure must leave registry with no partial surface set.
   Returns {:status :published :bundle bundle :revision revision}
   or throws typed error. On collision the whole publication fails.
-  Reuses revision for content identity and seq for publication order."
+  Reuses revision for content identity and seq for publication order.
+
+  This is the standalone path. The Source -> Revision -> Projector -> Bundle
+  single-transaction path (evoclj.environment.registry/refresh!) prepares all
+  projected bundles via `prepare-bundle` and applies them in ONE swap, so a
+  mid-chain failure leaves no torn bundle state."
   [registry bundle-or-opts]
   (let [registry (or registry (throw (err/error :bundle/invalid-registry "registry required" {})))
         lock (:lock @registry)]
     (when-not lock
       (throw (err/error :bundle/invalid-registry "registry missing :lock (not created via create-registry?)" {:registry registry})))
     (locking lock
-      ;; construct candidate bundle if opts given
-      (let [bundle (if (and (map? bundle-or-opts) (contains? bundle-or-opts :surfaces) (contains? bundle-or-opts :bundle/id))
-                     bundle-or-opts
-                     ;; allow opts map with :logical/id :payload :surfaces etc to construct bundle+revision internally
-                     (let [{:keys [logical-id payload surfaces bundle-id revision-id]} bundle-or-opts]
-                       (if (and logical-id payload)
-                         (let [rev-id (or revision-id (rev/payload->id payload))
-                               bid (or bundle-id (str "bundle:" rev-id ":" (str logical-id)))]
-                           (make-bundle {:bundle-id bid :revision-id rev-id :logical-id logical-id :surfaces surfaces}))
-                         (throw (err/error :bundle/invalid "publish-bundle! requires bundle map or {:logical-id :payload :surfaces}" {:opts bundle-or-opts})))))
-            ;; 1-4 checks before mutation
-            _ (validate-bundle bundle)
-            _ (check-collision-against-registry registry bundle)
-            ;; descriptor validity already done in validate-bundle, but explicit for ordering
-            _ (doseq [s (:surfaces bundle)] (surf/validate-surface s))
-            indexes (check-index-projection bundle)
-            ;; derive revision for publication order
-            ;; payload for revision is bundle content; use revision-id already in bundle
-            payload {:bundle/id (:bundle/id bundle) :logical/id (:logical/id bundle) :surfaces (:surfaces bundle)}
-            candidate-id (:revision/id bundle)
-            cur (:current @registry)
-            cur-id (:revision/id cur)]
-        (if (and cur-id (= candidate-id cur-id))
-          {:status :noop :bundle bundle :revision cur}
-          (let [prev @registry
-                prev-seq (:seq prev)
-                next-seq (inc (or prev-seq 0))
-                ;; create revision value reusing revision ns
-                source-id (or (:logical/id bundle) :bundle/source)
-                new-rev (rev/make-revision source-id payload next-seq)
-                ;; ensure bundle revision/id matches new-rev id for consistency if needed,
-                ;; but keep bundle's declared revision/id as content identity
-                ;; For co-versioning guarantee, we keep bundle's revision/id as published id
-                ;; and also store new-rev with same id. If they differ, use bundle's id.
-                new-rev (assoc new-rev :revision/id candidate-id)]
-            ;; single atomic swap
-            (loop []
-              (let [cur-state @registry
-                    cur-seq (:seq cur-state)]
-                (if (not= cur-seq prev-seq)
-                  ;; concurrent publication happened, treat as noop if same candidate
-                  (let [new-cur (:current cur-state)
-                        new-id (:revision/id new-cur)]
-                    (if (= candidate-id new-id)
-                      {:status :noop :bundle bundle :revision new-cur}
-                      (throw (err/error :bundle/concurrent-modification "concurrent publication modified registry" {:bundle bundle}))))
-                  (let [new-surface-index (merge (or (:surfaces cur-state) {}) (:surface-index indexes))
-                        new-bundles (assoc (or (:bundles cur-state) {}) (:bundle/id bundle) bundle)
-                        new-bundle-index (merge (or (:bundle-index cur-state) {}) (:bundle-index indexes))
-                        new-logical-index (merge (or (:logical-index cur-state) {}) (:logical-index indexes))
-                        new-state (-> cur-state
-                                      (assoc :current new-rev :last-good new-rev :seq next-seq :status :ok :dirty? false :last-refresh-error nil)
-                                      (assoc :bundles new-bundles
-                                             :surfaces new-surface-index
-                                             :bundle-index new-bundle-index
-                                             :logical-index new-logical-index
-                                             :indexes indexes)
-                                      (update :history (fnil conj []) new-rev)
-                                      (update :bundle-history (fnil conj []) bundle))]
-                    (if (compare-and-set! registry cur-state new-state)
-                      (do
-                        (doseq [[_ listener] (:listeners cur-state)]
-                          (try (listener {:prev (:current prev) :curr new-rev :bundle bundle}) (catch Exception _ nil)))
-                        {:status :published :bundle bundle :revision new-rev})
-                      (recur))))))))))))
+      (let [{:keys [status bundle revision revision-id prev-seq indexes]} (prepare-bundle registry bundle-or-opts)]
+        (if (= :noop status)
+          {:status :noop :bundle bundle :revision revision}
+          (loop []
+            (let [cur-state @registry
+                  cur-seq (:seq cur-state)]
+              (if (not= cur-seq prev-seq)
+                ;; concurrent publication happened; re-check candidate identity
+                (let [new-cur (:current cur-state)
+                      new-id (:revision/id new-cur)]
+                  (if (= revision-id new-id)
+                    {:status :noop :bundle bundle :revision new-cur}
+                    (throw (err/error :bundle/concurrent-modification "concurrent publication modified registry" {:bundle bundle}))))
+                (let [new-surface-index (merge (or (:surfaces cur-state) {}) (:surface-index indexes))
+                      new-bundles (assoc (or (:bundles cur-state) {}) (:bundle/id bundle) bundle)
+                      new-bundle-index (merge (or (:bundle-index cur-state) {}) (:bundle-index indexes))
+                      new-logical-index (merge (or (:logical-index cur-state) {}) (:logical-index indexes))
+                      next-seq (:revision/seq revision)
+                      new-state (-> cur-state
+                                    (assoc :current revision :last-good revision :seq next-seq :status :ok :dirty? false :last-refresh-error nil)
+                                    (assoc :bundles new-bundles
+                                           :surfaces new-surface-index
+                                           :bundle-index new-bundle-index
+                                           :logical-index new-logical-index
+                                           :indexes indexes)
+                                    (update :history (fnil conj []) revision)
+                                    (update :bundle-history (fnil conj []) bundle))]
+                  (if (compare-and-set! registry cur-state new-state)
+                    (do
+                      (doseq [[_ listener] (:listeners cur-state)]
+                        (try (listener {:prev (:current cur-state) :curr revision :bundle bundle}) (catch Exception _ nil)))
+                      {:status :published :bundle bundle :revision revision})
+                    (recur)))))))))))
 
 (defn publish-surfaces!
   "Convenience: publish a set of peer surfaces atomically as a bundle.

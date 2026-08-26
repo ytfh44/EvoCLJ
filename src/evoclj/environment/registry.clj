@@ -14,12 +14,22 @@
   source; an explicit refresh! with a source-id updates only that source.
   The top-level :current/:last-good/:seq/:history/:status remain a derived
   aggregate (latest published revision across all sources) so the
-  single-source contract and bundle.clj publication keep working. The
-  refresh! return value preserves the historical top-level :revision and
-  :error-data keys (single-source) for existing callers; per-source detail
-  lives under :per-source."
+  single-source contract and bundle.clj publication keep working.
+
+  E2 (single-transaction Source -> Revision -> Projector -> Bundle): the
+  chain for each source is
+      (snapshot! src)   ; PURE: read only, no publication
+      (project src snap); PURE: snapshot -> candidate bundle opts (may throw)
+      (prepare-bundle registry proj) ; PURE: validate + index, NO mutation
+  and ALL prepared bundles are then applied in ONE atomic swap. A throw at
+  any step (snapshot failure, projector failure, bundle-prepare failure)
+  leaves that source's prior published revision intact (fail-closed); the
+  swap never installs a torn half-published bundle. snapshot! is purified
+  (INV-06): it performs no registry mutation, no counter advance, no
+  publication — that belongs to this transaction boundary."
   (:require [evoclj.environment.revision :as rev]
             [evoclj.environment.source :as src]
+            [evoclj.environment.bundle :as bundle]
             [evoclj.kernel.error :as err]
             [evoclj.support.failpoint :as fault]))
 
@@ -132,41 +142,182 @@
     (throw (err/error :environment/invalid-snapshot "snapshot missing :payload" {:snapshot snapshot})))
   snapshot)
 
-;; Compute the new per-source entry from the current per-source entry and a
-;; captured snapshot (or a captured error). Fail-closed: on error the entry's
-;; current/last-good/seq are preserved and only :status/:last-refresh-error
-;; change. Returns {:status :published|:noop|:error :entry ...}.
-(defn- plan-source
-  [entry snapshot-or-error]
-  (if (:error snapshot-or-error)
-    {:status :error
-     :error (:error snapshot-or-error)
-     :error-data (:error-data snapshot-or-error)
-     :entry (assoc entry :status :degraded :last-refresh-error (:error-data snapshot-or-error))}
-    (let [snapshot (:snapshot snapshot-or-error)]
-      (try
-        (validate-snapshot snapshot)
-        (let [sid (:source/id snapshot)
-              payload (:payload snapshot)
-              candidate-id (rev/payload->id payload)
-              cur (:current entry)
-              cur-id (:revision/id cur)]
-          (if (and cur-id (= candidate-id cur-id))
-            {:status :noop :entry entry}
-            (let [prev-seq (:seq entry)
-                  next-seq (inc prev-seq)
-                  new-rev (rev/make-revision sid payload next-seq)]
-              {:status :published
-               :revision new-rev
-               :entry (-> entry
-                          (assoc :current new-rev :last-good new-rev :seq next-seq
-                                 :status :ok :last-refresh-error nil)
-                          (update :history (fnil conj []) new-rev))})))
-        (catch Throwable e
-          {:status :error
-           :error e
-           :error-data (err/error-data e)
-           :entry (assoc entry :status :degraded :last-refresh-error (err/error-data e))})))))
+;; ---------------------------------------------------------------------------
+;; E2 — single-transaction Source -> Revision -> Projector -> Bundle
+;; ---------------------------------------------------------------------------
+
+(defn- normalize-project
+  "Normalize a project result into a (possibly empty) vector of bundle-opts
+  maps. project may return nil (no bundle), a single bundle-opts map, or a
+  vector/collection of bundle-opts maps (e.g. one bundle per discovered
+  skill)."
+  [proj]
+  (cond
+    (nil? proj) []
+    (map? proj) [proj]
+    (sequential? proj) (vec proj)
+    :else (throw (err/error :environment/invalid-project "project returned unsupported value" {:project proj}))))
+
+(defn- plan-source-chain
+  "Run the Source -> Revision -> Projector -> Bundle chain for ONE source,
+  fail-closed and WITHOUT any registry mutation.
+
+  `entry` is this source's per-source state (:per-source sid) captured at the
+  start of the transaction. It is used ONLY for the fail-closed noop check: a
+  source is a noop when every projected bundle's content identity equals that
+  source's OWN published current revision/id — never the cross-source top-level
+  aggregate. (Comparing against the top-level aggregate would make an unchanged
+  sibling source look like a change and tear the atomic semantics.)
+
+  Returns a map:
+    {:sid sid
+     :projected? boolean
+     :preps <vector of prepare-bundle results>
+     :noop? boolean            ; all projected bundles equal THIS source's current published revisions
+     :error <Throwable | nil> ; set if snapshot/project/prepare threw
+     :error-data <... | nil>}
+
+  snapshot! is pure, project is pure, and prepare-bundle performs only checks
+  (no publish). The actual publication happens later in a single atomic swap
+  owned by refresh!. If any step throws, :error is set and the chain is left
+  uncommitted for this source (prior published state preserved)."
+  [registry src entry sid opts]
+  (try
+    (fault/trigger! opts :after-snapshot)
+    (let [snapshot (src/snapshot! src)]
+      (validate-snapshot snapshot)
+      (fault/trigger! opts :after-validate)
+      (let [proj (src/project src snapshot)]
+        (fault/trigger! opts :after-project)
+        (let [bundle-opts (normalize-project proj)]
+          (if (empty? bundle-opts)
+            {:sid sid :projected? false :preps [] :noop? true :error nil :error-data nil}
+            (let [preps (mapv (fn [bo]
+                                (fault/trigger! opts :after-bundle-publish)
+                                (bundle/prepare-bundle registry bo))
+                              bundle-opts)
+                  cur-rev-id (:revision/id (:current entry))
+                  noop? (every? #(= (:revision-id %) cur-rev-id) preps)]
+              {:sid sid :projected? true :preps preps :noop? noop? :error nil :error-data nil})))))
+    (catch Throwable e
+      {:sid sid :projected? false :preps [] :noop? false :error e :error-data (err/error-data e)})))
+
+(defn- advance-per-source-entry
+  "Return an updated per-source entry after a successful (non-noop) publish of
+  the plan's prepared bundles. Pure: returns the new entry map."
+  [entry plan]
+  (let [next-seq (inc (or (:seq entry) 0))
+        rev (assoc (:revision (last (:preps plan))) :revision/seq next-seq)]
+    (-> entry
+        (assoc :current rev :last-good rev :seq next-seq :status :ok :last-refresh-error nil)
+        (update :history (fnil conj []) rev))))
+
+(defn- advance-all
+  "Advance per-source entries for all non-noop, non-error plans. Pure."
+  [s per-src plans]
+  (reduce (fn [acc [sid plan]]
+            (if (or (:noop? plan) (some? (:error plan)))
+              acc
+              (assoc-in acc [:per-source sid] (advance-per-source-entry (get per-src sid) plan))))
+          s
+          plans))
+
+(defn- install-prep
+  "Merge one prepared bundle's surfaces/indexes/bundle into registry state s.
+  Pure: returns the updated state map."
+  [s prep]
+  (let [indexes (:indexes prep)
+        bundle (:bundle prep)
+        new-surface-index (merge (or (:surfaces s) {}) (:surface-index indexes))
+        new-bundles (assoc (or (:bundles s) {}) (:bundle/id bundle) bundle)
+        new-bundle-index (merge (or (:bundle-index s) {}) (:bundle-index indexes))
+        new-logical-index (merge (or (:logical-index s) {}) (:logical-index indexes))
+        rev (:revision prep)
+        with-indexes (assoc s
+                            :surfaces new-surface-index
+                            :bundles new-bundles
+                            :bundle-index new-bundle-index
+                            :logical-index new-logical-index
+                            :indexes indexes)
+        with-history (update with-indexes :history (fnil conj []) rev)]
+    (update with-history :bundle-history (fnil conj []) bundle)))
+
+(defn- mark-degraded
+  "Mark per-source entries whose chain errored as :degraded, keeping last-good.
+  Pure."
+  [s plans]
+  (reduce (fn [acc [sid plan]]
+            (if (some? (:error plan))
+              (update-in acc [:per-source sid]
+                         (fn [e] (assoc e :status :degraded :last-refresh-error (:error-data plan))))
+              acc))
+          s
+          plans))
+
+(defn- compute-aggregate
+  "Recompute the top-level :current/:last-good/:seq from per-source state.
+  Pure."
+  [per-src]
+  (reduce (fn [acc [sid e]]
+            (let [sq (:seq e)]
+              (if (or (nil? (:current acc)) (> sq (:seq acc)))
+                {:current (:current e) :last-good (:last-good e) :seq sq}
+                acc)))
+          {:current nil :last-good nil :seq -1}
+          per-src))
+
+(defn- apply-chain-swap!
+  "Apply all successfully-prepared per-source chains in ONE atomic swap.
+  `plans` is a map sid -> plan from plan-source-chain. Each non-noop,
+  non-error plan contributes its prepared bundles' surfaces/indexes/bundles,
+  and its per-source entry advances seq + current/last-good. This is the
+  single transaction boundary: a source whose chain errored is simply not in
+  the published set, so its prior published revision is intact; prepared
+  bundles from healthy sources all land together, never torn."
+  [registry state plans]
+  (let [per-src (:per-source state)
+        any-error (some #(some? (:error %)) (vals plans))
+        published-preps (mapcat (fn [[_ p]] (when (and (nil? (:error p)) (not (:noop? p)))
+                                            (:preps p)))
+                                plans)]
+    (swap! registry (fn [s]
+                      (let [s1 (advance-all s per-src plans)
+                            s2 (reduce install-prep s1 published-preps)
+                            s3 (mark-degraded s2 plans)
+                            new-per-src (:per-source s3)
+                            top (compute-aggregate new-per-src)]
+                        (assoc s3
+                               :current (:current top)
+                               :last-good (:last-good top)
+                               :seq (max (:seq s3) (max 0 (:seq top)))
+                               :status (if any-error :degraded :ok)
+                               :dirty? (boolean any-error)
+                               :last-refresh-error (when any-error
+                                                     (some #(:error-data %) (vals plans))))))))
+    ;; notify listeners for each published plan
+    (doseq [[sid plan] plans]
+      (when (and (nil? (:error plan)) (not (:noop? plan)))
+        (let [prev (:current (get (:per-source state) sid))]
+          (doseq [prep (:preps plan)]
+            (let [curr (:revision prep)]
+              (doseq [listener (vals (:listeners state))]
+                (try (listener {:prev prev :curr curr :bundle (:bundle prep)}) (catch Exception _ nil)))))))))
+
+(defn- per-source-results
+  "Build the :per-source result map for refresh! from the per-source plans.
+  Pure."
+  [plans]
+  (reduce (fn [m [sid p]]
+            (let [published? (and (seq (:preps p)) (not (:noop? p)))
+                  status (cond (some? (:error p)) :error
+                               published? :published
+                               (and (seq (:preps p)) (:noop? p)) :noop
+                               :else :noop)]
+              (cond-> (assoc m sid {:status status})
+                published? (assoc-in [sid :revision] (:revision (last (:preps p))))
+                (some? (:error p)) (assoc-in [sid :error-data] (:error-data p)))))
+          {}
+          plans))
 
 (defn refresh!
   ([registry]
@@ -187,89 +338,49 @@
                           (vec (keys sources)))]
          (when (empty? target-ids)
            (throw (err/error :environment/no-source "no source registered" {:source-id source-id})))
-         (let [plans (reduce
-                      (fn [m sid]
-                        (let [src (get sources sid)
-                              entry (get per-src sid)]
-                          (assoc m sid
-                                 (try
-                                   (let [snapshot (do (fault/trigger! opts :after-snapshot)
-                                                      (src/snapshot! src))]
-                                     (validate-snapshot snapshot)
-                                     (fault/trigger! opts :after-validate)
-                                     (plan-source entry {:snapshot snapshot}))
-                                   (catch Throwable e
-                                     (plan-source entry {:error e :error-data (err/error-data e)}))))))
-                      {} target-ids)
-               any-error (some #(= :error (:status %)) (vals plans))
-               any-published (some #(= :published (:status %)) (vals plans))
-               published (keep (fn [[_ p]] (when (= :published (:status p)) (:revision p))) plans)
-               new-per-src (into per-src (for [[sid p] plans] [sid (:entry p)]))]
-           (swap! registry (fn [s]
-                             (let [s (assoc s :per-source new-per-src)
-                                   s (if (seq published)
-                                       (update s :history (fnil into []) published)
-                                       s)
-                                   top (reduce (fn [acc [sid e]]
-                                                 (let [sq (:seq e)]
-                                                   (if (> sq (:seq acc))
-                                                     {:current (:current e) :last-good (:last-good e) :seq sq}
-                                                     acc)))
-                                               {:current nil :last-good nil :seq -1}
-                                               new-per-src)
-                                   s (assoc s
-                                            :current (:current top)
-                                            :last-good (:last-good top)
-                                            :seq (max (:seq s) (max 0 (:seq top)))
-                                            :status (if any-error :degraded :ok)
-                                            :dirty? (boolean any-error)
-                                            :last-refresh-error (when any-error
-                                                                  (some #(:last-refresh-error (:entry %)) (vals plans))))]
-                               s)))
-           (let [post-error
-                 (try
-                   (fault/trigger! opts :mid-publish)
-                   (doseq [[sid p] plans
-                           :when (= :published (:status p))]
-                     (let [prev (:current (get per-src sid))
-                           curr (:revision p)]
-                       (doseq [[_ listener] (:listeners state)]
-                         (try (listener {:prev prev :curr curr}) (catch Exception _ nil)))))
-                   nil
-                   (catch Throwable e e))]
-             (when post-error
-               (swap! registry assoc :status :degraded :last-refresh-error (err/error-data post-error)))
-             (let [single? (= 1 (count target-ids))
-                   single-plan (when single? (val (first plans)))
-                   status (if post-error
-                            :error
-                            (if single?
-                              (let [p (val (first plans))]
-                                (cond (= :error (:status p)) :error
-                                      (= :published (:status p)) :published
-                                      :else :noop))
-                              (cond any-error :partial
-                                    any-published :published-all
-                                    :else :noop-all)))
-                   error-ex (or post-error
-                                (when single? (:error single-plan))
-                                nil)]
-               (let [result
-                     {:status status
-                      :error error-ex
-                      :revision (if single?
-                                  (or (:revision single-plan)
-                                      (:current (:entry single-plan)))
-                                  (some :revision (vals plans)))
-                      :error-data (if single?
-                                    (:error-data single-plan)
-                                    (some :error-data (vals plans)))
-                      :per-source (reduce (fn [m [sid p]]
-                                            (assoc m sid (cond-> {:status (:status p)}
-                                                            (= :published (:status p)) (assoc :revision (:revision p))
-                                                            (= :error (:status p)) (assoc :error-data (:error-data p)))))
-                                          {} plans)}]
-                 result)))))))))
+         ;; Step 1-3 (snapshot -> project -> prepare) for every target source,
+         ;; fail-closed and WITHOUT mutation.
+         (let [plans (reduce (fn [m sid]
+                               (assoc m sid (plan-source-chain registry (get sources sid) (get per-src sid) sid opts)))
+                             {} target-ids)
+               any-error (some #(some? (:error %)) (vals plans))
+               any-published (some (fn [p] (and (seq (:preps p)) (not (:noop? p)) (nil? (:error p)))) (vals plans))
+               ;; Step 4: single atomic swap applies all prepared bundles together.
+               _ (apply-chain-swap! registry state plans)
+               post-error (try
+                            (fault/trigger! opts :mid-publish)
+                            nil
+                            (catch Throwable e e))]
+           (when post-error
+             (swap! registry assoc :status :degraded :last-refresh-error (err/error-data post-error)))
+           (let [single? (= 1 (count target-ids))
+                 single-plan (when single? (val (first plans)))
+                 status (if post-error
+                          :error
+                          (if single?
+                            (let [p (val (first plans))]
+                              (cond (some? (:error p)) :error
+                                    (and (seq (:preps p)) (not (:noop? p))) :published
+                                    :else :noop))
+                            (cond any-error :partial
+                                  any-published :published-all
+                                  :else :noop-all)))
+                 error-ex (or post-error
+                             (when single? (:error single-plan))
+                             nil)]
+             {:status status
+              :error error-ex
+              :revision (if single?
+                          (or (when-let [preps (:preps single-plan)]
+                                (when (seq preps) (:revision (last preps))))
+                              (when-let [entry (get per-src (:sid single-plan))]
+                                (:current entry)))
+                          (some (fn [p] (when-let [preps (:preps p)]
+                                          (when (seq preps) (:revision (last preps))))) (vals plans)))
+              :error-data (if single?
+                            (:error-data single-plan)
+                            (some :error-data (vals plans)))
+              :per-source (per-source-results plans)})))))))
 
 (defn refresh-async!
   ([registry] (refresh-async! registry nil))

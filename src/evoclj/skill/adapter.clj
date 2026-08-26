@@ -164,36 +164,65 @@
 (defrecord SkillSource [source-id roots cas registry subs closed? strict? extra-roots]
   src/LiveSource
   (snapshot! [this]
+    ;; PURE capture (INV-06): discover skill dirs and snapshot each to CAS +
+    ;; parse SKILL.md FROM SNAPSHOT to read its raw data. This performs NO
+    ;; publication, NO registry mutation, and NO counter advance. The
+    ;; downstream Source -> Revision -> Projector -> Bundle transaction
+    ;; (evoclj.environment.registry/refresh!) owns all publication; the
+    ;; projector (project, below) turns this captured payload into bundles.
+    ;; A strict-mode parse failure still throws (fail-closed) but does not
+    ;; partial-publish.
     (when @closed?
       (throw (err/error :skill/source-closed "SkillSource is closed" {:source/id source-id})))
     (let [mode (if strict? :strict :lenient)
           all-roots (vec (concat (or roots []) (or extra-roots [])))
           skill-dirs (discover-skill-dirs all-roots)
-          ;; For each skill dir, snapshot + parse from snapshot + publish bundle.
-          ;; In lenient mode, skip bad skills but continue; in strict, fail whole snapshot.
+          ;; For each skill dir, snapshot to CAS + parse FROM SNAPSHOT.
+          ;; In lenient mode, skip bad skills but continue; in strict, fail.
           results (reduce (fn [acc dir]
                             (try
-                              (let [res (derive-and-publish! dir cas registry mode)]
-                                (conj acc res))
+                              (let [{:keys [tree/id manifest]} (snapshot-skill-dir! dir cas)
+                                    parsed (parse-skill-from-snapshot cas manifest mode)
+                                    fm (:frontmatter parsed)
+                                    skill-name (or (:name fm) (skill-name-for-dir dir))]
+                                (conj acc {:skill/name skill-name
+                                           :tree/id id
+                                           :frontmatter (if (:name fm) fm (assoc fm :name skill-name))
+                                           :body (:body parsed)}))
                               (catch Exception e
                                 (if strict?
                                   (throw e)
-                                  ;; lenient: skip invalid skill, log
-                                  (do
-                                    ;; Could store error, but continue
-                                    acc)))))
+                                  ;; lenient: skip invalid skill, continue
+                                  acc))))
                           []
                           skill-dirs)
-          payload {:skills (into {} (map (fn [{:keys [skill/name tree/id bundle frontmatter]}]
-                                           [name {:tree/id id :bundle/id (:bundle/id bundle) :revision/id id :frontmatter frontmatter}])
+          payload {:skills (into {} (map (fn [{n :skill/name t :tree/id fm :frontmatter}]
+                                           [n {:tree/id t :revision/id t :frontmatter fm}])
                                          results))
                    :skill/count (count results)
                    :roots (mapv str all-roots)
                    :mode (name mode)}]
       {:source/id source-id
        :payload payload
-       :captured-at (System/currentTimeMillis)
-       :skill/results results}))
+       ;; captured-at is still recorded as a pure observation timestamp of the
+       ;; capture (the snapshot value), not stamped into published state.
+       :captured-at (System/currentTimeMillis)}))
+  (project [this snapshot]
+    ;; PURE projector (INV-06): turn the captured snapshot payload into a
+    ;; vector of candidate bundle-opts maps, one per discovered skill, ready
+    ;; for evoclj.environment.bundle/prepare-bundle + publish. Performs NO
+    ;; mutation; throwing here is the fail-closed signal for a mid-chain
+    ;; failure. Returns an empty vector when there are no skills.
+    (let [skills (get-in snapshot [:payload :skills])]
+      (if (empty? skills)
+        []
+        (mapv (fn [[skill-name {:keys [tree/id frontmatter body]}]]
+                (surface/skill->bundle {:skill/name skill-name
+                                        :tree/id id
+                                        :frontmatter frontmatter
+                                        :body body
+                                        :cas cas}))
+              skills))))
   (subscribe! [this invalidate-fn]
     (when @closed?
       (throw (err/error :skill/source-closed "SkillSource is closed" {:source/id source-id})))

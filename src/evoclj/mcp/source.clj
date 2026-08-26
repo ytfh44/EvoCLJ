@@ -16,6 +16,8 @@
   connection."
   (:require [clojure.string :as str]
             [evoclj.environment.source :as src]
+            [evoclj.environment.surface :as surf]
+            [evoclj.environment.revision :as rev]
             [evoclj.kernel.error :as err]
             [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.client :as mcp-client]
@@ -524,6 +526,21 @@
       {:source/id source-id
        :payload payload
        :captured-at (System/currentTimeMillis)}))
+  (project [this snapshot]
+    ;; PURE projector (INV-06): derive a single ToolSurface bundle from the
+    ;; captured snapshot payload. No mutation; throwing here is the fail-closed
+    ;; signal for a mid-chain failure in the Source -> Revision -> Projector
+    ;; -> Bundle transaction.
+    (let [sid (:source/id snapshot)
+          payload (:payload snapshot)
+          surfaces [(surf/make-tool-surface
+                      {:id (keyword (name (or sid :mcp)) "tools")
+                       :entries (tool-entries->surface payload manager transport-config
+                                                       (rev/make-revision sid payload 0))})]]
+      {:logical-id sid
+       :source-id sid
+       :payload (or payload {:source/id sid})
+       :surfaces surfaces}))
   (subscribe! [this invalidate-fn]
     ;; M17: the manager is the CANONICAL owner of subscriptions. The source's
     ;; invalidate callback is registered with the manager; on a

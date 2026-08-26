@@ -45,6 +45,7 @@
                                      the new arity ([registry source-id
                                      opts]); stages:
                                      :after-snapshot :after-validate
+                                     :after-project :after-bundle-publish
                                      :mid-publish
   - evoclj.skill.adapter/derive-and-publish! — opts is the trailing
                                      arg of the new arity ([skill-dir
@@ -52,12 +53,12 @@
                                      :after-snapshot-tree :after-parse
                                      :after-bundle-publish
 
-  Legal stages — exactly these 11 keywords (machine-checkable list;
+  Legal stages — exactly these 12 keywords (machine-checkable list;
   this block is flush-left: its lines are exactly those docstring
   lines that START at column zero with a keyword token):
 :after-db-insert :after-publish-runtime :before-event-append
 :after-event-append :after-unpublish :after-snapshot :after-validate
-:mid-publish :after-snapshot-tree :after-parse :after-bundle-publish"
+:after-project :mid-publish :after-snapshot-tree :after-parse :after-bundle-publish"
   (:require [clojure.string :as str]))
 
 (defn trigger!
