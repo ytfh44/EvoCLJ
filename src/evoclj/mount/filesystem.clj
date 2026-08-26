@@ -28,8 +28,9 @@
     First batch (RO): stat, list, read
     Second batch (RW): write, create, delete — only when mount surface and lease both grant.
 
-  This provider is the single filesystem I/O path. If a legacy read_skill_file
-  helper exists it must be a facade over this provider (no independent I/O stack)."
+  This provider is the single filesystem I/O path. There is no separate
+  read_skill_file / read-skill-file facade — all reads go through
+  provider-read (no independent I/O stack)."
   (:require [clojure.string :as str]
             [evoclj.capability.lease :as lease]
             [evoclj.capability.schema :as cap-schema]
@@ -337,16 +338,6 @@
 (def fs-write provider-write)
 (def fs-create provider-create)
 (def fs-delete provider-delete)
-
-;; ---------------------------------------------------------------------------
-;; Facade for legacy read_skill_file (if any) — routes through generic provider
-;; ---------------------------------------------------------------------------
-
-(defn read-skill-file
-  "Legacy entry point that must be a facade over the generic provider.
-  Prefer provider-read directly."
-  [provider mount-id path opts]
-  (provider-read provider mount-id path opts))
 
 ;; ---------------------------------------------------------------------------
 ;; Provider that also implements evoclj.provider.protocol for broker integration

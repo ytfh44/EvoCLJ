@@ -62,3 +62,43 @@
       (write-file skill-dir "SKILL.md" "changed")
       (let [content2 (fs/provider-read provider [:skill "demo" (:tree/id snap-res)] "SKILL.md" {:leases [skill-lease] :subject subject :now now})]
         (is (= "skill" (String. content2)) "snapshot independent of upstream")))))
+
+(defn- err-type [thunk]
+  "Run thunk, return the :error/type of the typed error it throws, else nil."
+  (try (thunk) nil
+       (catch clojure.lang.ExceptionInfo e (:error/type (ex-data e)))))
+
+(defn- skill-read-fixture
+  "Build a FilesystemProvider serving a real CAS tree skill mount, plus a
+  valid read lease and the mount-id. Returns
+  {:provider p :mount-id id :lease lease :subject subject}."
+  []
+  (let [skill-dir (temp-dir)
+        cas-dir (temp-dir)
+        cas (cas/->cas (.toString cas-dir))
+        _ (write-file skill-dir "SKILL.md" "skill")
+        snap-res (snap/snapshot-tree! (.toString skill-dir) cas {})
+        mount-id [:skill "demo" (:tree/id snap-res)]
+        skill-mount (backend/make-skill-mount mount-id cas (:tree/id snap-res))
+        reg (backend/create-registry)
+        _ (backend/register-mount! reg skill-mount)
+        provider (fs/make-provider reg)
+        subject {:phenotype/id p1}
+        lease {:cap/id (random-uuid) :subject subject :resource {:kind :filesystem/path :mount/id mount-id :path ""} :actions #{:read :list :stat} :issued-at now :expires-at (Date. (+ (.getTime now) 100000)) :constraints {}}]
+    {:provider provider :mount-id mount-id :lease lease :subject subject}))
+
+(deftest read-skill-file-facade-deleted-and-provider-read-intact
+  (testing "X1: the legacy read-skill-file facade is dead (zero callers) and must be gone"
+    (is (not (contains? (ns-publics 'evoclj.mount.filesystem) 'read-skill-file))
+        "read-skill-file is a passthrough to provider-read with no callers; deleting it must not change behavior"))
+  (testing "equivalence-to-deletion: the delegated production reader still serves a valid skill file"
+    (let [{:keys [provider mount-id lease subject]} (skill-read-fixture)]
+      (is (= "skill" (String. (fs/provider-read provider mount-id "SKILL.md" {:leases [lease] :subject subject :now now}))))))
+  (testing "fault 1: a missing file is rejected with the typed :filesystem/not-found error"
+    (let [{:keys [provider mount-id lease subject]} (skill-read-fixture)]
+      (is (= :filesystem/not-found
+             (err-type #(fs/provider-read provider mount-id "no-such.md" {:leases [lease] :subject subject :now now}))))))
+  (testing "fault 2: a path escaping the skill mount is rejected with the typed :filesystem/path-outside-mount error"
+    (let [{:keys [provider mount-id lease subject]} (skill-read-fixture)]
+      (is (= :filesystem/path-outside-mount
+             (err-type #(fs/provider-read provider mount-id "../etc/passwd" {:leases [lease] :subject subject :now now})))))))
