@@ -15,6 +15,24 @@
     :eval/system         evaluator map (component)
     :promotion/system    promotion-system map (component)
 
+  plus the MCP / dynamic-environment components:
+
+    :modelsdev/catalog   models.dev catalog refresh result (post-v0 ext 1)
+    :model/registry      kernel-owned model registry atom (post-v0 ext 1)
+    :mcp/manager         shared MCP connection pool manager (WO-M5,
+                         init/halt owned here via evoclj.mcp.manager;
+                         see runtime/system for the thin defmethods)
+    :mcp/source          the McpSource LiveSource behind the WO-M20 switch
+                         (:enabled? false ships off; the legacy static
+                         :mcp/bridge provider path is untouched)
+    :environment/registry  the DYNAMIC ENVIRONMENT HOST component (WO-E6):
+                         the EnvironmentRegistry (E1/E2/E4) every
+                         host-created source registers into; halt tears it
+                         down cleanly
+    :skill/source        the SkillSource LiveSource behind the WO-E6
+                         switch (:enabled? false ships off), registered
+                         into :environment/registry like :mcp/source
+
   Because the stable keys keep evoclj.runtime.system's shapes, the
   host config follows those constructors exactly (see
   evoclj.runtime.system for :store/* and :capability/broker):
@@ -73,8 +91,10 @@
   locations. Tests never go through load-config: they build the config
   map directly with temp paths (dependency injection, Step 4)."
   (:require [clojure.java.io :as io]
+            [evoclj.environment.registry :as env-reg]
             [evoclj.environment.source :as env-src]
             [evoclj.mcp.source :as mcp-source]
+            [evoclj.skill.adapter :as skill-adapter]
             [clojure.string :as str]
             [evoclj.eval.profile :as profile]
             [evoclj.evolution.budget :as budget]
@@ -116,15 +136,19 @@
 (def promotion-system-key :promotion/system)
 (def modelsdev-catalog-key :modelsdev/catalog)
 (def model-registry-key :model/registry)
+(def environment-registry-key :environment/registry)
+(def skill-source-key :skill/source)
 
 (def host-component-keys
   "The normative Integrant-owned host component set (component plus
-  post-v0 extension 1: the models.dev catalog and the model
-  registry). Genome graph nodes are NOT in this set."
+   post-v0 extension 1: the models.dev catalog and the model registry,
+   plus the WO-M5 MCP manager pool and the WO-E6 dynamic environment
+   host: the EnvironmentRegistry component and the SkillSource switch).
+   Genome graph nodes are NOT in this set."
   [store-sqlite-key store-cas-key provider-registry-key
    capability-broker-key runtime-executor-key evolution-system-key
    eval-system-key promotion-system-key modelsdev-catalog-key
-   model-registry-key])
+   model-registry-key environment-registry-key skill-source-key])
 
 ;; --- path resolution ---------------------------------------------------------
 
@@ -726,6 +750,37 @@
   "The registry is a host atom; nothing to close."
   nil)
 
+;; --- WO-E6 injected-registry guard ---------------------------------------------
+
+(defn- ensure-injected-env-registry!
+  "WO-E6 fail-closed guard over an INJECTED :environment/registry component
+   value (the resolved #ig/ref). Returns the validated registry, or nil when
+   the injection is optional and absent.
+
+     - absent and `required?` -> typed :environment/registry-required
+       (:skill/source requires the registry: registration into the dynamic
+       environment host IS the component's purpose);
+     - present but MALFORMED (anything that is not a registry atom built by
+       evoclj.environment.registry/create-registry) -> typed
+       :environment/invalid-registry for BOTH source kinds; a malformed
+       injection must never surface as an untyped ClassCastException from a
+       deep swap!."
+  [component-kw value required?]
+  (cond
+    (nil? value)
+    (when required?
+      (throw (err/error :environment/registry-required
+                        (str component-kw
+                             " requires an injected :environment/registry (#ig/ref :environment/registry) to register its source into")
+                        {:component component-kw})))
+    (not (env-reg/valid-registry? value))
+    (throw (err/error :environment/invalid-registry
+                      (str component-kw
+                           " received a malformed :environment/registry injection — it must be the registry built by evoclj.environment.registry/create-registry")
+                      {:component component-kw
+                       :value-class (some-> value class .getName)}))
+    :else value))
+
 ;; --- :mcp/source (M20) ---------------------------------------------------------
 ;;
 ;; The MCP dynamic-environment source as a real Integrant component, behind a
@@ -755,20 +810,145 @@
    either missing value). This init-key only forwards the config to the
    constructor; it does NOT re-assert those invariants. A missing value
    therefore fails closed with :mcp/config-invalid via make-mcp-source, never
-   via this component."
+   via this component.
+
+   WO-E6 — REGISTRATION into the dynamic environment host: when the config
+   ALSO carries an injected :environment/registry (#ig/ref), the built
+   McpSource is REGISTERED into it via register-source!, which subscribes
+   the source's invalidate callback THROUGH the registry (for an McpSource
+   that callback itself routes through the shared :mcp/manager per M17, so
+   tools-changed propagates: source trigger -> manager publish! -> registry
+   refresh!). The injection is OPTIONAL: absent, the source runs
+   UNREGISTERED and the pre-E6 behavior is preserved bit-for-bit (the M20
+   fallback path). Present but MALFORMED (anything that is not a registry
+   built by evoclj.environment.registry/create-registry) fails closed typed
+   with :environment/invalid-registry. The component VALUE stays the bare
+   McpSource record — the M20 contract is unchanged; teardown of the
+   registry-side subscription belongs to the :environment/registry halt-key!,
+   which runs AFTER this component halts (Integrant halts dependents first)."
   (when (:enabled? config)
-    (mcp-source/make-mcp-source
-     (cond-> {:source/id (:source/id config)
-              :transport-config (:transport-config config)
-              :mcp/server-id (:mcp/server-id config)}
-       (:manager config) (assoc :manager (:manager config))
-       (:connection/id config) (assoc :connection/id (:connection/id config))
-       (:discover-fn config) (assoc :discover-fn (:discover-fn config))))))
+    ;; WO-E6: validate the OPTIONAL registry injection BEFORE building so a
+    ;; malformed value never half-builds a source.
+    (let [env-registry (ensure-injected-env-registry!
+                        :mcp/source (:environment/registry config) false)
+          source (mcp-source/make-mcp-source
+                  (cond-> {:source/id (:source/id config)
+                           :transport-config (:transport-config config)
+                           :mcp/server-id (:mcp/server-id config)}
+                    (:manager config) (assoc :manager (:manager config))
+                    (:connection/id config) (assoc :connection/id (:connection/id config))
+                    (:discover-fn config) (assoc :discover-fn (:discover-fn config))))]
+      ;; Register + subscribe through the dynamic environment host when one
+      ;; was injected (register-source! stores the per-source entry AND the
+      ;; subscription handle in the registry).
+      (when env-registry
+        (env-reg/register-source! env-registry source))
+      source)))
 
 (defmethod ig/halt-key! :mcp/source
   [_ source]
   "Close the McpSource if one was built (it is nil when the switch was off).
    The manager it shares is owned by :mcp/manager and is closed there."
+  (when source
+    (try (env-src/close! source)
+         (catch Throwable _ nil)))
+  nil)
+
+;; --- :environment/registry and :skill/source (WO-E6) ----------------------------
+;;
+;; WO-E6 — the dynamic environment host becomes a real Integrant component.
+;;
+;;   :environment/registry  the EnvironmentRegistry (E1 per-source state, E2
+;;     single-transaction publication, E4 snapshot/pin) built by the ONE
+;;     constructor evoclj.environment.registry/create-registry. Host-created
+;;     sources register INTO it (see :mcp/source above and :skill/source
+;;     below), so their invalidation callbacks subscribe THROUGH it:
+;;       source trigger -> (manager publish! for MCP) -> registry refresh!
+;;     halt-key! tears it down cleanly and idempotently via the registry's
+;;     own shutdown! (closes every held source-subscription handle — which
+;;     for an McpSource unsubscribes its M17 callback from the shared
+;;     manager — drops listeners, resets publication state).
+;;
+;;   :skill/source  an OPTIONAL switch (the M20 pattern: fail-safe shipped
+;;     default). When :enabled? true the host builds a REAL SkillSource via
+;;     its production constructor make-skill-source (:cas REQUIRED there —
+;;     single enforcement point, INV-05) over the host's :store/cas, with
+;;     the host :environment/registry as BOTH the registration target and
+;;     the record's own registry, then registers it. A missing injection
+;;     fails closed typed (:environment/registry-required); a malformed one
+;;     fails closed typed (:environment/invalid-registry). When disabled or
+;;     absent nothing is built and nothing is registered — ad-hoc/static
+;;     Skill construction elsewhere stays untouched as the fallback.
+
+(defmethod ig/init-key :environment/registry
+  [_ _config]
+  "Build the :environment/registry component: a fresh EnvironmentRegistry
+   atom (evoclj.environment.registry/create-registry) — the dynamic
+   environment host every system-created LiveSource registers into. The
+   config subtree carries no options in v0; the component value IS the
+   registry atom consumers already accept (E1 refresh!, E4 pin!,
+   bundle/publish-bundle!, skill catalog readers)."
+  (env-reg/create-registry))
+
+(defmethod ig/halt-key! :environment/registry
+  [_ registry]
+  "Tear the dynamic environment host down CLEANLY (idempotent): close every
+   held source-subscription handle (for a registered McpSource this removes
+   its M17 invalidate callback from the shared manager), drop listeners, and
+   reset the publication state — via evoclj.environment.registry/shutdown!.
+   Runs AFTER the source components halt (Integrant halts dependents first),
+   so no live source calls back into a dead registry. Returns nil."
+  (when registry
+    (env-reg/shutdown! registry))
+  nil)
+
+(defmethod ig/init-key :skill/source
+  [_ config]
+  "Build the :skill/source component: a production SkillSource LiveSource
+   when the switch is enabled. When :enabled? is false (the SHIPPED DEFAULT,
+   fail-safe) the component yields nil, nothing registers, and existing
+   ad-hoc/static skill wiring is completely untouched.
+
+   When enabled:
+     - the injected :environment/registry (#ig/ref) is REQUIRED — a missing
+       value fails closed typed :environment/registry-required, a malformed
+       one :environment/invalid-registry (single guard:
+       ensure-injected-env-registry!). Registration into the dynamic
+       environment host is this component's purpose; a private orphan
+       registry would silently defeat it;
+     - the source is built by the SINGLE production constructor
+       evoclj.skill.adapter/make-skill-source, which owns the :cas REQUIRED
+       check (:skill/invalid-opts — INV-05: no duplicated validation here);
+       the host registry is injected as the record's :registry too, so the
+       registered target and the record's attached registry are ONE atom;
+     - register-source! stores the per-source entry AND subscribes the
+       invalidate callback through the registry: filesystem event ->
+       source trigger -> registry refresh! -> published SurfaceBundles.
+
+   The component VALUE is the bare SkillSource record (the M20 shape
+   convention). Its teardown runs at THIS key's halt (env-src/close!);
+   the registry-side subscription handle is closed by the
+   :environment/registry halt-key!, which Integrant runs afterwards."
+  (when (:enabled? config)
+    (let [env-registry (ensure-injected-env-registry!
+                        :skill/source (:environment/registry config) true)
+          source (skill-adapter/make-skill-source
+                  (cond-> {:source/id (:source/id config)
+                           :cas (:cas config)
+                           ;; ONE registry: the record's attached registry is
+                           ;; the SAME atom the source registers into.
+                           :registry env-registry}
+                    (:roots config) (assoc :roots (:roots config))
+                    (:extra-roots config) (assoc :extra-roots (:extra-roots config))
+                    (contains? config :strict?) (assoc :strict? (:strict? config))))]
+      (env-reg/register-source! env-registry source)
+      source)))
+
+(defmethod ig/halt-key! :skill/source
+  [_ source]
+  "Close the SkillSource if one was built (it is nil when the switch was
+   off). The CAS handle it reads through is owned by :store/cas; the
+   registry-side subscription is closed by :environment/registry's halt."
   (when source
     (try (env-src/close! source)
          (catch Throwable _ nil)))

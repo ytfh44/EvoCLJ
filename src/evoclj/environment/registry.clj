@@ -33,7 +33,15 @@
   rebuild-root-manifest deterministically derives the canonical top-level
   view from that pinned value alone. This namespace exposes aggregate-view
   so BOTH the live swap path and the pinned-snapshot rebuild share ONE
-  aggregation implementation (INV-05)."
+  aggregation implementation (INV-05).
+
+  E6 (dynamic environment host componentization): the registry becomes a
+  real Integrant host component (evoclj.kernel.system
+  :environment/registry). This namespace supplies the two pieces the host
+  lifecycle needs: valid-registry? (fail-closed validation of an INJECTED
+  registry value at component-build time) and shutdown! (clean, idempotent
+  teardown — closes every held source-subscription handle and resets state;
+  called by the host's halt-key!)."
   (:require [evoclj.environment.revision :as rev]
             [evoclj.environment.source :as src]
             [evoclj.environment.bundle :as bundle]
@@ -42,20 +50,64 @@
 
 (declare refresh! refresh-async!)
 
+(defn- initial-state
+  "The fresh registry state shape. ONE implementation (INV-05): both
+   create-registry and shutdown! derive their value from this fn."
+  []
+  {:sources {}
+   :per-source {}
+   :source-subs {}
+   :current nil
+   :last-good nil
+   :seq 0
+   :status :ok
+   :dirty? false
+   :last-refresh-error nil
+   :listeners {}
+   :history []})
+
 (defn create-registry []
   (let [lock (Object.)]
-    (atom {:sources {}
-           :per-source {}
-           :source-subs {}
-           :current nil
-           :last-good nil
-           :seq 0
-           :status :ok
-           :dirty? false
-           :last-refresh-error nil
-           :listeners {}
-           :lock lock
-           :history []})))
+    (atom (assoc (initial-state) :lock lock))))
+
+(defn valid-registry?
+  "True when x is an EnvironmentRegistry atom created by
+   create-registry (an atom whose value carries the registry state
+   shape: :sources, :per-source and the publication :lock). WO-E6: lets
+   host components validate an INJECTED registry value fail-closed at
+   build time instead of crashing with an untyped error deep inside a
+   swap!. evoclj.environment.snapshot performs the equivalent structural
+   gate at pin time; bundle/publish-bundle! checks :lock likewise — same
+   condition, layer-appropriate enforcement points."
+  [x]
+  (and (instance? clojure.lang.Atom x)
+       (map? @x)
+       (contains? @x :sources)
+       (contains? @x :per-source)
+       (some? (:lock @x))))
+
+(defn shutdown!
+  "WO-E6 (host componentization): tear the registry down CLEANLY. In order:
+
+     1. close every held source-subscription handle (:source-subs), so a
+        registered source stops calling back into this registry. For a
+        registered McpSource this ALSO removes its M17 invalidate callback
+        from the shared manager (the handle IS the manager subscription);
+     2. drop every listener (:listeners);
+     3. reset the atom to the fresh initial-state shape (same values as a
+        newly created registry), PRESERVING the lock object identity so any
+        racing access keeps locking correctly instead of NPE-ing.
+
+   Idempotent: a second call closes nothing and resets an already-empty
+   state. Returns nil (the halt-key! contract)."
+  [registry]
+  (when (valid-registry? registry)
+    (doseq [handle (vals (:source-subs @registry))]
+      (try (when-let [close! (:close! handle)] (close!))
+           (catch Throwable _ nil)))
+    (let [lock (:lock @registry)]
+      (reset! registry (assoc (initial-state) :lock lock))))
+  nil)
 
 (defn- registry-lock [registry]
   (:lock @registry))
