@@ -122,6 +122,18 @@
   [stage]
   (ex-info (str "seam:" (name stage)) {:failpoint/seam stage}))
 
+(defn- fresh-cas-with!
+  "Fresh temp CAS containing, for each given string, the artifact whose
+  id equals its text-digest — i.e. exactly the :revision/id that
+  make-skill-bundle derives from that payload. B2 made bundle existence
+  validation fail-closed, so activate!/reload! here verify against a
+  real CAS like production does."
+  [& contents]
+  (let [c (cas/->cas (str (temp-dir! "evoclj-fault-cas-" cas-roots)))]
+    (doseq [s contents]
+      (cas/put-bytes! c (.getBytes ^String s StandardCharsets/UTF_8) {:media-type "text/plain"}))
+    c))
+
 (defn- activated-events
   [db sid event-type]
   (filter #(= event-type (:event/type %)) (event/events-for-session db sid)))
@@ -172,7 +184,9 @@
                     sid (seed-session! db)
                     mounts (atom {})
                     b (make-skill-bundle [:skill "debugging"] "content-A")]
-                (let [res (binding/activate! db sid b (merge {:mount-registry mounts} opts))]
+                (let [res (binding/activate! db sid b (merge {:mount-registry mounts
+                                                              :cas (fresh-cas-with! "content-A")}
+                                                             opts))]
                   {:binding (select-keys res [:logical/id :revision/id :bundle/id :state :binding/type])
                    :events (mapv :event/type (event/events-for-session db sid))
                    :mount-count (count @mounts)})))]
@@ -240,6 +254,7 @@
             caught (atom nil)]
         (try
           (binding/activate! db sid b {:mount-registry mounts
+                                       :cas (fresh-cas-with! "content-A")
                                        :failpoints {stage (fn [] (throw sent))}})
           (catch Throwable t (reset! caught t)))
         (is (identical? sent @caught) "hook exception must propagate unchanged")
@@ -267,12 +282,14 @@
             sid (seed-session! db)
             a (make-skill-bundle [:skill "debugging"] "content-A")
             b (make-skill-bundle [:skill "debugging"] "content-B")
-            _ (binding/activate! db sid a {})
+            cas-handle (fresh-cas-with! "content-A" "content-B")
+            _ (binding/activate! db sid a {:cas cas-handle})
             sent (seam-ex stage)
             caught (atom nil)]
         (try
           (binding/reload! db sid [:skill "debugging"] b
-                           {:failpoints {stage (fn [] (throw sent))}})
+                           {:cas cas-handle
+                            :failpoints {stage (fn [] (throw sent))}})
           (catch Throwable t (reset! caught t)))
         (is (identical? sent @caught) "hook exception must propagate unchanged")
         (let [row (active-row db sid)]
@@ -288,7 +305,8 @@
         sid (seed-session! db)
         mounts (atom {})
         b (make-skill-bundle [:skill "debugging"] "content-A")]
-    (binding/activate! db sid b {:mount-registry mounts})
+    (binding/activate! db sid b {:mount-registry mounts
+                                 :cas (fresh-cas-with! "content-A")})
     (is (seq @mounts))
     (let [sent (seam-ex :after-unpublish)
           caught (atom nil)]
@@ -475,7 +493,8 @@
           boom (AssertionError. "t2-error")]
       (is (thrown-with-msg? AssertionError #"t2-error"
                             (binding/activate! db sid b
-                                               {:failpoints {:after-db-insert (fn [] (throw boom))}})))))
+                                               {:cas (fresh-cas-with! "content-A")
+                                                :failpoints {:after-db-insert (fn [] (throw boom))}})))))
   (testing "skill/adapter path — Error flies through derive-and-publish!"
     (let [{:keys [cas skills-root registry]} (adapter-fixture)
           dir (write-skill-dir! skills-root "debugging" true)
@@ -503,6 +522,7 @@
         sid-b (seed-session! db)
         latch (CountDownLatch. 1)
         log (atom [])
+        cas-handle (fresh-cas-with! "alpha-content" "beta-content")
         hooks (fn [tag]
                 {:failpoints
                  {:after-db-insert (fn []
@@ -515,7 +535,7 @@
         run (fn [sid tag logical payload]
               (future
                 (binding/activate! db sid (make-skill-bundle logical payload)
-                                   (hooks tag))))
+                                   (merge {:cas cas-handle} (hooks tag)))))
         f1 (run sid-a :a [:skill "alpha"] "alpha-content")
         f2 (run sid-b :b [:skill "beta"] "beta-content")]
     (Thread/sleep 200)

@@ -27,8 +27,10 @@
     a binding restores all siblings at the same revision.
 
   Runtime publishing:
-  - activate!/reload! validate the bundle exists (registry or CAS),
-    validate every sibling surface via evoclj.environment.surface,
+  - activate!/reload! validate the bundle exists FAIL-CLOSED (registry
+    hit or CAS artifact required; unverifiable bundles throw typed
+    :store/binding-invalid, INV-02), validate every sibling surface via
+    evoclj.environment.surface,
     insert/update the durable row, publish mount/context state into
     the supplied in-memory registries (if any), and append an event.
   - active-bindings reads only the durable table (CAS fallback, not
@@ -41,9 +43,12 @@
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [clojure.string :as str]
+            [evoclj.context.binding :as context-binding]
+            [evoclj.environment.bundle :as env-bundle]
             [evoclj.environment.surface :as surf]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
+            [evoclj.mount.backend :as mount-backend]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.sqlite :as sqlite]
@@ -219,9 +224,20 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- validate-bundle-exists
-  "Validate bundle exists via registry or CAS. If registry supplied,
-  look up bundle; if cas supplied, verify revision exists in CAS.
-  If neither supplied, just validate structure."
+  "Fail-closed existence check (INV-02): a binding may only be
+  activated/reloaded/restored when its referenced bundle can be shown
+  to exist. Verification sources, either of which confirming passes:
+    - registry (EnvironmentRegistry atom): bundle present under its
+      :bundle/id via evoclj.environment.bundle/get-bundle;
+    - cas (CAS handle/root/path): artifact present for :revision/id.
+  If every supplied source misses — or none is supplied, so existence
+  cannot be established at all — throws typed :store/binding-invalid
+  naming :bundle/id and :revision/id. Structural checks (canonical
+  sha256 revision id, non-empty string bundle id) always run first and
+  throw the same type. A source lookup ERROR counts as a miss, never as
+  proof of existence. The registry reader is referenced statically via
+  a top-level require (B2: resolution proven acyclic) — no runtime
+  symbol lookup."
   [bundle registry cas]
   (let [bid (bundle->bundle-id bundle)
         rev (bundle->revision bundle)]
@@ -229,22 +245,24 @@
       (throw (err/error :store/binding-invalid "revision_id must be sha256:<64 hex>" {:revision/id rev})))
     (when-not (and (string? bid) (seq bid))
       (throw (err/error :store/binding-invalid "bundle_id must be non-empty string" {:bundle/id bid})))
-    (when registry
-      (let [found (try
-                    (let [f (requiring-resolve 'evoclj.environment.bundle/get-bundle)]
-                      (when f (f registry bid)))
-                    (catch Exception _ nil))]
-        (when (and (not found) (nil? cas))
-          (let [has? (try
-                       (contains? (or (:bundles @registry) {}) bid)
-                       (catch Exception _ false))]
-            (when-not has?
-              nil)))))
-    (when cas
-      (try
-        (let [exists? (try (cas/exists? cas rev) (catch Exception _ false))]
-          (when-not exists? nil))
-        (catch Exception _ nil)))
+    (let [in-registry? (when registry
+                         ;; a lookup error is not evidence of existence:
+                         ;; treat it as a miss and let the verdict decide
+                         (try
+                           (some? (env-bundle/get-bundle registry bid))
+                           (catch Exception _ false)))
+          in-cas? (when cas
+                    (try
+                      (cas/exists? cas rev)
+                      (catch Exception _ false)))]
+      ;; INV-02 fail-closed verdict: existence must be positively
+      ;; confirmed by at least one supplied source; a miss or a source
+      ;; error under every supplied source — or no source at all —
+      ;; refuses activation/reload/restore.
+      (when-not (or in-registry? in-cas?)
+        (throw (err/error :store/binding-invalid
+                          "bundle cannot be verified to exist (absent from registry and CAS)"
+                          {:bundle/id bid :revision/id rev}))))
     bundle))
 
 (defn- validate-sibling-surfaces
@@ -273,7 +291,14 @@
 
 (defn- publish-runtime!
   "Publish bundle's surfaces into mount-registry and context-store.
-  Both are optional atoms. No-op if nil."
+  Both are optional atoms. No-op if nil.
+
+  Collaborators (evoclj.context.binding, evoclj.mount.backend) are
+  referenced statically via top-level requires (B2: resolution proven
+  acyclic) — no runtime symbol lookup. The per-surface try/catch
+  isolation is pre-existing behavior and is deliberately preserved
+  here; converting these swallows into typed propagation belongs to
+  WO-B1."
   [bundle {:keys [mount-registry context-store cas] :as opts}]
   (let [surfaces (bundle->surfaces bundle)
         logical-id (bundle->logical bundle)
@@ -289,47 +314,38 @@
                        :offer/bundle-id bid
                        :offer/name (str logical-id)
                        :offer/description (str "binding " logical-id)}]
-            (let [f (requiring-resolve 'evoclj.context.binding/activate!)]
-              (when f (f context-store offer))))
+            (context-binding/activate! context-store offer))
           (catch Exception _ nil))))
     (when mount-registry
       (doseq [s surfaces
               :when (= :directory (:surface/type s))]
         (try
           (let [mount-id (or (:surface/id s) logical-id)]
-            (let [existing (try (let [f (requiring-resolve 'evoclj.mount.backend/get-mount)]
-                                  (when f (f mount-registry mount-id)))
+            (let [existing (try (mount-backend/get-mount mount-registry mount-id)
                                 (catch Exception _ nil))]
               (when-not existing
                 (let [raw (:backend s)
                       backend (cond
                                 (and raw
                                      (try
-                                       (let [proto @(requiring-resolve 'evoclj.mount.backend/Backend)]
-                                         (satisfies? proto raw))
+                                       (satisfies? mount-backend/Backend raw)
                                        (catch Exception _ false))) raw
                                 (and raw (map? raw) (:tree/id raw) cas-handle)
                                 (try
-                                  (let [f (requiring-resolve 'evoclj.mount.backend/cas-tree-backend)]
-                                    (when f (f cas-handle (:tree/id raw))))
+                                  (mount-backend/cas-tree-backend cas-handle (:tree/id raw))
                                   (catch Exception _ raw))
                                 (and raw (map? raw) (:tree-id raw) cas-handle)
                                 (try
-                                  (let [f (requiring-resolve 'evoclj.mount.backend/cas-tree-backend)]
-                                    (when f (f cas-handle (:tree-id raw))))
+                                  (mount-backend/cas-tree-backend cas-handle (:tree-id raw))
                                   (catch Exception _ raw))
                                 cas-handle
                                 (try
-                                  (let [f (requiring-resolve 'evoclj.mount.backend/cas-tree-backend)]
-                                    (when f (f cas-handle rev)))
+                                  (mount-backend/cas-tree-backend cas-handle rev)
                                   (catch Exception _ nil))
                                 :else raw)
                       backend (or backend {:type :cas-tree :tree/id rev :bundle/id bid})
                       mount (try
-                              (let [mk (requiring-resolve 'evoclj.mount.backend/make-mount)]
-                                (if mk
-                                  (mk {:mount-id mount-id :backend backend :access-max (:access/max s)})
-                                  {:mount/id mount-id :backend backend :access/max (:access/max s)}))
+                              (mount-backend/make-mount {:mount-id mount-id :backend backend :access-max (:access/max s)})
                               (catch Exception _ {:mount/id mount-id :backend backend :access/max (:access/max s)}))]
                   (swap! mount-registry assoc mount-id mount)))))
           (catch Exception _ nil))))
@@ -343,8 +359,7 @@
   ([logical-id {:keys [mount-registry context-store]} surfaces-or-ids]
    (when context-store
      (try
-       (let [f (requiring-resolve 'evoclj.context.binding/deactivate!)]
-         (when f (f context-store logical-id)))
+       (context-binding/deactivate! context-store logical-id)
        (catch Exception _ nil)))
    (when mount-registry
      (try
@@ -407,9 +422,12 @@
 (defn activate!
   "Activate a bundle for session-id.
 
-  Validates bundle existence (registry or CAS) and that all sibling
-  surfaces are bindable, creates a durable row in session_bindings,
-  publishes runtime mount/context state, and appends an auditable event.
+  Validates bundle existence fail-closed (INV-02: a registry hit or a
+  CAS artifact for the revision must confirm the bundle exists; an
+  unverifiable bundle throws instead of passing through) and that all
+  sibling surfaces are bindable, creates a durable row in
+  session_bindings, publishes runtime mount/context state, and appends
+  an auditable event.
 
   Signatures:
     (activate! db session-id bundle)
@@ -499,7 +517,9 @@
   new revision, and opts supports :registry :cas :mount-registry :context-store.
 
   Returns the updated binding map.
-  Throws :store/binding-not-found if no active binding for logical-id."
+  Throws :store/binding-invalid if the new bundle cannot be verified to
+  exist (fail-closed, INV-02 — the durable row is left untouched), and
+  :store/binding-not-found if no active binding for logical-id."
   ([db session-id logical-id new-bundle]
    (reload! db session-id logical-id new-bundle {}))
   ([db session-id logical-id new-bundle opts]
@@ -600,6 +620,13 @@
     session-id  — UUID
     opts map    — {:cas :mount-registry :context-store :registry}
 
+  Fail-closed (INV-02): every durable binding is re-verified via
+  validate-bundle-exists against the supplied sources before its
+  runtime state is republished; a binding whose revision no longer
+  resolves (e.g. garbage-collected CAS artifact) aborts the whole
+  restore with typed :store/binding-invalid instead of republishing
+  content that cannot exist.
+
   Returns the restored bindings (vector)."
   [db session-id opts]
   (let [bindings (active-bindings db session-id)]
@@ -609,6 +636,9 @@
                                        :revision/id (:revision/id b)
                                        :logical/id (:logical/id b)
                                        :surfaces (:surfaces meta [])})]
+        ;; B2 / INV-02: refuse to republish a binding whose bundle no
+        ;; longer exists in registry/CAS — no partial runtime state.
+        (validate-bundle-exists bundle (:registry opts) (:cas opts))
         (publish-runtime! bundle opts)))
     bindings))
 
