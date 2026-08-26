@@ -246,10 +246,14 @@
               _ (Files/createDirectories orphan (make-array FileAttribute 0))
               _ (write-text! orphan "SKILL.md" "partial")
               body "x\n"
-              {:keys [artifact/id]} (cas/put-bytes! cas (.getBytes body StandardCharsets/UTF_8)
-                                                    {:media-type "application/octet-stream"})
+              skill-md (str "---\nname: my-skill\ndescription: test skill\n---\n" body)
+              md-id (:artifact/id (cas/put-bytes! cas (.getBytes skill-md StandardCharsets/UTF_8)
+                                                   {:media-type "application/octet-stream"}))
+              body-id (:artifact/id (cas/put-bytes! cas (.getBytes body StandardCharsets/UTF_8)
+                                                   {:media-type "application/octet-stream"}))
               manifest {:tree/version 1
-                        :entries {"a.md" {:artifact/id id :size (count body)}
+                        :entries {"SKILL.md" {:artifact/id md-id :size (count skill-md)}
+                                  "a.md" {:artifact/id body-id :size (count body)}
                                   "missing.md" {:artifact/id (str "sha256:" (apply str (repeat 64 "b")))
                                                 :size 1}}}
               tree-id (put-tree! cas manifest)
@@ -275,10 +279,14 @@
         (write-minimal-genome! genome-dir)
         (let [cas (cas/->cas (str cas-dir))
               body "x\n"
-              {:keys [artifact/id]} (cas/put-bytes! cas (.getBytes body StandardCharsets/UTF_8)
-                                                    {:media-type "application/octet-stream"})
+              skill-md (str "---\nname: my-skill\ndescription: test skill\n---\n" body)
+              md-id (:artifact/id (cas/put-bytes! cas (.getBytes skill-md StandardCharsets/UTF_8)
+                                                   {:media-type "application/octet-stream"}))
+              body-id (:artifact/id (cas/put-bytes! cas (.getBytes body StandardCharsets/UTF_8)
+                                                   {:media-type "application/octet-stream"}))
               manifest {:tree/version 1
-                        :entries {"sub/dir/a.md" {:artifact/id id :size (count body)}
+                        :entries {"SKILL.md" {:artifact/id md-id :size (count skill-md)}
+                                  "sub/dir/a.md" {:artifact/id body-id :size (count body)}
                                   "missing.md" {:artifact/id (str "sha256:" (apply str (repeat 64 "e")))
                                                 :size 1}}}
               tree-id (put-tree! cas manifest)
@@ -314,10 +322,14 @@
               dest (.resolve (.resolve genome-dir "skills") "my-skill")
               prior-content (String. (Files/readAllBytes (.resolve dest "SKILL.md")) StandardCharsets/UTF_8)
               body "x\n"
-              {:keys [artifact/id]} (cas/put-bytes! cas (.getBytes body StandardCharsets/UTF_8)
-                                                    {:media-type "application/octet-stream"})
+              skill-md (str "---\nname: my-skill\ndescription: test skill\n---\n" body)
+              md-id (:artifact/id (cas/put-bytes! cas (.getBytes skill-md StandardCharsets/UTF_8)
+                                                   {:media-type "application/octet-stream"}))
+              body-id (:artifact/id (cas/put-bytes! cas (.getBytes body StandardCharsets/UTF_8)
+                                                   {:media-type "application/octet-stream"}))
               manifest {:tree/version 1
-                        :entries {"a.md" {:artifact/id id :size (count body)}
+                        :entries {"SKILL.md" {:artifact/id md-id :size (count skill-md)}
+                                  "a.md" {:artifact/id body-id :size (count body)}
                                   "missing.md" {:artifact/id (str "sha256:" (apply str (repeat 64 "d")))
                                                 :size 1}}}
               bad-tree (put-tree! cas manifest)
@@ -347,7 +359,11 @@
         (write-minimal-genome! genome-dir)
         (let [cas (cas/->cas (str cas-dir))
               fake-id (str "sha256:" (apply str (repeat 64 "c")))
-              body "CORRUPT-BODY"
+              ;; Content is a VALID skill (so the WO-S7 strict gate passes and
+              ;; the failure is attributable to copy-integrity, not formatting).
+              ;; Its digest still != fake-id, so verify-staged (WO-S6) must
+              ;; reject the id mismatch before the rename.
+              body "---\nname: my-skill\ndescription: test skill\n---\nCORRUPT-BODY\n"
               ;; Fabricate a mismatched CAS body: stash bytes whose digest
               ;; != fake-id under fake-id's body path, so get-bytes (verify
               ;; off) returns bytes that do NOT match their claimed id.

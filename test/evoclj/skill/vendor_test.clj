@@ -249,12 +249,19 @@
       (try
         (write-minimal-genome! genome-dir)
         (let [cas (cas/->cas (str cas-dir))
-              body "hello nested\n"
-              {:keys [artifact/id]} (cas/put-bytes! cas (.getBytes body StandardCharsets/UTF_8)
-                                                    {:media-type "application/octet-stream"})
+              nested-body "hello nested\n"
+              ;; The strict gate (WO-S7) requires a resolvable top-level SKILL.md
+              ;; whose declared name matches the target dir, so the fixture must
+              ;; be a valid skill package; the nested files still vendor below.
+              skill-md (str "---\nname: my-skill\ndescription: test skill\n---\n" nested-body)
+              md-id (:artifact/id (cas/put-bytes! cas (.getBytes skill-md StandardCharsets/UTF_8)
+                                                    {:media-type "application/octet-stream"}))
+              nested-id (:artifact/id (cas/put-bytes! cas (.getBytes nested-body StandardCharsets/UTF_8)
+                                                        {:media-type "application/octet-stream"}))
               manifest {:tree/version 1
-                        :entries {"sub/dir/SKILL.md" {:artifact/id id :size (count body)}
-                                  "sub/top.md"         {:artifact/id id :size (count body)}}}
+                        :entries {"SKILL.md"         {:artifact/id md-id :size (count skill-md)}
+                                  "sub/dir/SKILL.md" {:artifact/id nested-id :size (count nested-body)}
+                                  "sub/top.md"       {:artifact/id nested-id :size (count nested-body)}}}
               tree-id (put-tree! cas manifest)
               vres (vendor/vendor-skill! {:genome/root genome-dir :cas cas :skill/name "my-skill" :tree/id tree-id})]
           (is (= "my-skill" (:skill/name vres)))
@@ -262,8 +269,9 @@
           (let [reloaded (load/load-genome genome-dir)]
             (is (contains? (:files reloaded) "skills/my-skill/sub/dir/SKILL.md"))
             (is (contains? (:files reloaded) "skills/my-skill/sub/top.md"))
-            (is (= body (String. (byte-array (get-in reloaded [:files "skills/my-skill/sub/dir/SKILL.md" :bytes]))
-                                 StandardCharsets/UTF_8)))))
+            (is (contains? (:files reloaded) "skills/my-skill/SKILL.md"))
+            (is (= nested-body (String. (byte-array (get-in reloaded [:files "skills/my-skill/sub/dir/SKILL.md" :bytes]))
+                                        StandardCharsets/UTF_8)))))
         (finally
           (delete-recursively! genome-dir)
           (delete-recursively! cas-dir))))))
