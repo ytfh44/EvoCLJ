@@ -7,11 +7,19 @@
   version in the `meta` table. Applying again is a no-op that verifies
   the recorded version and applied set against the classpath.
 
+  The classpath migration chain itself is validated on every call
+  (see validate-migration-chain!): its version numbers must run 1..N
+  contiguously and end exactly at latest-version, so the constant can
+  never silently drift from the file set that defines the real schema.
+
   The runner NEVER guesses at an untrustworthy database. A database
   whose tables exist without a version record, whose version differs
   from the code's expectation, or whose applied-migration record is
   missing an on-classpath migration fails cleanly with a typed
-  :store/schema-mismatch error, leaving the database untouched."
+  :store/schema-mismatch error, leaving the database untouched. A SQL
+  failure inside an upgrade surfaces as a typed :store/migration-error
+  naming the file; the transaction rolls back and the database keeps
+  its prior version."
   (:require [clojure.java.io :as io]
             [clojure.java.jdbc :as jdbc]
             [clojure.string :as str]
@@ -19,7 +27,10 @@
             [evoclj.store.sqlite :as sqlite]))
 
 (def latest-version
-  "The schema version this codebase knows how to migrate to."
+  "The schema version this codebase knows how to migrate to. Must equal
+  the highest migration file number on the classpath; the equality is
+  enforced fail-closed by validate-migration-chain! on every
+  migration-files/migrate! call."
   6)
 
 (def ^:private version-key "schema_version")
@@ -27,8 +38,44 @@
 (def ^:private migrations-dir "migrations")
 (def ^:private migration-pattern #"^\d+.*\.sql$")
 
+(defn- parse-version
+  "The leading integer of a migration file name. migration-pattern
+  guarantees a digit prefix, so this parses for anything that got past
+  the filename filter."
+  [file-name]
+  (Integer/parseInt (re-find #"^\d+" file-name)))
+
+(defn validate-migration-chain!
+  "Verify that a sorted list of migration file names forms the chain
+  this codebase expects BEFORE any database work: version numbers start
+  at 1 and increase strictly by one (no gaps, no duplicate numbers),
+  and the top of the chain equals `latest-version` — the constant must
+  never drift from the file set that defines the real schema. Returns
+  `files` unchanged when the chain is sound; throws typed
+  :store/migration-chain-invalid otherwise."
+  [files]
+  (let [versions (mapv parse-version files)
+        canonical (vec (range 1 (inc (count versions))))
+        broken? (or (not= versions canonical)
+                    (not= (peek versions) latest-version))
+        reason (cond
+                 (not= versions (distinct versions)) :chain-duplicate
+                 (and (seq versions) (not= 1 (first versions))) :chain-start
+                 (some #(not= 1 %) (map - (rest versions) versions)) :chain-gap
+                 :else :latest-version-drift)]
+    (when broken?
+      (throw (err/error :store/migration-chain-invalid
+                        "migration file chain does not match latest-version"
+                        {:reason reason
+                         :expected {:versions canonical :top latest-version}
+                         :actual {:files files :top (peek versions)}})))
+    files))
+
 (defn migration-files
-  "Return the sorted file names of SQL migrations on the classpath."
+  "Return the sorted file names of SQL migrations on the classpath,
+  after validating the chain they form (see validate-migration-chain!):
+  every consumer of this function fails closed on a broken or drifted
+  classpath before touching any database."
   []
   (let [dir (or (io/resource migrations-dir)
                 (throw (err/error :store/migration-error
@@ -40,7 +87,8 @@
          (filter #(.isFile ^java.io.File %))
          (map #(.getName ^java.io.File %))
          (filter #(re-matches migration-pattern %))
-         (sort))))
+         sort
+         validate-migration-chain!)))
 
 (defn- mismatch!
   "Throw a typed :store/schema-mismatch error describing why the
@@ -165,19 +213,29 @@
   "Execute a migration file's statements on the open connection and
   ACCUMULATE its file name into the meta table's applied-migrations set
   (the set is stored space-joined in one meta row, so each migration
-  appends its name instead of overwriting the record of earlier ones)."
+  appends its name instead of overwriting the record of earlier ones).
+  A driver-level failure is rethrown as a typed :store/migration-error
+  naming the file; the surrounding transaction rolls back, so a failed
+  upgrade leaves the prior schema version and data intact."
   [conn file-name sql]
-  (doseq [stmt (split-statements sql)]
-    (jdbc/execute! conn [stmt]))
-  (let [applied (-> (jdbc/query conn ["SELECT value FROM meta WHERE key = ?" applied-key])
-                    first
-                    :value)
-        updated (if (seq applied)
-                  (str/join " " (distinct (conj (str/split applied #"\s+") file-name)))
-                  file-name)]
-    (jdbc/execute! conn
-                   ["INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)"
-                    applied-key updated])))
+  (try
+    (doseq [stmt (split-statements sql)]
+      (jdbc/execute! conn [stmt]))
+    (let [applied (-> (jdbc/query conn ["SELECT value FROM meta WHERE key = ?" applied-key])
+                      first
+                      :value)
+          updated (if (seq applied)
+                    (str/join " " (distinct (conj (str/split applied #"\s+") file-name)))
+                    file-name)]
+      (jdbc/execute! conn
+                     ["INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)"
+                      applied-key updated]))
+    (catch Exception e
+      (throw (err/error :store/migration-error
+                        (str "migration failed: " file-name)
+                        {:migration/file file-name
+                         :cause/class (.getName (.getClass e))
+                         :cause/message (.getMessage e)})))))
 
 (defn- apply-files!
   "Execute `files` (migration file names) inside one transaction and
@@ -197,10 +255,15 @@
 
   Returns {:status :applied :version n} when migrations ran, or
   {:status :noop :version n} when the database was already current.
-  Throws :store/schema-mismatch when the database cannot be trusted:
+  The classpath migration chain is validated before any database work;
+  a gap, duplicate, wrong start, or drift from latest-version throws
+  typed :store/migration-chain-invalid. Throws
+  :store/schema-mismatch when the database cannot be trusted:
   tables present without a version record, a version ahead of or
   unknown to this codebase, or a migration file on the classpath that
-  the database does not record as applied. A failed migrate! changes
+  the database does not record as applied. A SQL failure inside an
+  upgrade rolls the transaction back and rethrows as typed
+  :store/migration-error naming the file. A failed migrate! changes
   nothing."
   [db]
   (let [files (migration-files)

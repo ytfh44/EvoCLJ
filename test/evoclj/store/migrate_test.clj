@@ -2,7 +2,7 @@
   "component tests for the SQLite schema and migration runner.
 
   Step 1: a fresh temporary database applies all migrations once and
-  ends with all 15 normative tables plus a recorded schema version.
+  ends with all 16 normative tables plus a recorded schema version.
   Step 2: a second apply is a safe no-op that verifies the version and
   leaves the schema undamaged. Step 3: the required unique constraints
   hold — generation id, per-session event sequence, the single CURRENT
@@ -13,12 +13,20 @@
   :store/schema-mismatch error and changes nothing. Step 6: the B0
   version-reconciliation matrix — databases stamped by the previous
   build (5) with and without the 006 record, a version-3 upgrade, and
-  a database stamped ahead of the code.
+  a database stamped ahead of the code. Step 7: the classpath
+  migration chain itself fails closed — validate-migration-chain!
+  rejects gaps, a wrong starting number, duplicate numbers, or drift
+  from latest-version BEFORE any database work, and every migrate!
+  path validates the chain first. Step 8: the per-step incremental
+  matrix — for every N→N+1 in the chain, a shaped version-N fixture
+  upgrades through the real runner with that file's own schema
+  invariants verified, zero data loss, and an idempotent re-run.
 
   Temp databases live in the system temp directory (created via
   java.nio.file.Files/createTempFile) and are deleted after each test;
   every connection is closed by java.jdbc before cleanup runs."
   (:require [clojure.java.jdbc :as jdbc]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite]))
@@ -464,6 +472,243 @@
     (testing "the failed attempt changed nothing"
       (is (= "7" (meta-value db "schema_version"))))))
 
+(deftest mid-chain-failure-leaves-prior-version-intact
+  ;; Fault path: a pending migration's SQL fails mid-chain (here 006's
+  ;; CREATE TABLE collides with a same-named object left on disk). The
+  ;; whole upgrade transaction must roll back — version stamp, applied
+  ;; record, and pre-existing data keep their prior values — and the
+  ;; failure surfaces as a typed :store/migration-error naming the file
+  ;; that failed, not a raw driver exception.
+  (let [db (fresh-db)]
+    (insert-generation! db g1 {})
+    (sqlite/exec! db ["DROP TABLE session_bindings"])
+    (sqlite/exec! db ["CREATE TABLE session_bindings (bogus TEXT)"])
+    (set-meta! db "applied_migrations"
+               "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql")
+    (set-meta! db "schema_version" "5")
+    (let [e (migrate-error db)]
+      (is (some? e) "migrate! must throw when a pending migration fails")
+      (is (= :store/migration-error (:error/type (ex-data e))))
+      (is (= "006-session-bindings.sql" (:migration/file (ex-data e))))
+      (testing "the failed attempt changed nothing"
+        (is (= "5" (meta-value db "schema_version")))
+        (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql"
+               (meta-value db "applied_migrations")))
+        (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"]))))
+        (testing "the sabotaged object was not consumed by a partial apply"
+          (is (= #{"bogus"}
+                 (set (map :name (sqlite/query db
+                                               ["PRAGMA table_info(session_bindings)"]))))))
+        (testing "the database still upgrades once the obstruction is cleared"
+          (sqlite/exec! db ["DROP TABLE session_bindings"])
+          (is (= {:status :applied :version 6} (migrate/migrate! db)))
+          (is (contains? (table-names db) "session_bindings"))
+          (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))))))
+
+;; ============================================================================
+;; Step 7 — fail-closed migration chain integrity (B0)
+;;
+;; latest-version is a human-maintained constant while the migration file
+;; set is ground truth; B0 happened precisely because nothing forced them
+;; to agree. validate-migration-chain! enforces that agreement BEFORE any
+;; database work: versions run 1..N contiguously (no gaps, no duplicate
+;; numbers, correct start) and end exactly at latest-version. The real
+;; classpath is validated inside migration-files, so every migrate! path
+;; inherits the check.
+;; ============================================================================
+
+(def ^:private full-chain
+  ["001-init.sql" "002-memory.sql" "003-routing.sql"
+   "004-enrichment.sql" "005-deploy.sql" "006-session-bindings.sql"])
+
+(deftest latest-version-matches-the-migration-file-set
+  ;; The three-way reconciliation pin: constant == file set == recorded
+  ;; applied set (the applied-record string is pinned exactly by the
+  ;; fresh-install test above).
+  (is (= full-chain (vec (migrate/migration-files))))
+  (is (= (count full-chain) migrate/latest-version))
+  (is (= full-chain
+         (migrate/validate-migration-chain! (migrate/migration-files)))
+      "the real classpath chain validates cleanly"))
+
+(deftest broken-migration-chains-fail-closed
+  (let [chain-error
+        (fn [files]
+          (try (migrate/validate-migration-chain! files)
+               nil
+               (catch clojure.lang.ExceptionInfo e e)))]
+    (testing "a gap in the middle of the chain"
+      (let [e (chain-error ["001-init.sql" "002-memory.sql" "004-enrichment.sql"])]
+        (is (some? e))
+        (is (= :store/migration-chain-invalid (:error/type (ex-data e))))
+        (is (= :chain-gap (:reason (ex-data e))))))
+    (testing "a chain that does not start at 1"
+      (let [e (chain-error ["003-routing.sql" "004-enrichment.sql"])]
+        (is (= :store/migration-chain-invalid (:error/type (ex-data e))))
+        (is (= :chain-start (:reason (ex-data e))))))
+    (testing "duplicate version numbers"
+      (let [e (chain-error ["001-init.sql" "001-duplicate.sql" "002-memory.sql"])]
+        (is (= :store/migration-chain-invalid (:error/type (ex-data e))))
+        (is (= :chain-duplicate (:reason (ex-data e))))))
+    (testing "a chain whose top disagrees with latest-version"
+      (let [e-short (chain-error (butlast full-chain))     ; tops out at 5
+            e-long (chain-error (conj full-chain "007-beyond.sql"))] ; tops at 7
+        (is (= :store/migration-chain-invalid (:error/type (ex-data e-short))))
+        (is (= :latest-version-drift (:reason (ex-data e-short))))
+        (is (= :latest-version-drift (:reason (ex-data e-long))))))
+    (testing "an empty chain cannot silently satisfy a non-empty constant"
+      (let [e (chain-error [])]
+        (is (= :latest-version-drift (:reason (ex-data e))))))))
+
+;; ============================================================================
+;; Step 8 — per-step incremental migration matrix (B0)
+;;
+;; For every N→N+1 in the chain: a fixture shaped like version N (real
+;; schema effects of later migrations rewound, meta records rewound)
+;; upgrades through the real runner; the file that owns step N+1 gets its
+;; OWN schema invariants verified post-upgrade, pre-existing rows survive,
+;; and a re-run is an idempotent noop.
+;; ============================================================================
+
+(defn- rewind-to-version!
+  "Shape a fully-migrated database into a version-N one: drop the
+  schema effects of every migration AFTER N, then rewind both meta
+  records to N. What remains is exactly what migrations 1..N produced."
+  [db n]
+  (when (< n 2) (sqlite/exec! db ["DROP TABLE episodic_memory"]))
+  (when (< n 3)
+    (sqlite/exec! db ["DROP INDEX sessions_routing_idx"])
+    (sqlite/exec! db ["ALTER TABLE sessions DROP COLUMN routing_deployment_version"])
+    (sqlite/exec! db ["ALTER TABLE sessions DROP COLUMN routing_bucket"]))
+  (when (< n 4) (sqlite/exec! db ["DROP TABLE enrichments"]))
+  (when (< n 5) (sqlite/exec! db ["DROP TABLE IF EXISTS deployment_decisions"]))
+  (when (< n 6) (sqlite/exec! db ["DROP TABLE IF EXISTS session_bindings"]))
+  (set-meta! db "applied_migrations" (str/join " " (take n full-chain)))
+  (set-meta! db "schema_version" (str n)))
+
+(deftest incremental-step-1-to-2-adds-session-scoped-memory
+  (let [db (fresh-db)]
+    (insert-generation! db g1 {})
+    (rewind-to-version! db 1)
+    (is (= {:status :applied :version 6} (migrate/migrate! db)))
+    (testing "002-memory.sql invariants hold after the incremental apply"
+      (insert! db :episodic_memory
+               {:session_id "s1" :memory_key "k" :content "{:v 1}" :created_at now})
+      (is (thrown-with-msg? java.sql.SQLException #"UNIQUE constraint failed"
+                            (insert! db :episodic_memory
+                                     {:session_id "s1" :memory_key "k"
+                                      :content "{:v 2}" :created_at now})))
+      (is (= "{:v 1}" (:content (first (sqlite/query db
+                                                     ["SELECT content FROM episodic_memory WHERE session_id = 's1'"]))))))
+    (testing "no data loss"
+      (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
+    (testing "re-running is a verified noop"
+      (is (= {:status :noop :version 6} (migrate/migrate! db))))))
+
+(deftest incremental-step-2-to-3-adds-session-routing-audit
+  (let [db (fresh-db)]
+    (insert-generation! db g1 {})
+    (insert-session! db "old-s" g1)
+    (rewind-to-version! db 2)
+    (is (= {:status :applied :version 6} (migrate/migrate! db)))
+    (testing "003-routing.sql invariants: additive audit columns, index present"
+      (let [row (first (sqlite/query db
+                                     ["SELECT routing_deployment_version, routing_bucket
+                                       FROM sessions WHERE id = 'old-s'"]))]
+        (is (nil? (:routing_deployment_version row)) "pre-routing rows stay NULL")
+        (is (nil? (:routing_bucket row))))
+      (sqlite/exec! db
+                    ["INSERT INTO sessions (id, generation_id, genome_id, resolution_id,
+                                            phenotype_id, state, created_at,
+                                            routing_deployment_version, routing_bucket)
+                      VALUES ('new-s', ?, ?, ?, ?, 'created', ?, 'v9', 42)"
+                     g1 hash1 "resolution-1" "phenotype-1" now])
+      (let [row (first (sqlite/query db
+                                     ["SELECT routing_deployment_version, routing_bucket
+                                       FROM sessions WHERE id = 'new-s'"]))]
+        (is (= "v9" (:routing_deployment_version row)))
+        (is (= 42 (:routing_bucket row))))
+      (is (seq (sqlite/query db
+                             ["SELECT name FROM sqlite_master
+                               WHERE type = 'index' AND name = 'sessions_routing_idx'"]))))
+    (testing "no data loss"
+      (is (= 2 (count (sqlite/query db ["SELECT id FROM sessions"])))))
+    (testing "re-running is a verified noop"
+      (is (= {:status :noop :version 6} (migrate/migrate! db))))))
+
+(deftest incremental-step-3-to-4-adds-append-only-enrichments
+  (let [db (fresh-db)]
+    (insert-generation! db g1 {})
+    (rewind-to-version! db 3)
+    (is (= {:status :applied :version 6} (migrate/migrate! db)))
+    (testing "004-enrichment.sql invariants: append-only discipline survives the upgrade"
+      (insert! db :enrichments
+               {:id "enr-1" :entity_kind ":genome" :entity_id "e1"
+                :kind ":case/weight" :version 1 :payload_ref hash1 :created_at now})
+      (is (thrown-with-msg? java.sql.SQLException #"append-only"
+                            (sqlite/exec! db
+                                          ["UPDATE enrichments SET version = 2 WHERE id = 'enr-1'"])))
+      (is (thrown-with-msg? java.sql.SQLException #"append-only"
+                            (sqlite/exec! db ["DELETE FROM enrichments"])))
+      (is (thrown-with-msg? java.sql.SQLException #"UNIQUE constraint failed"
+                            (insert! db :enrichments
+                                     {:id "enr-2" :entity_kind ":genome" :entity_id "e1"
+                                      :kind ":case/weight" :version 1
+                                      :payload_ref hash1 :created_at now}))))
+    (testing "no data loss"
+      (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
+    (testing "re-running is a verified noop"
+      (is (= {:status :noop :version 6} (migrate/migrate! db))))))
+
+(deftest incremental-step-4-to-5-adds-deployment-decision-log
+  (let [db (fresh-db)]
+    (insert-generation! db g1 {})
+    (rewind-to-version! db 4)
+    (is (= {:status :applied :version 6} (migrate/migrate! db)))
+    (testing "005-deploy.sql invariants: constrained decision vocabulary"
+      (insert! db :deployment_decisions
+               {:id "d1" :generation_id g1 :decision "deployed"
+                :reason "canary-pass" :created_at now})
+      (is (thrown-with-msg? java.sql.SQLException #"CHECK constraint failed"
+                            (insert! db :deployment_decisions
+                                     {:id "d2" :generation_id g1 :decision "bogus"
+                                      :created_at now})))
+      (is (= 1 (count (sqlite/query db ["SELECT id FROM deployment_decisions"])))))
+    (testing "no data loss"
+      (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
+    (testing "re-running is a verified noop"
+      (is (= {:status :noop :version 6} (migrate/migrate! db))))))
+
+(deftest incremental-step-5-to-6-adds-durable-session-bindings
+  (let [db (fresh-db)]
+    (insert-generation! db g1 {})
+    (insert-session! db "bound-s" g1)
+    (rewind-to-version! db 5)
+    (is (= {:status :applied :version 6} (migrate/migrate! db)))
+    (testing "006-session-bindings.sql invariants after the incremental apply"
+      (let [binding {:id "b1" :session_id "bound-s" :binding_type "skill"
+                     :logical_id "[:skill \"debugging\"]" :revision_id hash1
+                     :bundle_id "bundle-a" :state "active" :activated_at now}]
+        (insert! db :session_bindings binding)
+        (testing "at most one ACTIVE binding per (session, logical id)"
+          (is (thrown-with-msg? java.sql.SQLException #"UNIQUE constraint failed"
+                                (insert! db :session_bindings
+                                         (assoc binding :id "b2" :bundle_id "bundle-b")))))
+        (testing "an inactive sibling of the same logical id is fine"
+          (insert! db :session_bindings
+                   (assoc binding :id "b3" :state "inactive" :deactivated_at now))
+          (is (= 2 (count (sqlite/query db ["SELECT id FROM session_bindings"])))))
+        (testing "bindings still reference real sessions"
+          (is (thrown-with-msg? java.sql.SQLException #"FOREIGN KEY"
+                                (insert! db :session_bindings
+                                         (assoc binding :id "b4"
+                                                :session_id "no-such-session")))))))
+    (testing "no data loss"
+      (is (= 1 (count (sqlite/query db ["SELECT id FROM sessions"]))))
+      (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
+    (testing "re-running is a verified noop"
+      (is (= {:status :noop :version 6} (migrate/migrate! db))))))
+
 ;; ============================================================================
 ;; component — an existing version-1 database upgrades additively
 ;; ============================================================================
@@ -471,8 +716,9 @@
 (deftest version-1-database-upgrades-additively
   ;; Simulate a pre-Task-9.3 database: migrate a fresh db, then rewind
   ;; the 003-routing.sql effects (index + columns) and the meta records
-  ;; back to version 1. The runner must then apply ONLY the pending
-  ;; migration and bring the version forward to 2.
+  ;; back to version 1. The runner must then apply every pending
+  ;; migration and bring the version forward to the true latest (6,
+  ;; the top of the six-file classpath chain).
   (let [db (sqlite/spec (temp-db-path))
         _ (migrate/migrate! db)
         _ (sqlite/exec! db ["DROP INDEX sessions_routing_idx"])
