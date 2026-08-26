@@ -26,7 +26,14 @@
   leaves that source's prior published revision intact (fail-closed); the
   swap never installs a torn half-published bundle. snapshot! is purified
   (INV-06): it performs no registry mutation, no counter advance, no
-  publication — that belongs to this transaction boundary."
+  publication — that belongs to this transaction boundary.
+
+  E4 (EnvironmentSnapshot): evoclj.environment.snapshot/pin! captures the
+  full publication state as an immutable EnvironmentSnapshot and
+  rebuild-root-manifest deterministically derives the canonical top-level
+  view from that pinned value alone. This namespace exposes aggregate-view
+  so BOTH the live swap path and the pinned-snapshot rebuild share ONE
+  aggregation implementation (INV-05)."
   (:require [evoclj.environment.revision :as rev]
             [evoclj.environment.source :as src]
             [evoclj.environment.bundle :as bundle]
@@ -265,6 +272,17 @@
                 acc)))
           {:current nil :last-good nil :seq -1}
           per-src))
+
+(defn aggregate-view
+  "E4 public pure view over per-source state: recompute the canonical
+  top-level aggregate {:current :last-good :seq} exactly as the publication
+  swap path does (this is the SAME implementation — INV-05, no parallel
+  copy). evoclj.environment.snapshot uses it both to verify a registry is
+  internally consistent at pin time and to prove a pinned EnvironmentSnapshot
+  is self-describing: the recorded aggregate must follow from the pinned
+  per-source entries alone."
+  [per-src]
+  (compute-aggregate per-src))
 
 (defn- apply-chain-swap!
   "Apply all successfully-prepared per-source chains in ONE atomic swap.
