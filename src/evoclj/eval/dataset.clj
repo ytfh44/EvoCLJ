@@ -35,8 +35,18 @@
 
   Error contract (Global Constraint 22 — plain serializable data):
   :dataset/source-unknown, :dataset/case-invalid,
-  :dataset/workspace-invalid. Profile contract violations surface as
-  :eval/profile-invalid from evoclj.eval.profile."
+  :dataset/empty, :dataset/workspace-invalid. Profile contract
+  violations surface as :eval/profile-invalid from evoclj.eval.profile.
+
+  EMPTY DATASET (V1): running evals against a genuinely empty dataset
+  must NOT silently no-op/mislead. Every eval-facing accessor that must
+  produce cases — evolution-case-refs, evolution-input, the
+  selection-loader fn, and audit-cases — fails closed with the explicit
+  typed :dataset/empty marker (carrying :dataset/source and :case-count
+  0) instead of returning an empty collection. build-candidate-workspace!
+  is the deliberate exception: it mounts the evolution dataset into a
+  candidate workspace, and an empty evolution dir is a legitimate (if
+  unproductive) mount, so it does NOT fail on empty."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [evoclj.eval.profile :as profile]
@@ -117,6 +127,21 @@
 
 ;; --- content-addressed refs --------------------------------------------------
 
+(defn- ensure-nonempty!
+  "V1 empty-dataset guard: fail closed with the explicit typed
+  :dataset/empty marker when `cases` is empty. `source` is the dataset
+  :source keyword (used only for the marker payload), `root` the
+  physical dataset root. Returns `cases` unchanged when non-empty —
+  a non-empty dataset runs exactly as before."
+  [source root cases]
+  (when (empty? cases)
+    (throw (err/error :dataset/empty
+                      "the eval dataset is empty; running evals on an empty dataset would silently no-op"
+                      {:dataset/source source
+                       :dataset/root root
+                       :case-count 0})))
+  cases)
+
 (defn- canonical
   "Deterministic EDN form for hashing: maps sorted by their pr-str key
   form, sets by their pr-str element form, collections realized
@@ -148,9 +173,12 @@
   (mapv case-ref cases))
 
 (defn- dataset-case-refs
-  "Artifact refs of one dataset by source, read through its root."
+  "Artifact refs of one dataset by source, read through its root. A
+  genuinely empty dataset fails closed with :dataset/empty rather than
+  silently yielding zero refs."
   [source roots]
-  (case-refs (load-cases (dataset-root source roots))))
+  (let [root (dataset-root source roots)]
+    (case-refs (ensure-nonempty! source root (load-cases root)))))
 
 ;; --- Step 2: the evolution boundary ------------------------------------------
 
@@ -197,9 +225,10 @@
   ([profile] (selection-loader profile dataset-roots))
   ([profile roots]
    (profile/validate-profile! profile)
-   (let [root (dataset-root (get-in profile [:selection-set :source]) roots)]
+   (let [source (get-in profile [:selection-set :source])
+         root (dataset-root source roots)]
      (fn []
-       (load-cases root)))))
+       (ensure-nonempty! source root (load-cases root))))))
 
 ;; --- Step 4: the audit set is operator-only ----------------------------------
 
@@ -214,7 +243,9 @@
   ([profile] (audit-cases profile dataset-roots))
   ([profile roots]
    (profile/validate-profile! profile)
-   (load-cases (dataset-root (get-in profile [:audit-set :source]) roots))))
+   (let [source (get-in profile [:audit-set :source])
+         root (dataset-root source roots)]
+     (ensure-nonempty! source root (load-cases root)))))
 
 ;; --- Step 1: candidate workspace construction --------------------------------
 

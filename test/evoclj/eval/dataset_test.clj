@@ -33,7 +33,8 @@
   everywhere; the repo-root dataset-roots defaults are exercised only
   by the profile-shape assertions. All temp dirs live under the
   system temp dir and are deleted after every test."
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.eval.dataset :as dataset]
             [evoclj.eval.profile :as profile])
@@ -147,6 +148,36 @@
     (map? x) (some has-fn-value? (concat (keys x) (vals x)))
     (coll? x) (some has-fn-value? x)
     :else false))
+
+(defn- thrown-ex-data
+  "The ex-data of the typed ExceptionInfo thrown by `f`, or nil when
+  `f` returns normally (no throw)."
+  [f]
+  (try (f) nil
+       (catch clojure.lang.ExceptionInfo e (ex-data e))))
+
+(defn- edn-round-trip
+  "pr-str + edn/read-string round trip — a serializability probe for
+  plain-data values (GC-22)."
+  [x]
+  (edn/read-string (pr-str x)))
+
+(defn- empty-roots
+  "Three physically separate temp dataset roots, each holding ONLY a
+  README.md manifest and ZERO .edn case files — genuinely empty
+  datasets (the V1 empty-dataset state). Returns the source -> root
+  registry."
+  []
+  (let [evo (temp-dir "evoclj-evals-empty-evo-")
+        sel (temp-dir "evoclj-evals-empty-sel-")
+        aud (temp-dir "evoclj-evals-empty-aud-")]
+    ;; README.md only — no *.edn case file in any root
+    (seed-dataset! evo {"README.md" "# Evolution dataset\n"})
+    (seed-dataset! sel {"README.md" "# Selection dataset\n"})
+    (seed-dataset! aud {"README.md" "# Audit dataset\n"})
+    {:evals/evolution (str evo)
+     :evals/selection (str sel)
+     :evals/audit (str aud)}))
 
 ;; --- Step 1: mount/access — workspace excludes Selection and Audit ----------
 
@@ -298,3 +329,93 @@
         (is (vector? audit))
         (is (= :case/audit-1 (:case/id (first audit))))
         (is (contains? (first audit) :body))))))
+
+;; ============================================================================
+;; V1 — empty dataset: running evals on an empty dataset must NOT silently
+;; no-op/mislead. Each eval-facing dataset accessor that must produce cases
+;; fails closed with the explicit typed :dataset/empty marker.
+;; ============================================================================
+
+(deftest empty-evolution-dataset-fails-closed
+  (let [roots (empty-roots)
+        p (fixture-profile)]
+    (testing "evolution-case-refs fails closed with :dataset/empty"
+      (let [data (thrown-ex-data #(dataset/evolution-case-refs p roots))]
+        (is (= :dataset/empty (:error/type data)))
+        (is (= :evals/evolution (:dataset/source data)))
+        (is (= 0 (:case-count data)))))
+    (testing "evolution-input fails closed with :dataset/empty"
+      (let [data (thrown-ex-data #(dataset/evolution-input p roots))]
+        (is (= :dataset/empty (:error/type data)))
+        (is (= :evals/evolution (:dataset/source data)))))))
+
+(deftest empty-selection-dataset-fails-closed
+  (let [roots (empty-roots)
+        p (fixture-profile)]
+    (testing "the selection-loader fn fails closed with :dataset/empty when
+              the selection dataset has no cases"
+      (let [loader (dataset/selection-loader p roots)
+            data (thrown-ex-data #(loader))]
+        (is (= :dataset/empty (:error/type data)))
+        (is (= :evals/selection (:dataset/source data)))))))
+
+(deftest empty-audit-dataset-fails-closed
+  (let [roots (empty-roots)
+        p (fixture-profile)]
+    (testing "audit-cases fails closed with :dataset/empty"
+      (let [data (thrown-ex-data #(dataset/audit-cases p roots))]
+        (is (= :dataset/empty (:error/type data)))
+        (is (= :evals/audit (:dataset/source data)))))))
+
+(deftest empty-dataset-marker-is-typed-and-serializable
+  (let [roots (empty-roots)
+        p (fixture-profile)
+        data (thrown-ex-data #(dataset/evolution-case-refs p roots))]
+    ;; GC-22: the marker is plain serializable data (round-trips through
+    ;; pr-str / edn/read-string), never a handler or a loader handle.
+    (is (keyword? (:error/type data)))
+    (is (= :dataset/empty (edn-round-trip (:error/type data))))
+    (is (= (:dataset/source data) (edn-round-trip (:dataset/source data))))
+    (is (= (:case-count data) (edn-round-trip (:case-count data))))))
+
+(deftest dataset-loader-error-is-typed
+  (let [root (temp-dir "evoclj-evals-malformed-")
+        p (fixture-profile)
+        roots {:evals/evolution (str root)
+               :evals/selection (str root)
+               :evals/audit (str root)}]
+    ;; a malformed case file (not a single case map) is a LOADER ERROR,
+    ;; distinct from an empty dataset — it must surface typed
+    ;; :dataset/case-invalid, never as an empty/no-op result.
+    (write-file! (str root java.io.File/separator "bad.edn")
+                 "[1 2 3]\n")
+    (testing "a malformed case file fails closed with :dataset/case-invalid"
+      (let [data (thrown-ex-data #(dataset/evolution-case-refs p roots))]
+        (is (= :dataset/case-invalid (:error/type data)))
+        (is (= (str root java.io.File/separator "bad.edn")
+               (:file data)))))
+    (testing "an unknown source fails closed with :dataset/source-unknown"
+      ;; :evals/nope is NOT a key of `roots` — a genuinely unknown source
+      (let [data (thrown-ex-data
+                  #(dataset/dataset-root :evals/nope
+                                         {:evals/evolution (str root)
+                                          :evals/selection (str root)
+                                          :evals/audit (str root)}))]
+        (is (= :dataset/source-unknown (:error/type data)))))))
+
+;; --- README truthfulness (V1): doc must not claim a dataset that does not
+;; --- exist, and must describe the empty-dataset behavior accurately. --------
+
+(deftest dataset-readmes-are-truthful
+  (testing "each repo-root dataset README truthfully documents the
+            empty-dataset behavior (:dataset/empty) rather than claiming
+            case files that are not present"
+    (doseq [[source root] [[:evals/evolution "evals/evolution"]
+                           [:evals/selection "evals/selection"]
+                           [:evals/audit "evals/audit"]]]
+      (testing (str source)
+        (let [readme (slurp (str root "/README.md"))]
+          ;; the README must document the explicit empty-dataset marker so
+          ;; behavior and docs agree (doc/behavior consistency)
+          (is (str/includes? readme ":dataset/empty")
+              (str "README must document the :dataset/empty empty-dataset behavior")))))))

@@ -13,6 +13,17 @@ evolution artifact refs, or in any candidate workspace.
 - `README.md` — this manifest.
 - `*.edn` — case files; each holds one case map `{:case/id <keyword> ...}`.
 
+## Empty dataset behavior (fail closed)
+
+This dataset is currently **empty** (no `*.edn` case file is present
+beyond this manifest). An operator audit run against an empty audit
+dataset must NOT silently report nothing: the operator-only accessor
+`evoclj.eval.dataset/audit-cases` fails closed with the explicit typed
+`:dataset/empty` marker (carrying the `:dataset/source` and `:case-count
+0`) rather than yielding an empty case set. The marker is observable and
+serializable (Global Constraint 22). Seed this dataset with at least one
+case file before running an operator audit.
+
 ## Boundary contract
 
 - The audit set is reachable only through the explicit operator-only

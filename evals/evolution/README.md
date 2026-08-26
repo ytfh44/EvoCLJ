@@ -14,6 +14,20 @@ is enforced by directory boundaries, not by instruction.
 - `README.md` — this manifest.
 - `*.edn` — case files; each holds one case map `{:case/id <keyword> ...}`.
 
+## Empty dataset behavior (fail closed)
+
+This dataset is currently **empty** (no `*.edn` case file is present
+beyond this manifest). Running the evolution loop against an empty
+dataset must NOT silently no-op: the evolution-facing accessors
+(`evoclj.eval.dataset/evolution-case-refs`, `evolution-input`) fail
+closed with the explicit typed `:dataset/empty` marker (carrying the
+`:dataset/source` and `:case-count 0`) rather than yielding zero refs.
+This marker is observable and serializable (Global Constraint 22). Seed
+this dataset with at least one case file before running evolution. The
+exception is `build-candidate-workspace!`, which mounts this dataset
+into a candidate workspace and still succeeds on an empty directory — a
+workspace mount is distinct from producing cases.
+
 ## Boundary contract
 
 - Evolution adapters receive only **artifact refs** (`{:case/id k
