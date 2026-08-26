@@ -118,7 +118,17 @@
   :scheduler/session-invalid (:reason :not-found, :not-created,
   :missing-root-event), :scheduler/pin-mismatch (:reason :genome,
   :resolution, :phenotype), and :scheduler/task-input-invalid
-  (:reason :not-edn-safe — nothing non-EDN crosses this boundary)."
+  (:reason :not-edn-safe — nothing non-EDN crosses this boundary).
+
+   BINDINGS (WO-B1): before a session leaves :created the scheduler
+   restores its durable bindings' runtime state through
+   evoclj.store.binding/restore! (mount/context registries may be
+   carried on the executor's :stores; verification is fail-closed — an
+   unverifiable pinned binding refuses the run with typed
+   :store/binding-invalid). During model-call rounds the durable
+   bindings query degrades with a COUNTED typed event
+   (:scheduler/bindings-degraded, sanitized error data) instead of the
+   former silent swallow."
   (:require [evoclj.genome.types :as types]
             [evoclj.intent.core :as intent]
             [evoclj.intent.dispatch :as dispatch]
@@ -329,14 +339,60 @@
         (map (fn [t] [(:name t) t]))
         (get-in intent [:payload :tools])))
 
+(defn- record-bindings-degradation!
+  "WO-B1: a failing durable-bindings query is NEVER silent. Append one
+  typed causal event (:scheduler/bindings-degraded) carrying fully
+  sanitized error data; the number of such events on the session's log
+  IS the degradation counter (durable, attributable, queryable). If
+  even this event cannot be appended the failure propagates — fail
+  closed rather than degrade invisibly."
+  [executor pin cause t]
+  (append-event! executor pin cause :scheduler/bindings-degraded nil
+                 {:degradation :bindings-fetch
+                  :error (err/error-data t)}))
+
 (defn- fetch-bindings
   "Current active ContextBindings for the session (from durable store).
-  Returns [] when the binding table is absent or the query fails so
-  scheduler tests that run without bindings still pass."
-  [executor pin]
+   WO-B1: a missing table or failing query no longer swallows silently —
+   the Throwable is recorded as a typed degradation event and the run
+   degrades to [] (the session continues without bindings, but the
+   degradation is counted on the causal log)."
+  [executor pin cause]
   (try
     (binding-store/active-bindings (:sqlite (:stores executor)) (:session/id pin))
-    (catch Throwable _ [])))
+    (catch Throwable t
+      (record-bindings-degradation! executor pin cause t)
+      [])))
+
+(defn- restore-session-runtime!
+  "WO-B1 production wiring: before a session leaves :created, republish
+  its durable bindings' runtime state into the executor's registries.
+
+  Failure discipline (same vocabulary as fetch-bindings):
+    - an INV-02 VERDICT (:store/binding-invalid — the pinned bundle can
+      no longer be verified to exist) is fail-closed and ABORTS the run
+      with that typed error; the session stays :created;
+    - any other Throwable (e.g. the bindings table itself unreadable)
+      is recorded as a typed degradation event and the run continues
+      without restored runtime state — degraded and counted, never
+      silent."
+  [executor pin root]
+  (let [{:keys [cas registry mount-registry context-store]} (:stores executor)]
+    (try
+      (binding-store/restore! (:sqlite (:stores executor)) (:session/id pin)
+                              (cond-> {}
+                                cas (assoc :cas cas)
+                                registry (assoc :registry registry)
+                                mount-registry (assoc :mount-registry mount-registry)
+                                context-store (assoc :context-store context-store)))
+      (catch clojure.lang.ExceptionInfo e
+        (if (= :store/binding-invalid (:error/type (ex-data e)))
+          (throw e)
+          (do (record-bindings-degradation! executor pin (:event/id root) e)
+              nil)))
+      (catch Throwable e
+        (record-bindings-degradation! executor pin (:event/id root) e)
+        nil))))
 
 (defn- base-call-from-intent*
   "Extract BaseModelCall from an intent, tolerating both new
@@ -461,7 +517,7 @@
              rounds rounds
              pinned pinned]
         (let [cause-id (if (map? cause) (:event/id cause) cause)
-              bindings (fetch-bindings executor pin)
+              bindings (fetch-bindings executor pin cause-id)
               cas (:cas (:stores executor))
               prepared (try
                          (assembler/assemble current-base-call
@@ -644,6 +700,11 @@
                            :first-event (:event/type root)})))
       ;; the store's state machine has no :created → :running edge;
       ;; the :resolving hop is the normative path (component)
+      ;; WO-B1 production wiring: restore the session's durable bindings
+      ;; into the executor's runtime registries BEFORE the session leaves
+      ;; :created (see restore-session-runtime! for the failure
+      ;; discipline — verdicts abort typed, infrastructure degrades).
+      (restore-session-runtime! executor pin root)
       (session/transition-session! db (:session/id pin) :created :resolving nil)
       (session/transition-session! db (:session/id pin) :resolving :running nil)
       (let [started (append-event! executor pin (:event/id root) :session/started

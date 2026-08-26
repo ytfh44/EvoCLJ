@@ -33,8 +33,30 @@
     evoclj.environment.surface,
     insert/update the durable row, publish mount/context state into
     the supplied in-memory registries (if any), and append an event.
+  - WO-B1: activation is a TWO-PHASE transaction. Phase 1 stages every
+    mutation (durable row write + runtime publication); phase 2 commits
+    by appending the auditable event. Any failure inside the staged
+    region — a typed publish failure or an injected seam fault — runs
+    the COMPENSATING rollback (delete the staged row / restore the
+    prior row bytes, undo exactly this transaction's runtime deltas)
+    and rethrows the original exception: a failed activation leaves the
+    system byte-comparable to its pre-activation state, never torn.
+    A fault after the commit point (:after-event-append) never rolls
+    back. If the rollback itself cannot run, the caller gets typed
+    :store/binding-rollback-failed carrying the original error.
+  - WO-B1: publish-runtime! failures are TYPED
+    (:store/binding-publish-failed), never caught-and-continued.
+  - WO-B1: persisted metadata is serialized through a strict KEY
+    ALLOWLIST per surface (:materializer is stripped as operational;
+    backend records flatten to plain descriptors); unknown keys or
+    values that do not round-trip strict EDN are rejected typed
+    :store/binding-metadata-invalid before anything is written.
   - active-bindings reads only the durable table (CAS fallback, not
     catalog) so it works after source deletion or a restart.
+  - WO-B1: restore! verifies EVERY durable binding (phase 1) before
+    republishing ANY of them (phase 2); the scheduler's run-session!
+    calls it before a session leaves :created (production restart
+    wiring).
 
   Phenotype invariant: this namespace never reads or writes
   generations.genome_id, generations.resolution_id or sessions.phenotype_id
@@ -107,7 +129,12 @@
                      (Date/from (Instant/parse (:deactivated_at row))))
    :metadata (when (:metadata_edn row)
                (try (edn/read-string (:metadata_edn row))
-                    (catch Exception _ {})))})
+                    (catch Exception _
+                      ;; WO-B1: a corrupt persisted payload is a typed
+                      ;; failure, never a silent {}
+                      (throw (err/error :store/binding-invalid
+                                        "persisted metadata_edn is not readable EDN"
+                                        {:binding/id (:id row)})))))})
 
 (defn- binding-type-for
   "Derive binding_type string from logical-id or bundle."
@@ -146,25 +173,72 @@
   [bundle]
   (or (:surfaces bundle) []))
 
+;; WO-B1 metadata allowlist: the ONLY surface keys that may cross the
+;; persistence boundary. :materializer is operational (stripped before
+;; the check); anything else is an attempt to persist uncontrolled
+;; shape and is rejected typed.
+(def ^:private metadata-surface-allowlist
+  #{:surface/id :surface/type :revision/id :bundle/id :logical/id
+    :descriptor :entries :access/max :backend})
+
+;; The plain backend descriptor carries exactly these keys.
+(def ^:private metadata-backend-allowlist
+  #{:type :tree/id :root})
+
+(defn- edn-round-trips?
+  "True when v survives pr-str -> clojure.edn/read-string IDENTICALLY.
+  Strict EDN: fns, objects, regexes and other unreadable values fail
+  (the read throws or diverges)."
+  [v]
+  (try
+    (= v (edn/read-string (pr-str v)))
+    (catch Exception _ false)))
+
+(defn- metadata-invalid!
+  "Throw typed :store/binding-metadata-invalid."
+  [message data]
+  (throw (err/error :store/binding-metadata-invalid message data)))
+
 (defn- sanitize-surface
-  "Return an EDN-safe surface (strip non-serializable fns like :materializer).
-  Keeps only keys that round-trip via pr-str/edn/read-string.
-  Backend records are converted to plain serializable descriptors."
+  "WO-B1 allowlist serialization of one surface for persisted metadata.
+
+  Policy (fail-closed):
+  - :materializer is operational state and is stripped silently;
+  - every REMAINING key must be in metadata-surface-allowlist — any
+    other key rejects the whole activation typed
+    :store/binding-metadata-invalid naming the rejected keys;
+  - a map :backend with a :tree/id passes through its allowlisted keys
+    only; record backends flatten to the plain
+    {:type :cas-tree :tree/id ...} descriptor; any other backend
+    becomes the same plain descriptor keyed by revision;
+  - finally the result MUST round-trip strict EDN identically — a
+    poisoned value under an allowed key is rejected typed, never
+    silently sanitized away."
   [s]
-  (let [a (dissoc s :materializer)
-        b (if-let [backend (:backend a)]
-            (let [tree-id (or (:tree-id backend) (:tree/id backend) (:revision/id a))
-                  plain (cond
-                          (and (map? backend) (:tree/id backend)) backend
-                          (instance? clojure.lang.IRecord backend) {:type :cas-tree :tree/id (or (:tree-id backend) (:revision/id a))}
-                          :else {:type :cas-tree :tree/id (or tree-id (:revision/id a))})]
-              (assoc a :backend plain))
-            a)]
-    (try
-      (edn/read-string (pr-str b))
-      b
-      (catch Exception _
-        (select-keys b [:surface/id :surface/type :revision/id :bundle/id :logical/id :descriptor :entries :access/max :backend])))))
+  (let [stripped (dissoc s :materializer)
+        rejected (remove metadata-surface-allowlist (keys stripped))]
+    (when (seq rejected)
+      (metadata-invalid! "surface carries keys outside the metadata allowlist"
+                         {:rejected-keys (vec (sort rejected))
+                          :surface/type (:surface/type stripped)}))
+    (let [b (if (contains? stripped :backend)
+              (let [backend (:backend stripped)
+                    tree-id (or (:tree-id backend) (:tree/id backend) (:revision/id stripped))
+                    plain (cond
+                            (and (map? backend) (:tree/id backend))
+                            (select-keys backend metadata-backend-allowlist)
+
+                            (instance? clojure.lang.IRecord backend)
+                            {:type :cas-tree :tree/id tree-id}
+
+                            :else
+                            {:type :cas-tree :tree/id (or tree-id (:revision/id stripped))})]
+                (assoc stripped :backend plain))
+              stripped)]
+      (when-not (edn-round-trips? b)
+        (metadata-invalid! "surface values must round-trip strict EDN (non-serializable value under an allowed key)"
+                           {:surface/type (:surface/type b) :surface/id (:surface/id b)}))
+      b)))
 
 (defn- bundle->metadata
   "Build metadata_edn value for storage — keeps sanitized surfaces for restore."
@@ -289,16 +363,30 @@
 ;; Runtime publishing helpers
 ;; ---------------------------------------------------------------------------
 
+(defn- publish-failure
+  "The typed publication failure (WO-B1): a stable :error/type, the
+  failing phase (:context | :directory | :unpublish), the offending
+  surface (sanitized), and the fully sanitized original error. Never
+  thrown-and-continued away by this namespace."
+  [phase surface ^Exception cause]
+  (err/error :store/binding-publish-failed
+             (str "binding runtime publication failed during " (name phase) " publication")
+             {:phase phase
+              :surface (err/sanitize surface)
+              :error/original (err/error-data cause)}))
+
 (defn- publish-runtime!
   "Publish bundle's surfaces into mount-registry and context-store.
-  Both are optional atoms. No-op if nil.
+   Both are optional atoms. No-op if nil.
 
-  Collaborators (evoclj.context.binding, evoclj.mount.backend) are
-  referenced statically via top-level requires (B2: resolution proven
-  acyclic) — no runtime symbol lookup. The per-surface try/catch
-  isolation is pre-existing behavior and is deliberately preserved
-  here; converting these swallows into typed propagation belongs to
-  WO-B1."
+   Collaborators (evoclj.context.binding, evoclj.mount.backend) are
+   referenced statically via top-level requires (B2: resolution proven
+   acyclic) — no runtime symbol lookup.
+
+   WO-B1: the per-surface catch-and-continue swallows are GONE. A
+   failing publication throws typed :store/binding-publish-failed
+   naming the phase; the caller's staged transaction compensates back
+   to the pre-activation state."
   [bundle {:keys [mount-registry context-store cas] :as opts}]
   (let [surfaces (bundle->surfaces bundle)
         logical-id (bundle->logical bundle)
@@ -308,17 +396,24 @@
     (when context-store
       (doseq [s surfaces
               :when (= :context (:surface/type s))]
-        (try
-          (let [offer {:offer/logical-id logical-id
-                       :offer/revision-id rev
-                       :offer/bundle-id bid
-                       :offer/name (str logical-id)
-                       :offer/description (str "binding " logical-id)}]
-            (context-binding/activate! context-store offer))
-          (catch Exception _ nil))))
+        ;; WO-B1: no catch-and-continue. A failing publication surfaces
+        ;; typed; the caller's staged transaction compensates.
+        (let [offer {:offer/logical-id logical-id
+                     :offer/revision-id rev
+                     :offer/bundle-id bid
+                     :offer/name (str logical-id)
+                     :offer/description (str "binding " logical-id)}]
+          (try
+            (context-binding/activate! context-store offer)
+            (catch Exception e
+              (throw (publish-failure :context s e)))))))
     (when mount-registry
       (doseq [s surfaces
               :when (= :directory (:surface/type s))]
+        ;; WO-B1: the OUTER boundary is typed. The inner fallbacks below
+        ;; are deliberate degradation WITHIN a surface's construction
+        ;; (plain descriptor when a real Backend cannot be realized —
+        ;; mount-id shape unification is WO-B3) and stay.
         (try
           (let [mount-id (or (:surface/id s) logical-id)]
             (let [existing (try (mount-backend/get-mount mount-registry mount-id)
@@ -348,19 +443,24 @@
                               (mount-backend/make-mount {:mount-id mount-id :backend backend :access-max (:access/max s)})
                               (catch Exception _ {:mount/id mount-id :backend backend :access/max (:access/max s)}))]
                   (swap! mount-registry assoc mount-id mount)))))
-          (catch Exception _ nil))))
+          (catch Exception e
+            (throw (publish-failure :directory s e))))))
     nil))
 
 (defn- unpublish-runtime!
   "Remove binding's runtime state from mount-registry and context-store.
   If surfaces-or-ids is provided, remove those specific mount ids; otherwise
-  remove by logical-id."
+  remove by logical-id.
+
+  WO-B1: failures here are typed (:store/binding-publish-failed with
+  :phase :unpublish) — never caught-and-continued."
   ([logical-id opts] (unpublish-runtime! logical-id opts nil))
   ([logical-id {:keys [mount-registry context-store]} surfaces-or-ids]
    (when context-store
      (try
        (context-binding/deactivate! context-store logical-id)
-       (catch Exception _ nil)))
+       (catch Exception e
+         (throw (publish-failure :unpublish {:surface/type :context :logical/id logical-id} e)))))
    (when mount-registry
      (try
        (if (seq surfaces-or-ids)
@@ -371,7 +471,149 @@
          (swap! mount-registry
                 (fn [m]
                   (into {} (remove (fn [[k _]] (= k logical-id)) m)))))
-       (catch Exception _ nil)))))
+       (catch Exception e
+         (throw (publish-failure :unpublish {:surface/type :directory :logical/id logical-id} e)))))))
+
+;; ---------------------------------------------------------------------------
+;; WO-B1 two-phase activation: staging + compensating rollback
+;; ---------------------------------------------------------------------------
+
+(defn- publish-mount-ids
+  "The mount registry keys publish-runtime! would use for bundle's
+  directory surfaces (the exact same id formula)."
+  [bundle]
+  (let [logical-id (bundle->logical bundle)]
+    (set (for [s (bundle->surfaces bundle)
+               :when (= :directory (:surface/type s))]
+           (or (:surface/id s) logical-id)))))
+
+(defn- removed-mount-ids-for
+  "The mount registry keys unpublish-runtime! removes for these
+  surfaces-or-ids (mirrors its id logic exactly)."
+  [surfaces-or-ids logical-id]
+  (if (seq surfaces-or-ids)
+    (set (map #(or (:surface/id %) %) surfaces-or-ids))
+    #{logical-id}))
+
+(defn- read-prestate!
+  "Best-effort pre-state read. A store we cannot even READ is marked
+  ::unreadable — compensation will SKIP it (we never claim to restore
+  state we could not observe) while publication against it will still
+  fail typed."
+  [f]
+  (try (f) (catch Exception _ ::unreadable)))
+
+(defn- capture-runtime-prestate
+  "Snapshot the runtime state a staged transaction may mutate: the
+  context binding currently pinned under logical-id and the full mount
+  registry image. Small atoms; the snapshot is what makes rollback
+  byte-comparable. Unreadable stores are marked ::unreadable rather
+  than exploding here — they fail typed at publication time instead."
+  [logical-id {:keys [mount-registry context-store]}]
+  {:ctx-prev (when context-store (read-prestate! #(context-binding/get-binding context-store logical-id)))
+   :mounts (if mount-registry (read-prestate! #(clojure.core/deref mount-registry)) {})})
+
+(defn- compensate-runtime!
+  "Undo EXACTLY this transaction's runtime deltas: every touched mount
+  key returns to its pre-transaction value (present -> restored, absent
+  -> removed); the context binding under logical-id returns to its
+  pre-transaction value. swap!-based, so concurrent activations touching
+  OTHER keys are untouched (last-writer-wins only on the same key).
+
+  Returns a status map {:mounts ... :context ...} where each entry is
+  :ok | :skipped-unreadable | :failed — callers decide whether a
+  :failed constitutes an unrunnable rollback."
+  [{:keys [prestate added-mount-ids removed-mount-ids opts logical-id]}]
+  (let [{:keys [mounts ctx-prev]} prestate
+        touched (into added-mount-ids removed-mount-ids)
+        mounts-status
+        (cond
+          (= ::unreadable mounts) :skipped-unreadable
+          (not (:mount-registry opts)) :ok
+          :else
+          (try
+            (swap! (:mount-registry opts)
+                   (fn [m]
+                     (reduce (fn [acc k]
+                               (if (contains? mounts k)
+                                 (assoc acc k (get mounts k))
+                                 (dissoc acc k)))
+                             m touched)))
+            :ok
+            (catch Exception _ :failed)))
+        context-status
+        (cond
+          (= ::unreadable ctx-prev) :skipped-unreadable
+          (not (:context-store opts)) :ok
+          :else
+          (try
+            (swap! (:context-store opts)
+                   (fn [st]
+                     (let [installed (get-in st [:by-logical logical-id])]
+                       (cond-> (if ctx-prev
+                                 (assoc-in st [:by-logical logical-id] ctx-prev)
+                                 (update st :by-logical dissoc logical-id))
+                         ctx-prev (assoc-in [:by-id (:binding/id ctx-prev)] ctx-prev)
+                         installed (update :by-id dissoc (:binding/id installed))))))
+            :ok
+            (catch Exception _ :failed)))]
+    {:mounts mounts-status :context context-status}))
+
+(defn- compensate!
+  "Run the COMPENSATING actions for one failed staged transaction.
+
+  Durable first (the row is the source of truth):
+    - inserted-row-id present -> the staged INSERT is deleted;
+    - otherwise old-row present -> EVERY mutated column is written back
+      from the captured row image (byte-comparable restore).
+  Then the runtime deltas. If any compensation step itself throws, the
+  caller gets typed :store/binding-rollback-failed carrying the original
+  sanitized error — never silence, never an unexplained torn state.
+
+  txn keys:
+    :db :session-id :logical-id
+    :inserted-row-id   (activate!: the staged row's id)
+    :old-row           (reload!/deactivate!: full pre-image of the row)
+    :prestate          (capture-runtime-prestate value)
+    :added-mount-ids   (mount keys this txn published)
+    :removed-mount-ids (mount keys this txn removed)
+    :opts              {:mount-registry :context-store} runtime atoms only"
+  [{:keys [db session-id logical-id inserted-row-id old-row prestate
+           added-mount-ids removed-mount-ids opts original-throwable]}]
+  (let [durable-ok?
+        (try
+          (sqlite/with-db [conn db]
+            (if inserted-row-id
+              (jdbc/delete! conn :session_bindings
+                            ["id = ? AND session_id = ?" inserted-row-id (str (types/session-id session-id))])
+              (when old-row
+                (jdbc/execute! conn
+                               ["UPDATE session_bindings SET revision_id = ?, bundle_id = ?, activated_at = ?, metadata_edn = ?, state = ?, deactivated_at = ? WHERE id = ?"
+                                (:revision_id old-row) (:bundle_id old-row) (:activated_at old-row)
+                                (:metadata_edn old-row) (:state old-row) (:deactivated_at old-row)
+                                (:id old-row)]))))
+          true
+          (catch Exception _ false))
+        ;; stores marked ::unreadable at capture time are SKIPPED, not
+        ;; failures: we never promised to restore state we could not read.
+        ;; An ATTEMPTED step that FAILED means the rollback could not run.
+        statuses (try
+                   (let [s (compensate-runtime!
+                            {:prestate prestate
+                             :added-mount-ids added-mount-ids
+                             :removed-mount-ids removed-mount-ids
+                             :opts opts
+                             :logical-id logical-id})]
+                     (if (map? s) s {:mounts :failed :context :failed}))
+                   (catch Exception _ {:mounts :failed :context :failed}))]
+    (when (or (false? durable-ok?)
+              (some #(= :failed %) (vals statuses)))
+      (throw (err/error :store/binding-rollback-failed
+                        "compensating rollback itself failed; staged state may be retained"
+                        {:durable-compensated durable-ok?
+                         :runtime-status statuses
+                         :error/original (some-> original-throwable err/error-data)})))
+    nil))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API
@@ -487,22 +729,40 @@
                                         "binding already active for this session + logical_id"
                                         {:session/id (types/session-id session-id) :logical/id logical-id}))
                       (throw e)))))]
-       ;; T2 seam: durable row inserted; sits outside every catch around
-       ;; the insert, so a hook throw propagates to the caller unchanged
-       (fault/trigger! opts :after-db-insert)
-       (publish-runtime! bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
-       ;; T2 seam: runtime mount/context state published
-       (fault/trigger! opts :after-publish-runtime)
-       ;; T2 seam: last point before the auditable event append
-       (fault/trigger! opts :before-event-append)
-       (try
-         (append-binding-event! db session-id :binding/activated
-                                {:logical/id logical-id :revision/id rev :bundle/id bid :binding/id id})
-         (catch Exception e
-           (throw e)))
-       ;; T2 seam: event appended successfully
-       (fault/trigger! opts :after-event-append)
-       (get-binding db session-id logical-id)))))
+       ;; ---- WO-B1 staged region: everything below is compensatable ----
+       (let [runtime-opts {:mount-registry mount-registry :context-store context-store}
+             prestate (capture-runtime-prestate logical-id runtime-opts)
+             added-ids (publish-mount-ids bundle)
+             committed? (atom false)]
+         (try
+           ;; T2 seam: durable row inserted; sits outside every catch around
+           ;; the insert, so a hook throw propagates to the caller unchanged
+           (fault/trigger! opts :after-db-insert)
+           (publish-runtime! bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
+           ;; T2 seam: runtime mount/context state published
+           (fault/trigger! opts :after-publish-runtime)
+           ;; T2 seam: last point before the auditable event append
+           (fault/trigger! opts :before-event-append)
+           (append-binding-event! db session-id :binding/activated
+                                  {:logical/id logical-id :revision/id rev :bundle/id bid :binding/id id})
+           ;; ---- commit point: past here the activation is final ----
+           (reset! committed? true)
+           ;; T2 seam: event appended successfully
+           (fault/trigger! opts :after-event-append)
+           (get-binding db session-id logical-id)
+           (catch Throwable t
+             (when-not @committed?
+               (compensate! {:db db
+                             :session-id session-id
+                             :logical-id logical-id
+                             :inserted-row-id id
+                             :old-row nil
+                             :prestate prestate
+                             :added-mount-ids added-ids
+                             :removed-mount-ids #{}
+                             :opts runtime-opts
+                             :original-throwable t}))
+             (throw t))))))))
 
 (defn reload!
   "Reload an active binding to a new revision (A -> B).
@@ -542,9 +802,12 @@
        (throw (err/error :store/binding-invalid "new bundle logical_id must match requested logical_id"
                          {:requested logical-id :new-logical target-logical})))
      (fetch-session db session-id)
-     ;; fetch old binding metadata to know old mount ids to remove
+     ;; fetch old binding metadata to know old mount ids to remove;
+     ;; WO-B1: also capture the FULL pre-image row so a failed staged
+     ;; reload can restore every column byte-comparably
      (let [old-binding (get-binding db session-id logical-id)
-           old-surfaces (when old-binding (-> old-binding :metadata :surfaces))]
+           old-surfaces (when old-binding (-> old-binding :metadata :surfaces))
+           old-row (first (sqlite/query db ["SELECT * FROM session_bindings WHERE session_id = ? AND logical_id = ? AND state = 'active'" sid lid]))]
        (validate-bundle-exists new-bundle registry cas-handle)
        (validate-sibling-surfaces new-bundle)
        (let [cnt (sqlite/with-db [conn db]
@@ -554,19 +817,41 @@
          (when-not (= 1 cnt)
            (throw (err/error :store/binding-not-found "no active binding for this session + logical_id"
                              {:session/id (types/session-id session-id) :logical/id logical-id})))
-         ;; T2 seam: durable row updated (revision/bundle/metadata)
-         (fault/trigger! opts :after-db-insert)
-         (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
-         (publish-runtime! new-bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
-         ;; T2 seam: runtime state republished at the new revision
-         (fault/trigger! opts :after-publish-runtime)
-         ;; T2 seam: last point before the auditable event append
-         (fault/trigger! opts :before-event-append)
-         (append-binding-event! db session-id :binding/reloaded
-                                {:logical/id logical-id :from-revision (:revision/id old-binding) :to-revision new-rev :bundle/id new-bid})
-         ;; T2 seam: reloaded event appended successfully
-         (fault/trigger! opts :after-event-append)
-         (get-binding db session-id logical-id))))))
+         ;; ---- WO-B1 staged region: everything below is compensatable ----
+         (let [runtime-opts {:mount-registry mount-registry :context-store context-store}
+               prestate (capture-runtime-prestate logical-id runtime-opts)
+               added-ids (publish-mount-ids new-bundle)
+               removed-ids (removed-mount-ids-for old-surfaces logical-id)
+               committed? (atom false)]
+           (try
+             ;; T2 seam: durable row updated (revision/bundle/metadata)
+             (fault/trigger! opts :after-db-insert)
+             (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
+             (publish-runtime! new-bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
+             ;; T2 seam: runtime state republished at the new revision
+             (fault/trigger! opts :after-publish-runtime)
+             ;; T2 seam: last point before the auditable event append
+             (fault/trigger! opts :before-event-append)
+             (append-binding-event! db session-id :binding/reloaded
+                                    {:logical/id logical-id :from-revision (:revision/id old-binding) :to-revision new-rev :bundle/id new-bid})
+             ;; ---- commit point: past here the reload is final ----
+             (reset! committed? true)
+             ;; T2 seam: reloaded event appended successfully
+             (fault/trigger! opts :after-event-append)
+             (get-binding db session-id logical-id)
+             (catch Throwable t
+               (when-not @committed?
+                 (compensate! {:db db
+                               :session-id session-id
+                               :logical-id logical-id
+                               :inserted-row-id nil
+                               :old-row old-row
+                               :prestate prestate
+                               :added-mount-ids added-ids
+                               :removed-mount-ids removed-ids
+                               :opts runtime-opts
+                               :original-throwable t}))
+               (throw t)))))))))
 
 (defn deactivate!
   "Deactivate the active binding for session-id + logical-id.
@@ -589,9 +874,11 @@
          sid (str (types/session-id session-id))
          lid (logical->text logical-id)
          now (canonical-timestamp nil)
-         ;; fetch before update to know mount ids to clean
+         ;; fetch before update to know mount ids to clean; WO-B1 also
+         ;; captures the FULL pre-image row for byte-comparable rollback
          old-binding (get-binding db session-id logical-id)
          old-surfaces (when old-binding (-> old-binding :metadata :surfaces))
+         old-row (first (sqlite/query db ["SELECT * FROM session_bindings WHERE session_id = ? AND logical_id = ? AND state = 'active'" sid lid]))
          cnt (sqlite/with-db [conn db]
                (first (jdbc/execute! conn
                                      ["UPDATE session_bindings SET state = 'inactive', deactivated_at = ? WHERE session_id = ? AND logical_id = ? AND state = 'active'"
@@ -599,13 +886,34 @@
      (when-not (= 1 cnt)
        (throw (err/error :store/binding-not-found "no active binding to deactivate"
                          {:session/id (types/session-id session-id) :logical/id logical-id})))
-     (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
-     ;; T2 seam: runtime state removed (row already flipped to inactive)
-     (fault/trigger! opts :after-unpublish)
-     (append-binding-event! db session-id :binding/deactivated
-                            {:logical/id logical-id})
-     (let [row (first (sqlite/query db ["SELECT * FROM session_bindings WHERE session_id = ? AND logical_id = ? ORDER BY activated_at DESC LIMIT 1" sid lid]))]
-       (when row (row->binding row))))))
+     ;; ---- WO-B1 staged region: unpublish + commit event compensatable ----
+     (let [runtime-opts {:mount-registry mount-registry :context-store context-store}
+           prestate (capture-runtime-prestate logical-id runtime-opts)
+           removed-ids (removed-mount-ids-for old-surfaces logical-id)
+           committed? (atom false)]
+       (try
+         (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
+         ;; T2 seam: runtime state removed (row already flipped to inactive)
+         (fault/trigger! opts :after-unpublish)
+         (append-binding-event! db session-id :binding/deactivated
+                                {:logical/id logical-id})
+         ;; ---- commit point ----
+         (reset! committed? true)
+         (let [row (first (sqlite/query db ["SELECT * FROM session_bindings WHERE session_id = ? AND logical_id = ? ORDER BY activated_at DESC LIMIT 1" sid lid]))]
+           (when row (row->binding row)))
+         (catch Throwable t
+           (when-not @committed?
+             (compensate! {:db db
+                           :session-id session-id
+                           :logical-id logical-id
+                           :inserted-row-id nil
+                           :old-row old-row
+                           :prestate prestate
+                           :added-mount-ids #{}
+                           :removed-mount-ids removed-ids
+                           :opts runtime-opts
+                           :original-throwable t}))
+           (throw t)))))))
 
 (defn restore!
   "Restore active bindings for session-id into runtime registries.
@@ -621,26 +929,93 @@
     opts map    — {:cas :mount-registry :context-store :registry}
 
   Fail-closed (INV-02): every durable binding is re-verified via
-  validate-bundle-exists against the supplied sources before its
+  validate-bundle-exists against the supplied sources BEFORE any
   runtime state is republished; a binding whose revision no longer
   resolves (e.g. garbage-collected CAS artifact) aborts the whole
   restore with typed :store/binding-invalid instead of republishing
   content that cannot exist.
 
+  WO-B1 two-phase: verification of ALL bindings is phase 1; phase 2
+  republishes them while journaling compensations. A publication
+  failure mid-restore unwinds every already-republished binding back to
+  the pre-restore state, then rethrows (or throws typed
+  :store/binding-rollback-failed if the unwind itself cannot run).
+  With zero active bindings this is a no-op returning [].
+
   Returns the restored bindings (vector)."
   [db session-id opts]
-  (let [bindings (active-bindings db session-id)]
-    (doseq [b bindings]
-      (let [meta (:metadata b)
-            bundle (or (:bundle meta) {:bundle/id (:bundle/id b)
-                                       :revision/id (:revision/id b)
-                                       :logical/id (:logical/id b)
-                                       :surfaces (:surfaces meta [])})]
-        ;; B2 / INV-02: refuse to republish a binding whose bundle no
-        ;; longer exists in registry/CAS — no partial runtime state.
-        (validate-bundle-exists bundle (:registry opts) (:cas opts))
-        (publish-runtime! bundle opts)))
-    bindings))
+  (let [bindings (active-bindings db session-id)
+        bundles (mapv (fn [b]
+                        (let [meta (:metadata b)]
+                          (or (:bundle meta)
+                              {:bundle/id (:bundle/id b)
+                               :revision/id (:revision/id b)
+                               :logical/id (:logical/id b)
+                               :surfaces (:surfaces meta [])})))
+                      bindings)]
+    ;; ---- phase 1: verify EVERYTHING before publishing ANYTHING ----
+    (doseq [bundle bundles]
+      ;; B2 / INV-02: refuse to republish a binding whose bundle no
+      ;; longer exists in registry/CAS — no partial runtime state.
+      (validate-bundle-exists bundle (:registry opts) (:cas opts)))
+    ;; ---- phase 2: publish all, with a compensation journal ----
+    (if-not (seq bundles)
+      ;; zero active bindings: nothing to republish
+      bindings
+      (let [runtime-opts {:mount-registry (:mount-registry opts)
+                          :context-store (:context-store opts)}
+            publish-all
+            (fn publish-all*
+              [pending undos]
+              (if-not (seq pending)
+                ;; committed everything: the restore is final
+                bindings
+                (let [bundle (first pending)
+                      logical-id (:logical/id bundle)
+                      prestate (capture-runtime-prestate logical-id runtime-opts)
+                      undo {:logical-id logical-id
+                            :prestate prestate
+                            :added-mount-ids (publish-mount-ids bundle)}
+                      outcome (try
+                                (publish-runtime! bundle opts)
+                                ::published
+                                (catch Throwable t {::failure t}))
+                      failure (::failure outcome)]
+                  (if failure
+                    ;; unwind in reverse, then surface honestly
+                    (let [unwound
+                          (try
+                            (let [statuses (mapv #(compensate-runtime!
+                                                   {:prestate (:prestate %)
+                                                    :added-mount-ids (:added-mount-ids %)
+                                                    :removed-mount-ids #{}
+                                                    :opts runtime-opts
+                                                    :logical-id (:logical-id %)})
+                                                 (reverse undos))]
+                              ;; ::unreadable pre-states are skipped by
+                              ;; compensation; only an ATTEMPTED step that
+                              ;; failed counts as an unrunnable rollback
+                              (if (some #(= :failed %) (flatten statuses))
+                                ::step-failed
+                                ::ok))
+                            (catch Throwable t'
+                              {::rollback-failure t'}))]
+                      (cond
+                        (= ::ok unwound)
+                        (throw failure)
+
+                        (= ::step-failed unwound)
+                        (throw (err/error :store/binding-rollback-failed
+                                          "restore rollback itself failed; staged state may be retained"
+                                          {:error/original (err/error-data failure)}))
+
+                        :else
+                        (throw (err/error :store/binding-rollback-failed
+                                          "restore rollback itself failed; staged state may be retained"
+                                          {:error/original (err/error-data failure)
+                                           :error/rollback-failure (err/error-data (::rollback-failure unwound))}))))
+                    (recur (rest pending) (conj undos undo))))))]
+        (publish-all bundles [])))))
 
 (defn restore-active-bindings!
   "Alias for restore!."
