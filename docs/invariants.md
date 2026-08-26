@@ -141,21 +141,27 @@ Size/count/depth limits must be applied *before* bulk data is read,
 materialized, or written into stores — never after the fact on data that
 is already fully loaded.
 
-- **Motivation.** `snapshot-tree!` (`src/evoclj/fs/snapshot.clj:45-75`)
-  reads every file byte-for-byte and writes each one into CAS (lines
-  57–64) *before* `check-limits!` runs (line 65; limit predicates defined
-  at lines 22–43). An over-limit tree pays full I/O and permanently
-  pollutes the CAS store before failing with `:fs/snapshot-limit-exceeded`.
+- **Motivation.** `snapshot-tree!` (`src/evoclj/fs/snapshot.clj:87-125`)
+  originally read every file byte-for-byte and wrote each one into CAS
+  (the capture loop, lines 110–115) *before* `check-limits!` ran, so an
+  over-limit tree paid full I/O and permanently polluted the CAS store
+  before failing with `:fs/snapshot-limit-exceeded`. WO-S4 moved the limit
+  check to a read-only PREFLIGHT: `check-limits!` now runs at line 108
+  (limit predicates at lines 41–66) against attribute metadata gathered
+  without reading content by `preflight-entries!` (lines 68–85).
 - **Violation consequence.** A hostile or accidentally huge skill
   directory exhausts disk/CAS quota even though the snapshot "fails";
   repeated attempts amplify the waste. The same late-check pattern, if
   copied onto streaming readers, turns configured limits into
   post-mortem diagnostics instead of guardrails.
-- **Enforcement.** To be closed by WO-S4 (preflight/streaming limits — reject
-  before reading; e2e #9). Mechanical check: S4 acceptance tests must
-  demonstrate an over-limit tree produces zero new CAS artifacts;
-  reviewers reject any implementation that counts entries only after a
-  full walk/read.
+- **Enforcement.** GUARDED (landed by WO-S4, e2e #9): `evoclj.fs.snapshot-test`
+  drives the production `snapshot-tree!` and asserts an over-limit tree
+  is rejected fail-closed with `:fs/snapshot-limit-exceeded` carrying its
+  `:limit`/`:actual`, with ZERO new CAS artifacts (reject before read)
+  for each of `:max-files`/`:max-depth`/`:max-file-bytes`/
+  `:max-total-bytes`, plus an exactly-at-boundary admission test and a
+  concurrent capture-independence check. Reviewers reject any
+  implementation that counts entries only after a full walk/read.
 
 ### INV-04 — Materialization fails closed
 
