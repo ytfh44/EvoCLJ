@@ -41,7 +41,20 @@
   lifecycle needs: valid-registry? (fail-closed validation of an INJECTED
   registry value at component-build time) and shutdown! (clean, idempotent
   teardown — closes every held source-subscription handle and resets state;
-  called by the host's halt-key!)."
+  called by the host's halt-key!).
+
+  S10 (source removal tombstone / catalog projection from latest payload):
+  remove-source! records a tombstone (source id marked removed), releases the
+  removed source's subscription handle + source record, DROPS its owned
+  logical-ids/bundles/surfaces from the publication indexes, and recomputes
+  the aggregate from the REMAINING sources. A removed source is NOT
+  re-instantiated by a later refresh and its artifacts never surface again in
+  the catalog projection (never stale/dead). Re-registering the same
+  source-id clears the tombstone and produces a fresh per-source entry.
+  catalog-projection derives the available view from the registry's published
+  indexes plus explicit :removed tombstone marks. Removing a source that was
+  never registered fails closed :environment/no-source; re-removing an
+  already-removed source is idempotent."
   (:require [evoclj.environment.revision :as rev]
             [evoclj.environment.source :as src]
             [evoclj.environment.bundle :as bundle]
@@ -64,7 +77,8 @@
    :dirty? false
    :last-refresh-error nil
    :listeners {}
-   :history []})
+   :history []
+   :tombstones {}})
 
 (defn create-registry []
   (let [lock (Object.)]
@@ -131,13 +145,18 @@
       (throw (err/error :environment/invalid-source "source snapshot must contain :source/id" {})))
     (swap! registry (fn [s]
                       (-> s
+                          ;; S10: re-registering a removed source-id clears its
+                          ;; tombstone -> a FRESH per-source entry (never a
+                          ;; resurrected stale one).
+                          (update :tombstones dissoc sid)
                           (assoc-in [:sources sid] source)
                           (assoc-in [:per-source sid] {:current nil
                                                         :last-good nil
                                                         :seq 0
                                                         :history []
                                                         :status :ok
-                                                        :last-refresh-error nil}))))
+                                                        :last-refresh-error nil
+                                                        :owned-logical-ids #{}}))))
     (let [handle (src/subscribe! source (fn [] (swap! registry assoc :dirty? true) (refresh-async! registry sid)))]
       (swap! registry assoc-in [:source-subs sid] handle))
     sid))
@@ -263,12 +282,17 @@
 
 (defn- advance-per-source-entry
   "Return an updated per-source entry after a successful (non-noop) publish of
-  the plan's prepared bundles. Pure: returns the new entry map."
+  the plan's prepared bundles. Pure: returns the new entry map. Tracks the
+  set of logical-ids this source published (:owned-logical-ids) so a later
+  S10 removal can drop exactly its own artifacts."
   [entry plan]
   (let [next-seq (inc (or (:seq entry) 0))
-        rev (assoc (:revision (last (:preps plan))) :revision/seq next-seq)]
+        rev (assoc (:revision (last (:preps plan))) :revision/seq next-seq)
+        owned (into (or (:owned-logical-ids entry) #{})
+                    (map (fn [prep] (some-> prep :bundle :logical/id)) (:preps plan)))]
     (-> entry
-        (assoc :current rev :last-good rev :seq next-seq :status :ok :last-refresh-error nil)
+        (assoc :current rev :last-good rev :seq next-seq :status :ok :last-refresh-error nil
+               :owned-logical-ids owned)
         (update :history (fnil conj []) rev))))
 
 (defn- advance-all
@@ -335,6 +359,171 @@
   per-source entries alone."
   [per-src]
   (compute-aggregate per-src))
+
+;; ---------------------------------------------------------------------------
+;; S10 — source removal tombstone + catalog projection from latest payload
+;; ---------------------------------------------------------------------------
+
+(defn- drop-logical-ids
+  "Remove `owned` logical-ids from a logical-index map keyed by logical-id."
+  [m owned]
+  (reduce dissoc (or m {}) owned))
+
+(defn- drop-bundles-owned-by
+  "Remove entries whose value bundle is owned by one of `owned` logical-ids
+   from a bundle-id -> bundle map."
+  [m owned]
+  (into {} (remove (fn [[_ b]] (contains? owned (:logical/id b)))) (or m {})))
+
+(defn- drop-surfaces-owned-by
+  "Remove entries whose value surface is owned by one of `owned` logical-ids
+   from a surface-id -> surface map."
+  [m owned]
+  (into {} (remove (fn [[_ s]] (contains? owned (:logical/id s)))) (or m {})))
+
+(defn- drop-source-artifacts
+  "Pure: drop a removed source's owned logical-ids/bundles/surfaces from the
+   publication indexes, so a later catalog projection is never stale/dead.
+   `owned` is the set of logical-ids that source published."
+  [state owned]
+  (let [owned (set owned)]
+    (-> state
+        (update :logical-index drop-logical-ids owned)
+        (update :bundles drop-bundles-owned-by owned)
+        (update :bundle-index drop-bundles-owned-by owned)
+        (update :surfaces drop-surfaces-owned-by owned)
+        (update :indexes (fn [idx]
+                           (when (map? idx)
+                             (-> idx
+                                 (update :logical-index drop-logical-ids owned)
+                                 (update :bundle-index drop-bundles-owned-by owned)
+                                 (update :surface-index drop-surfaces-owned-by owned))))))))
+
+(defn- close-best-effort!
+  [x]
+  (when x
+    (try (x) (catch Throwable _ nil))))
+
+(defn remove-source!
+  "S10 source removal tombstone. Remove a registered source:
+
+   - record a tombstone (source id marked removed) with an explicit marker;
+   - release its subscription handle and the source record itself
+     (revoke/cleanup semantics);
+   - DROP its owned logical-ids/bundles/surfaces from the publication indexes
+     so it no longer appears in the catalog projection (never stale/dead);
+   - recompute the aggregate (:current/:last-good/:seq) from the REMAINING
+     sources only, keeping it consistent so a later snapshot pin! stays
+     coherent.
+
+   Fail-closed / typed:
+     - removing a source that was never registered throws
+       :environment/no-source.
+     - removing an already-removed source is IDEMPOTENT (returns the existing
+       tombstone, no throw).
+
+   A removed source is NOT re-instantiated by a later refresh (it is removed
+   from :sources), and its artifacts no longer surface in the catalog
+   projection. Re-registering the same source-id clears the tombstone and
+   produces a fresh per-source entry (see register-source!).
+
+   Returns {:status :removed :source/id sid :removed-logical-ids [..]
+            :tombstone {:source/id sid :removed-at n ...}}."
+  [registry source-id]
+  (let [lock (registry-lock registry)]
+    (locking lock
+      (let [state @registry
+            sources (:sources state)
+            per-src (:per-source state)]
+        (cond
+          ;; already removed -> idempotent, return the same tombstone
+          (contains? (:tombstones state) source-id)
+          (let [tomb (get-in state [:tombstones source-id])]
+            {:status :removed :idempotent? true :source/id source-id
+             :removed-logical-ids (:removed-logical-ids tomb)
+             :tombstone tomb})
+
+          ;; never registered -> fail closed typed
+          (not (contains? sources source-id))
+          (throw (err/error :environment/no-source "cannot remove source: not registered"
+                            {:source/id source-id}))
+
+          :else
+          (let [entry (get per-src source-id)
+                owned (set (or (:owned-logical-ids entry) #{}))
+                sub-handle (get-in state [:source-subs source-id])
+                ;; revoke/cleanup: release the subscription handle then the
+                ;; source record, best-effort and idempotent.
+                _ (when sub-handle
+                    (close-best-effort! (:close! sub-handle)))
+                _ (when-let [src (get sources source-id)]
+                    (close-best-effort! #(src/close! src)))
+                now (System/currentTimeMillis)
+                tomb {:source/id source-id :removed-at now
+                      :removed-logical-ids (vec owned)}
+                base (-> state
+                         (assoc-in [:tombstones source-id] tomb)
+                         (update :sources dissoc source-id)
+                         (update :source-subs dissoc source-id)
+                         (update :per-source dissoc source-id))
+                removed-state (drop-source-artifacts base owned)
+                top (compute-aggregate (:per-source removed-state))
+                ents (vals (:per-source removed-state))
+                any-degraded (boolean (some #(= :degraded (:status %)) ents))
+                err-data (some #(:last-refresh-error %)
+                               (filter #(= :degraded (:status %)) ents))
+                final-state (-> removed-state
+                                (assoc :current (:current top)
+                                       :last-good (:last-good top)
+                                       :seq (max 0 (or (:seq top) -1)))
+                                (assoc :status (if any-degraded :degraded :ok)
+                                       :dirty? false
+                                       :last-refresh-error err-data))]
+            (reset! registry final-state)
+            {:status :removed :source/id source-id
+             :removed-logical-ids (vec owned)
+             :tombstone tomb}))))))
+
+(defn source-removed?
+  "S10: true when source-id has been removed (tombstoned)."
+  [registry source-id]
+  (contains? (:tombstones @registry) source-id))
+
+(defn removed-sources
+  "S10: the set of source ids currently marked removed (tombstoned)."
+  [registry]
+  (set (keys (:tombstones @registry))))
+
+(defn tombstone
+  "S10: the removal tombstone record for source-id, or nil when not removed."
+  [registry source-id]
+  (get-in @registry [:tombstones source-id]))
+
+(defn catalog-projection
+  "S10 catalog projection — the derived view of the currently available
+   tools/skills/surfaces, recomputed from the MOST RECENT payload of the
+   remaining (non-removed) sources. Derived purely from the registry's
+   published indexes: removed-source artifacts have already been dropped by
+   remove-source! so they are never stale/dead, and a removed source is
+   surfaced ONLY as an explicit tombstone mark under :removed.
+
+   Returns:
+     {:logical-index {lid {:logical/id lid :bundle/id bid :revision/id rid}}
+      :bundles        {bundle-id bundle}
+      :surfaces       {surface-id surface}
+      :removed        {source-id tombstone}}"
+  [registry]
+  (let [state @registry
+        bundles (or (:bundles state) {})]
+    {:logical-index (into (sorted-map-by (fn [a b] (< (compare (str a) (str b)) 0)))
+                          (map (fn [[lid bid]]
+                                 [lid {:logical/id lid
+                                       :bundle/id bid
+                                       :revision/id (some-> (get bundles bid) :revision/id)}]))
+                          (or (:logical-index state) {}))
+     :bundles bundles
+     :surfaces (or (:surfaces state) {})
+     :removed (or (:tombstones state) {})}))
 
 (defn- apply-chain-swap!
   "Apply all successfully-prepared per-source chains in ONE atomic swap.
