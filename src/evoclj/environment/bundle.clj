@@ -4,6 +4,17 @@
   SurfaceBundle shape:
     {:bundle/id :revision/id :logical/id :surfaces [...]}
 
+  E3 OWNERSHIP: every published bundle/surface-set has a clear owner — the
+  logical source (:logical/id) that produced it. Ownership is stamped onto
+  the registry's surface index (:logical/id + :bundle/id per stored surface)
+  and enforced on update: only the owner can re-publish/replace its own
+  surface ids; a DIFFERENT logical id claiming an owned surface id or an
+  owned bundle id is a typed :bundle/collision and fails closed (no silent
+  overwrite). Legitimate re-publication by the SAME owner — a content
+  update / new revision, each its own content-addressed bundle id — always
+  succeeds. Ownership survives across refreshes; readers surface-owner /
+  bundle-owner expose the stamped owner.
+
   Sibling surfaces must be co-versioned (same revision/id). For Skill,
   Context and Directory are bound together atomically; no half-bound
   state where context succeeds but mount fails.
@@ -94,38 +105,67 @@
     bundle))
 
 (defn- check-collision-against-registry
-  "Collision check against the *current* registry state, before any mutation.
+  "E3 ownership-aware collision check against the *current* registry state,
+  before any mutation.
 
-  Fail-closed semantics (no torn state):
-    - A bundle/id already present with the SAME content identity
-      (:revision/id) is a legitimate re-publish/update (the noop path) and is
-      NOT a collision.
-    - A bundle/id already present with a DIFFERENT content identity is a
-      genuine ownership collision — someone else owns that id with different
-      content — and must fail the whole publication (typed :bundle/collision).
-    - A surface id that already exists in the registry, bound to a DIFFERENT
-      bundle (a different logical source) than the candidate, is a genuine
-      conflict and must fail (you cannot overwrite another bundle's surface).
-  Reusing the same surface id WITHIN the same bundle (same revision/id) is the
-  normal update case and is allowed."
+  OWNERSHIP MODEL: every published bundle/surface-set is owned by the
+  logical source that produced it (:logical/id — the stable per-source
+  identity). :bundle/id and :surface/id are claimed resources. Only the
+  owner may re-publish or replace its own claims; a DIFFERENT logical id
+  claiming an owned resource is a typed :bundle/collision and fails the
+  whole publication (no silent overwrite, no torn state).
+
+  Fail-closed semantics:
+    - bundle/id already present and bound to a DIFFERENT :logical/id:
+      cross-owner takeover of the bundle id -> typed :bundle/collision.
+    - bundle/id present, SAME owner, different :revision/id: a published
+      content-addressed bundle id may never be rebound to different
+      content -> typed :bundle/collision.
+    - bundle/id present, SAME owner, same :revision/id, but a different
+      surface-id set: contradictory content under one content address ->
+      typed :bundle/collision.
+    - surface id already bound (stamped) to a DIFFERENT :logical/id than
+      the candidate: cross-owner takeover of the surface id -> typed
+      :bundle/collision. Rebinding the SAME owner's surface id to a new
+      revision (content update / new revision of the same source) is the
+      legitimate update case and is allowed."
   [registry bundle]
-  (let [candidate-rev (:revision/id bundle)
-        bundles (or (:bundles @registry) {})
-        existing (get bundles (:bundle/id bundle))]
-    ;; 1. bundle/id ownership conflict: same id, different content
+  (let [bundles (or (:bundles @registry) {})
+        existing (get bundles (:bundle/id bundle))
+        candidate-rev (:revision/id bundle)
+        lid (:logical/id bundle)]
+    ;; 1a. bundle/id ownership conflict: claimed by a different source
+    (when (and existing (not= (:logical/id existing) lid))
+      (throw (err/error :bundle/collision "bundle id already owned by a different source"
+                        {:bundle/id (:bundle/id bundle)
+                         :owner-logical/id (:logical/id existing)
+                         :candidate-logical/id lid
+                         :existing-revision/id (:revision/id existing)
+                         :candidate-revision/id candidate-rev})))
+    ;; 1b. same owner rebinding a published content-addressed bundle id to
+    ;;     different content.
     (when (and existing (not= candidate-rev (:revision/id existing)))
       (throw (err/error :bundle/collision "bundle id already exists with different content"
                         {:bundle/id (:bundle/id bundle)
                          :existing-revision/id (:revision/id existing)
                          :candidate-revision/id candidate-rev})))
+    ;; 1c. same owner, same content identity, but a different surface-id set:
+    ;;     contradictory content under a single content address.
+    (when (and existing
+               (not= (vec (sort-by str (map :surface/id (:surfaces bundle))))
+                     (vec (sort-by str (map :surface/id (:surfaces existing))))))
+      (throw (err/error :bundle/collision "bundle id already exists with a different surface set"
+                        {:bundle/id (:bundle/id bundle)
+                         :owner-logical/id lid
+                         :existing-surface-ids (vec (sort-by str (map :surface/id (:surfaces existing))))
+                         :candidate-surface-ids (vec (sort-by str (map :surface/id (:surfaces bundle))))})))
     ;; 2. surface-id ownership conflict across DISTINCT sources.
     ;; A surface id whose existing owner shares THIS candidate's :logical/id
     ;; (same source rebinding its stable surface to a new revision) is allowed.
     ;; A surface id already bound to a DIFFERENT :logical/id is a genuine
     ;; ownership conflict and must fail.
     (let [existing-surfaces (or (:surfaces @registry) {})
-          new-ids (set (map :surface/id (:surfaces bundle)))
-          lid (:logical/id bundle)]
+          new-ids (set (map :surface/id (:surfaces bundle)))]
       (doseq [sid new-ids]
         (when-let [bound (get existing-surfaces sid)]
           ;; owned by a different source -> conflict.
@@ -133,7 +173,9 @@
             (throw (err/error :bundle/collision "surface id already bound to a different source"
                               {:surface/id sid
                                :bound-logical/id (:logical/id bound)
-                               :candidate-logical/id lid}))))))
+                               :candidate-logical/id lid
+                               :bound-bundle/id (:bundle/id bound)
+                               :candidate-bundle/id (:bundle/id bundle)}))))))
     nil))
 
 (defn- check-index-projection
@@ -208,6 +250,7 @@
         cur (:current @registry)
         cur-id (:revision/id cur)
         prev-seq (:seq @registry)
+        source-id (or (:logical/id bundle) :bundle/source)
         ;; Source-bundle-opts (e.g. from a LiveSource's project) may carry the
         ;; raw source :payload. When present we publish it as the revision
         ;; :payload to preserve the E1 single-source contract (the revision
@@ -216,7 +259,15 @@
         ;; there is no separate :payload, so we fall back to the bundle-derived
         ;; payload (bundle/id + logical/id + surfaces), matching E1 publish-bundle!.
         src-payload (:payload bundle-or-opts)]
-    (if (and cur-id (= candidate-id cur-id))
+    (if (and cur-id
+             (= candidate-id cur-id)
+             ;; E3 OWNERSHIP GUARD: the early :noop is legitimate only when the
+             ;; registry's current revision was published by THIS bundle's own
+             ;; logical source. Another source publishing byte-identical content
+             ;; must still publish its OWN revision — adopting the other source's
+             ;; revision object here would install foreign attribution (the
+             ;; adopted :source/id would name a different logical id).
+             (= (:source/id cur) source-id))
       {:status :noop
        :bundle bundle
        :revision-id candidate-id
@@ -224,7 +275,6 @@
        :revision cur
        :prev-seq prev-seq}
       (let [next-seq (inc (or prev-seq 0))
-            source-id (or (:logical/id bundle) :bundle/source)
             payload (if (some? src-payload)
                       src-payload
                       {:bundle/id (:bundle/id bundle) :logical/id (:logical/id bundle) :surfaces (:surfaces bundle)})
@@ -242,7 +292,9 @@
 
   Steps, in order, before any mutation:
     1. validate bundle and co-versioning
-    2. check collision (duplicate surface ids within bundle)
+    2. check collision: E3 ownership enforcement (cross-owner surface-id or
+       bundle-id claims are typed :bundle/collision; same-owner re-publish of
+       a new revision is allowed) plus duplicate surface ids within bundle
     3. check descriptor validity (each surface validated)
     4. check index projection (indexes derivable)
 
@@ -314,3 +366,15 @@
 (defn get-bundle [registry bundle-id] (get-in @registry [:bundles bundle-id]))
 (defn list-surfaces [registry] (vals (or (:surfaces @registry) {})))
 (defn get-surface [registry surface-id] (get-in @registry [:surfaces surface-id]))
+
+(defn surface-owner
+  "E3 OWNERSHIP reader: the :logical/id that owns a published surface id,
+  or nil when the surface id is not published."
+  [registry surface-id]
+  (:logical/id (get-in @registry [:surfaces surface-id])))
+
+(defn bundle-owner
+  "E3 OWNERSHIP reader: the :logical/id that owns a published bundle id,
+  or nil when the bundle id is not published."
+  [registry bundle-id]
+  (:logical/id (get-in @registry [:bundles bundle-id])))
