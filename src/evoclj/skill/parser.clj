@@ -21,7 +21,15 @@
     never coerced into a `java.util.Date`/`Temporal` object (no type confusion).
 
   allowed-tools is preserved raw and also parsed into normalized tokens for visibility hint.
-  scripts/ is never execution authority — just files in the RO mount."
+  scripts/ is never execution authority — just files in the RO mount.
+
+  allowed-tools token grammar (W/O-S9): a valid token is a non-empty, non-blank
+  identifier composed of letters, digits, and the tool-id namespacing separators
+  `. _ / : + -` (no whitespace, comma, or any other punctuation). The grammar is
+  judged by this namespace and surfaced through the production parse result:
+  - strict mode: any invalid token => typed :skill/invalid-tool-token (fail-closed).
+  - lenient mode: invalid tokens => parse continues but a WARN diagnostic is
+    surfaced via :warnings / :allowed-tools-invalid (never silent, never fatal)."
   (:require [clojure.string :as str]
             [evoclj.kernel.error :as err])
   (:import (org.yaml.snakeyaml Yaml LoaderOptions DumperOptions)
@@ -178,9 +186,30 @@
     (check-plain-value kwm)
     kwm))
 
+(def ^:private tool-token-pattern
+  "Canonical allowed-tools token grammar (W/O-S9). A valid token is a non-empty,
+  non-blank identifier: a leading alphanumeric followed by alphanumerics and/or the
+  tool-id namespacing separators `. _ / : + -`. This rejects blanks, internal
+  whitespace, commas, and any other punctuation/UTF-8 junk a malformed token would
+  carry. It is judged by #\"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$\"."
+  #"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
+
+(defn valid-tool-token?
+  "True when `t` is a well-formed allowed-tools tool token per the canonical grammar
+  (see tool-token-pattern). A nil/blank/whitespace/comma-heavy or otherwise malformed
+  token is NOT valid. Single implementation of the grammar (INV-05) — the
+  parse path calls this and nothing else re-derives the grammar."
+  [t]
+  (and (string? t)
+       (not (str/blank? t))
+       (boolean (re-matches tool-token-pattern t))))
+
 (defn- parse-allowed-tools
-  "Parse allowed-tools / tools value. Returns {:raw original :parsed [...] :normalized [...]}
-   or nil when absent. Does not mint leases; only a visibility hint."
+  "Parse allowed-tools / tools value. Returns {:raw original :parsed [...] :normalized [...]
+   :known [...] :invalid [...] :valid? bool} or nil when absent.
+   Does not mint leases; only a visibility hint. Classifies each parsed token by the
+   canonical grammar (valid-tool-token?) so strict can fail-closed and lenient can
+   surface an invalid-token diagnostic."
   [fm]
   (let [raw (or (:allowed-tools fm) (:allowed_tools fm) (:tools fm))]
     (when raw
@@ -198,11 +227,18 @@
                      (vec (map str raw))
                      :else [(str raw)])
             known #{"Read" "Write" "Edit" "Bash" "Grep" "Glob" "Skill" "Agent" "AskUserQuestion" "TodoWrite" "WebFetch" "WebSearch" "Task" "NotebookEdit" "ExitPlanMode"}
+            invalid (vec (remove valid-tool-token? tokens))
+            valid? (empty? invalid)
             normalized (mapv (fn [t]
                                (let [lower (str/lower-case t)]
                                  (keyword lower)))
                              tokens)]
-        {:raw raw :parsed tokens :normalized normalized :known known}))))
+        {:raw raw
+         :parsed tokens
+         :normalized normalized
+         :known known
+         :invalid invalid
+         :valid? valid?}))))
 
 (defn extract-frontmatter
   "Split SKILL.md content into {:frontmatter-yaml (or nil) :body string :had-frontmatter? bool}
@@ -255,12 +291,25 @@
          (throw (err/error :skill/invalid-descriptor "strict SKILL.md requires non-empty :description" {:frontmatter fm}))))
      ;; allowed-tools handling
      (let [at (parse-allowed-tools fm)
-           fm-with-at (if at (assoc fm :allowed-tools (:raw at) :allowed-tools-parsed at) fm)]
+           fm-with-at (if at (assoc fm :allowed-tools (:raw at) :allowed-tools-parsed at) fm)
+           invalid (when at (:invalid at))
+           _ (when (and (= mode :strict) at (seq invalid))
+               (throw (err/error :skill/invalid-tool-token
+                                 "allowed-tools contains invalid tool token(s)"
+                                 {:invalid invalid :allowed-tools (:raw at) :mode mode})))
+           warnings (when (and (not= mode :strict) at (seq invalid))
+                      [{:type :skill/invalid-tool-token
+                        :tokens invalid
+                        :allowed-tools (:raw at)
+                        :mode mode}])]
        {:frontmatter fm-with-at
         :body (str/trim body)
         :raw content
         :had-frontmatter? had-frontmatter?
         :allowed-tools at
+        ;; stable diagnostic shape: absent/valid => empty vectors, never nil.
+        :allowed-tools-invalid (vec (or invalid []))
+        :warnings (vec (or warnings []))
         :mode mode}))))
 
 (defn validate-skill-metadata
