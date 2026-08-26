@@ -173,6 +173,41 @@
   [bundle]
   (or (:surfaces bundle) []))
 
+;; WO-B3: mount-id shape unification. A mount id is ALWAYS a canonical
+;; vector ([:skill "name" "sha256:..."], [:workspace "id"]) — never a
+;; bare scalar :surface/id. The canonical id for a directory surface is
+;; the bundle's logical-id vector extended with the surface's
+;; :revision/id when that revision is not already part of the logical id.
+;; Used by publish/unpublish/publish-mount-ids/removed-mount-ids-for so
+;; every mount registry key derives from ONE formula (INV-05).
+
+(defn- directory-mount-id
+  "Canonical vector mount-id for a directory surface.
+
+  Returns logical-id (a vector) extended with the surface's :revision/id
+  when that revision is not already a component of the logical id.
+  Throws typed :store/binding-invalid when logical-id is not a usable
+  vector base (fail-closed)."
+  [logical-id surface]
+  (when-not (and (vector? logical-id) (seq logical-id) (keyword? (first logical-id)))
+    (throw (err/error :store/binding-invalid
+                      "directory surface mount id requires a vector logical-id"
+                      {:logical/id logical-id :surface/id (:surface/id surface)})))
+  (let [lid (vec logical-id)
+        rev (:revision/id surface)]
+    (cond-> lid
+      (and rev (not (some #{rev} lid))) (conj rev))))
+
+(defn- mount-key-for
+  "Given an element of surfaces-or-ids (a surface map OR an
+  already-canonical mount-id), return its canonical mount registry key.
+  WO-B3: surfaces are normalized via directory-mount-id; pre-computed
+  ids pass through unchanged."
+  [logical-id elt]
+  (if (map? elt)
+    (directory-mount-id logical-id elt)
+    elt))
+
 ;; WO-B1 metadata allowlist: the ONLY surface keys that may cross the
 ;; persistence boundary. :materializer is operational (stripped before
 ;; the check); anything else is an attempt to persist uncontrolled
@@ -416,39 +451,40 @@
     (when mount-registry
       (doseq [s surfaces
               :when (= :directory (:surface/type s))]
-        ;; WO-B1: the OUTER boundary is typed. The inner fallbacks below
-        ;; are deliberate degradation WITHIN a surface's construction
-        ;; (plain descriptor when a real Backend cannot be realized —
-        ;; mount-id shape unification is WO-B3) and stay.
+        ;; WO-B1: the OUTER boundary is typed. WO-B3: the mount-id is a
+        ;; canonical vector (directory-mount-id — logical-id + revision,
+        ;; never a bare scalar :surface/id) and registration goes through
+        ;; the single canonical register-mount! — no ad-hoc
+        ;; (swap! assoc) mutation of the registry (INV-05). The backend
+        ;; realization fallbacks below stay: a real Backend is preferred,
+        ;; else a plain descriptor mount is built (register-mount!
+        ;; accepts a descriptor backend) and the filesystem provider
+        ;; fails-closed at operation time.
         (try
-          (let [mount-id (or (:surface/id s) logical-id)]
-            (let [existing (try (mount-backend/get-mount mount-registry mount-id)
-                                (catch Exception _ nil))]
-              (when-not existing
-                (let [raw (:backend s)
-                      backend (cond
-                                (and raw
-                                     (try
-                                       (satisfies? mount-backend/Backend raw)
-                                       (catch Exception _ false))) raw
-                                (and raw (map? raw) (:tree/id raw) cas-handle)
-                                (try
-                                  (mount-backend/cas-tree-backend cas-handle (:tree/id raw))
-                                  (catch Exception _ raw))
-                                (and raw (map? raw) (:tree-id raw) cas-handle)
-                                (try
-                                  (mount-backend/cas-tree-backend cas-handle (:tree-id raw))
-                                  (catch Exception _ raw))
-                                cas-handle
-                                (try
-                                  (mount-backend/cas-tree-backend cas-handle rev)
-                                  (catch Exception _ nil))
-                                :else raw)
-                      backend (or backend {:type :cas-tree :tree/id rev :bundle/id bid})
-                      mount (try
-                              (mount-backend/make-mount {:mount-id mount-id :backend backend :access-max (:access/max s)})
-                              (catch Exception _ {:mount/id mount-id :backend backend :access/max (:access/max s)}))]
-                  (swap! mount-registry assoc mount-id mount)))))
+          (let [mount-id (directory-mount-id logical-id s)]
+            (when-not (mount-backend/get-mount mount-registry mount-id)
+              (let [raw (:backend s)
+                    backend (cond
+                              (and raw
+                                   (try
+                                     (satisfies? mount-backend/Backend raw)
+                                     (catch Exception _ false))) raw
+                              (and raw (map? raw) (:tree/id raw) cas-handle)
+                              (try
+                                (mount-backend/cas-tree-backend cas-handle (:tree/id raw))
+                                (catch Exception _ raw))
+                              (and raw (map? raw) (:tree-id raw) cas-handle)
+                              (try
+                                (mount-backend/cas-tree-backend cas-handle (:tree-id raw))
+                                (catch Exception _ raw))
+                              cas-handle
+                              (try
+                                (mount-backend/cas-tree-backend cas-handle rev)
+                                (catch Exception _ nil))
+                              :else raw)
+                    backend (or backend {:type :cas-tree :tree/id rev :bundle/id bid})
+                    mount (mount-backend/make-mount {:mount-id mount-id :backend backend :access-max (:access/max s)})]
+                (mount-backend/register-mount! mount-registry mount))))
           (catch Exception e
             (throw (publish-failure :directory s e))))))
     nil))
@@ -470,7 +506,7 @@
    (when mount-registry
      (try
        (if (seq surfaces-or-ids)
-         (let [ids (set (map #(or (:surface/id %) %) surfaces-or-ids))]
+         (let [ids (set (map #(mount-key-for logical-id %) surfaces-or-ids))]
            (swap! mount-registry
                   (fn [m]
                     (into {} (remove (fn [[k _]] (contains? ids k)) m)))))
@@ -486,19 +522,21 @@
 
 (defn- publish-mount-ids
   "The mount registry keys publish-runtime! would use for bundle's
-  directory surfaces (the exact same id formula)."
+  directory surfaces (the exact same id formula — canonical vector
+  mount-id via directory-mount-id)."
   [bundle]
   (let [logical-id (bundle->logical bundle)]
     (set (for [s (bundle->surfaces bundle)
                :when (= :directory (:surface/type s))]
-           (or (:surface/id s) logical-id)))))
+           (directory-mount-id logical-id s)))))
 
 (defn- removed-mount-ids-for
   "The mount registry keys unpublish-runtime! removes for these
-  surfaces-or-ids (mirrors its id logic exactly)."
+  surfaces-or-ids (mirrors its id logic exactly — canonical vector
+  mount-id via mount-key-for)."
   [surfaces-or-ids logical-id]
   (if (seq surfaces-or-ids)
-    (set (map #(or (:surface/id %) %) surfaces-or-ids))
+    (set (map #(mount-key-for logical-id %) surfaces-or-ids))
     #{logical-id}))
 
 (defn- read-prestate!

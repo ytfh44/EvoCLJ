@@ -179,7 +179,10 @@
       (is (= 1 (count (ctx-binding/list-active ctx-store))) "context binding published")
       (is (= logical (:logical/id (first (ctx-binding/list-active ctx-store)))))
       (is (= 1 (count (mount-backend/list-mounts mount-reg))) "mount published")
-      (is (some? (mount-backend/get-mount mount-reg (keyword "skill-dir"))) "mount id present or synthetic"))
+      (is (some? (mount-backend/get-mount mount-reg (conj logical (:revision/id bundle))))
+          "mount registered under the canonical vector mount-id (logical-id + revision)")
+      (is (nil? (mount-backend/get-mount mount-reg (keyword "skill-dir")))
+          "no scalar surface-id mount key remains"))
     (testing "event appended"
       (is (= (inc before-events) (count after-events)))
       (is (= :binding/activated (:event/type (last after-events)))))
@@ -188,6 +191,30 @@
             surfaces (:surfaces meta)]
         (is (= 2 (count surfaces)) "bundle had context + mount")
         (is (every? #(= (:revision/id bundle) (:revision/id %)) surfaces) "siblings share revision")))))
+
+(deftest mount-id-is-canonical-vector-form-through-activation
+  (testing "WO-B3: activation publishes a directory surface under the canonical
+            vector mount-id (logical-id + revision) — never a bare scalar
+            :surface/id — and registration goes through register-mount!"
+    (let [db (fresh-db)
+          sid (seed-session! db)
+          cas-root (temp-cas-root)
+          cas (cas/->cas (str cas-root))
+          mount-reg (mount-backend/create-registry)
+          logical [:skill "debugging"]
+          payload "skill content A"
+          bundle (make-skill-bundle logical payload)
+          rev (:revision/id bundle)
+          canonical (conj logical rev)
+          ;; put the raw payload bytes so its CAS artifact id == revision id
+          _ (cas/put-bytes! cas (.getBytes payload StandardCharsets/UTF_8)
+                            {:media-type "text/plain"})
+          _ (binding/activate! db sid bundle {:cas cas :mount-registry mount-reg})]
+      (testing "the mount is registered exactly once under the canonical vector id"
+        (is (= 1 (count (mount-backend/list-mounts mount-reg))))
+        (is (some? (mount-backend/get-mount mount-reg canonical)))
+        (is (nil? (mount-backend/get-mount mount-reg (keyword "skill-dir")))
+            "no scalar surface-id key remains in the registry")))))
 
 (deftest activation-validates-bundle-and-sibling-surfaces
   (let [db (fresh-db)
