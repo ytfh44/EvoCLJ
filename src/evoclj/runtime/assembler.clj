@@ -8,6 +8,7 @@
   tool-loop; context is rebuilt each round so activate_skill becomes
   visible immediately."
   (:require [evoclj.context.materializer :as mat]
+            [evoclj.context.prompt-trust :as trust]
             [evoclj.environment.revision :as rev]
             [evoclj.kernel.error :as err]))
 
@@ -19,7 +20,13 @@
   catalog: map source-id -> revision-id (current catalog)
   tool-catalog-binding: {:binding/id :revision/ids ...} or nil
   history: string or vector of messages
-  opts: {:cas <cas-config-or-map-or-path> :policy <host-policy>}"
+  opts: {:cas <cas-config-or-map-or-path> :policy <host-policy>}
+
+  Returns a PreparedModelCall map that additionally carries
+  :prompt/provenance — a structured header attributing each message to a
+  source/trust level (:kernel/:extra/:user/:model). Kernel instructions
+  are always emitted first and are non-overridable by lower-trust
+  content (S13)."
 
   ([base-call session-bindings catalog tool-catalog-binding]
    (base->prepared base-call session-bindings catalog tool-catalog-binding nil {}))
@@ -51,11 +58,20 @@
                       :effective/segments []
                       :effective/bindings []})
          segments (:effective/segments effective [])
-         ;; inject segments as system messages before base messages
+         ;; S13 PROVENANCE + KERNEL PRIORITY: the trusted assembler must
+         ;; (1) tag each message with a provenance header and (2) emit
+         ;; kernel instructions first, before any lower-trust extra/user
+         ;; content. base-call messages are classified as :kernel/:user/
+         ;; :model by role; skill segments are :extra. `prioritized-prompt`
+         ;; orders them kernel > extra > user > model and builds the
+         ;; :prompt/provenance header; it fails closed (typed) when a
+         ;; message cannot be attributed (INV-04/09 style).
          seg-messages (mapv (fn [seg] {:role "system"
                                        :content (or (:segment/content seg) (str seg))})
                             segments)
-         messages (into (vec seg-messages) (vec base-messages))
+         {messages :messages provenance :prompt/provenance} (trust/prioritized-prompt
+                                                             (merge (trust/split-base-messages base-messages)
+                                                                    {:extra seg-messages}))
          ;; tool-map: wire name -> binding (for scheduler)
          tool-map (into {} (map (fn [t] [(:tool/id t) t]) (or requested-tools [])))
          manifest {:context/manifest-version 1
@@ -68,6 +84,7 @@
      {:messages messages
       :tools (or requested-tools [])
       :tool-map tool-map
+      :prompt/provenance provenance
       :context/manifest manifest
       :tool-catalog/binding tool-catalog
       :environment/provenance {:catalog catalog
