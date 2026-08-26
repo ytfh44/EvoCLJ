@@ -30,13 +30,44 @@
   and write it to CAS. Consequently an over-limit (or unreadable) tree is
   rejected fail-closed with a typed error BEFORE any CAS artifact is
   created — zero new artifacts, never a partial snapshot that is rejected
-  mid-stream."
+  mid-stream.
+
+  TOCTOU HARDENING (WO-S5, e2e#10 — NOFOLLOW + identity re-check,
+  platform-graded):
+  The preflight validates metadata and the walker rejects symlinks, but a
+  path can still be SWAPPED between that validation and the actual read
+  (the readAllBytes/cas-write in the capture phase). S5 closes that
+  window on the capture step (see capture-entry!) by:
+
+    - NOFOLLOW — the file is opened/read with NOFOLLOW_LINKS, so a
+      validated path switched to a symbolic link after preflight is never
+      followed to an outside target; the open itself fails and the outside
+      bytes are never read.
+    - Identity re-check — the file identity is captured once at preflight
+      (preflight-entries! -> identity-of) and re-verified immediately at
+      capture (capture-entry!). A mismatch (path retargeted, file
+      replaced, symlink introduced, path vanished) is a typed fail-closed
+      reject (:fs/toctou-symlink / :fs/toctou-identity-mismatch) and the
+      swapped file is NOT read, so zero content reaches CAS.
+    - Platform-graded identity — identity-of reports the strongest
+      available token per platform: :file-key (inode identity) from the
+      basic file view when the host/populates it (POSIX and some NTFS
+      hosts), plus :real-path, :size and :last-modified. Where :file-key
+      is unavailable (e.g. a host returning null), the identity DEGRADES
+      to real-path/size/last-modified rather than silently pretending an
+      unverifiable token is strong; reading an unverifiable path still
+      fails closed because real-path resolution and the atomic NOFOLLOW
+      open also reject. The grading is deliberate: on every platform the
+      re-check is either satisfied or the capture throw — never skipped."
   (:require [clojure.edn :as edn]
             [evoclj.fs.walk :as walk]
             [evoclj.kernel.error :as err]
             [evoclj.store.cas :as cas])
   (:import (java.nio.charset StandardCharsets)
-           (java.nio.file Files LinkOption Path)))
+           (java.nio.file Files LinkOption OpenOption Path StandardOpenOption)
+           (java.nio.file.attribute BasicFileAttributes)))
+
+(declare identity-of capture-entry! read-open-bytes)
 
 (defn- check-limits!
   "Enforce the configured limits against a sequence of preflight entries
@@ -66,14 +97,29 @@
                             {:total total :limit max-total-bytes})))))))
 
 (defn- preflight-entries!
-  "Gather path + attribute metadata (size, readability, regular-file) for
-  every walked file WITHOUT reading any content (INV-03). Fail-closed:
+  "Gather path + attribute metadata (size, readability, regular-file)
+  for every walked file WITHOUT reading any content (INV-03). Fail-closed:
   an entry that is not a regular file or is not readable throws
-  :fs/unreadable before the capture phase touches a single byte."
+  :fs/unreadable before the capture phase touches a single byte.
+
+  Each returned entry also carries the platform-graded file :identity for
+  the TOCTOU re-check: the capture step re-verifies this identity and
+  rejects a path swapped after preflight (see capture-entry! / identity-of)."
   [entries-raw]
   (mapv (fn [{:keys [path physical-path]}]
           (let [^Path p physical-path
-                _ (when-not (Files/isRegularFile p (make-array LinkOption 0))
+                attrs (try
+                        (Files/readAttributes p BasicFileAttributes
+                                              (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+                        (catch java.nio.file.NoSuchFileException _
+                          (throw (err/error :fs/unreadable
+                                            "entry is missing"
+                                            {:path path}))))
+                _ (when (.isSymbolicLink attrs)
+                    (throw (err/error :fs/symlink-rejected
+                                      "entry is a symbolic link"
+                                      {:path path})))
+                _ (when-not (.isRegularFile attrs)
                     (throw (err/error :fs/unreadable
                                       "entry is not a regular file"
                                       {:path path})))
@@ -81,8 +127,104 @@
                     (throw (err/error :fs/unreadable
                                       "entry is not readable"
                                       {:path path})))]
-            {:path path :physical-path p :size (Files/size p)}))
+            {:path path :physical-path p :size (.size attrs)
+             :identity (identity-of p attrs)}))
         entries-raw))
+
+(defn- identity-of
+  "Platform-graded file identity used for the TOCTOU re-verify.
+
+  Captured at preflight (in preflight-entries!) and again at capture (in
+  capture-entry!). A mismatch between the two means the on-disk object at
+  the logical path changed asynchronously after preflight (it was
+  retargeted, replaced, or a symbolic link was introduced) and the file
+  must NOT be read.
+
+  Grading (documented in the ns docstring): the strongest available token
+  is used. `:file-key` (inode identity from the basic file view) is the
+  primary identity when the host populates it (POSIX, some NTFS hosts);
+  where it is null the identity degrades to real-path/size/last-modified
+  so the check never silently drops to 'unverifiable => accept'. `:size`
+  and `:last-modified` catch a same-path replacement even when the weak
+  platform does not expose a stable :file-key."
+  [^Path p ^BasicFileAttributes attrs]
+  {:real-path (try
+                (str (.toRealPath p (make-array LinkOption 0)))
+                (catch java.io.IOException e
+                  (throw (err/error :fs/unreadable
+                                    "cannot resolve real path for file identity"
+                                    {:path (str p) :cause (.getMessage e)}))))
+   :file-key (.fileKey attrs)
+   :size (.size attrs)
+   :last-modified (.toMillis (.lastModifiedTime attrs))})
+
+(defn- read-open-bytes
+  "Read all bytes of `p` opening it WITHOUT following a symbolic link
+  (NOFOLLOW_LINKS), so a path switched to a symlink after preflight is
+  rejected at open rather than followed. Used only after the identity
+  re-verify has passed."
+  [^Path p]
+  (with-open [in (Files/newInputStream p
+                                       (into-array OpenOption
+                                                   [StandardOpenOption/READ
+                                                    LinkOption/NOFOLLOW_LINKS]))]
+    (.readAllBytes in)))
+
+(defn- capture-entry!
+  "Capture a single preflighted entry, hardening the preflight->read window.
+
+  `entry` is a preflight entry produced by preflight-entries! carrying
+  {:path :physical-path :identity}. On return it stores the file's exact
+  bytes in CAS and yields {:path :artifact/id :size :physical-path}.
+
+  TOCTOU hardening (NOFOLLOW + identity re-check, platform-graded):
+    1. Re-read the current file attributes (NOFOLLOW) at capture time.
+       Symlink -> :fs/toctou-symlink; missing/unreadable/config -> the
+       verification throws :fs/toctou-identity-mismatch (fail-closed).
+    2. Re-verify the identity (:real-path :file-key :size :last-modified)
+       against the preflight :identity; a mismatch (path retargeted, file
+       replaced, symlink introduced) -> :fs/toctou-identity-mismatch.
+    3. Only then read bytes via a NOFOLLOW open and write them to CAS.
+
+  A mismatch is rejected BEFORE the read, so the swapped file's bytes are
+  never read and no content reaches CAS."
+  [cas {:keys [path physical-path identity]}]
+  (let [^Path p physical-path
+        attrs (try
+                (Files/readAttributes p BasicFileAttributes
+                                      (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+                (catch java.nio.file.NoSuchFileException _
+                  (throw (err/error :fs/toctou-identity-mismatch
+                                    "snapshot target vanished between preflight and capture"
+                                    {:path path})))
+                (catch java.io.IOException e
+                  (throw (err/error :fs/toctou-identity-mismatch
+                                    "snapshot target is not verifiable at capture time"
+                                    {:path path :cause (.getMessage e)}))))
+        _ (when (.isSymbolicLink attrs)
+            (throw (err/error :fs/toctou-symlink
+                              "snapshot target became a symbolic link between preflight and capture"
+                              {:path path})))
+        _ (when-not (.isRegularFile attrs)
+            (throw (err/error :fs/toctou-identity-mismatch
+                              "snapshot target is no longer a regular file"
+                              {:path path})))
+        _ (when-not (= identity (identity-of p attrs))
+            (throw (err/error :fs/toctou-identity-mismatch
+                              "snapshot target changed identity between preflight and capture"
+                              {:path path})))
+        ba (try
+             (read-open-bytes p)
+             (catch java.io.IOException e
+               ;; A swap in the window between identity-verify and the open is
+               ;; still fail-closed + typed (NOFOLLOW rejects a symlink here).
+               (throw (err/error (if (Files/isSymbolicLink p)
+                                   :fs/toctou-symlink
+                                   :fs/toctou-identity-mismatch)
+                                 "snapshot target became unreadable at capture"
+                                 {:path path :cause (.getMessage e)}))))
+        {:keys [artifact/id size]} (cas/put-bytes! cas ba {:media-type "application/octet-stream"})]
+    {:path path :artifact/id id :size size :physical-path p}))
 
 (defn snapshot-tree!
   "Snapshot root directory to CAS under limits.
@@ -106,13 +248,10 @@
         entries-raw (walk/walk-tree root)
         preflight (preflight-entries! entries-raw)
         _ (check-limits! preflight limits)
-        ;; 2) CAPTURE — only after preflight passes do we read + write to CAS
-        entries (mapv (fn [{:keys [path physical-path]}]
-                        (let [^Path p physical-path
-                              ba (Files/readAllBytes p)
-                              {:keys [artifact/id size]} (cas/put-bytes! cas ba {:media-type "application/octet-stream"})]
-                          {:path path :artifact/id id :size size :physical-path p}))
-                      preflight)
+        ;; 2) CAPTURE — only after preflight passes do we read + write to CAS.
+        ;; Each entry is hardened: NOFOLLOW open + identity re-check so a file
+        ;; swapped after preflight is rejected typed and never read (WO-S5).
+        entries (mapv (fn [entry] (capture-entry! cas entry)) preflight)
         ;; canonical ordering for deterministic manifest
         sorted (sort-by :path (fn [a b] (compare a b)) entries)
         manifest {:tree/version 1

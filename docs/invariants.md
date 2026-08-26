@@ -141,14 +141,14 @@ Size/count/depth limits must be applied *before* bulk data is read,
 materialized, or written into stores — never after the fact on data that
 is already fully loaded.
 
-- **Motivation.** `snapshot-tree!` (`src/evoclj/fs/snapshot.clj:87-125`)
+- **Motivation.** `snapshot-tree!` (`src/evoclj/fs/snapshot.clj:215-248`)
   originally read every file byte-for-byte and wrote each one into CAS
-  (the capture loop, lines 110–115) *before* `check-limits!` ran, so an
+  (the capture loop, lines 235–238) *before* `check-limits!` ran, so an
   over-limit tree paid full I/O and permanently polluted the CAS store
   before failing with `:fs/snapshot-limit-exceeded`. WO-S4 moved the limit
-  check to a read-only PREFLIGHT: `check-limits!` now runs at line 108
-  (limit predicates at lines 41–66) against attribute metadata gathered
-  without reading content by `preflight-entries!` (lines 68–85).
+  check to a read-only PREFLIGHT: `check-limits!` now runs at line 234
+  (limit predicates at lines 70–95) against attribute metadata gathered
+  without reading content by `preflight-entries!` (lines 97–130).
 - **Violation consequence.** A hostile or accidentally huge skill
   directory exhausts disk/CAS quota even though the snapshot "fails";
   repeated attempts amplify the waste. The same late-check pattern, if
