@@ -21,7 +21,15 @@
   reload_skill atomic A->B for both surfaces.
 
   Source refresh: catalog shows B but existing binding A unchanged.
-  Source removal: catalog disappears but binding A still works via CAS tree."
+  Source removal: catalog disappears but binding A still works via CAS tree.
+
+  S11 (lenient diagnostic): the SkillSource snapshot! payload reports skills
+  that were rejected during lenient capture/parse (invalid manifest, unknown
+  frontmatter key, disallowed YAML tag, missing SKILL.md, ...) under
+  :rejected-skills — a list of {:skill/name <dir> :reason <typed reason>} —
+  plus :skill/rejected-count. In :strict mode the first rejection still
+  aborts (fail-closed); in :lenient mode rejected skills are skipped for
+  publication but never silently dropped (they are observable via the report)."
   (:require [clojure.string :as str]
             [evoclj.environment.source :as src]
             [evoclj.environment.registry :as reg]
@@ -124,6 +132,17 @@
     (let [content (String. ^bytes ba StandardCharsets/UTF_8)]
       (parser/parse-skill-content content mode))))
 
+(defn- rejection-reason
+  "Typed, fully serializable reason for a rejected skill (S11 contract).
+
+   Produced by the production error contract (`err/error-data`) so every
+   rejected skill carries a machine-readable `:error/type` plus the error
+   message/class/cause data. Never a raw Throwable, never a silently empty
+   reason: the fail-closed report contract is that a rejected skill ALWAYS
+   appears in `:rejected-skills` WITH a reason."
+  [t]
+  (err/error-data t))
+
 ;; ---------------------------------------------------------------------------
 ;; Bundle derivation + publish
 ;; ---------------------------------------------------------------------------
@@ -172,34 +191,47 @@
     ;; projector (project, below) turns this captured payload into bundles.
     ;; A strict-mode parse failure still throws (fail-closed) but does not
     ;; partial-publish.
+    ;;
+    ;; S11 (lenient diagnostic): in :lenient mode a skill whose capture/parse
+    ;; throws is NOT published, but it is never silently dropped — every such
+    ;; skill is reported in the snapshot payload under :rejected-skills
+    ;; ({:skill/name <dir> :reason <typed reason>}) with a matching
+    ;; :skill/rejected-count. :strict mode still aborts on the first rejection.
     (when @closed?
       (throw (err/error :skill/source-closed "SkillSource is closed" {:source/id source-id})))
     (let [mode (if strict? :strict :lenient)
           all-roots (vec (concat (or roots []) (or extra-roots [])))
           skill-dirs (discover-skill-dirs all-roots)
-          ;; For each skill dir, snapshot to CAS + parse FROM SNAPSHOT.
-          ;; In lenient mode, skip bad skills but continue; in strict, fail.
-          results (reduce (fn [acc dir]
-                            (try
-                              (let [{:keys [tree/id manifest]} (snapshot-skill-dir! dir cas)
-                                    parsed (parse-skill-from-snapshot cas manifest mode)
-                                    fm (:frontmatter parsed)
-                                    skill-name (or (:name fm) (skill-name-for-dir dir))]
-                                (conj acc {:skill/name skill-name
-                                           :tree/id id
-                                           :frontmatter (if (:name fm) fm (assoc fm :name skill-name))
-                                           :body (:body parsed)}))
-                              (catch Exception e
-                                (if strict?
-                                  (throw e)
-                                  ;; lenient: skip invalid skill, continue
-                                  acc))))
-                          []
-                          skill-dirs)
+          ;; Per-skill capture + parse. Each entry is either a well-formed skill
+          ;; (accepted) or, in lenient mode, a rejected skill with its reason.
+          {:keys [results rejected]}
+          (reduce (fn [acc dir]
+                    (try
+                      (let [{:keys [tree/id manifest]} (snapshot-skill-dir! dir cas)
+                            parsed (parse-skill-from-snapshot cas manifest mode)
+                            fm (:frontmatter parsed)
+                            skill-name (or (:name fm) (skill-name-for-dir dir))]
+                        (update acc :results conj {:skill/name skill-name
+                                                   :tree/id id
+                                                   :frontmatter (if (:name fm) fm (assoc fm :name skill-name))
+                                                   :body (:body parsed)}))
+                      (catch Exception e
+                        (if strict?
+                          (throw e)
+                          ;; lenient: report the rejected skill + its typed
+                          ;; reason, and continue. Never silently drop (S11).
+                          (update acc :rejected conj {:skill/name (skill-name-for-dir dir)
+                                                      :reason (rejection-reason e)})))))
+                  {:results [] :rejected []}
+                  skill-dirs)
+          results (vec (or results []))
+          rejected (vec (or rejected []))
           payload {:skills (into {} (map (fn [{n :skill/name t :tree/id fm :frontmatter}]
                                            [n {:tree/id t :revision/id t :frontmatter fm}])
                                          results))
                    :skill/count (count results)
+                   :rejected-skills rejected
+                   :skill/rejected-count (count rejected)
                    :roots (mapv str all-roots)
                    :mode (name mode)}]
       {:source/id source-id
