@@ -72,6 +72,27 @@
 (def ^:private snapshot-limits
   {:max-depth 20 :max-files 2000 :max-total-bytes (* 20 1024 1024) :max-file-bytes (* 5 1024 1024)})
 
+(defn- try-create-symlink!
+  "Best-effort Files/createSymbolicLink. Returns false when the host
+  refuses (Windows hosts without Developer Mode or symlink privileges)."
+  [^Path target ^Path link]
+  (try
+    (Files/createSymbolicLink link target (make-array FileAttribute 0))
+    true
+    (catch Exception _ false)))
+
+(defn- put-tree!
+  "Store an arbitrary tree-manifest map into CAS and return its tree id."
+  [cas manifest]
+  (let [mb (.getBytes (pr-str manifest) StandardCharsets/UTF_8)
+        {:keys [artifact/id]} (cas/put-bytes! cas mb {:media-type "application/edn"})]
+    id))
+
+(defn- thrown-vendor
+  "The ExceptionInfo thrown by vendor-skill!, or nil when it succeeds."
+  [opts]
+  (try (vendor/vendor-skill! opts) nil (catch clojure.lang.ExceptionInfo e e)))
+
 ;; ---------------------------------------------------------------------------
 ;; 1. external Skill never mutation target (fails via allowlist)
 ;; ---------------------------------------------------------------------------
@@ -215,3 +236,201 @@
           (delete-recursively! genome-dir)
           (delete-recursively! cas-dir)
           (delete-recursively! ext-root))))))
+
+;; ---------------------------------------------------------------------------
+;; 4. S6P happy — a legit nested relative path still vendors (realpath
+;;    containment + segment-level '..' check do NOT reject a legal path).
+;; ---------------------------------------------------------------------------
+
+(deftest legit-nested-path-vendors
+  (testing "a well-formed nested rel under skills/<name>/ vendors through the production path"
+    (let [genome-dir (temp-dir!)
+          cas-dir (temp-dir!)]
+      (try
+        (write-minimal-genome! genome-dir)
+        (let [cas (cas/->cas (str cas-dir))
+              body "hello nested\n"
+              {:keys [artifact/id]} (cas/put-bytes! cas (.getBytes body StandardCharsets/UTF_8)
+                                                    {:media-type "application/octet-stream"})
+              manifest {:tree/version 1
+                        :entries {"sub/dir/SKILL.md" {:artifact/id id :size (count body)}
+                                  "sub/top.md"         {:artifact/id id :size (count body)}}}
+              tree-id (put-tree! cas manifest)
+              vres (vendor/vendor-skill! {:genome/root genome-dir :cas cas :skill/name "my-skill" :tree/id tree-id})]
+          (is (= "my-skill" (:skill/name vres)))
+          (is (= tree-id (:tree/id vres)))
+          (let [reloaded (load/load-genome genome-dir)]
+            (is (contains? (:files reloaded) "skills/my-skill/sub/dir/SKILL.md"))
+            (is (contains? (:files reloaded) "skills/my-skill/sub/top.md"))
+            (is (= body (String. (byte-array (get-in reloaded [:files "skills/my-skill/sub/dir/SKILL.md" :bytes]))
+                                 StandardCharsets/UTF_8)))))
+        (finally
+          (delete-recursively! genome-dir)
+          (delete-recursively! cas-dir))))))
+
+;; ---------------------------------------------------------------------------
+;; 5. S6P branch+fault #1 — a '..' segment escaping the skill dir is rejected
+;;    at the segment/lexical level, typed :skill/vendor-path-escape, with no
+;;    file written outside the root.
+;; ---------------------------------------------------------------------------
+
+(deftest dotdot-escape-is-rejected-typed
+  (testing "a '../escape.txt' manifest entry is rejected before any write"
+    (let [genome-dir (temp-dir!)
+          cas-dir (temp-dir!)]
+      (try
+        (write-minimal-genome! genome-dir)
+        (let [cas (cas/->cas (str cas-dir))
+              manifest {:tree/version 1
+                        :entries {"../escape.txt" {:artifact/id (str "sha256:" (apply str (repeat 64 "a")))
+                                                   :size 5}}}
+              tree-id (put-tree! cas manifest)
+              e (thrown-vendor {:genome/root genome-dir :cas cas :skill/name "my-skill" :tree/id tree-id})]
+          (is (instance? clojure.lang.ExceptionInfo e) "must be typed-rejected")
+          (is (= :skill/vendor-path-escape (:error/type (ex-data e)))
+              (str "expected segment-level escape type, got " (:error/type (ex-data e))))
+          (is (not (Files/exists (.resolve genome-dir "escape.txt") (make-array LinkOption 0)))
+              "no file may escape the genome root"))
+        (finally
+          (delete-recursively! genome-dir)
+          (delete-recursively! cas-dir))))))
+
+(deftest nested-dotdot-escape-is-rejected-typed
+  (testing "a 'sub/../../escape.txt' manifest entry is rejected at the segment level"
+    (let [genome-dir (temp-dir!)
+          cas-dir (temp-dir!)]
+      (try
+        (write-minimal-genome! genome-dir)
+        (let [cas (cas/->cas (str cas-dir))
+              manifest {:tree/version 1
+                        :entries {"sub/../../escape.txt" {:artifact/id (str "sha256:" (apply str (repeat 64 "a")))
+                                                          :size 5}}}
+              tree-id (put-tree! cas manifest)
+              e (thrown-vendor {:genome/root genome-dir :cas cas :skill/name "my-skill" :tree/id tree-id})]
+          (is (instance? clojure.lang.ExceptionInfo e))
+          (is (= :skill/vendor-path-escape (:error/type (ex-data e))))
+          (is (not (Files/exists (.resolve genome-dir "escape.txt") (make-array LinkOption 0)))
+              "no file may escape the genome root"))
+        (finally
+          (delete-recursively! genome-dir)
+          (delete-recursively! cas-dir))))))
+
+;; ---------------------------------------------------------------------------
+;; 6. S6P branch — backslash / absolute structural invalidity is typed-rejected
+;;    (defense in breadth; not the '..'-escape discriminator).
+;; ---------------------------------------------------------------------------
+
+(deftest non-escaping-dotdot-is-rejected
+  (testing "a '..' segment is rejected at the segment level even when it does NOT escape"
+    (let [genome-dir (temp-dir!)
+          cas-dir (temp-dir!)]
+      (try
+        (write-minimal-genome! genome-dir)
+        (let [cas (cas/->cas (str cas-dir))
+              body "x\n"
+              {:keys [artifact/id]} (cas/put-bytes! cas (.getBytes body StandardCharsets/UTF_8)
+                                                    {:media-type "application/octet-stream"})
+              manifest {:tree/version 1
+                        :entries {"sub/../SKILL.md" {:artifact/id id :size (count body)}}}
+              tree-id (put-tree! cas manifest)
+              e (thrown-vendor {:genome/root genome-dir :cas cas :skill/name "my-skill" :tree/id tree-id})]
+          (is (instance? clojure.lang.ExceptionInfo e))
+          (is (= :skill/vendor-path-escape (:error/type (ex-data e))) "rejected at segment level")
+          (is (not (Files/exists (.resolve genome-dir "skills/my-skill/SKILL.md")
+                                 (make-array LinkOption 0)))
+              "no file may be written from a ..-containing rel"))
+        (finally
+          (delete-recursively! genome-dir)
+          (delete-recursively! cas-dir))))))
+
+(deftest backslash-escape-is-rejected
+  (testing "a Windows backslash traversal entry is rejected typed"
+    (let [genome-dir (temp-dir!)
+          cas-dir (temp-dir!)]
+      (try
+        (write-minimal-genome! genome-dir)
+        (let [cas (cas/->cas (str cas-dir))
+              manifest {:tree/version 1
+                        :entries {"..\\..\\escape.txt" {:artifact/id (str "sha256:" (apply str (repeat 64 "a")))
+                                                        :size 5}}}
+              tree-id (put-tree! cas manifest)
+              e (thrown-vendor {:genome/root genome-dir :cas cas :skill/name "my-skill" :tree/id tree-id})]
+          (is (instance? clojure.lang.ExceptionInfo e))
+          (is (contains? #{:skill/vendor-invalid-args :skill/vendor-path-escape}
+                         (:error/type (ex-data e))))
+          (is (not (Files/exists (.resolve genome-dir "escape.txt") (make-array LinkOption 0)))))
+        (finally
+          (delete-recursively! genome-dir)
+          (delete-recursively! cas-dir))))))
+
+;; ---------------------------------------------------------------------------
+;; 7. S6P fault #2a — deleting a stale skill dir must NOT follow a symlink to
+;;    an outside target; the link is removed as a link and the target is intact.
+;; ---------------------------------------------------------------------------
+
+(deftest delete-does-not-follow-symlink
+  (testing "a symlinked child inside the skill dir is deleted as a link, never followed"
+    (let [genome-dir (temp-dir!)
+          cas-dir (temp-dir!)
+          ext-root (temp-dir!)
+          outside-dir (temp-dir!)]
+      (try
+        (write-minimal-genome! genome-dir)
+        (let [cas (cas/->cas (str cas-dir))
+              ext-skill (.resolve ext-root "my-skill")
+              _ (write-skill! ext-skill "Body fixed" :extra-files {"references/guide.md" "guide fixed"})
+              snap (snapshot/snapshot-tree! ext-skill cas snapshot-limits)
+              tree-id (:tree/id snap)
+              sentinel (write-text! outside-dir "secret.txt" "SECRET")
+              dest (.resolve (.resolve genome-dir "skills") "my-skill")]
+          (Files/createDirectories dest (make-array FileAttribute 0))
+          (if (try-create-symlink! outside-dir (.resolve dest "evil"))
+            (do
+              (vendor/vendor-skill! {:genome/root genome-dir :cas cas :skill/name "my-skill" :tree/id tree-id})
+              (is (Files/exists sentinel (make-array LinkOption 0))
+                  "the symlink target was NOT followed for delete — outside content survives")
+              (is (Files/exists (.resolve dest "SKILL.md") (make-array LinkOption 0))
+                  "vendored content written into the refreshed skill dir")
+              (is (not (Files/exists (.resolve dest "evil") (make-array LinkOption 0)))
+                  "the symlink itself was removed AS A LINK")
+              (is (str/includes? (String. (Files/readAllBytes (.resolve dest "SKILL.md")) StandardCharsets/UTF_8)
+                                 "Body fixed")))
+            (testing "symlink creation unavailable on this host; skipped" (is true))))
+        (finally
+          (delete-recursively! genome-dir)
+          (delete-recursively! cas-dir)
+          (delete-recursively! ext-root)
+          (delete-recursively! outside-dir))))))
+
+;; ---------------------------------------------------------------------------
+;; 8. S6P fault #2b — realpath containment: a symlinked <genome-root>/skills
+;;    pointing OUTSIDE the genome root is rejected before any write.
+;; ---------------------------------------------------------------------------
+
+(deftest symlinked-skills-escape-is-rejected-before-write
+  (testing "a symlinked skills dir escaping the genome root is rejected typed before write"
+    (let [genome-dir (temp-dir!)
+          cas-dir (temp-dir!)
+          ext-root (temp-dir!)
+          outside-dir (temp-dir!)]
+      (try
+        (write-minimal-genome! genome-dir)
+        (let [cas (cas/->cas (str cas-dir))
+              ext-skill (.resolve ext-root "my-skill")
+              _ (write-skill! ext-skill "Body bonus" :extra-files {"references/guide.md" "guide bonus"})
+              snap (snapshot/snapshot-tree! ext-skill cas snapshot-limits)
+              tree-id (:tree/id snap)
+              skills-dir (.resolve genome-dir "skills")]
+          (if (try-create-symlink! outside-dir skills-dir)
+            (let [e (thrown-vendor {:genome/root genome-dir :cas cas :skill/name "my-skill" :tree/id tree-id})]
+              (is (instance? clojure.lang.ExceptionInfo e))
+              (is (= :skill/vendor-path-escape (:error/type (ex-data e))))
+              (is (not (Files/exists (.resolve outside-dir "my-skill/SKILL.md")
+                                     (make-array LinkOption 0)))
+                  "nothing was written through the symlink into the outside target"))
+            (testing "symlink creation unavailable on this host; skipped" (is true))))
+        (finally
+          (delete-recursively! genome-dir)
+          (delete-recursively! cas-dir)
+          (delete-recursively! ext-root)
+          (delete-recursively! outside-dir))))))
