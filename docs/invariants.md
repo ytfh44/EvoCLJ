@@ -303,11 +303,15 @@ is unauditable.
   accumulated stale references: the first authoritative scan of the real
   `docs/` tree produced an invalid-reference inventory (recorded in the
   repair ledger's T5 entry as D1 input — eight occurrences at that time).
-  The concrete incident: the MCP gap-closure report's commit list
-  (`docs/superpowers/specs/2026-08-20-mcp-gap-closure-report.md:53-58`)
-  cites six abbreviated SHAs that no longer resolve to any commit in this
-  repository — the history they described was rewritten away, and nothing
-  could detect that until the scan existed.
+  The concrete incident (now closed by WO-D1): the MCP gap-closure report's
+  "Commits" section
+  (`docs/superpowers/specs/2026-08-20-mcp-gap-closure-report.md`) cited six
+  abbreviated SHAs — previously at `:53-58` — that no longer resolve to any
+  commit in this repository; the history they described was rewritten away,
+  and nothing could detect that until the scan existed. WO-D1 has since
+  marked that report SUPERSEDED with a resolvable pointer and removed the
+  unresolvable SHAs, so it can no longer be mistaken for the current closure
+  truth.
   `scripts/verify-doc-hashes.clj` now scans every markdown file and
   verifies each candidate with `git rev-parse --verify <sha>^{commit}`.
 - **Violation consequence.** A reviewer tracing "which commit introduced
@@ -318,10 +322,12 @@ is unauditable.
   `clojure -M scripts/verify-doc-hashes.clj` — exit 0 required for any
   docs change; the script contract (lexical rules E1–E4, exit codes,
   WARN-visible exemptions) is pinned by
-  `test/evoclj/support/doc-hashes-test.clj`. WO-D1 closes the existing
-  backlog and makes the closure report hash-traceable. New documentation
-  must not increase the invalid-reference count; pure `file:line`
-  citations are unaffected by this rule.
+  `test/evoclj/support/doc-hashes-test.clj`. WO-D1 closed the closure-report
+  share of the existing backlog (6 of 8) and made the report hash-traceable
+  via a resolvable SUPERSEDED pointer; the 2 remaining invalid refs are
+  ledger agent-instance-ids (non-commit refs, tracked as D1-followup). New
+  documentation must not increase the invalid-reference count; pure
+  `file:line` citations are unaffected by this rule.
 
 ### INV-09 — Tests must traverse production paths
 

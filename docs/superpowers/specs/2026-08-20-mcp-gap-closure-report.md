@@ -1,5 +1,16 @@
 # MCP Gap Closure Report — 2026-08-20
 
+> **STATUS: SUPERSEDED — historical record, NOT the current closure truth.**
+>
+> This report documents the **2026-08-20** MCP gap-closure pass (6 steps,
+> 26 gaps A1–G3, `mcp:2.0.0`). It is retained for historical context only and
+> is **no longer authoritative**. The authoritative, current closure and
+> repair state for the MCP/Skills effort is the live repair ledger
+> [`docs/codebase/REPAIR-PLAN.md`](../../codebase/REPAIR-PLAN.md) together
+> with the invariant checklist [`docs/invariants.md`](../../invariants.md).
+> The MCP closure-repair phase that supersedes this report landed at commit
+> `c19e3d9` (see the live work-group ledger's M20 entry).
+
 6 steps, 26 gaps (A1–G3), `mcp:2.0.0` pinned. All gates pass.
 
 ## Summary
@@ -48,14 +59,20 @@ test/evoclj/mcp/adapter_test.clj    — adapter equivalence + cache/continuation
 .tmp/mcp-gap-fix-flow.json          — flow definition (not shipped)
 ```
 
-Commits:
+Commits (historical):
 
-* `96e94e8` fix(mcp): correct manager status transitions syntax
-* `ca95a43` fix(mcp): freeze descriptor generation
-* `96d73af` fix(mcp): enforce second-layer scope and stabilize adapter wiring
-* `da3a77b` feat: host-owned MCP manager with pooled single-flight connections
-* `5e3a02e` feat: enforce JSON Schema budgets and harden validator limits
-* `730be62` feat: add versioned protocol adapter with cache and continuation support
+The six abbreviated SHAs that originally accompanied these entries were
+rewritten away and **no longer resolve** to any commit in this repository,
+so they are intentionally omitted to keep this documentation hash-traceable
+under INV-08. See the SUPERSEDED notice above for the current authoritative
+pointer; the original subjects are retained as historical context:
+
+* fix(mcp): correct manager status transitions syntax
+* fix(mcp): freeze descriptor generation
+* fix(mcp): enforce second-layer scope and stabilize adapter wiring
+* feat: host-owned MCP manager with pooled single-flight connections
+* feat: enforce JSON Schema budgets and harden validator limits
+* feat: add versioned protocol adapter with cache and continuation support
 
 ## Closure map A1–G3
 
