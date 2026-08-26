@@ -57,6 +57,13 @@
     republishing ANY of them (phase 2); the scheduler's run-session!
     calls it before a session leaves :created (production restart
     wiring).
+  - WO-B4: when the caller supplies a filesystem lease (`:fs-lease`,
+    plus an optional `:fs-lease-registry` atom for revocation/recording
+    checks), activate!/reload!/restore! RE-verify it fail-closed against
+    the session's pinned phenotype BEFORE any runtime state is
+    published — a stale/expired/revoked lease is rejected with a typed
+    error, never silently honored. Without an `:fs-lease` the engine
+    grants no filesystem access (no lease, no grant).
 
   Phenotype invariant: this namespace never reads or writes
   generations.genome_id, generations.resolution_id or sessions.phenotype_id
@@ -71,6 +78,7 @@
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
             [evoclj.mount.backend :as mount-backend]
+            [evoclj.mount.filesystem :as mount-fs]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.sqlite :as sqlite]
@@ -393,6 +401,26 @@
                             "bundle revision_id must match surfaces revision_id"
                             {:bundle-rev rev :surface-revs revs})))))
     bundle))
+
+(defn- verify-binding-fs-lease!
+  "B4 fail-closed re-verification: when the caller supplies a filesystem
+  lease (`:fs-lease`), RE-verify it against the session's pinned phenotype
+  and the supplied instant BEFORE any runtime state is published — a stale /
+  expired / revoked lease is rejected with a typed error, never silently
+  honored. When no `:fs-lease` is supplied this is a no-op (the engine
+  grants no filesystem access without a lease). Reuses
+  evoclj.mount.filesystem/verify-fs-lease! (single implementation, INV-05).
+  Returns the lease when present."
+  [db session-id fs-lease opts]
+  (when fs-lease
+    (let [{:keys [phenotype_id]} (fetch-session db session-id)]
+      (mount-fs/verify-fs-lease! fs-lease
+                                 {:subject (if phenotype_id
+                                             {:phenotype/id phenotype_id}
+                                             (get-in fs-lease [:subject]))
+                                  :now (:now opts)
+                                  :registry (:fs-lease-registry opts)})))
+  fs-lease)
 
 ;; ---------------------------------------------------------------------------
 ;; Runtime publishing helpers
@@ -724,6 +752,12 @@
     :cas            — CAS handle (string/path or {:root ...}) for CAS check
     :mount-registry — atom map mount-id -> mount
     :context-store  — atom from evoclj.context.binding/create-store
+    :fs-lease       — optional filesystem CapabilityLease (B4): RE-verified
+                      fail-closed against the session's pinned phenotype
+                      before any runtime state is published
+    :fs-lease-registry — optional atom from
+                      evoclj.mount.filesystem/create-lease-registry for
+                      revocation/recording checks (B4)
 
   Returns the persisted binding map (as from active-bindings).
   Throws :store/binding-invalid, :bundle/co-version-violation,
@@ -755,6 +789,10 @@
      (fetch-session db session-id)
      (validate-bundle-exists bundle registry cas-handle)
      (validate-sibling-surfaces bundle)
+     ;; B4: if the caller granted a filesystem lease, RE-verify it
+     ;; fail-closed against the session's pinned phenotype before any
+     ;; runtime state is published.
+     (verify-binding-fs-lease! db session-id (:fs-lease opts) opts)
      (let [id (try
                 (insert-binding-row! db session-id logical-id rev bid binding-type metadata-edn)
                 (catch java.sql.SQLException e
@@ -854,6 +892,10 @@
            old-row (first (sqlite/query db ["SELECT * FROM session_bindings WHERE session_id = ? AND logical_id = ? AND state = 'active'" sid lid]))]
        (validate-bundle-exists new-bundle registry cas-handle)
        (validate-sibling-surfaces new-bundle)
+       ;; B4: RE-verify the fs lease fail-closed before republishing runtime
+       ;; state at the new revision (a stale/expired/revoked lease aborts
+       ;; the reload rather than being silently honored).
+       (verify-binding-fs-lease! db session-id (:fs-lease opts) opts)
        (let [cnt (sqlite/with-db [conn db]
                    (first (jdbc/execute! conn
                                          ["UPDATE session_bindings SET revision_id = ?, bundle_id = ?, activated_at = ?, metadata_edn = ? WHERE session_id = ? AND logical_id = ? AND state = 'active'"
@@ -998,6 +1040,11 @@
                                :surfaces (:surfaces meta [])})))
                       bindings)]
     ;; ---- phase 1: verify EVERYTHING before publishing ANYTHING ----
+    ;; B4: if the caller granted a filesystem lease, RE-verify it once
+    ;; fail-closed against the session's pinned phenotype before any
+    ;; binding is republished (a stale/expired/revoked lease aborts the
+    ;; restore rather than being silently honored).
+    (verify-binding-fs-lease! db session-id (:fs-lease opts) opts)
     (doseq [bundle bundles]
       ;; B2 / INV-02: refuse to republish a binding whose bundle no
       ;; longer exists in registry/CAS — no partial runtime state.

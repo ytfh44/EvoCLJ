@@ -7,7 +7,8 @@
             [evoclj.mount.filesystem :as fs]
             [evoclj.store.cas :as cas])
   (:import (java.nio.file Files)
-           (java.nio.file.attribute FileAttribute)))
+           (java.nio.file.attribute FileAttribute)
+           (java.util Date)))
 
 (defn- temp-dir []
   (Files/createTempDirectory "mount-test" (make-array FileAttribute 0)))
@@ -17,6 +18,9 @@
     (Files/createDirectories (.getParent p) (make-array FileAttribute 0))
     (Files/write p (.getBytes content) (make-array java.nio.file.OpenOption 0))
     p))
+
+(def ^:private p1 (str "sha256:" (apply str (repeat 64 "a"))))
+(def ^:private now (java.util.Date.))
 
 (deftest same-provider-serves-both
   (testing "single FilesystemProvider serves workspace and skill mount"
@@ -34,26 +38,27 @@
           _ (backend/register-mount! reg ws-mount)
           _ (backend/register-mount! reg skill-mount)
           provider (fs/make-provider reg)
-          ws-lease {:cap/id (random-uuid) :subject {:phenotype/id "p1"} :resource {:kind :filesystem/path :mount/id [:workspace "ws"] :path ""} :actions #{:read :list :stat :write :create :delete} :issued-at (java.util.Date.) :expires-at (java.util.Date. (+ (System/currentTimeMillis) 100000)) :constraints {}}
-          skill-lease {:cap/id (random-uuid) :subject {:phenotype/id "p1"} :resource {:kind :filesystem/path :mount/id [:skill "demo" (:tree/id snap-res)] :path ""} :actions #{:read :list :stat} :issued-at (java.util.Date.) :expires-at (java.util.Date. (+ (System/currentTimeMillis) 100000)) :constraints {}}]
+          subject {:phenotype/id p1}
+          ws-lease {:cap/id (random-uuid) :subject subject :resource {:kind :filesystem/path :mount/id [:workspace "ws"] :path ""} :actions #{:read :list :stat :write :create :delete} :issued-at now :expires-at (Date. (+ (.getTime now) 100000)) :constraints {}}
+          skill-lease {:cap/id (random-uuid) :subject subject :resource {:kind :filesystem/path :mount/id [:skill "demo" (:tree/id snap-res)] :path ""} :actions #{:read :list :stat} :issued-at now :expires-at (Date. (+ (.getTime now) 100000)) :constraints {}}]
       ;; skill read via provider
-      (let [content (fs/provider-read provider [:skill "demo" (:tree/id snap-res)] "SKILL.md" {:leases [skill-lease]})]
+      (let [content (fs/provider-read provider [:skill "demo" (:tree/id snap-res)] "SKILL.md" {:leases [skill-lease] :subject subject :now now})]
         (is (= "skill" (String. content))))
       ;; workspace read via same provider
-      (let [content (fs/provider-read provider [:workspace "ws"] "a.txt" {:leases [ws-lease]})]
+      (let [content (fs/provider-read provider [:workspace "ws"] "a.txt" {:leases [ws-lease] :subject subject :now now})]
         (is (= "workspace" (String. content))))
       ;; skill write must fail even with RW lease
-      (let [rw-leases (conj [skill-lease] {:cap/id (random-uuid) :subject {:phenotype/id "p1"} :resource {:kind :filesystem/path :mount/id [:skill "demo" (:tree/id snap-res)] :path ""} :actions #{:write :create} :issued-at (java.util.Date.) :expires-at (java.util.Date. (+ (System/currentTimeMillis) 100000)) :constraints {}})]
-        (is (thrown? clojure.lang.ExceptionInfo (fs/provider-write provider [:skill "demo" (:tree/id snap-res)] "SKILL.md" (.getBytes "x") {:leases rw-leases}))))
+      (let [rw-leases (conj [skill-lease] {:cap/id (random-uuid) :subject subject :resource {:kind :filesystem/path :mount/id [:skill "demo" (:tree/id snap-res)] :path ""} :actions #{:write :create} :issued-at now :expires-at (Date. (+ (.getTime now) 100000)) :constraints {}})]
+        (is (thrown? clojure.lang.ExceptionInfo (fs/provider-write provider [:skill "demo" (:tree/id snap-res)] "SKILL.md" (.getBytes "x") {:leases rw-leases :subject subject :now now}))))
       ;; workspace write requires both surface and lease
-      (is (thrown? clojure.lang.ExceptionInfo (fs/provider-write provider [:workspace "ws"] "new.txt" (.getBytes "x") {:leases [skill-lease]})))
-      (let [res (fs/provider-create provider [:workspace "ws"] "new.txt" (.getBytes "new") {:leases [ws-lease]})]
+      (is (thrown? clojure.lang.ExceptionInfo (fs/provider-write provider [:workspace "ws"] "new.txt" (.getBytes "x") {:leases [skill-lease] :subject subject :now now})))
+      (let [res (fs/provider-create provider [:workspace "ws"] "new.txt" (.getBytes "new") {:leases [ws-lease] :subject subject :now now})]
         (is (some? res)))
       ;; .. cannot escape
-      (is (thrown? clojure.lang.ExceptionInfo (fs/provider-read provider [:skill "demo" (:tree/id snap-res)] "../etc/passwd" {:leases [skill-lease]})))
+      (is (thrown? clojure.lang.ExceptionInfo (fs/provider-read provider [:skill "demo" (:tree/id snap-res)] "../etc/passwd" {:leases [skill-lease] :subject subject :now now})))
       ;; mount A lease cannot access mount B
-      (is (thrown? clojure.lang.ExceptionInfo (fs/provider-read provider [:workspace "ws"] "a.txt" {:leases [skill-lease]})))
+      (is (thrown? clojure.lang.ExceptionInfo (fs/provider-read provider [:workspace "ws"] "a.txt" {:leases [skill-lease] :subject subject :now now})))
       ;; CAS snapshot independence
       (write-file skill-dir "SKILL.md" "changed")
-      (let [content2 (fs/provider-read provider [:skill "demo" (:tree/id snap-res)] "SKILL.md" {:leases [skill-lease]})]
+      (let [content2 (fs/provider-read provider [:skill "demo" (:tree/id snap-res)] "SKILL.md" {:leases [skill-lease] :subject subject :now now})]
         (is (= "skill" (String. content2)) "snapshot independent of upstream")))))
