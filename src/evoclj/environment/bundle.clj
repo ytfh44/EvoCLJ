@@ -27,7 +27,8 @@
   Integrates with EnvironmentRegistry created via
   evoclj.environment.registry/create-registry and reuses
   evoclj.environment.revision for content identity."
-  (:require [evoclj.environment.revision :as rev]
+  (:require [evoclj.environment.bounded :as bounded]
+            [evoclj.environment.revision :as rev]
             [evoclj.environment.surface :as surf]
             [evoclj.kernel.error :as err]))
 
@@ -332,6 +333,7 @@
                       new-bundle-index (merge (or (:bundle-index cur-state) {}) (:bundle-index indexes))
                       new-logical-index (merge (or (:logical-index cur-state) {}) (:logical-index indexes))
                       next-seq (:revision/seq revision)
+                      max-history (get-in cur-state [:bounds :max-history])
                       new-state (-> cur-state
                                     (assoc :current revision :last-good revision :seq next-seq :status :ok :dirty? false :last-refresh-error nil)
                                     (assoc :bundles new-bundles
@@ -339,8 +341,8 @@
                                            :bundle-index new-bundle-index
                                            :logical-index new-logical-index
                                            :indexes indexes)
-                                    (update :history (fnil conj []) revision)
-                                    (update :bundle-history (fnil conj []) bundle))]
+                                    (update :history #(bounded/keep-recent (conj (or % []) revision) max-history))
+                                    (update :bundle-history #(bounded/keep-recent (conj (or % []) bundle) max-history)))]
                   (if (compare-and-set! registry cur-state new-state)
                     (do
                       (doseq [[_ listener] (:listeners cur-state)]

@@ -54,14 +54,49 @@
   catalog-projection derives the available view from the registry's published
   indexes plus explicit :removed tombstone marks. Removing a source that was
   never registered fails closed :environment/no-source; re-removing an
-  already-removed source is idempotent."
-  (:require [evoclj.environment.revision :as rev]
+  already-removed source is idempotent.
+
+   E5 (GC roots + tombstone compaction + bounded history): the registry keeps
+   its growth in check on three axes.
+
+   - GC ROOTS (gc!): gc! computes the set of reachable roots — the current
+     published bundles/surfaces referenced by live sources (via
+     :logical-index) — and reclaims any unreachable garbage (orphaned bundles
+     and surfaces left behind by content updates). It is fail-closed and
+     typed: a non-registry argument throws :environment/invalid-registry, and
+     a logically-inconsistent index (a logical-id referencing a bundle-id not
+     present in :bundles) throws :environment/gc-inconsistent and mutates
+     nothing. Only artifacts provably unreachable from the roots are dropped;
+     current/last-good revisions and every live source's own current bundle
+     are never touched.
+
+   - TOMBSTONE COMPACTION: the :tombstones set (S10 removed sources) is
+     bounded by :bounds :max-tombstones. When a removal would exceed the cap,
+     the set is compacted deterministically — the most recent tombstones (by
+     :removed-at, tie-broken by source id) survive and the oldest are evicted.
+
+   - BOUNDED HISTORY: per-source :history and the aggregate :history /
+     :bundle-history keep at most :bounds :max-history entries (most recent
+     kept, oldest evicted). The bounds are configurable per registry via
+     create-registry's opts and default to {max-history 128, max-tombstones
+     32}, which preserves the prior unbounded behavior within the ranges the
+     existing suites exercise."
+  (:require [evoclj.environment.bounded :as bounded]
+            [evoclj.environment.revision :as rev]
             [evoclj.environment.source :as src]
             [evoclj.environment.bundle :as bundle]
             [evoclj.kernel.error :as err]
             [evoclj.support.failpoint :as fault]))
 
 (declare refresh! refresh-async!)
+
+(defn- default-bounds
+  "E5 default retention/GC bounds. max-history caps the per-source and
+   aggregate :history/:bundle-history; max-tombstones caps the S10 removal
+   tombstone set. The defaults are large enough to preserve the prior
+   (unbounded) behavior within the ranges the existing suites exercise."
+  []
+  {:max-history 128 :max-tombstones 32})
 
 (defn- initial-state
   "The fresh registry state shape. ONE implementation (INV-05): both
@@ -78,11 +113,27 @@
    :last-refresh-error nil
    :listeners {}
    :history []
-   :tombstones {}})
+   :tombstones {}
+   :bounds (default-bounds)})
 
-(defn create-registry []
-  (let [lock (Object.)]
-    (atom (assoc (initial-state) :lock lock))))
+(defn create-registry
+  "Create an EnvironmentRegistry atom.
+
+   Optional opts map supports :bounds {:max-history n :max-tombstones m} to
+   configure the E5 retention/GC caps per registry. When omitted, the
+   defaults (128 / 32) are used. The registry value always carries the
+   canonical state shape (see initial-state), plus the publication :lock and
+   the :bounds the caller requested (or the defaults)."
+  ([] (create-registry nil))
+  ([opts]
+   (let [lock (Object.)
+         bounds (merge (default-bounds) (:bounds opts))]
+     (atom (assoc (initial-state) :lock lock :bounds bounds)))))
+
+(defn registry-bounds
+  "E5 reader: the registry's current retention/GC bounds map."
+  [registry]
+  (get-in @registry [:bounds] (default-bounds)))
 
 (defn valid-registry?
   "True when x is an EnvironmentRegistry atom created by
@@ -119,8 +170,9 @@
     (doseq [handle (vals (:source-subs @registry))]
       (try (when-let [close! (:close! handle)] (close!))
            (catch Throwable _ nil)))
-    (let [lock (:lock @registry)]
-      (reset! registry (assoc (initial-state) :lock lock))))
+    (let [lock (:lock @registry)
+          bounds (get-in @registry [:bounds])]
+      (reset! registry (assoc (initial-state) :lock lock :bounds bounds))))
   nil)
 
 (defn- registry-lock [registry]
@@ -284,8 +336,10 @@
   "Return an updated per-source entry after a successful (non-noop) publish of
   the plan's prepared bundles. Pure: returns the new entry map. Tracks the
   set of logical-ids this source published (:owned-logical-ids) so a later
-  S10 removal can drop exactly its own artifacts."
-  [entry plan]
+  S10 removal can drop exactly its own artifacts. E5: the per-source :history
+  is bounded to :max-history — the newest entry is appended and the oldest
+  evicted."
+  [entry plan max-history]
   (let [next-seq (inc (or (:seq entry) 0))
         rev (assoc (:revision (last (:preps plan))) :revision/seq next-seq)
         owned (into (or (:owned-logical-ids entry) #{})
@@ -293,24 +347,28 @@
     (-> entry
         (assoc :current rev :last-good rev :seq next-seq :status :ok :last-refresh-error nil
                :owned-logical-ids owned)
-        (update :history (fnil conj []) rev))))
+        (update :history #(bounded/keep-recent (conj (or % []) rev) max-history)))))
 
 (defn- advance-all
-  "Advance per-source entries for all non-noop, non-error plans. Pure."
+  "Advance per-source entries for all non-noop, non-error plans. Pure.
+   Applies the E5 per-source history bound from the accumulator state."
   [s per-src plans]
-  (reduce (fn [acc [sid plan]]
-            (if (or (:noop? plan) (some? (:error plan)))
-              acc
-              (assoc-in acc [:per-source sid] (advance-per-source-entry (get per-src sid) plan))))
-          s
-          plans))
+  (let [max-history (get-in s [:bounds :max-history])]
+    (reduce (fn [acc [sid plan]]
+              (if (or (:noop? plan) (some? (:error plan)))
+                acc
+                (assoc-in acc [:per-source sid] (advance-per-source-entry (get per-src sid) plan max-history))))
+            s
+            plans)))
 
 (defn- install-prep
   "Merge one prepared bundle's surfaces/indexes/bundle into registry state s.
-  Pure: returns the updated state map."
+  Pure: returns the updated state map. E5: the aggregate :history and
+  :bundle-history are bounded to :max-history — newest kept, oldest evicted."
   [s prep]
   (let [indexes (:indexes prep)
         bundle (:bundle prep)
+        max-history (get-in s [:bounds :max-history])
         new-surface-index (merge (or (:surfaces s) {}) (:surface-index indexes))
         new-bundles (assoc (or (:bundles s) {}) (:bundle/id bundle) bundle)
         new-bundle-index (merge (or (:bundle-index s) {}) (:bundle-index indexes))
@@ -321,9 +379,10 @@
                             :bundles new-bundles
                             :bundle-index new-bundle-index
                             :logical-index new-logical-index
-                            :indexes indexes)
-        with-history (update with-indexes :history (fnil conj []) rev)]
-    (update with-history :bundle-history (fnil conj []) bundle)))
+                            :indexes indexes)]
+    (-> with-indexes
+        (update :history #(bounded/keep-recent (conj (or % []) rev) max-history))
+        (update :bundle-history #(bounded/keep-recent (conj (or % []) bundle) max-history)))))
 
 (defn- mark-degraded
   "Mark per-source entries whose chain errored as :degraded, keeping last-good.
@@ -404,6 +463,17 @@
   (when x
     (try (x) (catch Throwable _ nil))))
 
+(defn- compact-tombstones
+  "E5 tombstone compression: bound the :tombstones set to `max-t` entries,
+  keeping the most recent (by :removed-at, tie-broken by source id — so the
+  result is deterministic) and evicting the oldest. Pure. When max-t is nil,
+  the set is not bounded."
+  [tombstones max-t]
+  (if (nil? max-t)
+    tombstones
+    (into {} (take-last max-t
+                        (sort-by (fn [[sid t]] [(:removed-at t) sid]) tombstones)))))
+
 (defn remove-source!
   "S10 source removal tombstone. Remove a registered source:
 
@@ -421,6 +491,12 @@
        :environment/no-source.
      - removing an already-removed source is IDEMPOTENT (returns the existing
        tombstone, no throw).
+
+   E5 tombstone compression: after recording a new tombstone, the :tombstones
+   set is bounded to :bounds :max-tombstones — the most recent tombstones (by
+   :removed-at, tie-broken by source id) survive and the oldest are evicted,
+   deterministically. A source whose tombstone is compacted away is no longer
+   reported as removed (it is neither live nor recorded-removed).
 
    A removed source is NOT re-instantiated by a later refresh (it is removed
    from :sources), and its artifacts no longer surface in the catalog
@@ -461,8 +537,10 @@
                 now (System/currentTimeMillis)
                 tomb {:source/id source-id :removed-at now
                       :removed-logical-ids (vec owned)}
+                max-tombstones (get-in state [:bounds :max-tombstones])
                 base (-> state
                          (assoc-in [:tombstones source-id] tomb)
+                         (update :tombstones compact-tombstones max-tombstones)
                          (update :sources dissoc source-id)
                          (update :source-subs dissoc source-id)
                          (update :per-source dissoc source-id))
@@ -524,6 +602,88 @@
      :bundles bundles
      :surfaces (or (:surfaces state) {})
      :removed (or (:tombstones state) {})}))
+
+;; ---------------------------------------------------------------------------
+;; E5 — GC roots: compute reachable roots and reclaim unreachable garbage
+;; ---------------------------------------------------------------------------
+
+(defn- gc-filter-map
+  "Keep only map entries whose key is in `keep`; else {}."
+  [m keep]
+  (into {} (filter (fn [[k _]] (contains? keep k))) (or m {})))
+
+(defn- collect-garbage
+  "Pure: compute the GC'd registry state.
+
+   Roots = the currently-published claims of live sources, i.e. every logical
+   id in :logical-index. Those roots reference, transitively, the bundles and
+   surfaces still reachable in the current publication graph. Anything NOT
+   reachable from those roots is unreachable garbage (orphaned bundles and
+   surfaces left behind by content updates) and is reclaimed.
+
+   Fail-closed: a logical id in :logical-index that references a bundle-id not
+   present in :bundles is an inconsistent/conflicted index; GC refuses to
+   operate (throws :environment/gc-inconsistent) rather than silently dropping
+   a live root or leaving a dangling reference."
+  [state]
+  (let [bundles (or (:bundles state) {})
+        logical-index (or (:logical-index state) {})
+        ;; root bundle-ids = the current publication claims of live sources
+        root-bids (set (vals logical-index))
+        ;; every root claim must resolve to an existing bundle
+        missing (remove #(contains? bundles %) root-bids)]
+    (when (seq missing)
+      (throw (err/error :environment/gc-inconsistent
+                        "cannot GC: logical-index references a missing bundle"
+                        {:missing-bundle-ids (vec missing)})))
+    (let [reachable-bids root-bids
+          reachable-bundles (select-keys bundles reachable-bids)
+          reachable-sids (into #{}
+                               (mapcat (fn [b] (map :surface/id (:surfaces b))))
+                               (vals reachable-bundles))]
+      (-> state
+          (update :bundles #(gc-filter-map % reachable-bids))
+          (update :bundle-index #(gc-filter-map % reachable-bids))
+          (update :surfaces #(gc-filter-map % reachable-sids))
+          (update :indexes (fn [idx]
+                             (when (map? idx)
+                               (-> idx
+                                   (update :logical-index (fn [m] (or m {})))
+                                   (update :bundle-index #(gc-filter-map % reachable-bids))
+                                   (update :surface-index #(gc-filter-map % reachable-sids))))))))))
+
+(defn gc!
+  "E5 GC roots: compute the set of reachable roots (the current published
+   bundles/surfaces referenced by live sources via :logical-index) and reclaim
+   any unreachable garbage (orphaned bundles and surfaces left behind by
+   content updates).
+
+   Fail-closed / typed:
+     - a non-registry argument throws :environment/invalid-registry;
+     - a logically-inconsistent index (a logical-id referencing a bundle-id
+       not present in :bundles) throws :environment/gc-inconsistent and
+       mutates NOTHING.
+
+   Only artifacts provably unreachable from the roots are dropped; current /
+   last-good revisions and every live source's own current bundle are never
+   touched. The computation is pure and applied in ONE atomic swap under the
+   registry lock, so a concurrent refresh!/remove-source! cannot tear it.
+
+   Returns {:status :ok :gc/reclaimed-bundles n :gc/reclaimed-surfaces m}."
+  [registry]
+  (when-not (valid-registry? registry)
+    (throw (err/error :environment/invalid-registry
+                      "gc! requires a valid EnvironmentRegistry" {})))
+  (let [lock (registry-lock registry)]
+    (locking lock
+      (let [state @registry
+            before-bundles (count (or (:bundles state) {}))
+            before-surfaces (count (or (:surfaces state) {}))
+            new-state (collect-garbage state)]
+        (reset! registry new-state)
+        {:status :ok
+         :gc/reclaimed-bundles (- before-bundles (count (or (:bundles new-state) {})))
+         :gc/reclaimed-surfaces (- before-surfaces (count (or (:surfaces new-state) {})))}))))
 
 (defn- apply-chain-swap!
   "Apply all successfully-prepared per-source chains in ONE atomic swap.
