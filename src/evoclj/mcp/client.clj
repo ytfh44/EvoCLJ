@@ -24,7 +24,8 @@
             [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.transport :as transport])
   (:import [io.modelcontextprotocol.client McpClient McpSyncClient]
-           [io.modelcontextprotocol.spec McpClientTransport]
+           [io.modelcontextprotocol.spec McpClientTransport McpError]
+            [io.modelcontextprotocol.spec McpSchema$JSONRPCResponse$JSONRPCError]
            [io.modelcontextprotocol.spec McpSchema$CallToolRequest
             McpSchema$CallToolResult
             McpSchema$ListToolsResult
@@ -37,6 +38,16 @@
 
 (def ^:private default-max-reopen-attempts 2)
 
+(def singleton-object-mapper
+  "SHARED Jackson ObjectMapper used for wire-size computation in call-tool.
+   A single JVM-wide instance is correct and performant: ObjectMapper is
+   thread-safe for read/write after construction, and we never reconfigure
+   it. WO-M9 removes the previous per-call `(new ObjectMapper.)` allocation.
+   This is the SAME instance every caller receives (verified by
+   evoclj.mcp.structured-content-boundary-test); there is no per-call
+   construction anywhere in the call path."
+  (com.fasterxml.jackson.databind.ObjectMapper.))
+
 (defn- now-iso
   "Return the current instant as an ISO-8601 string."
   []
@@ -47,9 +58,41 @@
   [start end]
   (long (- end start)))
 
+(defn- abort-init-close!
+  "WO-M4 R2: best-effort shutdown of a McpSyncClient whose initialize()
+   just threw. The stdio transport has ALREADY spawned a server subprocess
+   whose only reliable exit is this client closing stdin, so skipping the
+   close strands the half-built client AND its child until JVM death.
+   Idempotent and error-proof: a secondary close failure is reported on
+   stderr and swallowed so it never masks the ORIGINAL initialize
+   failure the caller is about to see."
+  [^McpSyncClient client]
+  (when client
+    (try
+      (.closeGracefully client)
+      (catch Throwable t
+        (try
+          (binding [*out* *err*]
+            (println "[evoclj.mcp.client] post-initialize-failure client close failed:"
+                     (pr-str (err/sanitize t))))
+          (catch Throwable report-ex
+            ;; same discipline as close-owned!: even the *err* write may
+            ;; throw (an Error here must not escape and mask the original
+            ;; failure) — one raw PrintStream line keeps the swallow
+            ;; visible without risking another throw.
+            (try
+              (.println System/err
+                        (str "[evoclj.mcp.client] post-initialize-failure close-failure report also failed: "
+                             (pr-str (err/sanitize report-ex))))
+              (catch Throwable _ nil))))))))
+
 (defn- build-client
   "Build and initialize a McpSyncClient from a transport config map.
    Returns the live client, or throws :mcp/initialize-failed.
+
+   When initialize() throws, the half-built client is closed
+   best-effort first (its stdio subprocess would otherwise be leaked);
+   the thrown error's type and data shape are unchanged.
 
    `tools-change-consumer` is an optional zero-arg fn that the client
    will invoke when the server notifies of a tools list change.
@@ -86,6 +129,12 @@
       (.initialize sync-client)
       sync-client
       (catch Throwable ex
+        ;; WO-M4 R2: reap the half-built client's stdio subprocess FIRST
+        ;; (best-effort, error-proof — see abort-init-close!), THEN rethrow
+        ;; the original :mcp/initialize-failed wrapping. Type, message, and
+        ;; {:cause ...} data shape are byte-identical to the pre-cleanup
+        ;; contract; only the leak is gone.
+        (abort-init-close! sync-client)
         (throw (err/error :mcp/initialize-failed
                           "MCP client initialize failed"
                           {:cause (err/sanitize ex)})))))))
@@ -240,7 +289,7 @@
                                        ; (or {} when absent); the bridge's
                                        ; json-schema->malli converts it
       :mcp/output-schema <map|vector|  ; normalized remote outputSchema,
-                            :any>       ; :any when absent, or a vector
+                            nil>        ; nil when absent (FAIL CLOSED, never
                                        ; Malli schema (legacy 2025-11-25)
       :mcp/output-schema-kind <kw?>    ; :json-schema when output-schema is
                                        ; a map, :malli when a vector
@@ -264,9 +313,13 @@
            tools (.tools result)
            next-cursor (.nextCursor result)]
        {:tools (mapv (fn [^McpSchema$Tool t]
-                       (let [schema (or (.inputSchema ^McpSchema$JsonSchema t) {})
-                             output-schema (or (.outputSchema ^McpSchema$JsonSchema t) :any)
-                             input-schema (if (instance? java.util.Map schema)
+                        (let [schema (or (.inputSchema ^McpSchema$JsonSchema t) {})
+                              ;; M11: a missing outputSchema yields nil (FAIL CLOSED).
+                              ;; We deliberately do NOT default to :any -- that was a
+                              ;; fail-open loophole silently widening an unknown schema
+                              ;; to an accepting wildcard.
+                              output-schema (.outputSchema ^McpSchema$JsonSchema t)
+                              input-schema (if (instance? java.util.Map schema)
                                            (java-schema->clj schema)
                                            {})
                              out-schema (cond
@@ -293,19 +346,66 @@
                          "MCP listTools failed"
                          {:cause (err/sanitize ex)}))))))
 
+(def ^:dynamic ^:private *default-max-tools*
+  "Hard ceiling on the number of tools `list-all-tools` will aggregate across
+   all pages before failing closed with `:mcp/pagination-exceeded`.
+
+   The MCP Java SDK 2.0.0 auto-follows `nextCursor` *inside a single*
+   `listTools` call (WO-T1: one production call already walks every server
+   page and returns the whole aggregate). A hostile or misconfigured server
+   advertising a huge tool set would therefore blow the caller's memory the
+   moment that one call returns, and — at the raw layer — a never-terminating
+   cursor would block the SDK-internal loop indefinitely. This EvoCLJ-layer
+   bound is the fail-closed guard (WO-M6; fail-closed per INV-04): it is
+   enforced in `list-all-tools`, NOT delegated to the SDK. Callers may pass a
+   tighter `:max-tools` via opts; configuration layers may rebind this var."
+   10000)
+
 (defn list-all-tools
   "Return a single vector of all plain Clojure tool-descriptor maps by
    following :next-cursor pagination until exhausted.
 
-   Throws :mcp/list-tools-failed on transport failure."
-  [^McpSyncClient client]
-  (loop [acc []
-         cursor nil]
-    (let [result (list-tools client cursor)
-          tools (:tools result)]
-      (if (:has-more? result)
-        (recur (into acc tools) (:next-cursor result))
-        (into acc tools)))))
+   `opts` may carry:
+     :max-tools <pos-int>  hard ceiling on the aggregated tool count; when
+       the running total would exceed it, throws `:mcp/pagination-exceeded`
+       (fail-closed). Defaults to `*default-max-tools*`.
+
+   Throws `:mcp/list-tools-failed` on transport failure and
+   `:mcp/pagination-exceeded` when the aggregated tool count exceeds the
+   configured cap (or the cap itself is not a positive integer)."
+  ([^McpSyncClient client]
+   (list-all-tools client {}))
+  ([^McpSyncClient client {:keys [max-tools] :or {max-tools *default-max-tools*}}]
+   ;; fail-closed on an unusable cap (e.g. cap = 0 / negative / nil): a
+   ;; non-positive ceiling would let the next page push the aggregate past
+   ;; any finite bound, so reject it up front rather than silently accept.
+   (when-not (pos-int? max-tools)
+     (throw (err/error :mcp/pagination-exceeded
+                       "list-all-tools max-tools must be a positive integer"
+                       {:max-tools (pr-str max-tools)
+                        :error/reason :invalid-max-tools})))
+   (loop [acc []
+          cursor nil
+          pages 0]
+     (let [result (list-tools client cursor)
+           tools (:tools result)
+           next (into acc tools)
+           pages (inc pages)]
+       (cond
+         ;; fail-closed: aggregated count exceeds the configured cap
+         (> (count next) max-tools)
+         (throw (err/error :mcp/pagination-exceeded
+                           "list-all-tools exceeded the pagination tool-count cap"
+                           {:max-tools max-tools
+                            :observed (count next)
+                            :pages pages
+                            :error/reason :tool-count-exceeded}))
+         ;; normal termination: no more pages
+         (not (:has-more? result))
+         next
+         ;; keep aggregating the next page
+         :else
+         (recur next (:next-cursor result) pages))))))
 
 ;; --- tool invocation ---------------------------------------------------------
 
@@ -315,6 +415,11 @@
 
      {:mcp/content [<content-block-maps>]
       :mcp/is-error <boolean?>
+       :mcp/latency-ms <non-negative int> ; measured wall-clock elapsed
+                                        ; time (ms) of the real .callTool
+                                        ; SDK round-trip; always present on
+                                        ; the success path, never on the
+                                        ; failure path (fail-closed)
       :mcp/raw-size-bytes <int?>        ; total serialized size of the
                                        ; response content blocks in bytes,
                                        ; or nil when unknown}
@@ -336,8 +441,16 @@
                       {:args (pr-str args)})))
   (let [args (canonical/value->canonical args)]
     (try
-      (let [^McpSchema$CallToolResult result
+      (let [start (System/currentTimeMillis)
+            ^McpSchema$CallToolResult result
             (.callTool client (McpSchema$CallToolRequest. ^String tool-name args))
+            ;; M10: the ACTUAL measured wall-clock latency of the real
+            ;; .callTool SDK round-trip, in whole milliseconds. Captured
+            ;; immediately after the SDK returns (before any EDN
+            ;; conversion) so it reflects the transport cost, not the
+            ;; conversion work. `elapsed-ms` floors at 0 so a clock that
+            ;; does not advance never yields a negative value.
+            latency (max 0 (elapsed-ms start (System/currentTimeMillis)))
             content-block-maps
             (mapv (fn [^McpSchema$Content c]
                     (case (.type c)
@@ -360,68 +473,181 @@
                        :content/raw (str c)}))
                   (.content result))
             is-error (boolean (.isError result))
-            structured-content (.structuredContent result)
+            structured-content (canonical/java-value->edn (.structuredContent result))
             wire-bytes (try
-                         (let [mapper (com.fasterxml.jackson.databind.ObjectMapper.)
-                               m {"content" content-block-maps
-                                  "structuredContent" structured-content
-                                  "isError" is-error}]
-                           (alength (.writeValueAsBytes mapper m)))
+                         ;; WO-M9: serialize the wire envelope with the SHARED
+                         ;; singleton ObjectMapper. NB: `mapper` and `envelope`
+                         ;; are distinct bindings - a previous edit shadowed the
+                         ;; mapper with the envelope, which silently fell through
+                         ;; to the byte-length fallback and defeated the
+                         ;; singleton entirely. Keeping them separate is what
+                         ;; makes Mutation C (per-call `new ObjectMapper.`) and
+                         ;; the singleton-usage test observable.
+                         (let [mapper singleton-object-mapper
+                               envelope {"content" content-block-maps
+                                          "structuredContent" structured-content
+                                          "isError" is-error}]
+                           (alength (.writeValueAsBytes mapper envelope)))
                          (catch Throwable _
                            (long (reduce + 0 (map #(alength (.getBytes (str %) "UTF-8")) content-block-maps)))))]
         (cond-> {:mcp/content content-block-maps
                  :mcp/is-error is-error
-                 :mcp/tool-status (if is-error :error :ok)}
+                 :mcp/tool-status (if is-error :error :ok)
+                 ;; M10 write-back: the measured latency travels WITH the
+                 ;; result so every consumer (managed wrapper, bridge,
+                 ;; source) can surface the real number instead of a
+                 ;; hardcoded placeholder. Never nil on the success path.
+                 :mcp/latency-ms latency}
           (some? structured-content) (assoc :mcp/structured-content structured-content)
           (pos? wire-bytes) (assoc :mcp/raw-size-bytes wire-bytes)))
       (catch Throwable ex
-        (throw (err/error :mcp/call-tool-failed
-                          (str "MCP callTool " tool-name " failed")
-                          {:tool-name tool-name
-                           :args (err/sanitize args)
-                           :cause (err/sanitize ex)}))))))
+        (let [mcp-code (when (instance? McpError ex)
+                         (some-> ex .getJsonRpcError .code))]
+          (throw (err/error :mcp/call-tool-failed
+                            (str "MCP callTool " tool-name " failed")
+                            (cond-> {:tool-name tool-name
+                                     :args (err/sanitize args)
+                                     :cause (err/sanitize ex)}
+                              (some? mcp-code) (assoc :mcp/error-code mcp-code)))))))))
 
-;; --- observability ------------------------------------------------------------
+;; --- error classification v2 (M7) --------------------------------------------
+;;
+;; classify-mcp-error turns a raw Throwable (or an EvoCLJ ExceptionInfo that
+;; wraps one) into a sanitized, typed error map. The classification is
+;; fail-closed and produces INDEPENDENT, machine-readable categories:
+;;
+;;   :mcp/timeout        — TimeoutException / SocketTimeoutException, AND the
+;;                         MCP JSON-RPC request-timeout code -32001. Timeouts
+;;                         are their OWN family and are never folded into the
+;;                         generic :mcp/transport-error bucket.
+;;   :mcp/transport-error— IOException / SocketException / ConnectException,
+;;                         and the JSON-RPC connection-closed code -32000.
+;;   :mcp/protocol-error — Jackson parse/mapping failures, and the JSON-RPC
+;;                         parse/invalid-request codes -32700 / -32600.
+;;   :mcp/method-not-found / :mcp/invalid-params / :mcp/internal-error —
+;;                         typed JSON-RPC codes -32601 / -32602 / -32603.
+;;   :mcp/json-rpc-error — any other MCP JSON-RPC error code (carries :mcp/error-code).
+;;   :mcp/unknown-error  — nothing above matched (fail-closed default).
+;;
+;; JSON-RPC evidence is read from two sources:
+;;   1. a :mcp/error-code stashed in ex-data when an McpError is wrapped at the
+;;      call-tool boundary (so the numeric code survives sanitization);
+;;   2. the cause chain, walked through the SANITIZED error tree because the
+;;      production wrappers store the original throwable as a :cause map (the
+;;      live .getCause is nil after err/error wraps it).
+;;
+;; The classifier is pure: no shared mutable state is touched (INV-05).
 
-(def ^:private known-transport-classes
-  #{"java.io.IOException" "java.net.SocketException" "java.net.ConnectException"
-    "java.net.SocketTimeoutException" "java.util.concurrent.TimeoutException"})
+(def ^:private timeout-classes
+  "Java exception classes that mean a wall-clock deadline was exceeded."
+  #{"java.util.concurrent.TimeoutException" "java.net.SocketTimeoutException"})
 
-(def ^:private known-protocol-classes
+(def ^:private transport-classes
+  "Java exception classes that mean the CONNECTION (not the tool/input) failed."
+  #{"java.io.IOException" "java.net.SocketException" "java.net.ConnectException"})
+
+(def ^:private protocol-classes
+  "Java exception classes that mean a malformed JSON payload on the wire."
   #{"com.fasterxml.jackson.core.JsonParseException" "com.fasterxml.jackson.databind.JsonMappingException"})
 
-(defn- cause-chain-types
+(def ^:private transient-error-types
+  "Error types that represent a retryable, connection-level failure. A timeout,
+   transport break, or protocol break on a shared pooled connection should be
+   healed (mark-broken / reopen) rather than treated as a terminal business
+   error."
+  #{:mcp/timeout :mcp/transport-error :mcp/protocol-error})
+
+(defn transient-error-type?
+  "True when `error-type` is a retryable connection-level (transient) MCP
+   failure family."
+  [error-type]
+  (contains? transient-error-types error-type))
+
+(defn- json-rpc-code->type
+  "Map a JSON-RPC error `code` to a typed MCP error category. Unknown codes
+   fall back to :mcp/json-rpc-error (the code is still carried on the map)."
+  [code]
+  (case code
+    -32700 :mcp/protocol-error
+    -32600 :mcp/protocol-error
+    -32601 :mcp/method-not-found
+    -32602 :mcp/invalid-params
+    -32603 :mcp/internal-error
+    -32000 :mcp/transport-error
+    -32001 :mcp/timeout
+    :mcp/json-rpc-error))
+
+(defn- walk-classes-and-code
+  "Walk the SANITIZED error tree collecting every :error/class string and the
+   first :mcp/error-code encountered. The production wrappers keep the
+   original throwable as a :cause map (under ex-data :cause) and stash JSON-RPC
+   codes under :error/data, so the whole bounded sanitized tree is visited."
+  [node]
+  (loop [stack [node] classes #{} code nil]
+    (if (seq stack)
+      (let [n (first stack)]
+        (cond
+          (map? n)
+          (recur (into (rest stack) (vals n))
+                 (cond-> classes
+                   (string? (:error/class n)) (conj (:error/class n)))
+                 (or code (:mcp/error-code n)))
+          (or (vector? n) (seq? n))
+          (recur (into (rest stack) (vec n)) classes code)
+          :else (recur (rest stack) classes code)))
+      {:classes classes :code code})))
+(defn- live-mcp-code
+  "Walk the LIVE throwable cause chain and return the first JSON-RPC error
+   code carried by an io.modelcontextprotocol.spec.McpError, or nil. A raw
+   McpError (the SDK's JSON-RPC error response) is not yet wrapped, so its
+   code lives on the instance — not in ex-data."
   [^Throwable ex]
-  (lazy-seq
-   (when ex
-     (cons (:error/type (ex-data ex))
-           (cause-chain-types (.getCause ex))))))
+  (loop [t ex]
+    (when t
+      (if (instance? McpError t)
+        (some-> t .getJsonRpcError .code)
+        (recur (.getCause t))))))
 
 (defn- categorize-error
+  "Return a map with :error/type (and, for JSON-RPC errors, :mcp/error-code)
+   for the given Throwable. Priority: explicit JSON-RPC code > timeout class >
+   transport class > protocol class > already-typed EvoCLJ error > unknown.
+   The JSON-RPC code is read from two sources: a live McpError instance in the
+   cause chain, and a :mcp/error-code stashed in ex-data when an McpError is
+   wrapped at the call-tool boundary."
   [^Throwable ex]
-  (let [stable (:error/type (ex-data ex))]
+  (let [data (err/error-data ex)
+        {:keys [classes code]} (walk-classes-and-code data)
+        code (or code (live-mcp-code ex))
+        stable (:error/type (ex-data ex))]
     (cond
-      (and stable (not= stable :error/unknown)) stable
-      (contains? known-transport-classes (.getName (.getClass ex))) :mcp/transport-error
-      (contains? known-protocol-classes (.getName (.getClass ex))) :mcp/protocol-error
-      :else
-      (let [cause-types (remove nil? (cause-chain-types (.getCause ex)))
-            first-cause (first cause-types)]
-        (cond
-          (some #{:mcp/transport-error} cause-types) :mcp/transport-error
-          (some #{:mcp/protocol-error} cause-types) :mcp/protocol-error
-          (some #{:mcp/tool-error} cause-types) :mcp/tool-error
-          first-cause first-cause
-          :else :mcp/unknown-error)))))
+      ;; 1. JSON-RPC code wins even when wrapped in :mcp/call-tool-failed.
+      (some? code)
+      {:error/type (json-rpc-code->type code) :mcp/error-code code}
+      ;; 2. timeout is its own family (never folded into transport).
+      (some timeout-classes classes) {:error/type :mcp/timeout}
+      ;; 3. transport break.
+      (some transport-classes classes) {:error/type :mcp/transport-error}
+      ;; 4. protocol (wire) break.
+      (some protocol-classes classes) {:error/type :mcp/protocol-error}
+      ;; 5. an already-typed EvoCLJ error keeps its identity.
+      (and stable (not= stable :error/unknown)) {:error/type stable}
+      ;; 6. fail-closed default.
+      :else {:error/type :mcp/unknown-error})))
 
 (defn classify-mcp-error
-  "Return a sanitized error map with an enriched :error/type for the
-   given Throwable. Wraps the throwable's class, message, and cause
-   chain without leaking Java objects across the Agent boundary."
+  "Return a sanitized error map with an enriched :error/type for the given
+   Throwable. For MCP-originated JSON-RPC errors the map also carries
+   :mcp/error-code (the numeric JSON-RPC code). Timeouts are reported as the
+   independent :mcp/timeout category — they are never folded into
+   :mcp/transport-error. Wraps the throwable's class, message, and cause chain
+   without leaking Java objects across the Agent boundary."
   [^Throwable ex]
   (err/sanitize
-    (assoc (err/error-data ex)
-           :error/type (categorize-error ex))))
+    (let [cat (categorize-error ex)]
+      (assoc (err/error-data ex)
+             :error/type (:error/type cat)
+             :mcp/error-code (:mcp/error-code cat)))))
 
 (defn reduce-content-blocks
   "Honest rename for legacy non-streaming block reduction. Was call-tool-streaming which falsely promised protocol-level streaming. For true async streaming use adapter async channel."
@@ -484,9 +710,14 @@
                          "MCP managed client is closed"
                          {:open-count (or (:open-count managed) 0)})))
      (try
-       (let [start (System/currentTimeMillis)
-             result (call-tool (:client managed) tool-name args)
-             latency (elapsed-ms start (System/currentTimeMillis))
+       (let [result (call-tool (:client managed) tool-name args)
+             ;; M10: reuse the latency `call-tool` already measured around
+             ;; the REAL SDK round-trip -- do NOT re-measure a wrapper
+             ;; (that would double-count the managed-record overhead and
+             ;; could disagree with the source of truth). Fail-closed: a
+             ;; successful result always carries :mcp/latency-ms (call-tool
+             ;; writes it on the success path), so this is never nil here.
+             latency (long (max 0 (or (:mcp/latency-ms result) 0)))
              updated (assoc managed
                             :call-count (inc (or (:call-count managed) 0))
                             :last-latency-ms latency
@@ -508,18 +739,122 @@
                               :open-count (or (:open-count managed) 0)}))))))))
 
 (defn ping!
-  "Validate liveness of a managed MCP client by calling list-tools and
-   returning the tool count. Throws :mcp/ping-failed when the client
-   is closed or listTools throws."
+  "Validate liveness of a managed MCP client over the REAL transport by
+   calling the MCP Java SDK's `McpSyncClient.ping()` — a genuine JSON-RPC
+   `ping` request is sent across the wire and must round-trip, so liveness
+   is actually verified (not faked by counting tools).
+
+   Returns a plain EDN liveness map on success:
+
+       {:mcp/ping :ok
+        :mcp/ping-roundtrip-ms <pos-int>
+        :mcp/ping-at <ISO-8601 string>}
+
+   Throws :mcp/ping-failed when the managed record is closed/nil or the
+   live ping request fails. The thrown error carries
+   `:mcp/ping-cause-type` — the underlying error category produced by
+   `classify-mcp-error` (e.g. :mcp/timeout / :mcp/transport-error) — so a
+   failed liveness probe is itself typed and fail-closed."
   [managed]
   (if (closed? managed)
     (throw (err/error :mcp/ping-failed
                       "MCP client is closed"
                       {:open-count (or (:open-count managed) 0)}))
-    (let [client (:client (ensure-open managed default-max-reopen-attempts))]
+    (let [client (:client (ensure-open managed default-max-reopen-attempts))
+          start (System/currentTimeMillis)]
       (try
-        (count (list-all-tools client))
+        (.ping ^McpSyncClient client)
+        (let [rt (elapsed-ms start (System/currentTimeMillis))]
+          {:mcp/ping :ok
+           :mcp/ping-roundtrip-ms (long (max 0 rt))
+           :mcp/ping-at (now-iso)})
         (catch Throwable ex
-          (throw (err/error :mcp/ping-failed
-                            "MCP ping failed"
-                            {:cause (err/sanitize ex)})))))))
+          (let [classified (classify-mcp-error ex)]
+            (throw (err/error :mcp/ping-failed
+                              "MCP ping failed"
+                              {:mcp/ping-cause-type (:error/type classified)
+                               :mcp/ping-roundtrip-ms (long (max 0 (elapsed-ms start (System/currentTimeMillis))))
+                               :cause (err/sanitize ex)}))))))))
+
+;; --- optional keepalive (M8) -------------------------------------------------
+;;
+;; Keepalive is OPT-IN: callers must pass :keepalive? true to
+;; `start-keepalive!`. The default (no opt-in) returns nil and starts NO
+;; background thread, so liveness probing never happens unless explicitly
+;; requested. When enabled, a daemon thread pings the live client on a
+;; fixed interval and records the result in a shared liveness atom that the
+;; caller owns (returned in the control map), so external code can observe
+;; connection health without being coupled to the ping loop.
+
+(defn- keepalive-step!
+  "One ping cycle: update `liveness` with the result of `ping!`. Never
+   throws out of the loop — a failed ping is recorded as :failed so the
+   loop keeps running (and the failure is observable)."
+  [managed liveness]
+  (let [snapshot (try
+                   (ping! managed)
+                   (catch Throwable ex
+                     {:mcp/ping :failed
+                      :mcp/ping-cause-type (:error/type (ex-data ex))}))
+        verdict (if (= :ok (:mcp/ping snapshot)) :ok :failed)]
+    (swap! liveness assoc
+           :mcp/keepalive verdict
+           :mcp/keepalive-at (now-iso)
+           :mcp/last-ping snapshot)
+    snapshot))
+
+(defn start-keepalive!
+  "Start OPTIONAL periodic liveness probing for a managed MCP client.
+
+   opts:
+     :keepalive?        <boolean>  enable the loop (DEFAULT false — opt-in only)
+     :interval-ms      <pos-int>  ping period (default 30000)
+     :liveness         <atom?>    caller-owned atom to record health into;
+                                   a fresh atom is created when omitted
+
+   Returns nil when keepalive is NOT enabled (default-off, nothing runs).
+   When enabled, returns a control map:
+
+       {:keepalive? true
+        :stop!      <fn>      ; halts the loop and joins the thread (bounded)
+        :liveness   <atom>    ; {:mcp/keepalive :ok|:failed ...}
+        :thread     <Thread>}
+
+   The loop is a daemon thread that pings on `:interval-ms` and updates the
+   liveness atom. Fail-closed: a failed ping records :failed (with the
+   classified cause type) rather than terminating the loop or masking the
+   failure. stop! is idempotent and bounded — it interrupts the thread and
+   joins with a timeout, never blocking forever."
+  ([managed] (start-keepalive! managed {}))
+  ([managed {:keys [keepalive? interval-ms liveness]
+             :or {keepalive? false interval-ms 30000}}]
+   ;; OPTIONAL by contract: without explicit opt-in, do nothing — return
+   ;; nil and start NO background thread (default safe/off).
+   (when keepalive?
+     (let [liveness (or liveness (atom {:mcp/keepalive :unknown}))
+           interval-ms (long (max 1 (or interval-ms 30000)))
+           stop? (atom false)
+           thread (Thread.
+                    (fn []
+                      (while (not @stop?)
+                        (try
+                          (keepalive-step! managed liveness)
+                          (catch Throwable _ nil))
+                        (let [deadline (+ (System/currentTimeMillis) interval-ms)]
+                          (while (and (not @stop?)
+                                      (< (System/currentTimeMillis) deadline))
+                            (try (Thread/sleep 20) (catch Throwable _ nil))))))
+                    (str "evoclj-mcp-keepalive-" (java.util.UUID/randomUUID)))]
+       (.setDaemon thread true)
+       (.start thread)
+       {:keepalive? true
+        :stop! (fn stop!
+                 ([]
+                  (stop! 5000))
+                 ([join-ms]
+                  (when (compare-and-set! stop? false true)
+                    (try (.interrupt thread) (catch Throwable _ nil))
+                    (try (.join thread (long join-ms)) (catch Throwable _ nil)))
+                  nil))
+        :liveness liveness
+        :thread thread}))))

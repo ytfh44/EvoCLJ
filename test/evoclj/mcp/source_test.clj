@@ -9,12 +9,19 @@
    - Removed tool not in new ToolSurface, old binding retains old descriptor but execution may fail
    - Descriptor no longer mutates in place
    - ToolSurface derived from MCP Revision matches old provider registry behavior (equivalence)
-   - Identical tool set yields noop (no churn)"
+   - Identical tool set yields noop (no churn)
+
+   NOTE (M12): every MCP tool's local :tool/id is now the deterministic
+   composite [server-id remote-name] tuple — never the bare keyword
+   :mcp/<name>, which was collision-prone across servers. All id lookups
+   below use the composite tuple."
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.environment.registry :as env-reg]
             [evoclj.environment.revision :as rev]
+            [evoclj.intent.core :as intent]
             [evoclj.mcp.manager :as manager]
             [evoclj.mcp.source :as mcp-source]
+            [evoclj.provider.mcp-bridge]
             [evoclj.provider.protocol :as proto]))
 
 (defn- mcp-tool [name]
@@ -34,6 +41,7 @@
                   {:source/id :mcp/test
                    :transport-config {:type :stdio :command "echo" :args []}
                    :manager mgr
+                   :mcp/server-id "test"
                    :discover-fn discover-fn})]
       (is (satisfies? evoclj.environment.source/LiveSource source))
       (let [snap1 (evoclj.environment.source/snapshot! source)
@@ -52,6 +60,7 @@
                   {:source/id :mcp/shared
                    :transport-config {:type :stdio :command "echo" :args [] :connection/id :shared/test}
                    :manager mgr
+                   :mcp/server-id "shared"
                    :discover-fn discover-fn})
           snap (evoclj.environment.source/snapshot! source)
           payload (:payload snap)
@@ -60,8 +69,8 @@
           ;; second revision with same tool but new generation
           rev2 (rev/make-revision :mcp/shared payload 2)
           entries2 (mcp-source/tool-entries->surface payload mgr {:type :stdio :command "echo" :args [] :connection/id :shared/test} rev2)
-          e1 (get entries1 :mcp/shared-tool)
-          e2 (get entries2 :mcp/shared-tool)]
+          e1 (get entries1 ["shared" "shared-tool"])
+          e2 (get entries2 ["shared" "shared-tool"])]
       (is (some? e1))
       (is (some? e2))
       (is (not= e1 e2) "distinct immutable ToolEntry values")
@@ -81,17 +90,18 @@
                   {:source/id :mcp/immut
                    :transport-config {:type :stdio :command "echo" :args []}
                    :manager mgr
+                   :mcp/server-id "immut"
                    :discover-fn discover-fn})
           snap1 (evoclj.environment.source/snapshot! source)
           payload1 (:payload snap1)
           rev1 (rev/make-revision :mcp/immut payload1 17)
           entries1 (mcp-source/tool-entries->surface payload1 mgr {:type :stdio :command "echo"} rev1)
-          e17 (get entries1 :mcp/immutable-tool)
+          e17 (get entries1 ["immut" "immutable-tool"])
           desc17 (proto/describe e17)]
       ;; snapshot again with same payload but new revision 18
       (let [rev18 (rev/make-revision :mcp/immut payload1 18)
             entries18 (mcp-source/tool-entries->surface payload1 mgr {:type :stdio :command "echo"} rev18)
-            e18 (get entries18 :mcp/immutable-tool)
+            e18 (get entries18 ["immut" "immutable-tool"])
             desc18 (proto/describe e18)]
         (is (= 17 (:mcp/generation desc17)))
         (is (= 18 (:mcp/generation desc18)))
@@ -108,6 +118,7 @@
                   {:source/id :mcp/inflight-src
                    :transport-config {:type :stdio :command "echo" :args []}
                    :manager mgr
+                   :mcp/server-id "inflight"
                    :discover-fn discover-fn})
           env (env-reg/create-registry)
           _ (env-reg/register-source! env source)
@@ -115,7 +126,7 @@
           rev1 (:revision r1)
           payload1 (:payload rev1)
           entries1 (mcp-source/tool-entries->surface payload1 mgr {:type :stdio :command "echo"} rev1)
-          old-entry (get entries1 :mcp/inflight-tool)
+          old-entry (get entries1 ["inflight" "inflight-tool"])
           old-desc (proto/describe old-entry)]
       ;; simulate in-flight holder keeping old-entry
       (is (= 1 (:mcp/generation old-desc)))
@@ -126,7 +137,7 @@
             rev2 (:revision r2)
             payload2 (:payload rev2)
             entries2 (mcp-source/tool-entries->surface payload2 mgr {:type :stdio :command "echo"} rev2)
-            new-entry (get entries2 :mcp/inflight-tool)
+            new-entry (get entries2 ["inflight" "inflight-tool"])
             new-desc (proto/describe new-entry)]
         (is (= :published (:status r2)) "new payload yields new revision")
         (is (= 2 (:revision/seq rev2)))
@@ -146,6 +157,7 @@
                   {:source/id :mcp/remove-src
                    :transport-config {:type :stdio :command "echo" :args []}
                    :manager mgr
+                   :mcp/server-id "remove"
                    :discover-fn discover-fn})
           env (env-reg/create-registry)
           _ (env-reg/register-source! env source)
@@ -153,10 +165,10 @@
           rev1 (:revision r1)
           payload1 (:payload rev1)
           entries1 (mcp-source/tool-entries->surface payload1 mgr {:type :stdio :command "echo"} rev1)
-          old-entry (get entries1 :mcp/remove-tool)
+          old-entry (get entries1 ["remove" "remove-tool"])
           old-desc (proto/describe old-entry)]
-      (is (contains? entries1 :mcp/remove-tool))
-      (is (contains? entries1 :mcp/keep-tool))
+      (is (contains? entries1 ["remove" "remove-tool"]))
+      (is (contains? entries1 ["remove" "keep-tool"]))
       ;; simulate remote deletion: discover now returns only keep-tool
       (reset! tools-atom [(mcp-tool "keep-tool")])
       (let [r2 (env-reg/refresh! env)
@@ -164,15 +176,15 @@
             payload2 (:payload rev2)
             entries2 (mcp-source/tool-entries->surface payload2 mgr {:type :stdio :command "echo"} rev2)]
         (is (= :published (:status r2)))
-        (is (not (contains? entries2 :mcp/remove-tool)) "removed tool not in new ToolSurface")
-        (is (contains? entries2 :mcp/keep-tool))
+        (is (not (contains? entries2 ["remove" "remove-tool"])) "removed tool not in new ToolSurface")
+        (is (contains? entries2 ["remove" "keep-tool"]))
         ;; old binding retains old descriptor (immutable)
         (is (= old-desc (proto/describe old-entry)) "old entry still has old descriptor")
         ;; execution may fail if remote physically deleted: simulate by calling old entry's execute
         ;; which will try to call tool that no longer exists; it should throw :provider/execution-failed or similar
         ;; we don't have a live server, but we can verify that old entry still exists and new surface doesn't
         (is (some? old-entry))
-        (is (nil? (get entries2 :mcp/remove-tool)))))))
+        (is (nil? (get entries2 ["remove" "remove-tool"])))))))
 
 (deftest tools-list-changed-only-invalidates
   (testing "on tools/list_changed only invalidate is called, not direct registry mutate"
@@ -183,6 +195,7 @@
                   {:source/id :mcp/invalidate-src
                    :transport-config {:type :stdio :command "echo" :args []}
                    :manager mgr
+                   :mcp/server-id "invalidate"
                    :discover-fn discover-fn})
           env (env-reg/create-registry)
           _ (env-reg/register-source! env source)
@@ -191,10 +204,12 @@
           original-id (:revision/id original-current)
           ;; track whether invalidate was called
           invalidate-called (atom false)
-          ;; our source's trigger should call the registry's invalidate path (dirty + async refresh)
-          ;; we simulate by directly calling trigger-tools-changed! which should invoke subscribers
-          _ (let [subs @(:subs source)]
-              (is (= 1 (count subs)) "one subscriber (registry)"))
+          ;; M17: the source's invalidate callback is registered with the MANAGER,
+          ;; not a source-local subscription atom. The registry subscribed via
+          ;; src/subscribe! -> manager/subscribe!, so the manager holds exactly
+          ;; one subscription for this source.
+          _ (is (nil? (:subs source)) "source carries no local subscription atom (M17)")
+          _ (is (= 1 (manager/subscription-count mgr)) "one subscriber held by the manager")
           before-dirty (:dirty? (env-reg/status env))]
       ;; trigger notification
       (mcp-source/trigger-tools-changed! source)
@@ -217,6 +232,7 @@
                   {:source/id :mcp/stable
                    :transport-config {:type :stdio :command "echo" :args []}
                    :manager mgr
+                   :mcp/server-id "stable"
                    :discover-fn discover-fn})
           env (env-reg/create-registry)
           _ (env-reg/register-source! env source)
@@ -280,15 +296,23 @@
                   {:source/id :mcp/equiv-src
                    :transport-config {:type :stdio :command "echo" :args []}
                    :manager mgr
+                   :mcp/server-id "equiv-srv"
                    :discover-fn discover-fn})
           snap (evoclj.environment.source/snapshot! source)
           payload (:payload snap)
           rev (rev/make-revision :mcp/equiv-src payload 1)
           entries (mcp-source/tool-entries->surface payload mgr {:type :stdio :command "echo"} rev)
-          new-entry (get entries :mcp/equiv)
+          new-entry (get entries ["equiv-srv" "equiv"])
           new-desc (proto/describe new-entry)]
-      ;; core identity matches
-      (is (= (:tool/id old-desc) (:tool/id new-desc)))
+      ;; core identity: the OLD path uses an explicit keyword :tool/id, while
+      ;; the NEW (M12) path derives a deterministic composite [server remote]
+      ;; id, so the two ids are NOT equal by design — that is the whole point
+      ;; of M12 (no collision-prone bare keyword). We assert the new id is the
+      ;; composite tuple instead.
+      (is (not= (:tool/id old-desc) (:tool/id new-desc))
+          "old keyword id and new composite id are deliberately distinct")
+      (is (= ["equiv-srv" "equiv"] (:tool/id new-desc))
+          "new path id is the deterministic composite tuple")
       (is (= (:effect old-desc) (:effect new-desc)))
       (is (= :remote (:effect new-desc)))
       ;; old used direct Malli with keyword keys, new via JSON schema with string keys
@@ -298,7 +322,42 @@
       ;; mcp/input-schema: old was {} (no JSON), new is the JSON schema
       (is (= {} (:mcp/input-schema old-desc)))
       (is (= {"type" "object" "properties" {"text" {"type" "string"}} "required" ["text"]} (:mcp/input-schema new-desc)))
-      ;; ToolSurface equivalence: both have one entry for :mcp/equiv
+      ;; ToolSurface equivalence: both have exactly one entry
       (is (= 1 (count entries)))
-      (is (contains? entries :mcp/equiv))
+      (is (contains? entries ["equiv-srv" "equiv"]))
       )))
+
+(deftest mcp-removed-tool-entry-fails-closed-with-typed-error
+  (testing "an MCP ToolEntry whose descriptor carries :mcp/removed-at fails closed"
+    (let [mgr (manager/create-manager)
+          removed-desc
+          {:tool/id ["srv" "removed"]
+           :effect :remote
+           :input-schema [:map [:text :string]]
+           :output-schema [:map [:text :string]]
+           :required-action :invoke
+           :version 1
+           :mcp/name "removed"
+           :mcp/input-schema {"type" "object" "properties" {"text" {"type" "string"}} "required" ["text"]}
+           :mcp/output-schema {"type" "object" "properties" {"text" {"type" "string"}}}
+           :mcp/server-id "srv"
+           :mcp/removed-at 12345}
+          entry (mcp-source/make-tool-entry removed-desc mgr {:type :stdio :command "echo"})
+          intent {:payload {:tool/id ["srv" "removed"] :args {:text "hi"}}}]
+      (testing "normalize-request throws the typed :provider/tool-removed"
+        (let [e (try
+                  (proto/normalize-request entry intent)
+                  (catch clojure.lang.ExceptionInfo ex ex))]
+          (is (some? e) "normalize-request does not return a silent value")
+          (is (= :provider/tool-removed (:error/type (ex-data e)))
+              "removed MCP tool yields typed :provider/tool-removed")
+          (is (= ["srv" "removed"] (:tool/id (ex-data e)))
+              "the removed tool id is identified in the error data")
+          (is (= 12345 (:mcp/removed-at (ex-data e)))
+              "the removal timestamp is carried in the error data")))
+      (testing "a present (non-removed) MCP ToolEntry normalizes fine"
+        (let [present-desc (dissoc removed-desc :mcp/removed-at)
+              present-entry (mcp-source/make-tool-entry present-desc mgr {:type :stdio :command "echo"})]
+          (is (some? (proto/normalize-request present-entry intent))
+              "non-removed descriptor normalizes without error"))))))
+

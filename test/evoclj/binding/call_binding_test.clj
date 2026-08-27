@@ -119,11 +119,11 @@
               (execute-request! [_ _] {:text "ok"}))
           b (binding/capture-tool-binding p {:freshness :best-effort})]
       (is (= 10 (:revision/seq b)))
-      (is (= 10 (:mcp/generation b)))
+      (is (= 10 (:mcp/generation (binding/binding->audit b))))
       ;; mutate original
       (swap! desc-atom assoc :mcp/generation 99 :mcp/last-refreshed nil)
       (is (= 10 (:revision/seq b)) "binding still holds frozen seq 10")
-      (is (= 10 (:mcp/generation b)))
+      (is (= 10 (:mcp/generation (binding/binding->audit b))))
       (is (= 10 (:mcp/generation (:binding/descriptor b))) "descriptor snapshot not mutated")
       (is (= {:tool/id :fake/immut :effect :pure} (select-keys (:binding/descriptor b) [:tool/id :effect]))))))
 
@@ -187,7 +187,7 @@
     (let [desc {:tool/id :test/c :effect :pure :input-schema :any :output-schema :any :required-action :invoke :mcp/generation 3 :mcp/last-refreshed (System/currentTimeMillis)}]
       (let [c (contract/capture desc :best-effort)
             b (binding/capture desc :best-effort)]
-        (is (= (:contract/generation c) (:contract/generation b)))
+        (is (= (:contract/generation c) (:revision/seq b)))
         (is (= (:contract/id c) (:contract/id c)) "has id")
         (is (contract/valid-freshness? :best-effort))
         (is (= (contract/generation desc) (binding/generation desc)))

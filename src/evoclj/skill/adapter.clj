@@ -12,6 +12,19 @@
 
   Each skill is a directory containing SKILL.md. Name defaults to directory name when frontmatter :name missing (lenient mode).
 
+  S12 (same-name collision): when the same skill name is discoverable from more
+  than one scope (:project, :user, :extra), it resolves by the FIXED precedence
+  project > user > extra — never by registration order and never by an arbitrary
+  tie-break. The scope of each root is explicit (see :root-scopes below); when
+  the legacy :roots / :extra-roots options are used, a root matching
+  <project>/.agents/skills is :project, a root matching ~/.agents/skills is
+  :user, all other :roots are :user, and :extra-roots are :extra. An OPTIONAL
+  `:on-collision :error` mode turns a cross-scope same-name collision into a
+  typed :skill/name-collision error (fail-closed) instead of a precedence pick;
+  the default :precedence resolves deterministically. Scope and collision-mode
+  validation is fail-closed (typed :skill/invalid-root-scope /
+  :skill/invalid-collision-mode).
+
   ContextSurface progressive disclosure:
   - catalog projection -> Offer with name+description (descriptor)
   - activation -> full SKILL.md exact revision via CAS materializer
@@ -21,7 +34,15 @@
   reload_skill atomic A->B for both surfaces.
 
   Source refresh: catalog shows B but existing binding A unchanged.
-  Source removal: catalog disappears but binding A still works via CAS tree."
+  Source removal: catalog disappears but binding A still works via CAS tree.
+
+  S11 (lenient diagnostic): the SkillSource snapshot! payload reports skills
+  that were rejected during lenient capture/parse (invalid manifest, unknown
+  frontmatter key, disallowed YAML tag, missing SKILL.md, ...) under
+  :rejected-skills — a list of {:skill/name <dir> :reason <typed reason>} —
+  plus :skill/rejected-count. In :strict mode the first rejection still
+  aborts (fail-closed); in :lenient mode rejected skills are skipped for
+  publication but never silently dropped (they are observable via the report)."
   (:require [clojure.string :as str]
             [evoclj.environment.source :as src]
             [evoclj.environment.registry :as reg]
@@ -31,11 +52,13 @@
             [evoclj.fs.walk :as walk]
             [evoclj.kernel.error :as err]
             [evoclj.skill.parser :as parser]
+            [evoclj.skill.collect :as collect]
             [evoclj.skill.surface :as surface]
             [evoclj.context.offer :as offer]
             [evoclj.context.binding :as ctx-binding]
             [evoclj.store.binding :as store-binding]
-            [evoclj.store.cas :as cas])
+            [evoclj.store.cas :as cas]
+            [evoclj.support.failpoint :as fault])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file Files LinkOption Path Paths)
            (java.nio.file.attribute FileAttribute)))
@@ -97,6 +120,45 @@
   (str (.getFileName dir)))
 
 ;; ---------------------------------------------------------------------------
+;; Scope assignment (S12): project > user > extra precedence
+;; ---------------------------------------------------------------------------
+
+(defn- scoped-roots-for
+  "Build the vector of {:path <Path> :scope <keyword>} discovery roots from the
+   source's configured roots.
+
+   When :root-scopes is supplied (map scope -> [paths]) it is authoritative and
+   order-independent: each root's scope is explicit, so reordering the map (or
+   the paths within a scope) never changes which skill resolves.
+
+   Otherwise the legacy flat :roots / :extra-roots are used and each root gets a
+   deterministic scope by path identity: a root equal to the project
+   .agents/skills root -> :project; every other :root -> :user; every
+   :extra-root -> :extra. This is path-based (never order-based)."
+  [roots extra-roots root-scopes]
+  (if (seq root-scopes)
+    (vec (for [[scope paths] root-scopes
+               p paths]
+           {:path (path-of p) :scope scope}))
+    (let [roots (or roots [])
+          project-roots (filter #(= (str (path-of %)) (str (project-skills-root))) roots)
+          user-roots (remove #(= (str (path-of %)) (str (project-skills-root))) roots)]
+      (vec (concat
+            (map (fn [p] {:path (path-of p) :scope :project}) project-roots)
+            (map (fn [p] {:path (path-of p) :scope :user}) user-roots)
+            (map (fn [p] {:path (path-of p) :scope :extra}) (or extra-roots [])))))))
+
+(defn- scoped-skill-dirs
+  "Discover skill dirs per scoped root. `scoped-roots` is a vector of
+   {:path <Path> :scope <keyword>}; returns a vector of
+   {:dir <Path> :scope <keyword>}."
+  [scoped-roots]
+  (vec (mapcat (fn [{:keys [path scope]}]
+                 (map (fn [dir] {:dir dir :scope scope})
+                      (discover-skill-dirs [path])))
+               scoped-roots)))
+
+;; ---------------------------------------------------------------------------
 ;; Snapshot + parse FROM SNAPSHOT (must not parse live)
 ;; ---------------------------------------------------------------------------
 
@@ -123,6 +185,17 @@
     (let [content (String. ^bytes ba StandardCharsets/UTF_8)]
       (parser/parse-skill-content content mode))))
 
+(defn- rejection-reason
+  "Typed, fully serializable reason for a rejected skill (S11 contract).
+
+   Produced by the production error contract (`err/error-data`) so every
+   rejected skill carries a machine-readable `:error/type` plus the error
+   message/class/cause data. Never a raw Throwable, never a silently empty
+   reason: the fail-closed report contract is that a rejected skill ALWAYS
+   appears in `:rejected-skills` WITH a reason."
+  [t]
+  (err/error-data t))
+
 ;; ---------------------------------------------------------------------------
 ;; Bundle derivation + publish
 ;; ---------------------------------------------------------------------------
@@ -130,57 +203,123 @@
 (defn derive-and-publish!
   "Snapshot skill-dir to CAS, parse SKILL.md from snapshot, validate, derive bundle, publish atomically.
   Returns {:skill/name ... :tree/id ... :bundle bundle :frontmatter ... :body ...}
-  Throws on strict validation failure. In lenient mode, caller decides to skip or throw."
-  [skill-dir cas registry mode]
-  (let [dir-name (skill-name-for-dir skill-dir)
-        {:keys [tree/id manifest] :as snap} (snapshot-skill-dir! skill-dir cas)
-        parsed (parse-skill-from-snapshot cas manifest mode)
-        fm (:frontmatter parsed)
-        skill-name (or (:name fm) dir-name)
-        ;; normalize frontmatter for surface: ensure name present
-        fm-with-name (if (:name fm) fm (assoc fm :name skill-name))
-        bundle (surface/skill->bundle {:skill/name skill-name :tree/id id :frontmatter fm-with-name :body (:body parsed) :cas cas})]
-    ;; atomic publish via environment registry
-    (bundle/publish-bundle! registry bundle)
-    {:skill/name skill-name :tree/id id :manifest manifest :parsed parsed :frontmatter fm-with-name :body (:body parsed) :bundle bundle :snapshot snap}))
+  Throws on strict validation failure. In lenient mode, caller decides to skip or throw.
+
+  Optional 5th arg opts may carry {:failpoints {...}} seams
+  (:after-snapshot-tree / :after-parse / :after-bundle-publish) — see
+  evoclj.support.failpoint. A hook throw propagates to the caller."
+  ([skill-dir cas registry mode]
+   (derive-and-publish! skill-dir cas registry mode nil))
+  ([skill-dir cas registry mode {:as opts}]
+   (let [dir-name (skill-name-for-dir skill-dir)
+         {:keys [tree/id manifest] :as snap} (snapshot-skill-dir! skill-dir cas)]
+     ;; T2 seam: tree snapshotted to CAS, not yet parsed
+     (fault/trigger! opts :after-snapshot-tree)
+     (let [parsed (parse-skill-from-snapshot cas manifest mode)]
+       ;; T2 seam: SKILL.md parsed from snapshot; bundle not yet derived/published
+       (fault/trigger! opts :after-parse)
+       (let [fm (:frontmatter parsed)
+             skill-name (or (:name fm) dir-name)
+             ;; normalize frontmatter for surface: ensure name present
+             fm-with-name (if (:name fm) fm (assoc fm :name skill-name))
+             bundle (surface/skill->bundle {:skill/name skill-name :tree/id id :frontmatter fm-with-name :body (:body parsed) :cas cas})]
+         ;; atomic publish via environment registry
+         (bundle/publish-bundle! registry bundle)
+         ;; T2 seam: bundle published into the registry
+         (fault/trigger! opts :after-bundle-publish)
+         {:skill/name skill-name :tree/id id :manifest manifest :parsed parsed :frontmatter fm-with-name :body (:body parsed) :bundle bundle :snapshot snap})))))
 
 ;; ---------------------------------------------------------------------------
 ;; SkillSource LiveSource
 ;; ---------------------------------------------------------------------------
 
-(defrecord SkillSource [source-id roots cas registry subs closed? strict? extra-roots]
+(defrecord SkillSource [source-id roots cas registry subs closed? strict? extra-roots root-scopes collision]
   src/LiveSource
   (snapshot! [this]
+    ;; PURE capture (INV-06): discover skill dirs and snapshot each to CAS +
+    ;; parse SKILL.md FROM SNAPSHOT to read its raw data. This performs NO
+    ;; publication, NO registry mutation, and NO counter advance. The
+    ;; downstream Source -> Revision -> Projector -> Bundle transaction
+    ;; (evoclj.environment.registry/refresh!) owns all publication; the
+    ;; projector (project, below) turns this captured payload into bundles.
+    ;; A strict-mode parse failure still throws (fail-closed) but does not
+    ;; partial-publish.
+    ;;
+    ;; S11 (lenient diagnostic): in :lenient mode a skill whose capture/parse
+    ;; throws is NOT published, but it is never silently dropped — every such
+    ;; skill is reported in the snapshot payload under :rejected-skills
+    ;; ({:skill/name <dir> :reason <typed reason>}) with a matching
+    ;; :skill/rejected-count. :strict mode still aborts on the first rejection.
+    ;; S12 (same-name collision): each discovered skill is tagged with the scope
+    ;; of the root it came from, then same-name skills across scopes are
+    ;; resolved deterministically (project > user > extra) — or, when
+    ;; :on-collision :error, the whole snapshot fails closed with a typed
+    ;; :skill/name-collision instead of picking a winner.
     (when @closed?
       (throw (err/error :skill/source-closed "SkillSource is closed" {:source/id source-id})))
     (let [mode (if strict? :strict :lenient)
-          all-roots (vec (concat (or roots []) (or extra-roots [])))
-          skill-dirs (discover-skill-dirs all-roots)
-          ;; For each skill dir, snapshot + parse from snapshot + publish bundle.
-          ;; In lenient mode, skip bad skills but continue; in strict, fail whole snapshot.
-          results (reduce (fn [acc dir]
-                            (try
-                              (let [res (derive-and-publish! dir cas registry mode)]
-                                (conj acc res))
-                              (catch Exception e
-                                (if strict?
-                                  (throw e)
-                                  ;; lenient: skip invalid skill, log
-                                  (do
-                                    ;; Could store error, but continue
-                                    acc)))))
-                          []
-                          skill-dirs)
-          payload {:skills (into {} (map (fn [{:keys [skill/name tree/id bundle frontmatter]}]
-                                           [name {:tree/id id :bundle/id (:bundle/id bundle) :revision/id id :frontmatter frontmatter}])
-                                         results))
-                   :skill/count (count results)
-                   :roots (mapv str all-roots)
+          scoped-roots (scoped-roots-for roots extra-roots root-scopes)
+          scoped-dirs (scoped-skill-dirs scoped-roots)
+          ;; Per-skill capture + parse, tagged with the root's scope. Each entry
+          ;; is either a well-formed skill (accepted) or, in lenient mode, a
+          ;; rejected skill with its reason.
+          {:keys [results rejected]}
+          (reduce (fn [acc {:keys [dir scope]}]
+                    (try
+                      (let [{:keys [tree/id manifest]} (snapshot-skill-dir! dir cas)
+                            parsed (parse-skill-from-snapshot cas manifest mode)
+                            fm (:frontmatter parsed)
+                            skill-name (or (:name fm) (skill-name-for-dir dir))]
+                        (update acc :results conj {:skill/name skill-name
+                                                   :scope scope
+                                                   :tree/id id
+                                                   :frontmatter (if (:name fm) fm (assoc fm :name skill-name))
+                                                   :body (:body parsed)}))
+                      (catch Exception e
+                        (if strict?
+                          (throw e)
+                          ;; lenient: report the rejected skill + its typed
+                          ;; reason, and continue. Never silently drop (S11).
+                          (update acc :rejected conj {:skill/name (skill-name-for-dir dir)
+                                                      :reason (rejection-reason e)})))))
+                  {:results [] :rejected []}
+                  scoped-dirs)
+          results (vec (or results []))
+          rejected (vec (or rejected []))
+          ;; S12: collapse same-name across scopes by fixed precedence, or
+          ;; fail closed on a cross-scope collision when :on-collision :error.
+          resolved (collect/resolve-skills results collision)
+          payload {:skills (into {} (map (fn [[n entry]]
+                                           [n {:tree/id (:tree/id entry)
+                                               :revision/id (:tree/id entry)
+                                               :frontmatter (:frontmatter entry)}])
+                                         resolved))
+                   :skill/count (count resolved)
+                   :rejected-skills rejected
+                   :skill/rejected-count (count rejected)
+                   :roots (mapv #(str (:path %)) scoped-roots)
                    :mode (name mode)}]
       {:source/id source-id
        :payload payload
-       :captured-at (System/currentTimeMillis)
-       :skill/results results}))
+       ;; captured-at is still recorded as a pure observation timestamp of the
+       ;; capture (the snapshot value), not stamped into published state.
+       :captured-at (System/currentTimeMillis)}))
+  (project [this snapshot]
+    ;; PURE projector (INV-06): turn the captured snapshot payload into a
+    ;; vector of candidate bundle-opts maps, one per discovered skill, ready
+    ;; for evoclj.environment.bundle/prepare-bundle + publish. Performs NO
+    ;; mutation; throwing here is the fail-closed signal for a mid-chain
+    ;; failure. Returns an empty vector when there are no skills.
+    (let [skills (get-in snapshot [:payload :skills])]
+      (if (empty? skills)
+        []
+        (mapv (fn [[skill-name {:keys [tree/id frontmatter body]}]]
+                (surface/skill->bundle {:skill/name skill-name
+                                        :tree/id id
+                                        :frontmatter frontmatter
+                                        :body body
+                                        :cas cas}))
+              skills))))
   (subscribe! [this invalidate-fn]
     (when @closed?
       (throw (err/error :skill/source-closed "SkillSource is closed" {:source/id source-id})))
@@ -204,11 +343,18 @@
   :cas — CAS handle (required, string path or {:root ...} map)
   :registry — environment registry atom (optional, created if not supplied)
   :strict? — boolean, false = lenient external discovery, true = strict vendored/evolution compile
+  :root-scopes — map scope -> [paths] making each root's precedence scope
+    explicit (:project / :user / :extra). Order-independent and authoritative.
+    When omitted, scopes derive from the legacy :roots / :extra-roots by path
+    identity (see scoped-roots-for).
+  :on-collision — :precedence (default; same-name resolves project > user >
+    extra deterministically) or :error (a cross-scope same-name collision
+    raises a typed :skill/name-collision and the snapshot fails closed).
 
   The source's snapshot! will:
    filesystem event -> mark dirty -> snapshot whole skill dir to CAS -> parse SKILL.md FROM SNAPSHOT -> validate -> derive SurfaceBundle -> atomic publish.
   It must not parse live then snapshot."
-  [{:keys [source/id roots cas registry strict? extra-roots] :as opts}]
+  [{:keys [source/id roots cas registry strict? extra-roots root-scopes on-collision] :as opts}]
   (when-not cas
     (throw (err/error :skill/invalid-opts "SkillSource requires :cas" {:opts opts})))
   (let [sid (or id :skills/all)
@@ -217,7 +363,9 @@
         subs (atom {})
         closed? (atom false)
         strict? (boolean strict?)
-        source (->SkillSource sid roots cas registry subs closed? strict? (or extra-roots []))]
+        collision (collect/validate-collision-mode on-collision)
+        root-scopes (collect/validate-root-scopes (or root-scopes {}))
+        source (->SkillSource sid roots cas registry subs closed? strict? (or extra-roots []) root-scopes collision)]
     ;; attach registry for external access
     (assoc source :registry registry)))
 
@@ -263,7 +411,7 @@
                     ctx (first (filter #(= :context (:surface/type %)) surfaces))
                     desc (:descriptor ctx)
                     name (or (:name desc) (second logical-id))]
-                (offer/make-offer {:logical-id logical-id :revision-id rev :bundle-id bid :name (or name (str logical-id)) :description (or (:description desc) "")}))) 
+                (offer/make-offer {:logical-id logical-id :revision-id rev :bundle-id bid :name (or name (str logical-id)) :description (or (:description desc) "") :descriptor (when (map? desc) (:materializer desc))}))) 
             logical-index)
       ;; fallback when logical-index empty (e.g., registry created without bundle publish): scan all bundles and deduplicate by logical-id
       (let [bundles (bundle/list-bundles registry)
@@ -276,7 +424,7 @@
                       ctx (first (filter #(= :context (:surface/type %)) surfaces))
                       desc (:descriptor ctx)
                       name (or (:name desc) (second logical-id))]
-                  (offer/make-offer {:logical-id logical-id :revision-id rev :bundle-id bid :name (or name (str logical-id)) :description (or (:description desc) "")})))
+                  (offer/make-offer {:logical-id logical-id :revision-id rev :bundle-id bid :name (or name (str logical-id)) :description (or (:description desc) "") :descriptor (when (map? desc) (:materializer desc))})))
               by-logical)))))
 
 (defn current-offer-for

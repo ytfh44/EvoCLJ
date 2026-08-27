@@ -159,18 +159,22 @@
     (t/is (= 1 (count (:effective/segments result))))
     (t/is (= [:skill "debugging"] (:segment/logical-id (first (:effective/segments result)))))))
 
-(t/deftest materialize-with-cas-function-resolver
-  (let [content-a "# SKILL via fn"
+(t/deftest materialize-with-real-cas-resolver
+  ;; WO-S1 / INV-09: the materializer resolves via REAL CAS, never a
+  ;; test-injected resolver fn (cas-fn is banned). A leaf artifact stored
+  ;; in a real CAS tree is materialized verbatim through production CAS.
+  (let [content-a "# SKILL via real cas"
         rev-a (rev content-a)
         offer-a (offer/make-offer {:logical-id [:skill "debugging"] :revision-id rev-a :bundle-id "bundle:a"})
-        cas-fn (fn [id] (when (= id rev-a) content-a))
         store (binding/create-store)
         _ (binding/activate! store offer-a)
+        cas-root (temp-cas-root)
+        _ (cas/put-bytes! (str cas-root) (txt-bytes content-a) {:media-type "text/markdown"})
         result (mat/materialize {:history "h"
                                  :bindings (binding/list-active store)
                                  :catalog nil
                                  :policy nil
-                                 :cas cas-fn})]
+                                 :cas (str cas-root)})]
     (t/is (= content-a (:segment/content (first (:effective/segments result)))))))
 
 (t/deftest compression-does-not-need-skill

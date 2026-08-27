@@ -283,7 +283,15 @@
 ;; ---------------------------------------------------------------------------
 
 (defn validate-mount
-  "Validate mount map shape. Throws :mount/invalid on failure."
+  "Validate mount map shape. Throws :mount/invalid on failure.
+
+  WO-B3: :mount/id MUST be a canonical vector id (mount-id?) — never a
+  bare scalar :surface/id. The :backend may satisfy the Backend protocol
+  OR be a plain descriptor map (a not-yet-realized backend such as
+  {:type :cas-tree :tree/id ...}); the filesystem provider enforces
+  realizability at operation time, so a descriptor mount fails-closed at
+  use rather than being rejected here (the degraded-descriptor path is
+  retained so publication stays a single canonical register-mount!)."
   [m]
   (when-not (map? m)
     (throw (err/error :mount/invalid "mount must be a map" {:mount m})))
@@ -291,8 +299,9 @@
     (throw (err/error :mount/invalid "invalid :mount/id" {:mount m})))
   (when-not (:backend m)
     (throw (err/error :mount/invalid "missing :backend" {:mount m})))
-  (when-not (satisfies? Backend (:backend m))
-    (throw (err/error :mount/invalid "backend must satisfy Backend protocol" {:mount m})))
+  (when-not (or (satisfies? Backend (:backend m))
+                (map? (:backend m)))
+    (throw (err/error :mount/invalid "backend must satisfy Backend protocol or be a descriptor map" {:mount m})))
   (when-not (valid-access? (:access/max m))
     (throw (err/error :mount/invalid "invalid :access/max" {:mount m :valid valid-capabilities})))
   m)

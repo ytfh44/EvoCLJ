@@ -27,23 +27,34 @@
        (string? (:offer/revision-id x))
        (types/artifact-id? (:offer/revision-id x))
        (string? (:offer/bundle-id x))
-       (seq (:offer/bundle-id x))))
+       (seq (:offer/bundle-id x))
+       (let [d (:offer/descriptor x)]
+         (or (nil? d)
+             (and (map? d)
+                  (contains? #{:cas-leaf :cas-tree-file} (:type d)))))))
 
 (defn make-offer
   "Create a ContextOffer. Requires :logical-id vector, :revision-id sha256 string,
-  :bundle-id string. Optional :name and :description strings."
-  [{:keys [logical-id revision-id bundle-id name description]}]
+  :bundle-id string. Optional :name and :description strings.
+  Optional :descriptor is a materializer descriptor (WO-S1) that the
+  materializer routes on when a binding is created from this offer."
+  [{:keys [logical-id revision-id bundle-id name description descriptor]}]
   (when-not (and (vector? logical-id) (seq logical-id))
     (throw (err/error :context/offer-invalid "logical-id must be non-empty vector" {:logical-id logical-id})))
   (when-not (types/artifact-id? revision-id)
     (throw (err/error :context/offer-invalid "revision-id must be sha256:<64 hex>" {:revision-id revision-id})))
   (when-not (and (string? bundle-id) (seq bundle-id))
     (throw (err/error :context/offer-invalid "bundle-id must be non-empty string" {:bundle-id bundle-id})))
+  (when (some? descriptor)
+    (when-not (and (map? descriptor)
+                   (contains? #{:cas-leaf :cas-tree-file} (:type descriptor)))
+      (throw (err/error :context/offer-invalid "invalid :descriptor" {:descriptor descriptor}))))
   (cond-> {:offer/logical-id logical-id
            :offer/revision-id revision-id
            :offer/bundle-id bundle-id}
     name (assoc :offer/name name)
-    description (assoc :offer/description description)))
+    description (assoc :offer/description description)
+    (some? descriptor) (assoc :offer/descriptor descriptor)))
 
 (defn catalog-projection
   "Build a CatalogProjection map from a collection of offers.

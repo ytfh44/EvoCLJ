@@ -14,6 +14,18 @@ directory boundaries, not by instruction.
 - `README.md` — this manifest.
 - `*.edn` — case files; each holds one case map `{:case/id <keyword> ...}`.
 
+## Empty dataset behavior (fail closed)
+
+This dataset is currently **empty** (no `*.edn` case file is present
+beyond this manifest). Evaluating a candidate against an empty selection
+dataset must NOT silently pass with zero cases: the evaluator-only
+loader returned by `evoclj.eval.dataset/selection-loader` fails closed
+with the explicit typed `:dataset/empty` marker (carrying the
+`:dataset/source` and `:case-count 0`) rather than yielding an empty
+case set. The marker is observable and serializable (Global Constraint
+22). Seed this dataset with at least one case file before running
+paired comparisons.
+
 ## Boundary contract
 
 - Selection case **bodies are loaded only by evaluator code**, after

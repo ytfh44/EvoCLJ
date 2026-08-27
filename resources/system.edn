@@ -61,6 +61,76 @@
   ;; per-session capability leases before any session runs
   :leases []}
 
+  ;; WO-M20 (P0, e2e#1): McpSource PRODUCTION WIRING - an Integrant SWITCH.
+  ;;
+  ;; When :enabled? is false (the SHIPPED DEFAULT, fail-safe), the host starts
+  ;; WITHOUT an McpSource and the legacy static MCP path (:mcp/bridge
+  ;; providers in :provider/registry) is completely untouched. Flip it to true
+  ;; to have the production system instantiate a real McpSource
+  ;; (evoclj.mcp.source/McpSource) through the host's ig/init path.
+  ;;
+  ;; When enabled, the following are REQUIRED and validated fail-closed by
+  ;; evoclj.kernel.system/ig/init-key :mcp/source:
+  ;;   :source/id        - keyword identifying the source
+  ;;   :transport-config - map accepted by evoclj.mcp.transport/transport-for
+  ;; :manager is injected so the source shares the host-owned connection pool
+  ;; (M5); :mcp/server-id tags the discovered tools' composite tool-ids (M12).
+  ;;
+  ;; Example (uncomment to enable a real MCP source):
+  ;;
+  ;;   :mcp/source
+  ;;   {:enabled? true
+  ;;    :source/id :mcp/production
+  ;;    :transport-config {:type :stdio :command "npx"}
+  ;;    :mcp/server-id "production"
+  ;;    :manager #ig/ref :mcp/manager}
+  :mcp/source
+  {:enabled? false
+   ;; WO-E6: when the switch above is flipped to true, the built McpSource
+   ;; is REGISTERED into the dynamic environment host (:environment/registry)
+   ;; via register-source! and its invalidation callback subscribes through
+   ;; it (tools-changed -> manager publish! -> registry refresh). With the
+   ;; switch off this ref is simply resolved and unused.
+   :environment/registry #ig/ref :environment/registry}
+  :mcp/manager
+  {}
+
+  ;; WO-E6 (dynamic environment host componentization): the
+  ;; EnvironmentRegistry component (evoclj.environment.registry). Sources the
+  ;; host creates (:mcp/source when enabled, :skill/source when enabled)
+  ;; register INTO it, so tool/skill changes propagate as registry refreshes;
+  ;; halt tears it down cleanly. The config subtree carries no options in v0.
+  :environment/registry
+  {}
+
+  ;; WO-E6: SkillSource PRODUCTION WIRING - an Integrant SWITCH (the M20
+  ;; pattern). Shipped default :enabled? false (fail-safe): no SkillSource is
+  ;; built and existing ad-hoc/static skill wiring stays untouched. Flipping
+  ;; it to true makes the host build a real evoclj.skill.adapter/SkillSource
+  ;; through make-skill-source over the host's :store/cas and REGISTER it
+  ;; into :environment/registry (skill changes then publish into the dynamic
+  ;; environment automatically).
+  ;;
+  ;; When enabled, the following are REQUIRED and validated fail-closed:
+  ;;   :cas                   - #ig/ref :store/cas (make-skill-source throws
+  ;;                            :skill/invalid-opts without it)
+  ;;   :environment/registry  - #ig/ref :environment/registry (missing ->
+  ;;                            :environment/registry-required; malformed ->
+  ;;                            :environment/invalid-registry)
+  ;; Optional: :source/id (default :skills/all), :roots, :extra-roots,
+  ;; :strict?.
+  ;;
+  ;; Example (uncomment to enable):
+  ;;
+  ;;   :skill/source
+  ;;   {:enabled? true
+  ;;    :source/id :skills/host
+  ;;    :roots ["/path/to/skills"]
+  ;;    :cas #ig/ref :store/cas
+  ;;    :environment/registry #ig/ref :environment/registry}
+  :skill/source
+  {:enabled? false}
+
  ;; The scheduler host: stores + broker + run-session!. Per-session
  ;; executor maps are built from a compiled Phenotype at run time —
  ;; the Phenotype is never an Integrant component (Global Constraints
@@ -207,6 +277,10 @@
   ;; fails closed with :eval/system-invalid. The judge is attributed to
   ;; the deterministic kernel id "evoclj/eval-judge".
   ;; ==================================================================}
+
+
+  ;; WO-M5: close :eval/system map
+  }
 
  :promotion/system
  {:store {:sqlite #ig/ref :store/sqlite

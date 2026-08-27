@@ -388,7 +388,7 @@
       (testing "Step 5 — close and REOPEN the store from disk; the episode and
                 trace remain queryable"
         (let [reopened-db (sqlite/spec db-path)
-              _ (is (= {:status :noop :version 3}
+              _ (is (= {:status :noop :version 6}
                        (migrate/migrate! reopened-db)))
               reopened-cas (cas/->cas cas-root)
               reopened-store {:sqlite reopened-db :cas reopened-cas}

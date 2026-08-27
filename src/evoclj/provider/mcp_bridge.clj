@@ -11,8 +11,13 @@
    Phase 1 (connection lifecycle): the bridge uses managed client
    records with auto-reconnect. When `:connection/id` is provided,
    providers with the same id share a single underlying McpSyncClient
-   (connection pooling). All values crossing the protocol boundary are
-   plain validated Clojure data (Global Constraint 22).
+   (connection pooling); the pool entry's lifecycle belongs to the
+   McpManager (healing / release). Providers WITHOUT :connection/id are
+   CALL-SCOPED instead: every execute-request! opens its own client and
+   guarantees it is closed before the call returns or throws (WO-M4),
+   so stdio subprocess handles can no longer accumulate across calls.
+   All values crossing the protocol boundary are plain validated
+   Clojure data (Global Constraint 22).
 
    Phase 5 (security boundaries): content-block output is sandboxed so
    binary image/audio data and opaque resource blobs never surface as
@@ -23,6 +28,7 @@
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.client :as mcp-client]
+            [evoclj.mcp.codec :as codec]
             [evoclj.mcp.json-schema :as json-schema]
             [evoclj.mcp.manager :as manager]
             [evoclj.provider.protocol :as proto]
@@ -30,126 +36,27 @@
             [malli.core :as m]))
 
 ;; ---------------------------------------------------------------------------
-;; JSON Schema -> Malli conversion
+;; JSON Schema -> Malli conversion (single implementation in evoclj.mcp.codec)
 ;; ---------------------------------------------------------------------------
-
-(def ^:private unsupported-json-schema-keys
-  "JSON Schema keywords the converter cannot prove equivalent to a Malli
-   primitive. When present, the original schema is preserved and validated
-   by the native validator (fail-closed), never degraded to :any."
-  #{"oneOf" "anyOf" "allOf" "$ref" "$defs"
-    "pattern" "format" "dependentSchemas" "unevaluatedProperties"})
+;;
+;; The converter lives in evoclj.mcp.codec so the bridge, the MCP source,
+;; and the CLI paths all share ONE implementation (INV-05). No caller may
+;; reflectively reach into another module for it (ns-resolve /
+;; requiring-resolve), and there is no hand-copied parallel variant. The
+;; public alias below delegates to the single codec implementation.
 
 (declare json-schema->malli)
 
 ;; defined later in this namespace (content-block -> EDN section)
 (declare java-value->edn)
 
-(defn maybe-nilable
-  "Wrap `node` in :maybe when the schema declares `nullable: true`.
-   (:nilable is not registered in Malli 0.20.1; :maybe is.)"
-  [node schema]
-  (if (true? (get schema "nullable")) [:maybe node] node))
-
-(defn object->malli
-  [schema]
-  (let [props (get schema "properties" {})
-        required (set (get schema "required" []))
-        closed? (false? (get schema "additionalProperties" true))
-        entries (map (fn [[k v]]
-                       (if (contains? required k)
-                         [k (json-schema->malli v)]
-                         [k {:optional true} (json-schema->malli v)]))
-                     props)
-        m (if closed?
-            (into [:map {:closed true}] entries)
-            (into [:map] entries))]
-    (maybe-nilable m schema)))
-
-(defn string->malli
-  [schema]
-  (let [min-l (get schema "minLength")
-        max-l (get schema "maxLength")
-        node (cond
-               (and min-l max-l) [:string {:min min-l :max max-l}]
-               (some? min-l)      [:string {:min min-l}]
-               (some? max-l)      [:string {:max max-l}]
-               :else              :string)]
-    (maybe-nilable node schema)))
-
-(defn number->malli
-  [schema]
-  (let [integer? (= "integer" (get schema "type"))
-        min-v (get schema "minimum")
-        max-v (get schema "maximum")
-        opts (cond-> {}
-               (some? min-v) (assoc :min min-v)
-               (some? max-v) (assoc :max max-v))
-        ;; "integer" -> :int. JSON "number" accepts both integers and
-        ;; floats; Malli's :number is not registered, so union :int and
-        ;; :double (both honor :min/:max).
-        node (if integer?
-               (if (seq opts) [:int opts] :int)
-               (if (seq opts) [:or [:int opts] [:double opts]] [:or :int :double]))]
-    (maybe-nilable node schema)))
-
-(defn array->malli
-  [schema]
-  (let [items (get schema "items")
-        node (if (and items (map? items))
-               [:vector (json-schema->malli items)]
-               [:vector :any])]
-    (maybe-nilable node schema)))
-
-(defn wrap-json-schema-validator
-  "Fallback for schema constructs we cannot prove equivalent to a Malli
-   primitive: preserve the (normalized string-keyed) schema and validate
-   it with the native validator inside a Malli :fn. Fail-closed."
-  [schema]
-  [:fn {:error/message "json-schema"}
-   (fn [v] (json-schema/validate schema v))])
-
 (defn json-schema->malli
-  "Convert a (string-keyed) JSON Schema map to an equivalent Malli schema.
-
-   Operates on string-keyed maps (the shape produced by
-   evoclj.mcp.client/java-schema->clj) and also accepts a
-   java.util.Map with string keys.
-
-   Handles the common MCP subset: object (properties + required +
-   additionalProperties), string, integer, number, boolean, array (items),
-   enum, const, null/nullable, and minLength/maxLength/minimum/maximum.
-
-   Fail-closed: constructs the converter cannot prove equivalent to a
-   Malli primitive (oneOf/anyOf/allOf/$ref/$defs/pattern/format/
-   dependentSchemas/unevaluatedProperties) preserve the original schema
-   and validate it with the native validator. :any is returned ONLY when
-   the schema is genuinely empty or absent."
+  "Public alias delegating to evoclj.mcp.codec/json-schema->malli — the
+   single implementation (INV-05). See that namespace for the contract:
+   :any is returned ONLY when a schema is genuinely empty or absent, and
+   callers MUST treat that as a fail-closed signal."
   [schema]
-  (let [s (cond
-            (instance? java.util.Map schema) (java-value->edn schema)
-            (map? schema) schema
-            :else nil)]
-    (cond
-      (nil? s) :any
-      (empty? s) :any
-      (some #(contains? s %) unsupported-json-schema-keys)
-      (wrap-json-schema-validator s)
-      (contains? s "enum")
-      (maybe-nilable (into [:enum] (get s "enum")) s)
-      (contains? s "const")
-      (maybe-nilable [:enum (get s "const")] s)
-      (= "object"  (get s "type")) (object->malli s)
-      (= "string"  (get s "type")) (string->malli s)
-      (= "integer" (get s "type")) (number->malli s)
-      (= "number"  (get s "type")) (number->malli s)
-      (= "boolean" (get s "type")) (maybe-nilable :boolean s)
-      (= "array"   (get s "type")) (array->malli s)
-      (= "null"    (get s "type")) (maybe-nilable :nil s)
-      :else
-      (if (seq s)
-        (wrap-json-schema-validator s)
-        :any))))
+  (codec/json-schema->malli schema))
 
 ;; ---------------------------------------------------------------------------
 ;; connection pool
@@ -157,17 +64,43 @@
 
 (def ^:private default-max-reopen-attempts 2)
 
-;; Global atoms removed — state is host-owned via :mcp/manager. Fallback for non-Integrant use.
-(def ^:private fallback-manager (manager/create-manager))
-(defn- mgr [opts] (or (:manager opts) (:mcp/manager opts) fallback-manager))
-(defn shutdown-pool! [] (manager/shutdown! fallback-manager))
+;; Global atoms removed — state is host-owned via :mcp/manager (WO-M5).
+;; Fallback for non-Integrant use: created LAZILY on the first provider
+;; built without an injected manager, and reachable for shutdown via
+;; shutdown-pool! (invoked by evoclj.kernel.system/halt! and available to
+;; any embedder), so zero-config use still has a defined teardown path.
+(def ^:private fallback-manager (delay (manager/create-manager)))
+(defn- mgr [opts] (or (:manager opts) (:mcp/manager opts) @fallback-manager))
+(defn shutdown-pool!
+  "Shut down the LAZY fallback manager (zero-config embedders). No-op when
+   the fallback was never realized; idempotent. The Integrant-injected
+   :mcp/manager component shuts down through its own halt-key! instead."
+  []
+  (when (realized? fallback-manager)
+    (manager/shutdown! @fallback-manager)))
 
 ;; ---------------------------------------------------------------------------
 ;; descriptor helper
 ;; ---------------------------------------------------------------------------
 
+(defn- real-schema?
+  "MCP-bridge view of the REAL-schema predicate. Delegates to the single
+   implementation in evoclj.mcp.codec (INV-05) so the rule is defined
+   exactly once and cannot drift between the bridge and the MCP source."
+  [s]
+  (codec/real-schema? s))
+(defn- require-real-schema!
+  "Fail-closed gate (WO-M9 / M11): throw :provider/schema-required unless
+   `s` is a REAL declared schema. Delegates to the single codec
+   implementation (INV-05). Rejects nil / :any / garbage."
+  [which s opts]
+  (codec/require-real-schema! which s opts))
 (defn- mcp-tool-descriptor
-  "Build the static descriptor for an MCP-backed tool."
+  "Build the static descriptor for an MCP-backed tool.
+
+   Fail-closed on schemas (WO-M9): both :input-schema and :output-schema
+   MUST be explicitly declared real schemas. The old `(or schema :any)`
+   default is removed — `:any` was a fail-open loophole."
   [opts]
   (let [tool-id (:tool/id opts)
         mcp-name (:tool/mcp-name opts)]
@@ -186,17 +119,20 @@
           retry-safe?   (or (:retry-safe? opts) false)
           connection-id (:connection/id opts)
           server-id     (:mcp/server-id opts)]
+      ;; WO-M9 fail-closed: require explicit, declared schemas.
+      (require-real-schema! :input-schema input-schema opts)
+      (require-real-schema! :output-schema output-schema opts)
       (cond-> {:tool/id         tool-id
                :effect          :remote
-               :input-schema    (or input-schema :any)
-               :output-schema   (or output-schema :any)
-               :provider/input-schema (or input-schema :any)
-               :provider/output-schema (or output-schema :any)
+               :input-schema    input-schema
+               :output-schema   output-schema
+               :provider/input-schema input-schema
+               :provider/output-schema output-schema
                :mcp/input-schema (or mcp-in {})
-               :mcp/output-schema (or mcp-out :any)
+               :mcp/output-schema (or mcp-out {})
                :mcp/input-schema-json (or mcp-in {})
-               :mcp/output-schema-json (or mcp-out :any)
-               :mcp/schema-source (if mcp-in :json-schema-fallback :malli)
+               :mcp/output-schema-json (or mcp-out {})
+               :mcp/schema-source (if (or mcp-in mcp-out) :json-schema-fallback :malli)
                :required-action :invoke
                :version         1
                :mcp/generation  (or (:mcp/generation opts) 0)
@@ -204,45 +140,24 @@
                :mcp/last-refreshed (or (:mcp/last-refreshed opts) (System/currentTimeMillis))}
         retry-safe? (assoc :retry {:safe? true})
         connection-id (assoc :mcp/connection-id connection-id)
-        server-id (assoc :mcp/server-id server-id)))))
+        server-id (assoc :mcp/server-id server-id)
+        (:mcp/param-projections opts) (assoc :mcp/param-projections (:mcp/param-projections opts))))))
 
 ;; ---------------------------------------------------------------------------
 ;; content-block result -> plain Clojure
 ;; ---------------------------------------------------------------------------
 
 (defn content-block->edn
-  "Convert one MCP content-block map into a plain EDN value.
-
-   Output sandboxing: binary/opaque blocks (`:image`, `:audio`,
-   `:resource-link`) are replaced with safe placeholders so base64
-   binary data and opaque resource blobs never reach the EDN layer;
-   `:text` blocks pass through as strings."
+  "Convert one MCP content-block map into a plain EDN value. Delegates to
+   the single implementation in evoclj.mcp.codec (INV-05)."
   [block]
-  (case (:content/type block)
-    :text (:content/text block)
-    :image {:mcp/content-type :image
-            :mcp/sandboxed true
-            :mime-type (:content/mime-type block)}
-    :audio {:mcp/content-type :audio
-            :mcp/sandboxed true
-            :mime-type (:content/mime-type block)}
-    :resource-link {:mcp/content-type :resource-link
-                    :mcp/sandboxed true
-                    :uri (:content/uri block)
-                    :mime-type (:content/mime-type block)}
-    :resource (let [uri (:content/uri block)
-                    mime (:content/mime-type block)]
-                (cond
-                  (and uri mime) {:uri uri :mimeType mime}
-                  uri {:uri uri}
-                  :else {:mcp/content-type :resource
-                         :mcp/sandboxed true}))
-    (:content/raw block)))
+  (codec/content-block->edn block))
 
 (defn java-value->edn
-  "Recursively convert a value returned by the MCP Java SDK 2.0
-   (structuredContent is a java.util.Map with STRING keys) into plain
-   persistent Clojure data:
+  "Delegates to the single shared boundary converter
+   evoclj.mcp.canonical/java-value->edn (WO-M9 / INV-05). Recursively
+   converts a value returned by the MCP Java SDK 2.0 (structuredContent is
+   a java.util.Map with STRING keys) into plain persistent Clojure data:
 
      java.util.Map        -> persistent map (string keys preserved)
      java.util.List       -> vector
@@ -250,22 +165,12 @@
      java.util.Collection -> vector
      strings/numbers/bool -> passed through unchanged
 
-   The result is always plain EDN-safe data for the protocol boundary."
+   The result is always plain EDN-safe data for the protocol boundary.
+   This arity is kept as the public name used by result->edn; the real
+   implementation lives in evoclj.mcp.canonical so there is exactly one
+   converter (no parallel copy to drift)."
   [v]
-  (cond
-    (instance? java.util.Map v)
-    (into {} (map (fn [[k val]] [k (java-value->edn val)]) v))
-
-    (instance? java.util.List v)
-    (mapv java-value->edn v)
-
-    (instance? java.util.Set v)
-    (into #{} (map java-value->edn v))
-
-    (instance? java.util.Collection v)
-    (mapv java-value->edn v)
-
-    :else v))
+  (codec/java-value->edn v))
 
 (defn result->edn
   "Convert the full call-tool result map into a plain EDN envelope.
@@ -301,6 +206,35 @@
 ;; the provider
 ;; ---------------------------------------------------------------------------
 
+(defn- close-owned!
+  "WO-M4: best-effort close of a CALL-SCOPED (non-pooled) managed client
+  record. evoclj.mcp.client/close! is already graceful and idempotent;
+  the guard here only catches a Throwable escaping OUTSIDE that
+  contract, reports it on stderr (swallowed failures must stay visible,
+  not silent), and never masks the original call outcome.
+
+  Mirror of evoclj.mcp.source/close-owned! — keep in lockstep until M11."
+  [managed]
+  (when managed
+    (try
+      (mcp-client/close! managed)
+      (catch Throwable t
+        (try
+          (binding [*out* *err*]
+            (println "[evoclj.provider.mcp-bridge] non-pooled client close failed:"
+                     (pr-str (err/sanitize t))))
+          ;; R2 (m1): the report path itself is error-proof — an Error
+          ;; escaping this finally-position guard used to mask the real
+          ;; outcome. Catch it too and fall back to one raw PrintStream
+          ;; line (System/err cannot throw on IO failure); only what even
+          ;; THAT throws is swallowed.
+          (catch Throwable report-ex
+            (try
+              (.println System/err
+                        (str "[evoclj.provider.mcp-bridge] non-pooled client close-failure report also failed: "
+                             (pr-str (err/sanitize report-ex))))
+              (catch Throwable _ nil))))))))
+
 (defrecord ToolEntry [descriptor manager conn-key transport-config mcp-name tool-id connection-id server-id]
   proto/Provider
   (describe [_] descriptor)
@@ -322,7 +256,7 @@
                           "MCP provider input failed JSON Schema validation"
                           {:value (err/sanitize args)})))
       {:tool/id    tool-id
-       :resource   (canonical/canonical-resource tool-id args)
+       :resource   (canonical/canonical-resource descriptor args)
        :args       args}))
   (execute-request! [_ authorized-request]
     (when-not (and (map? authorized-request)
@@ -330,17 +264,55 @@
       (throw (err/error :provider/request-invalid
                         "MCP provider received a non-normalized request"
                         {:value (err/sanitize authorized-request)})))
-    (let [args (:args authorized-request)]
+    (let [args (:args authorized-request)
+          ;; WO-M3: hoisted so the failure-reporting catch below can see it
+          shared? (some? connection-id)
+          ;; WO-M4: tracks the CALL-SCOPED client opened by this very call
+          ;; on the non-shared path, so the finally below can close it no
+          ;; matter how this scope exits. Shared records are pool-owned;
+          ;; they are never closed here.
+          owned (volatile! nil)]
       (try
-        (let [shared? (some? connection-id)
-              managed (if shared?
-                        (let [entry (manager/pool-get manager conn-key)
-                              c (:client entry)]
-                          (if c c
-                            (let [cl (manager/get-or-open! manager conn-key #(mcp-client/open! (manager/normalize-transport transport-config)))]
-                              {:client cl :transport-config transport-config})))
-                        (mcp-client/open! (manager/normalize-transport transport-config)))
-              managed (mcp-client/ensure-open managed default-max-reopen-attempts)]
+        (let [;; WO-M1: get-or-open! returns the managed record itself
+              ;; (never a raw client), so it is used directly — same as
+              ;; the pool-hit value. No {:client ...} re-wrapping.
+              opened (if shared?
+                       (let [entry (manager/pool-get manager conn-key)
+                             c (:client entry)]
+                         ;; WO-M2 / INV-01: open! receives the REAL config —
+                         ;; no redaction wrapper on the execution path.
+                         (if c c
+                           (manager/get-or-open! manager conn-key #(mcp-client/open! transport-config))))
+                       ;; WO-M4: no :connection/id -> this client belongs to
+                       ;; THIS call only; opened here, closed in finally.
+                       (let [fresh (mcp-client/open! transport-config)]
+                         (vreset! owned fresh)
+                         fresh))
+              managed (mcp-client/ensure-open opened default-max-reopen-attempts)
+              ;; WO-M5 gap (c): ensure-open returns a DIFFERENT record when
+              ;; the pooled one came back closed and had to be LOCALLY
+              ;; reopened. That product used to be neither pooled nor closed
+              ;; (one stdio child leaked per occurrence). Now it is first
+              ;; offered back to the pool via adopt-client! (CAS against
+              ;; the stale record); if adoption is refused — entry already
+              ;; healed, stripped, or torn down — the record belongs to
+              ;; THIS call and is tracked in `owned` for the finally close.
+              locally-reopened? (not (identical? opened managed))
+              adopted? (when (and shared? locally-reopened?)
+                         (manager/adopt-client! manager conn-key opened managed))
+              ;; Re-track after ensure-open: a just-opened record has
+              ;; :closed? false, so ensure-open returns it unchanged and
+              ;; cannot throw here — there is no leak window between the
+              ;; two bindings; re-tracking keeps `owned` pointing at the
+              ;; record actually used below.
+              _ (vreset! owned
+                         (cond
+                           ;; call-scoped path: this call owns its client
+                           (not shared?) managed
+                           ;; local reopen the pool refused: orphaned product
+                           (and locally-reopened? (not adopted?)) managed
+                           ;; pooled hit or adopted reopen: pool owns it
+                           :else nil))]
           (when (mcp-client/closed? managed)
             (throw (err/error :mcp/client-closed
                               "MCP managed client is closed"
@@ -350,42 +322,92 @@
                 edn-result (result->edn raw-result)
                 audit {:mcp/tool-name mcp-name
                        :mcp/connection-id connection-id
-                       :mcp/server-id server-id}
+                       :mcp/server-id server-id
+                        ;; M10: surface the real measured latency on the
+                        ;; provider audit trail (non-negative long; absent
+                        ;; only on a path that throws before reaching here).
+                        :mcp/latency-ms (long (max 0 (or (:mcp/latency-ms raw-result) 0)))}
                 sc (get-in edn-result [:value :mcp/structured-content])
                 desc descriptor]
             (when (some? sc)
               (when-not (json-schema/validate (:mcp/output-schema desc) sc)
                 (throw (err/error :provider/output-invalid "structuredContent failed mcp/output-schema" {:value (err/sanitize sc)}))))
-            (let [env (:value edn-result)]
-              (when-not (m/validate (:provider/output-schema desc) env)
-                (throw (err/error :provider/output-invalid "envelope failed provider/output-schema" {:value (err/sanitize env)}))))
-            (when shared? (try (manager/set-metrics manager conn-key #(-> % (update :call-count (fnil inc 0)) (assoc :latency-ms 0))) (catch Exception _ nil)))
+            ;; Protocol contract (INV-05 / WO-M9): :output-schema describes the
+            ;; FULL result value that execute-request! returns — for MCP that is
+            ;; the {:value <envelope> :audit <map>} map, NOT the inner envelope.
+            ;; The dispatcher's validate-output! also validates this same value.
+            ;; Validating only (:value edn-result) here checked the inner envelope
+            ;; against a schema meant for the whole result, rejecting every valid
+            ;; call that declared a :value-shaped :output-schema (BT6a).
+            (when-not (m/validate (:provider/output-schema desc) edn-result)
+              (throw (err/error :provider/output-invalid "output failed provider/output-schema" {:value (err/sanitize edn-result)})))
+            ;; M10: write back the ACTUAL measured latency (carried on the
+            ;; call-tool result as :mcp/latency-ms) onto the pooled entry's
+            ;; runtime stats. This replaces the previous hardcoded
+            ;; `(assoc :latency-ms 0)` placeholder, which M10 forbids: a
+            ;; bogus zero is indistinguishable from a real sub-millisecond
+            ;; call and hides regressions. `(fnil ... 0)` only guards the
+            ;; (unreachable on the success path) absent case. Because this
+            ;; runs AFTER a successful call-tool, a failed/unmeasurable op
+            ;; never reaches here, so no bogus latency is ever persisted.
+            (when shared?
+              (try
+                (let [measured (long (max 0 (or (:mcp/latency-ms raw-result) 0)))]
+                  (manager/set-metrics manager conn-key
+                    #(-> % (update :call-count (fnil inc 0)) (assoc :latency-ms measured))))
+                (catch Exception _ nil)))
+            ;; WO-M3 failure reporting, success side: a successful call on a
+            ;; pooled connection refreshes health.last-ok (and clears any
+            ;; stale :last-error).
+            (when shared? (try (manager/mark-ok manager conn-key) (catch Exception _ nil)))
             (update edn-result :audit merge audit)))
         (catch Throwable ex
           (if (= :mcp/tool-error (:error/type (ex-data ex)))
             (throw ex)
-            (let [category (:error/type (mcp-client/classify-mcp-error ex))]
-              (if (or (= category :mcp/transport-error)
-                      (= category :mcp/protocol-error))
-                (throw (err/error :provider/transient-error
-                                  "MCP provider call-tool failed"
-                                  {:tool-name mcp-name
-                                   :mcp/connection-id connection-id
-                                   :mcp/server-id server-id
-                                   :mcp/transport-config (err/sanitize (manager/normalize-transport transport-config))
-                                   :cause (err/sanitize ex)}))
-                (throw (err/error :provider/execution-failed
-                                  "MCP provider call-tool failed"
-                                  {:tool-name mcp-name
-                                   :mcp/connection-id connection-id
-                                   :mcp/server-id server-id
-                                   :mcp/transport-config (err/sanitize (manager/normalize-transport transport-config))
-                                   :cause (err/sanitize ex)}))))))))))
+            (do
+              ;; WO-M3 failure reporting, failure side: a transport-family
+              ;; failure on a shared pooled connection demotes the entry so
+              ;; the next caller heals through get-or-open! instead of
+              ;; reusing the dead client forever. err-data is display-safe
+              ;; (sanitized + transport-redacted, INV-01).
+              (when (and shared? (manager/broken-worthy? ex))
+                (try
+                  (manager/mark-broken manager conn-key
+                                       (manager/broken-err-data ex transport-config))
+                  (catch Exception _ nil)))
+              (let [category (:error/type (mcp-client/classify-mcp-error ex))]
+                (if (mcp-client/transient-error-type? category)
+                  (throw (err/error :provider/transient-error
+                                    "MCP provider call-tool failed"
+                                    {:tool-name mcp-name
+                                     :mcp/connection-id connection-id
+                                     :mcp/server-id server-id
+                                     :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
+                                     :cause (err/sanitize ex)}))
+                  (throw (err/error :provider/execution-failed
+                                    "MCP provider call-tool failed"
+                                    {:tool-name mcp-name
+                                     :mcp/connection-id connection-id
+                                     :mcp/server-id server-id
+                                     :mcp/transport-config (err/sanitize (manager/redact-transport transport-config))
+                                     :cause (err/sanitize ex)})))))))
+        (finally
+          ;; WO-M4/WO-M5: success AND failure exits release the client THIS
+          ;; call owns (call-scoped always; a refused-adoption local reopen
+          ;; on the shared path). close! is idempotent/graceful,
+          ;; close-owned! never masks the original outcome.
+          (when @owned
+            (close-owned! @owned)))))))
 
 (defn make-tool-entry
   "Create an immutable ToolEntry. Each entry is a distinct immutable value
    sharing the same manager connection pool. Generation is part of the
-   descriptor and never mutated in place."
+   descriptor and never mutated in place.
+
+   Lifecycle (WO-M4): an entry created WITH :connection/id executes over
+   its pooled managed client (manager-owned lifetime). An entry WITHOUT
+   :connection/id is CALL-SCOPED: every execute-request! opens a fresh
+   client and closes it before returning or throwing."
   [opts]
   (let [descriptor (mcp-tool-descriptor opts)
         transport-cfg (:transport-config opts)
@@ -409,10 +431,18 @@
 (defn refresh-provider!
   "Deprecated: previously mutated descriptor-atom in place. Now returns a new
    immutable ToolEntry with bumped :mcp/generation and nil :mcp/last-refreshed.
-   The original provider instance is unchanged (immutable)."
+   The original provider instance is unchanged (immutable).
+
+   M18: PRESERVES the existing `:transport-config` of the incoming provider
+   (read from the ToolEntry record). The old implementation clobbered it to
+   `{}`, which dropped the connection config and broke any subsequent
+   call-scoped execution. The refresh must only invalidate the schema
+   (last-refreshed -> nil) and bump generation, never discard the transport
+   config."
   [provider]
   (let [desc (proto/describe provider)
-        tool-id (:tool/id desc)]
+        tool-id (:tool/id desc)
+        transport-cfg (:transport-config provider)]
     (when-not tool-id
       (throw (err/error :provider/not-a-provider "provider missing :tool/id" {:provider (err/sanitize provider)})))
     (let [new-desc (-> desc
@@ -421,12 +451,14 @@
                        (assoc :mcp/captured-at (System/currentTimeMillis)))
           opts {:tool/id tool-id
                 :tool/mcp-name (or (:mcp/name desc) (name tool-id))
-                :transport-config {}
+                :transport-config transport-cfg
                 :input-schema (:provider/input-schema desc)
                 :output-schema (:provider/output-schema desc)
                 :mcp/generation (:mcp/generation new-desc)
                 :mcp/captured-at (:mcp/captured-at new-desc)
-                :mcp/last-refreshed nil}]
+                :mcp/last-refreshed nil
+                :mcp/connection-id (:mcp/connection-id desc)
+                :mcp/server-id (:mcp/server-id desc)}]
       (let [new-entry (make-tool-entry (merge opts {:mcp/input-schema (:mcp/input-schema desc)
                                                     :mcp/output-schema (:mcp/output-schema desc)}))]
         (let [bumped (assoc new-entry :descriptor new-desc)]
@@ -441,12 +473,18 @@
                  (assoc m k (:descriptor new-entry))))
              {}
              @legacy-registry))
-(defn dispose! [provider] (let [tool-id (-> provider proto/describe :tool/id)
-        desc (proto/describe provider)
-        cid (:mcp/connection-id desc)]
-    (when cid
-      (let [ck2 (manager/connection-key {:connection/id cid :type :stdio})]
-        (try (manager/release fallback-manager ck2 tool-id) (catch Throwable _ nil))
-        ;; also try generic type lookup via fallback pools
-        (doseq [[k _] (:pools @fallback-manager)]
-          (when (= cid (second k)) (try (manager/release fallback-manager k tool-id) (catch Throwable _ nil))))))))
+(defn dispose!
+  "Release this entry's pooled connection back to the manager it was BUILT
+   with. WO-M5: the ToolEntry record carries its own :manager atom and
+   :conn-key — dispose! uses exactly those, so an injected :mcp/manager is
+   returned its own pool entry under the real connection key. The previous
+   implementation reconstructed a lossy {:connection/id cid :type :stdio}
+   key and released against the global fallback, leaking the injected
+   pool's entry forever. Releasing an unknown/stale owner is inert by
+   manager contract (WO-M5), so dispose! is safe to call twice."
+  [provider]
+  (let [tool-id (:tool/id (proto/describe provider))
+        mgr (:manager provider)
+        k (:conn-key provider)]
+    (when (and mgr k)
+      (try (manager/release mgr k tool-id) (catch Throwable _ nil)))))

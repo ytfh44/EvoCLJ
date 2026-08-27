@@ -34,6 +34,16 @@
    :form (route-case-form)
    :expected-effect {:primary-metric :task/success :direction :neutral}})
 
+(defn- default-hypothesis-id
+  "Deterministic name-based hypothesis id for the default adapter
+   (mirrors the demo mutator's `UUID/nameUUIDFromBytes` convention).
+   complete-mutation! gates on `(uuid? hypothesis-id)`, so a bare
+   string id would fail the cycle as :evolution/mutator-invalid; the
+   name-based UUID keeps proposals deterministic and satisfies that gate."
+  []
+  (java.util.UUID/nameUUIDFromBytes
+   (.getBytes "default/noop" StandardCharsets/UTF_8)))
+
 ;; --- the adapter --------------------------------------------------------------
 
 (defrecord DefaultMutator []
@@ -51,7 +61,7 @@
                           {:value (err/sanitize context)})))
     ;; Propose exactly one trivial mutation.
     [{:risk :program
-      :hypothesis/id "default/noop"
+      :hypothesis/id (default-hypothesis-id)
       :ops [{:op :replace-form
              :file "programs/route.clj"
              :selector ['case]

@@ -25,74 +25,43 @@
   [:skill skill-name])
 
 (defn- descriptor-for
-  "Catalog descriptor (small, for Offer). Progressive disclosure: catalog only shows name+description."
+  "Catalog descriptor (small, for Offer). Progressive disclosure: catalog only shows name+description.
+  Carries the :materializer descriptor (WO-S1) telling the generic materializer
+  to read SKILL.md from the CAS tree named by the surface's :revision/id."
   [skill-name frontmatter]
   {:name skill-name
    :description (or (:description frontmatter) "")
    :allowed-tools (:allowed-tools frontmatter)
    :allowed-tools-parsed (:allowed-tools-parsed frontmatter)
-   :skill/name skill-name})
-
-(defn- materializer-for
-  "Materializer function for ContextSurface. It reads exact SKILL.md bytes
-  for the revision's CAS tree (never live host path). This ensures
-  activation sees the exact revision that was snapshotted, even if upstream
-  later changes."
-  [cas tree-id]
-  (fn
-    ([]
-     ;; arity 0 for compatibility: return descriptor hint
-     {:tree/id tree-id})
-    ([cas-arg revision-id]
-     (let [c (or cas-arg cas)
-           tid (or revision-id tree-id)]
-       (when-not c
-         (throw (err/error :skill/materializer-missing-cas "CAS required to materialize skill" {:tree/id tid})))
-       (let [manifest (snapshot/load-tree c tid)
-             ba (snapshot/get-file-bytes c manifest "SKILL.md")]
-         (when-not ba
-           (throw (err/error :skill/missing-skill-md "SKILL.md missing in tree" {:tree/id tid})))
-         (String. ^bytes ba StandardCharsets/UTF_8))))
-    ([cas-arg revision-id _opts]
-     ;; 3-arity for materializer interface consistency
-     (materializer-for cas tree-id))))
+   :skill/name skill-name
+   :materializer {:type :cas-tree-file :path "SKILL.md"}})
 
 (defn- materializer-fn
-  "Build a materializer that reads SKILL.md from CAS tree-id.
-  The materializer is a function (cas revision-id -> content string) and also
-  carries :tree/id metadata. It closes over cas and tree-id so that
-  even if the host file changes, the materialized content is pinned."
-  [cas tree-id body-cache]
-  ;; body-cache is the body at snapshot time; but we must read via CAS for fidelity.
-  ;; We keep a fn that re-reads from CAS on each materialize to prove immutability.
-  (fn
-    ([] body-cache)
-    ([cas-arg] (materializer-fn cas tree-id body-cache))
-    ([cas-arg revision-id]
-     (let [c (or cas-arg cas)
-           tid (or revision-id tree-id)]
-       (if c
-         (try
-           (let [manifest (snapshot/load-tree c tid)
-                 ba (snapshot/get-file-bytes c manifest "SKILL.md")
-                 _ (when-not ba (throw (err/error :skill/missing-skill-md "SKILL.md missing" {:tree/id tid})))
-                 raw (String. ^bytes ba StandardCharsets/UTF_8)
-                 ;; strip frontmatter, return body? For materializer we return full text per progressive disclosure spec:
-                 ;; activation -> full SKILL.md exact revision
-                 full raw]
-             full)
-           (catch Exception _
-             ;; fallback to cached body if CAS unavailable (tests may use func cas)
-             body-cache))
-         body-cache)))
-    ([cas-arg revision-id _] (materializer-fn cas tree-id body-cache))))
+  "Build the canonical single-arity ContextSurface materializer (INV-05):
+   (materializer cas revision-id) -> SKILL.md content string for the CAS tree
+   named by revision-id (defaulting to tree-id). Fail-closed (INV-04): a nil
+   CAS resolver, an unreadable/missing tree, or a missing SKILL.md throws a
+   typed error; it NEVER substitutes cached or degraded content."
+  [cas tree-id]
+  (fn [cas-arg revision-id]
+    (let [c (or cas-arg cas)
+          tid (or revision-id tree-id)]
+      (when-not c
+        (throw (err/error :skill/materializer-missing-cas "CAS required to materialize skill" {:tree/id tid})))
+      (let [manifest (snapshot/load-tree c tid)]
+        (when-not (map? manifest)
+          (throw (err/error :skill/missing-skill-md "invalid tree manifest for skill" {:tree/id tid})))
+        (let [ba (snapshot/get-file-bytes c manifest "SKILL.md")]
+          (when-not ba
+            (throw (err/error :skill/missing-skill-md "SKILL.md missing in tree" {:tree/id tid})))
+          (String. ^bytes ba StandardCharsets/UTF_8))))))
 
 (defn make-context-surface
   "Create ContextSurface for a skill."
-  [{:keys [skill-name frontmatter body cas tree-id]}]
+  [{:keys [skill-name frontmatter cas tree-id]}]
   (let [logical-id (skill-name->logical-id skill-name)
         descriptor (descriptor-for skill-name frontmatter)
-        mat (materializer-fn cas tree-id body)]
+        mat (materializer-fn cas tree-id)]
     (surf/make-context-surface {:id (keyword "skill" (str skill-name "-ctx"))
                                 :descriptor descriptor
                                 :materializer mat
@@ -114,7 +83,9 @@
     {:skill/name string
      :tree/id \"sha256:...\"  manifest id from snapshot
      :frontmatter map from parser
-     :body string markdown body
+     :body string markdown body (unused for materialization — the context
+            surface reads the pinned SKILL.md from the CAS tree, never a
+            cached body; kept for call-site compatibility)
      :cas CAS handle}
 
   Returns bundle where both surfaces share tree/id. Throws on validation."
@@ -123,7 +94,7 @@
         tid (or id (throw (err/error :skill/invalid-descriptor "tree/id required" {:opts opts})))]
     (when-not (and (string? tid) (re-matches #"^sha256:[0-9a-f]{64}$" tid))
       (throw (err/error :skill/invalid-descriptor "tree/id must be sha256" {:tree/id tid})))
-    (let [ctx (make-context-surface {:skill-name skill-name :frontmatter frontmatter :body body :cas cas :tree-id tid})
+    (let [ctx (make-context-surface {:skill-name skill-name :frontmatter frontmatter :cas cas :tree-id tid})
           dir (make-directory-surface {:skill-name skill-name :cas cas :tree-id tid})
           logical-id (skill-name->logical-id skill-name)
           bundle-id (str "bundle:skill:" skill-name ":" tid)]

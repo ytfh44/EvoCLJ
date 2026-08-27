@@ -117,6 +117,56 @@
   (let [res (materializer/materialize {:history "history" :bindings bindings :catalog nil :policy nil :cas cas})]
     (:segment/content (first (:effective/segments res)))))
 
+(defn- publish!
+  "Drive the full production publication path for a skill source.
+
+  E2 contract (INV-06): SkillSource/snapshot! is PURE — it captures and parses
+  but performs NO registry mutation and NO publication. All publication belongs
+  to the registry's refresh! single transaction (Source -> Revision ->
+  Projector -> Bundle). So tests must register the source into its registry and
+  run refresh!, rather than relying on a stale snapshot! side effect.
+
+  Registers the source once (idempotent), then refreshes. Returns the refresh!
+  result map (e.g. {:status :published ...})."
+  [registry source]
+  (let [sid (or (:source/id source) (:source-id source))]
+    (when-not (or (nil? sid) (contains? (:sources @registry) sid))
+      (reg/register-source! registry source))
+    (reg/refresh! registry)))
+
+;; ---------------------------------------------------------------------------
+;; Filesystem access leases (v0 CapabilityLease, B4)
+;; ---------------------------------------------------------------------------
+
+(def ^:private lease-now (java.util.Date.))
+
+(defn- fs-subject
+  "The requesting :subject for a filesystem lease (B4 forces it at access time)."
+  []
+  {:phenotype/id phenotype})
+
+(defn- lease-for
+  "Build a valid v0 CapabilityLease granting `actions` on `mount-id` for the
+  test phenotype. NOTE (B4): a bare {:mount/id :path :actions} map is NOT a
+  grant — an access lease must be a host-issued CapabilityLease that the
+  mount/filesystem provider validates before covering an action."
+  [mount-id actions]
+  {:cap/id (random-uuid)
+   :subject (fs-subject)
+   :resource {:kind :filesystem/path :mount/id mount-id :path ""}
+   :actions (set actions)
+   :constraints {}
+   :issued-at lease-now
+   :expires-at (java.util.Date. (+ (.getTime lease-now) 100000))})
+
+(defn- fs-opts
+  "Provider access opts for a read/list/stat lease: the mount/functions
+  provider FORCES the requesting :subject and the access :now at enforcement."
+  [mount-id actions]
+  {:leases [(lease-for mount-id actions)]
+   :subject (fs-subject)
+   :now lease-now})
+
 ;; ---------------------------------------------------------------------------
 ;; 1. Install A -> catalog A
 ;; ---------------------------------------------------------------------------
@@ -132,9 +182,10 @@
           registry (reg/create-registry)
           source (adapter/make-skill-source {:source/id :skills/test :roots [skills-root] :cas cas :registry registry :strict? false})]
       ;; refresh: filesystem -> snapshot -> parse FROM SNAPSHOT -> validate -> publish
-      (let [{:keys [status snapshot]} (adapter/refresh-skills! source)]
+      ;; (E2/INV-06: publication happens in the registry's refresh! transaction)
+      (let [{:keys [status]} (publish! registry source)]
         (is (= :published status))
-        (is (= 1 (:skill/count (:payload snapshot))) "one skill installed"))
+        (is (= 1 (count (adapter/list-offers registry))) "one skill installed"))
       (let [offers (adapter/list-offers registry)]
         (is (= 1 (count offers)))
         (let [o (first offers)]
@@ -161,7 +212,7 @@
                           :extra-files {"references/guide.md" "# Guide content A" "scripts/helper.sh" "echo A"})
           registry (reg/create-registry)
           source (adapter/make-skill-source {:source/id :skills/test :roots [skills-root] :cas cas :registry registry})
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           mount-reg (mount-backend/create-registry)
           ctx-store (ctx-binding/create-store)
           activated (adapter/activate-skill! db sid "debugging" {:registry registry :cas cas :mount-registry mount-reg :context-store ctx-store})]
@@ -175,15 +226,10 @@
         (is (= (:revision/id activated) (:revision/id (first active)))))
       ;; next round materializer returns full SKILL.md A (not just hint)
       (let [bindings (store-binding/active-bindings db sid)
-            ;; materialize via CAS map (binding revision -> content via CAS tree)
-            ;; adapter's materializer reads from CAS tree; we simulate via materializer/materialize with CAS func that reads from tree
-            ;; Use a CAS fn that reads SKILL.md bytes from the published tree.
-            cas-fn (fn [rev]
-                     ;; rev is tree id; load manifest and get SKILL.md
-                     (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                           ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                       (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
-            content (read-via-materializer (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) bindings) cas-fn)]
+            ;; materialize via REAL CAS (the same handle as activation): the
+            ;; generic materializer detects the CAS tree and hydrates SKILL.md
+            ;; itself — no injected resolver fn (INV-09: cas-fn banned).
+            content (read-via-materializer (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) bindings) cas)]
         (is (str/includes? content "Body A original") "activated body is A"))
       ;; generic mounted directory via mount filesystem provider (RO)
       (let [provider (mount-fs/make-provider mount-reg)
@@ -191,21 +237,20 @@
             mounts (mount-backend/list-mounts mount-reg)
             _ (is (= 1 (count mounts)) "one mount for skill")
             mount (first mounts)
-            mount-id (:mount/id mount)
-            lease {:mount/id mount-id :path "" :actions #{:read :list :stat}}]
+            mount-id (:mount/id mount)]
         (is (= #{:read :list :stat} (:access/max mount)) "DirectorySurface is RO")
         (is (= :cas-tree (mount-backend/backend-type (:backend mount))) "backend is CAS tree")
         ;; list root contains references, scripts, SKILL.md
-        (let [children (mount-fs/provider-list provider mount-id "" {:leases [lease]})]
+        (let [children (mount-fs/provider-list provider mount-id "" (fs-opts mount-id #{:read :list :stat}))]
           (is (some #(= "SKILL.md" (:name %)) children))
           (is (some #(= "references" (:name %)) children))
           (is (some #(= "scripts" (:name %)) children)))
         ;; read references/guide.md
-        (let [ba (mount-fs/provider-read provider mount-id "references/guide.md" {:leases [lease]})
+        (let [ba (mount-fs/provider-read provider mount-id "references/guide.md" (fs-opts mount-id #{:read :list :stat}))
               txt (String. ^bytes ba StandardCharsets/UTF_8)]
           (is (str/includes? txt "Guide content A")))
         ;; read scripts/helper.sh (files only, not execution authority)
-        (let [ba (mount-fs/provider-read provider mount-id "scripts/helper.sh" {:leases [lease]})
+        (let [ba (mount-fs/provider-read provider mount-id "scripts/helper.sh" (fs-opts mount-id #{:read :list :stat}))
               txt (String. ^bytes ba StandardCharsets/UTF_8)]
           (is (str/includes? txt "echo A")))))))
 
@@ -224,7 +269,7 @@
                           "---\nname: debugging\ndescription: Debugging helper\n---\n# Debugging Skill\nBody A original\n")
           registry (reg/create-registry)
           source (adapter/make-skill-source {:source/id :skills/test :roots [skills-root] :cas cas :registry registry})
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           mount-reg (mount-backend/create-registry)
           ctx-store (ctx-binding/create-store)
           activated (adapter/activate-skill! db sid "debugging" {:registry registry :cas cas :mount-registry mount-reg :context-store ctx-store})
@@ -234,7 +279,7 @@
           _ (write-skill! skills-root "debugging"
                           "---\nname: debugging\ndescription: Debugging helper\n---\n# Debugging Skill\nBody B updated with new content\n"
                           :extra-files {"references/guide.md" "# Guide B" "references/new.md" "new"})
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           offers (adapter/list-offers registry)
           rev-b (:offer/revision-id (first offers))]
       (is (not= rev-a rev-b) "catalog moved from A to B")
@@ -245,13 +290,9 @@
         (is (= rev-a (:revision/id (first active))) "binding still pinned to A"))
       ;; materializer for existing binding still returns A
       (let [active (store-binding/active-bindings db sid)
-            cas-fn (fn [rev]
-                     (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                           ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                       (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
             ;; need to convert stored binding to ctx-binding shape for materializer
             bindings (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) active)
-            content (read-via-materializer bindings cas-fn)]
+            content (read-via-materializer bindings cas)]
         (is (str/includes? content body-a) "materialized still A")
         (is (not (str/includes? content "Body B")) "must not yet see B"))
       ;; new activation (different session) would see B
@@ -276,7 +317,7 @@
                           "---\nname: debugging\ndescription: Debugging helper\n---\n# Debugging Skill\nBody A pinned\n")
           registry (reg/create-registry)
           source (adapter/make-skill-source {:source/id :skills/test :roots [skills-root] :cas cas :registry registry})
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           mount-reg (mount-backend/create-registry)
           ctx-store (ctx-binding/create-store)
           activated (adapter/activate-skill! db sid "debugging" {:registry registry :cas cas :mount-registry mount-reg :context-store ctx-store})
@@ -284,7 +325,7 @@
           ;; upstream to B
           _ (write-skill! skills-root "debugging"
                           "---\nname: debugging\ndescription: Debugging helper\n---\n# Debugging Skill\nBody B updated\n")
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           rev-b (:offer/revision-id (first (adapter/list-offers registry)))
           _ (is (not= rev-a rev-b))
           ;; simulate compaction: history string compressed, but bindings unchanged
@@ -292,12 +333,8 @@
           compressed "compressed: short"
           active (store-binding/active-bindings db sid)
           bindings (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) active)
-          cas-fn (fn [rev]
-                   (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                         ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                     (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
-          before (materializer/materialize {:history long-history :bindings bindings :catalog (adapter/catalog-snapshot registry) :policy nil :cas cas-fn})
-          after (materializer/materialize {:history compressed :bindings bindings :catalog (adapter/catalog-snapshot registry) :policy nil :cas cas-fn})]
+          before (materializer/materialize {:history long-history :bindings bindings :catalog (adapter/catalog-snapshot registry) :policy nil :cas cas})
+          after (materializer/materialize {:history compressed :bindings bindings :catalog (adapter/catalog-snapshot registry) :policy nil :cas cas})]
       (is (= rev-a (:segment/revision-id (first (:effective/segments before)))) "before compaction still A")
       (is (= rev-a (:segment/revision-id (first (:effective/segments after)))) "after compaction still A")
       (is (str/includes? (:segment/content (first (:effective/segments after))) "Body A pinned"))
@@ -319,7 +356,7 @@
                           :extra-files {"references/old.md" "old"})
           registry (reg/create-registry)
           source (adapter/make-skill-source {:source/id :skills/test :roots [skills-root] :cas cas :registry registry})
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           mount-reg (mount-backend/create-registry)
           ctx-store (ctx-binding/create-store)
           activated (adapter/activate-skill! db sid "debugging" {:registry registry :cas cas :mount-registry mount-reg :context-store ctx-store})
@@ -327,14 +364,13 @@
           _ (write-skill! skills-root "debugging"
                           "---\nname: debugging\ndescription: Debugging helper\n---\n# Debugging Skill\nBody B reloaded\n"
                           :extra-files {"references/new.md" "new file" "references/old.md" "old updated"})
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           rev-b (:offer/revision-id (first (adapter/list-offers registry)))
           _ (is (not= rev-a rev-b))
           ;; before reload, provider still shows A
           provider-before (mount-fs/make-provider mount-reg)
           mount-id-before (:mount/id (first (mount-backend/list-mounts mount-reg)))
-          lease-before {:mount/id mount-id-before :path "" :actions #{:read :list :stat}}
-          children-before (mount-fs/provider-list provider-before mount-id-before "" {:leases [lease-before]})
+          children-before (mount-fs/provider-list provider-before mount-id-before "" (fs-opts mount-id-before #{:read :list :stat}))
           ;; reload
           reloaded (adapter/reload-skill! db sid "debugging" {:registry registry :cas cas :mount-registry mount-reg :context-store ctx-store})]
       (is (:reloaded reloaded))
@@ -353,26 +389,22 @@
             _ (is (= 1 (count mounts)) "still one mount but replaced")
             mount (first mounts)
             provider (mount-fs/make-provider mount-reg)
-            lease {:mount/id (:mount/id mount) :path "" :actions #{:read :list :stat}}
-            children (mount-fs/provider-list provider (:mount/id mount) "" {:leases [lease]})
+            mid (:mount/id mount)
+            children (mount-fs/provider-list provider mid "" (fs-opts mid #{:read :list :stat}))
             names (set (map :name children))]
         (is (contains? names "references"))
         ;; read new file
-        (let [ba (mount-fs/provider-read provider (:mount/id mount) "references/new.md" {:leases [lease]})
+        (let [ba (mount-fs/provider-read provider mid "references/new.md" (fs-opts mid #{:read :list :stat}))
               txt (String. ^bytes ba StandardCharsets/UTF_8)]
           (is (str/includes? txt "new file")))
         ;; old file updated
-        (let [ba (mount-fs/provider-read provider (:mount/id mount) "references/old.md" {:leases [lease]})
+        (let [ba (mount-fs/provider-read provider mid "references/old.md" (fs-opts mid #{:read :list :stat}))
               txt (String. ^bytes ba StandardCharsets/UTF_8)]
           (is (str/includes? txt "old updated"))))
       ;; materializer now returns B
       (let [active (store-binding/active-bindings db sid)
-            cas-fn (fn [rev]
-                     (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                           ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                       (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
             bindings (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) active)
-            content (read-via-materializer bindings cas-fn)]
+            content (read-via-materializer bindings cas)]
         (is (str/includes? content "Body B reloaded"))
         (is (not (str/includes? content "Body A")))))))
 
@@ -392,7 +424,7 @@
                           :extra-files {"scripts/run.sh" "echo hi" "SKILL.md" "---\nname: debugging\ndescription: Debugging helper\n---\n# Body\nA\n"})
           registry (reg/create-registry)
           source (adapter/make-skill-source {:source/id :skills/test :roots [skills-root] :cas cas :registry registry})
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           mount-reg (mount-backend/create-registry)
           ctx-store (ctx-binding/create-store)
           _ (adapter/activate-skill! db sid "debugging" {:registry registry :cas cas :mount-registry mount-reg :context-store ctx-store})
@@ -400,14 +432,15 @@
           mount (first (mount-backend/list-mounts mount-reg))
           mount-id (:mount/id mount)
           ;; even a lease that claims to grant write should still fail because surface max is RO (fail closed)
-          rw-lease {:mount/id mount-id :path "" :actions #{:read :list :stat :write :create :delete}}]
+          rw-lease (lease-for mount-id #{:read :list :stat :write :create :delete})
+          rw-opts {:leases [rw-lease] :subject (fs-subject) :now lease-now}]
       (is (= #{:read :list :stat} (:access/max mount)))
-      (is (thrown? clojure.lang.ExceptionInfo (mount-fs/provider-write provider mount-id "SKILL.md" (.getBytes "hacked" StandardCharsets/UTF_8) {:leases [rw-lease]})))
-      (is (thrown? clojure.lang.ExceptionInfo (mount-fs/provider-create provider mount-id "scripts/evil.sh" (.getBytes "evil" StandardCharsets/UTF_8) {:leases [rw-lease]})))
-      (is (thrown? clojure.lang.ExceptionInfo (mount-fs/provider-delete provider mount-id "scripts/run.sh" {:leases [rw-lease]})))
+      (is (thrown? clojure.lang.ExceptionInfo (mount-fs/provider-write provider mount-id "SKILL.md" (.getBytes "hacked" StandardCharsets/UTF_8) rw-opts)))
+      (is (thrown? clojure.lang.ExceptionInfo (mount-fs/provider-create provider mount-id "scripts/evil.sh" (.getBytes "evil" StandardCharsets/UTF_8) rw-opts)))
+      (is (thrown? clojure.lang.ExceptionInfo (mount-fs/provider-delete provider mount-id "scripts/run.sh" rw-opts)))
       ;; read still works
-      (let [ro-lease {:mount/id mount-id :path "" :actions #{:read :list :stat}}
-            ba (mount-fs/provider-read provider mount-id "scripts/run.sh" {:leases [ro-lease]})]
+      (let [ro-lease (lease-for mount-id #{:read :list :stat})
+            ba (mount-fs/provider-read provider mount-id "scripts/run.sh" {:leases [ro-lease] :subject (fs-subject) :now lease-now})]
         (is (bytes? ba))
         (is (str/includes? (String. ^bytes ba StandardCharsets/UTF_8) "echo hi"))))))
 
@@ -450,7 +483,7 @@
                             "---\nname: debugging\ndescription: Debugging helper\n---\n# Body\nvendored base\n")
             registry (reg/create-registry)
             source (adapter/make-skill-source {:source/id :skills/test :roots [skills-root] :cas cas :registry registry})
-            _ (adapter/refresh-skills! source)
+            _ (publish! registry source)
             bundle (adapter/get-skill-bundle registry "debugging")
             rev (:revision/id bundle)]
         (is (some? rev))
@@ -477,7 +510,7 @@
                           :extra-files {"references/a.md" "a"})
           registry (reg/create-registry)
           source (adapter/make-skill-source {:source/id :skills/test :roots [skills-root] :cas cas :registry registry})
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           mount-reg (mount-backend/create-registry)
           ctx-store (ctx-binding/create-store)
           activated (adapter/activate-skill! db sid "debugging" {:registry registry :cas cas :mount-registry mount-reg :context-store ctx-store})
@@ -486,7 +519,7 @@
           _ (write-skill! skills-root "debugging"
                           "---\nname: debugging\ndescription: Debugging helper\n---\n# Body\nRevision B for restart\n"
                           :extra-files {"references/b.md" "b"})
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           _ (adapter/reload-skill! db sid "debugging" {:registry registry :cas cas :mount-registry mount-reg :context-store ctx-store})
           active-before (store-binding/active-bindings db sid)
           rev-b (:revision/id (first active-before))
@@ -506,13 +539,9 @@
       (is (= 1 (count (mount-backend/list-mounts new-mount))))
       (is (= 1 (count (ctx-binding/list-active new-ctx))))
       ;; materializer via new mount still returns B body via CAS
-      (let [cas-fn (fn [rev]
-                     (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                           ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                       (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
-            active (store-binding/active-bindings new-db sid)
+      (let [active (store-binding/active-bindings new-db sid)
             bindings (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) active)
-            content (read-via-materializer bindings cas-fn)]
+            content (read-via-materializer bindings cas)]
         (is (str/includes? content "Revision B for restart"))
         (is (not (str/includes? content "Revision A"))))
       ;; also prove that even if we delete skill dir before restart, restore still works (CAS retains B)
@@ -534,7 +563,7 @@
                           :extra-files {"references/keep.md" "keep"})
           registry (reg/create-registry)
           source (adapter/make-skill-source {:source/id :skills/test :roots [skills-root] :cas cas :registry registry})
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           mount-reg (mount-backend/create-registry)
           ctx-store (ctx-binding/create-store)
           activated (adapter/activate-skill! db sid "debugging" {:registry registry :cas cas :mount-registry mount-reg :context-store ctx-store})
@@ -548,7 +577,7 @@
           ;; To model catalog disappearance, we should clear registry's bundles for debugging? Instead, we simulate that list-offers now should be empty if we consider only current snapshot's skills.
           ;; In our implementation, bundles accumulate; we need to represent catalog as snapshot payload's skills, not accumulated bundles.
           ;; For this test, we check that even though discovery now yields zero, the old bundle still exists for binding.
-          _ (adapter/refresh-skills! source)
+          _ (publish! registry source)
           ;; catalog: our current list-offers will still contain old bundle because we never delete bundles. To test catalog disappearance, we check that discovery finds nothing:
           discovered (adapter/discover-skill-dirs [skills-root])]
       (is (empty? discovered) "discovery now finds zero skills after removal")
@@ -556,20 +585,15 @@
       (let [active (store-binding/active-bindings db sid)]
         (is (= 1 (count active)))
         (is (= rev-a (:revision/id (first active)))))
-      (let [cas-fn (fn [rev]
-                     (let [manifest (evoclj.fs.snapshot/load-tree cas rev)
-                           ba (evoclj.fs.snapshot/get-file-bytes cas manifest "SKILL.md")]
-                       (when ba (String. ^bytes ba StandardCharsets/UTF_8))))
-            active (store-binding/active-bindings db sid)
+      (let [active (store-binding/active-bindings db sid)
             bindings (map (fn [b] {:logical/id (:logical/id b) :revision/id (:revision/id b) :bundle/id (:bundle/id b) :binding/activated-at 0}) active)
-            content (read-via-materializer bindings cas-fn)]
+            content (read-via-materializer bindings cas)]
         (is (str/includes? content "A persists after removal")))
       ;; filesystem provider still servable via CAS tree even though live dir gone
       (let [provider (mount-fs/make-provider mount-reg)
             mount (first (mount-backend/list-mounts mount-reg))
             mount-id (:mount/id mount)
-            lease {:mount/id mount-id :path "" :actions #{:read :list :stat}}
-            ba (mount-fs/provider-read provider mount-id "references/keep.md" {:leases [lease]})]
+            ba (mount-fs/provider-read provider mount-id "references/keep.md" (fs-opts mount-id #{:read :list :stat}))]
         (is (bytes? ba))
         (is (str/includes? (String. ^bytes ba StandardCharsets/UTF_8) "keep"))))))
 
@@ -618,7 +642,7 @@
                             :extra-files {"scripts/deploy.sh" "#!/bin/bash\nrm -rf /\n" "scripts/ok.sh" "echo ok"})
             registry (reg/create-registry)
             source (adapter/make-skill-source {:source/id :skills/test :roots [skills-root] :cas cas :registry registry})
-            _ (adapter/refresh-skills! source)
+            _ (publish! registry source)
             db (fresh-db)
             sid (seed-session! db)
             mount-reg (mount-backend/create-registry)
@@ -627,13 +651,12 @@
             provider (mount-fs/make-provider mount-reg)
             mount (first (mount-backend/list-mounts mount-reg))
             mount-id (:mount/id mount)
-            lease {:mount/id mount-id :path "" :actions #{:read :list :stat}}
-            children (mount-fs/provider-list provider mount-id "scripts" {:leases [lease]})
+            children (mount-fs/provider-list provider mount-id "scripts" (fs-opts mount-id #{:read :list :stat}))
             names (set (map :name children))]
         (is (contains? names "deploy.sh"))
         (is (contains? names "ok.sh"))
         ;; read is allowed
-        (is (bytes? (mount-fs/provider-read provider mount-id "scripts/deploy.sh" {:leases [lease]})))
+        (is (bytes? (mount-fs/provider-read provider mount-id "scripts/deploy.sh" (fs-opts mount-id #{:read :list :stat}))))
         ;; execution is not a filesystem capability — no :execute in access/max, and no tool/action grants it
         (is (not (contains? (:access/max mount) :execute)) "no execute capability")
         (is (not (contains? (:access/max mount) :write)) "no write")))))

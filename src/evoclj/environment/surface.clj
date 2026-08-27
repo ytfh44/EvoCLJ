@@ -13,10 +13,11 @@
     #{:read :list :stat}                              ; read-only
     #{:read :list :stat :write :create :delete}       ; read-write
 
-  Future capabilities not implemented now but reserved for extension:
-  append-only, no-delete, write-existing-only, execute.
-  They are mentioned here for forward compatibility but are not accepted
-  by validation at present.
+    Tokens append-only, no-delete, write-existing-only, execute are recognized
+  but NOT supported: validation rejects any of them fail-closed with the typed
+  error :surface/invalid-descriptor. They are named only so the rejection is
+  explicit rather than a generic invalid-capability error; they are not part of
+  the supported surface and are not reserved for future implementation.
 
   All surfaces are plain maps. Validation is explicit and throws typed
   errors via evoclj.kernel.error."
@@ -27,14 +28,10 @@
   #{:read :list :stat :write :create :delete})
 
 (def future-capabilities
-  "Reserved future extensions, not implemented now:
-   append-only, no-delete, write-existing-only, execute."
+  "Unsupported directory-capability tokens. They are recognized so validation
+   rejects them explicitly (fail-closed); none is implemented or a planned part
+   of the supported surface. append-only, no-delete, write-existing-only, execute."
   #{:append-only :no-delete :write-existing-only :execute})
-
-(def known-access-sets
-  "Common access sets in use today."
-  [#{:read :list :stat}
-   #{:read :list :stat :write :create :delete}])
 
 (defn valid-access-max?
   [access]
@@ -143,8 +140,8 @@
 (defn make-directory-surface
   "Create a DirectorySurface. Requires :id, :backend, :access/max.
    :access/max must be a subset of #{:read :list :stat :write :create :delete}.
-   Future capabilities append-only, no-delete, write-existing-only, execute
-   are reserved but not implemented."
+   Tokens append-only, no-delete, write-existing-only, execute are recognized
+   but unsupported: validation rejects any of them fail-closed."
   [{:keys [id backend access-max] :as opts}]
   (let [m {:surface/type :directory
            :surface/id id
@@ -154,12 +151,3 @@
     (if-let [rev (:revision/id opts)]
       (assoc m :revision/id rev)
       m)))
-
-(defn co-versioned?
-  "True when all surfaces share the same :revision/id (if present)."
-  [surfaces]
-  (let [revs (set (map :revision/id surfaces))]
-    (or (empty? revs)
-        (= 1 (count (remove nil? revs)))
-        ;; if all have revision/id they must be equal; if none have it, vacuously true
-        (and (every? some? revs) (= 1 (count revs))))))

@@ -89,7 +89,8 @@ What the codebase already provides, per foundation:
   inferential primitives (bootstrap CI, trend test) in a separate
   namespace that states its own assumptions.
 - **F3**: content-addressed CAS + SQLite with append-only discipline
-  and migrations (001-init, 002-memory, 003-routing). Entities
+  and migrations (001-init, 002-memory, 003-routing,
+  004-enrichment, 005-deploy, 006-session-bindings). Entities
   (genomes, candidates, cases) are immutable by design. MISSING: a
   generic, versioned, append-only annotation layer keyed by
   entity-kind + entity-id whose payloads live in the CAS.
@@ -147,7 +148,11 @@ metrics, generated docs).
 - Migration 004: append-only `enrichments` table
   (entity_kind/entity_id/kind/version, payload_ref → CAS,
   cause_ref, created_at) with no-update/no-delete triggers mirroring
-  the events table; bump `evoclj.store.migrate/latest-version` to 3.
+  the events table; raises `evoclj.store.migrate/latest-version` to
+  track the file set (the constant must equal the top of the
+  contiguous classpath chain — enforced fail-closed by
+  `validate-migration-chain!`; the chain now tops out at
+  006-session-bindings, so latest-version is 6).
 - `put-enrichment!` — payload → CAS, row references it (Constraint
   21); version counter per (entity-kind, entity-id, kind).
 - `enrichments` / `latest-enrichment` / `payload`.

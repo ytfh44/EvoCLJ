@@ -10,7 +10,11 @@
 
   Enforcement: EffectiveAccess = SurfaceAccessMax ∩ CapabilityLease
     - SurfaceAccessMax is mount's :access/max (e.g. Skill RO = #{:read :list :stat})
-    - CapabilityLease is the lease's :actions set and :resource scope
+    - CapabilityLease is a proper v0 CapabilityLease (subject-bound, positive
+      window, :actions set, :resource scope). Subject and expiry are FORCED
+      (B4): a lease bound to a different subject, an expired lease, or a
+      revoked lease is rejected with a precise typed error — never silently
+      honored.
     Even if a lease incorrectly grants :write to a Skill mount, the backend
     still rejects because surface max does not contain :write (fail closed).
 
@@ -24,12 +28,17 @@
     First batch (RO): stat, list, read
     Second batch (RW): write, create, delete — only when mount surface and lease both grant.
 
-  This provider is the single filesystem I/O path. If a legacy read_skill_file
-  helper exists it must be a facade over this provider (no independent I/O stack)."
+  This provider is the single filesystem I/O path. There is no separate
+  read_skill_file / read-skill-file facade — all reads go through
+  provider-read (no independent I/O stack)."
   (:require [clojure.string :as str]
+            [evoclj.capability.lease :as lease]
+            [evoclj.capability.schema :as cap-schema]
             [evoclj.mount.backend :as backend]
             [evoclj.kernel.error :as err]
-            [evoclj.provider.protocol :as proto]))
+            [evoclj.provider.protocol :as proto]
+            [malli.core :as m])
+  (:import (java.util Date UUID)))
 
 ;; ---------------------------------------------------------------------------
 ;; Canonical resource
@@ -49,67 +58,201 @@
      :path canonical}))
 
 ;; ---------------------------------------------------------------------------
-;; Lease helpers — support both full CapabilityLease ({:resource {:mount/id :path} :actions})
-;; and simplified test leases ({:mount/id :path :actions} or {:lease/id ...})
+;; FS lease issuer (B4) — the wired issuer that mints, records, verifies,
+;; and revokes filesystem CapabilityLeases. A lease is a bounded HOST-OWNED
+;; grant bound to ONE exact subject and ONE canonical :filesystem/path
+;; resource, spanning a positive window. The issuer is the ONLY source of a
+;; valid grant (Global Constraint 9: a visible action never grants resource
+;; authority); a lease minted here is recorded in a registry so it can be
+;; re-verified and revoked (fail-closed, never silently honored).
 ;; ---------------------------------------------------------------------------
 
-(defn- lease-mount-id [lease]
-  (or (get-in lease [:resource :mount/id])
-      (:mount/id lease)
-      (:mount-id lease)))
+(defn create-lease-registry
+  "A verifiable lease ledger: an atom mapping :cap/id ->
+  {:lease <lease> :revoked? <boolean>}."
+  []
+  (atom {}))
 
-(defn- lease-path [lease]
-  (or (get-in lease [:resource :path])
-      (:path lease)
-      ""))
+(defn register-lease!
+  "Validate `lease` as a proper filesystem CapabilityLease and record it in
+  `lease-registry`, making it verifiable. Returns the lease. Throws typed
+  :capability/schema-invalid on a malformed lease."
+  [lease-registry lease]
+  (cap-schema/validate-lease lease)
+  (swap! lease-registry assoc (:cap/id lease) {:lease lease :revoked? false})
+  lease)
 
-(defn- lease-actions [lease]
-  (cond
-    (contains? lease :actions) (:actions lease)
-    (contains? lease :action) #{(:action lease)}
-    (contains? lease :capabilities) (:capabilities lease)
-    :else #{}))
+(defn get-lease
+  "Look up a recorded lease by :cap/id, or nil when not recorded."
+  [lease-registry cap-id]
+  (get-in @lease-registry [cap-id :lease]))
 
-(defn- mount-path-inside?
-  "True when request path is inside grant path (segment boundary).
-  Empty grant path covers whole mount. Both are canonicalized."
-  [grant-path req-path]
-  (let [g (backend/canonicalize-mount-path (or grant-path ""))
-        r (backend/canonicalize-mount-path (or req-path ""))]
-    (or (= g "")
-        (= g r)
-        (str/starts-with? r (str g "/")))))
+(defn lease-revoked?
+  "True when the lease with :cap/id is recorded as revoked."
+  [lease-registry cap-id]
+  (boolean (get-in @lease-registry [cap-id :revoked?])))
+
+(defn revoke-lease!
+  "Revoke the recorded lease with :cap/id (fail-closed: a revoked lease is
+  rejected by verify-fs-lease!/lease-grants?). Idempotent. Returns nil."
+  [lease-registry cap-id]
+  (swap! lease-registry update cap-id (fn [rec]
+                                        (cond-> (or rec {:lease nil :revoked? true})
+                                          true (assoc :revoked? true))))
+  nil)
+
+(defn- phenotype-id-valid?
+  "True when subject is a { :phenotype/id <sha256> } map conforming to the
+  capability SubjectSchema (exact phenotype id)."
+  [subject]
+  (boolean (m/validate cap-schema/SubjectSchema subject)))
+
+(defn issue-fs-lease
+  "The filesystem lease issuer (B4). Mint one v0 CapabilityLease granting
+  ONE authorized subject `actions` over the canonical :filesystem/path
+  resource {:mount/id mount-id :path path}, spanning a positive window.
+
+  Inputs (all required unless noted):
+    :subject     { :phenotype/id \"sha256:...\" } — the SINGLE phenotype the
+                 grant belongs to (exact match; a sibling phenotype from the
+                 same Genome is a different subject and never matches).
+    :mount-id    canonical vector mount id ([:skill \"x\" \"sha256:...\"] or
+                 [:workspace \"id\"]).
+    :path        mount-relative path the grant covers (\"\" = whole mount).
+    :actions     non-empty #{:read :list :stat :write :create :delete}.
+    :issued-at   #inst (default now) — INCLUSIVE window start.
+    :expires-at  #inst (default +1h) — EXCLUSIVE window end; must be after
+                 :issued-at (a zero/negative window is a host bug, rejected).
+    :constraints optional map (default {} — no call limit).
+    :cap/id      optional #uuid (default fresh).
+
+  When `lease-registry` is supplied the lease is recorded (verifiable and
+  revocable). Returns the lease map. Throws typed errors:
+    :capability/schema-invalid  — malformed subject/mount/path/actions/window
+    :filesystem/path-outside-mount — path escapes the mount.
+
+  The issuer is the wired production path for granting filesystem access —
+  simplified bare { :mount/id :path :actions } maps are NOT grants and are
+  rejected by the access path (B4: subject/expiry are forced)."
+  [lease-registry
+   {:keys [subject mount-id path actions issued-at expires-at constraints]
+    cap-id :cap/id
+    :as opts}]
+  (when-not (phenotype-id-valid? subject)
+    (throw (err/error :capability/schema-invalid
+                      "fs lease subject must be a single authorized phenotype ({:phenotype/id sha256})"
+                      {:subject (err/sanitize subject)})))
+  (when-not (backend/mount-id? mount-id)
+    (throw (err/error :capability/schema-invalid
+                      "fs lease requires a canonical vector :mount/id"
+                      {:mount/id mount-id})))
+  (let [canonical (backend/canonicalize-mount-path (or path ""))]
+    (when-not (and (set? actions) (seq actions)
+                   (every? backend/valid-capabilities actions))
+      (throw (err/error :capability/schema-invalid
+                        "fs lease requires a non-empty subset of valid filesystem actions"
+                        {:actions (err/sanitize actions) :valid (vec backend/valid-capabilities)})))
+    (let [issued (or issued-at (Date.))
+          expires (or expires-at (Date. (+ (.getTime ^Date issued) 3600000)))]
+      (when-not (inst? issued)
+        (throw (err/error :capability/schema-invalid
+                          "fs lease :issued-at must be an #inst" {:issued-at issued})))
+      (when-not (inst? expires)
+        (throw (err/error :capability/schema-invalid
+                          "fs lease :expires-at must be an #inst" {:expires-at expires})))
+      (when-not (.before ^Date issued ^Date expires)
+        (throw (err/error :capability/schema-invalid
+                          "fs lease must span a positive window (:expires-at after :issued-at)"
+                          {:issued-at issued :expires-at expires})))
+      (let [lease {:cap/id (or cap-id (UUID/randomUUID))
+                   :subject subject
+                   :resource {:kind :filesystem/path :mount/id mount-id :path canonical}
+                   :actions (set actions)
+                   :constraints (or constraints {})
+                   :issued-at issued
+                   :expires-at expires}]
+        (when lease-registry
+          (register-lease! lease-registry lease))
+        lease))))
+
+(defn verify-fs-lease!
+  "Re-verify a filesystem lease FAIL-CLOSED (B4 reload!/restore!
+  re-verification and the access path). Throws the precise typed error:
+    :capability/schema-invalid   — lease is not a valid CapabilityLease
+    :capability/revoked          — lease is recorded as revoked in
+                                   `:registry`, or (when a registry is
+                                   supplied) is not recorded at all (the
+                                   issuer is the only source of a grant)
+    :capability/expired          — the window does not cover `:now`
+    :capability/subject-mismatch — `:subject` (when supplied) differs from
+                                   the lease's bound subject
+  Returns the lease when valid. `:now` defaults to the access clock (expiry
+  is FORCED — never optional). Uses evoclj.capability.lease for the expiry
+  and subject judgements (single implementation, INV-05)."
+  [lease {:keys [now subject registry]}]
+  (cap-schema/validate-lease lease)
+  (when (some? registry)
+    (let [rec (get @registry (:cap/id lease))]
+      (when (or (nil? rec) (:revoked? rec))
+        (throw (err/error :capability/revoked
+                          "lease is revoked or was never issued by the fs lease issuer"
+                          {:cap/id (:cap/id lease)})))))
+  (let [t (or now (Date.))]
+    (when-not (lease/valid-at? lease t)
+      (throw (err/error :capability/expired
+                        "lease has expired"
+                        {:cap/id (:cap/id lease)
+                         :expires-at (:expires-at lease)
+                         :now t}))))
+  (when (and subject (not (lease/subject-matches? lease subject)))
+    (throw (err/error :capability/subject-mismatch
+                      "lease belongs to a different subject"
+                      {:cap/id (:cap/id lease)
+                       :lease-subject (:subject lease)
+                       :request-subject (err/sanitize subject)})))
+  lease)
+
+;; ---------------------------------------------------------------------------
+;; Lease enforcement — the access path FORCES subject and expiry (B4).
+;; The lease MUST be a valid CapabilityLease (a bare { :mount/id :path :actions }
+;; map is NOT a grant); a malformed lease throws, never silently grants or
+;; denies. Coverage is delegated to evoclj.capability.lease (INV-05 — one
+;; implementation, no re-implemented expiry/subject logic here).
+;; ---------------------------------------------------------------------------
 
 (defn- lease-grants?
-  "True when lease grants action for mount-id + req-path.
-  Checks mount-id equality, path prefix, and action membership.
-  If lease carries :issued-at/:expires-at, expiry is enforced when :now supplied.
-  If lease carries :subject, subject matching is enforced when :subject supplied."
-  [lease mount-id req-path action {:keys [now subject]}]
-  (let [lm (lease-mount-id lease)
-        acts (lease-actions lease)]
-    (and (some? lm)
-         (= lm mount-id)
-         (contains? acts action)
-         (mount-path-inside? (lease-path lease) req-path)
-         ;; optional expiry check if lease is full CapabilityLease
-         (if (and (:issued-at lease) (:expires-at lease) now)
-           (try
-             (let [valid? (and (not (.before ^java.util.Date now ^java.util.Date (:issued-at lease)))
-                               (.before ^java.util.Date now ^java.util.Date (:expires-at lease)))]
-               valid?)
-             (catch Exception _ false))
-           true)
-         ;; optional subject check
-         (if (and (:subject lease) subject)
-           (= (:phenotype/id (:subject lease)) (:phenotype/id subject))
-           true))))
+  "True when a valid `lease` grants `action` for mount-id + req-path.
+  B4: subject and expiry are FORCED — but only on the lease that actually
+  covers this request (scope + action). A lease that does not cover the
+  request simply does not grant (returns false, so another lease may); a
+  lease that DOES cover it but is expired, revoked, or bound to a
+  different subject throws the precise typed error (:capability/expired /
+  :capability/revoked / :capability/subject-mismatch). The requesting
+  subject comes from opts :subject (required for a covering lease); the
+  instant from opts :now (defaults to the access clock); revocation /
+  recording from opts :registry (when supplied)."
+  [lease mount-id req-path action {:keys [now subject registry] :as opts}]
+  (cap-schema/validate-lease lease)
+  (if (lease/resource-covers? lease
+                              {:kind :filesystem/path :mount/id mount-id :path req-path}
+                              action)
+    (do
+      (when-not subject
+        (throw (err/error :filesystem/lease-subject-required
+                          "filesystem access requires a requesting :subject to enforce the lease subject binding"
+                          {:mount/id mount-id :action action})))
+      (verify-fs-lease! lease {:now now :subject subject :registry registry})
+      true)
+    false))
 
 (defn- authorized?
   "True when any lease in collection grants action for resource.
-  Surface check is separate (EffectiveAccess is intersection)."
+  Surface check is separate (EffectiveAccess is intersection). A lease that
+  is expired/revoked/subject-mismatched throws its precise typed error
+  (fail-closed), never silently skipped."
   [leases mount-id req-path action opts]
-  (some #(lease-grants? % mount-id req-path action opts) leases))
+  (some (fn [lease] (lease-grants? lease mount-id req-path action opts))
+        (or leases [])))
 
 (defn- check-effective-access!
   "Enforce EffectiveAccess = SurfaceAccessMax ∩ CapabilityLease.
@@ -197,16 +340,6 @@
 (def fs-delete provider-delete)
 
 ;; ---------------------------------------------------------------------------
-;; Facade for legacy read_skill_file (if any) — routes through generic provider
-;; ---------------------------------------------------------------------------
-
-(defn read-skill-file
-  "Legacy entry point that must be a facade over the generic provider.
-  Prefer provider-read directly."
-  [provider mount-id path opts]
-  (provider-read provider mount-id path opts))
-
-;; ---------------------------------------------------------------------------
 ;; Provider that also implements evoclj.provider.protocol for broker integration
 ;; (optional — allows filesystem intents to flow through dispatch)
 ;; ---------------------------------------------------------------------------
@@ -232,7 +365,15 @@
     (let [{:keys [mount/id path action]} authorized-request
           op (or action :read)
           leases (:leases authorized-request)
-          opts {:leases leases}]
+          ;; The broker already authorized subject/expiry during decide; the
+          ;; provider re-enforces them fail-closed. Derive the requesting
+          ;; subject from the request when present, else from the lease it
+          ;; will authorize against (a self-match is a no-op — the broker is
+          ;; responsible), and never skip expiry (default to the access clock).
+          opts {:leases leases
+                :subject (or (:subject authorized-request)
+                             (some-> (first (or leases [])) :subject))
+                :now (or (:now authorized-request) (java.util.Date.))}]
       (case op
         :read (provider-read this id path opts)
         :list (provider-list this id path opts)

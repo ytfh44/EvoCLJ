@@ -48,7 +48,6 @@
             [evoclj.config :as config]
             [evoclj.eval.profile :as profile]
             [evoclj.evolution.core :as evolution]
-            [evoclj.evolution.default-mutator :as default-mutator]
             [evoclj.evolution.demo-mutator :as demo-mutator]
             [evoclj.kernel.error :as err]
             [evoclj.kernel.system :as kernel]
@@ -305,12 +304,11 @@
                :provider-catalog provider-catalog
                :candidates-dir (candidates-dir opts)
                ;; v0 ships NO :genome-root/:genome-loader (the parent
-               ;; bundle is resolved per command) and NO :mutator
-               ;; (YAGNI, Global Constraint 24 — hosts inject one)
+               ;; bundle is resolved per command) and a NO-OP :mutator (:none — YAGNI, Global Constraint 24; hosts inject one)
                :diagnostician {:task/success-threshold 1.0
                                :max-hypotheses 3
                                :confidence-band :medium}
-               :mutator (default-mutator/default-mutator)
+               :mutator :none
                :budget-profile (merge {:max-candidates 3}
                                       (config/config-value envelope [:config/budget]))
                :programs-registry [route-descriptor]}

@@ -970,7 +970,7 @@
                   (testing "STEP 5 — close and REOPEN the store from disk;
                             lineage/current checks re-run cleanly"
                     (let [reopened-db (sqlite/spec (:db-path fx))
-                          _ (is (= {:status :noop :version 3}
+                          _ (is (= {:status :noop :version 6}
                                    (migrate/migrate! reopened-db)))
                           reopened-store {:sqlite reopened-db
                                           :cas (cas/->cas (:cas-root fx))}]

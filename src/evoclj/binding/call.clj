@@ -16,14 +16,30 @@
   Cross-persistence/audit boundary only writes pure data:
     {:binding/id ... :tool/id ... :revision/id ... :revision/seq ...}
   No live objects cross the boundary."
-  (:require [evoclj.provider.protocol :as proto]
+  (:require [evoclj.kernel.error :as err]
+            [evoclj.provider.protocol :as proto]
             [malli.core :as m]))
 
 (def freshness-values #{:required :best-effort :pinned})
 (def FreshnessSchema [:enum :required :best-effort :pinned])
 
+;; ---------------------------------------------------------------------------
+;; Canonical binding key set (M21)
+;;
+;; A CallBinding record carries EXACTLY this set of keys. It is the single
+;; source of truth (INV-05, single-implementation): generic code reads
+;; :binding/* and :revision/*; MCP/contract compatibility keys are projected
+;; on demand by `binding->audit` / `attach-audit-to-result` and never stored
+;; in the record. No :contract/* or :mcp/* alias duplicates live here.
+;; ---------------------------------------------------------------------------
+(def canonical-binding-keys
+  #{:binding/id :tool/id :revision/id :revision/seq :source/id
+    :binding/descriptor :binding/provider :binding/freshness
+    :binding/stale? :binding/captured-at})
+
+;; Closed schema: rejects any key outside the canonical set (fail-closed).
 (def CallBindingSchema
-  [:map
+  [:map {:closed true}
    [:binding/id uuid?]
    [:tool/id keyword?]
    [:revision/id {:optional true} [:maybe string?]]
@@ -36,6 +52,16 @@
    [:binding/captured-at int?]])
 
 (defn valid-freshness? [v] (contains? freshness-values v))
+
+(defn- validate-canonical-keys
+  "Fail-closed check: every key on the binding must belong to the canonical set."
+  [b]
+  (let [extra (remove canonical-binding-keys (keys b))]
+    (when (seq extra)
+      (throw (err/error :binding/unknown-key
+                        "CallBinding record carries a non-canonical key"
+                        {:keys (vec extra)})))
+    b))
 
 (defn- extract-descriptor-provider
   "Extract [descriptor provider] from various entry shapes:
@@ -88,12 +114,19 @@
 
 (defn stale?
   "True when descriptor/binding is stale for given freshness.
+
+  Canonical arity (M21): `stale?` has exactly two arities,
+  `[x]` (defaults to :best-effort) and `[x freshness]`. The previously
+  inconsistent 3-arity overload `[x freshness revision-id]` was removed so
+  there is a single definition of staleness.
+
   Stale is defined as:
    - if freshness is :pinned -> never stale
    - else if descriptor contains :mcp/last-refreshed -> nil means stale (MCP compat)
    - else if descriptor/binding has :revision/id -> nil means stale (generic)
-   - else if no revision and no mcp field -> stale (conservative, matches old fixture behavior)
-  An explicit :stale? in opts overrides this computation when capturing."
+   - else if descriptor/binding carries an explicit :binding/stale? -> that value (canonical override)
+   - else if descriptor/binding carries a compat :contract/stale? -> that value
+   - else no provenance -> stale (conservative, matches old fixture behavior)"
   ([x]
    (stale? x :best-effort))
   ([x freshness]
@@ -114,27 +147,16 @@
 
        :else
        ;; no provenance: treat as stale for best-effort (matches old fixture behavior where :mcp/last-refreshed missing => stale)
-       true)))
-  ([x freshness revision-id]
-   (if (= freshness :pinned)
-     false
-     (if (contains? x :mcp/last-refreshed)
-       (nil? (:mcp/last-refreshed x))
-       (nil? revision-id)))))
+       true))))
 
 (defn validate-binding
-  "Validate binding against CallBindingSchema, throwing on invalid."
+  "Validate binding: keys must be canonical (fail-closed) and the canonical
+  subset must satisfy CallBindingSchema."
   [b]
+  (validate-canonical-keys b)
   (when-not (m/validate CallBindingSchema b)
     (throw (ex-info "invalid CallBinding" {:explanation (m/explain CallBindingSchema b) :binding b})))
   b)
-
-(defn- coerce-revision-seq [v descriptor]
-  (cond
-    (some? v) (int v)
-    (some? (:revision/seq descriptor)) (int (:revision/seq descriptor))
-    (some? (:mcp/generation descriptor)) (int (:mcp/generation descriptor))
-    :else 0))
 
 (defn capture-tool-binding
   "Create a CallBinding from a ToolSurface current entry (or provider registry entry).
@@ -183,11 +205,11 @@
              (throw (ex-info "capture-tool-binding requires :tool/id keyword" {:tool-id tool-id :descriptor descriptor})))
          revision-id (or (:revision/id opts) (:revision/id descriptor) (:mcp/revision-id descriptor) nil)
          ;; revision-seq: prefer explicit opts, then descriptor's revision/seq, then mcp/generation, then 0
-         revision-seq (coerce-revision-seq (or (:revision/seq opts) (:revision/id opts) nil) descriptor)
+         revision-seq nil ; (dead revision-seq coercer removed; canonical value derived below)
          ;; Actually revision-seq should be from opts :revision/seq or descriptor's :mcp/generation
          revision-seq (cond
-                        (contains? opts :revision/seq) (int (:revision/seq opts))
-                        (contains? opts :revision-seq) (int (:revision-seq opts))
+                        (contains? opts :revision/seq) (if (int? (:revision/seq opts)) (int (:revision/seq opts)) (throw (err/error :binding/invalid-revision-seq ":revision/seq must be an integer" {:value (:revision/seq opts)})))
+                        (contains? opts :revision-seq) (if (int? (:revision-seq opts)) (int (:revision-seq opts)) (throw (err/error :binding/invalid-revision-seq ":revision-seq must be an integer" {:value (:revision-seq opts)})))
                         (some? (:revision/seq descriptor)) (int (:revision/seq descriptor))
                         (some? (:mcp/generation descriptor)) (int (:mcp/generation descriptor))
                         (some? (:contract/generation descriptor)) (int (:contract/generation descriptor))
@@ -214,17 +236,17 @@
                   :binding/freshness freshness
                   :binding/stale? (boolean stale)
                   :binding/captured-at (long captured)
-                  ;; aliases for MCP/contract compat - keeps existing tests green while generic code uses :binding/* and :revision/*
-                  :contract/id binding-id
-                  :contract/generation (int revision-seq)
-                  :contract/descriptor descriptor
-                  :contract/freshness freshness
-                  :contract/stale? (boolean stale)
-                  :contract/captured-at (long captured)
-                  :mcp/generation (int revision-seq)
-                  :mcp/stale? (boolean stale)
-                  :mcp/freshness freshness}]
-     (validate-binding (select-keys binding [:binding/id :tool/id :revision/id :revision/seq :source/id :binding/descriptor :binding/provider :binding/freshness :binding/stale? :binding/captured-at]))
+                  ;; Canonical record: ONLY canonical :binding/* + :revision/* keys; compat projected by binding->audit.
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  
+                  }]
+     (validate-binding binding)
      binding)))
 
 (defn capture
@@ -240,8 +262,8 @@
   ([descriptor normalized decision freshness opts]
    (let [base (capture-tool-binding descriptor (merge {:freshness freshness} opts))]
      (cond-> base
-       (some? normalized) (assoc :contract/normalized normalized :binding/normalized normalized)
-       (some? decision) (assoc :contract/decision decision :binding/decision decision)))))
+       (some? normalized) (assoc :binding/normalized normalized)
+       (some? decision) (assoc :binding/decision decision)))))
 
 (defn freeze
   "Alias for capture."

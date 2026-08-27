@@ -1,6 +1,7 @@
 (ns evoclj.environment.fake
   "FakeSource - mutable atom-backed LiveSource for tests."
-  (:require [evoclj.environment.source :as src]))
+  (:require [evoclj.environment.source :as src]
+            [evoclj.environment.surface :as surf]))
 
 (defrecord FakeSource [source-id state subs closed?]
   src/LiveSource
@@ -16,6 +17,19 @@
           close-fn (fn [] (swap! subs dissoc id))]
       (swap! subs assoc id invalidate-fn)
       {:subscription/id id :close! close-fn}))
+  (project [this snapshot]
+    ;; Pure projector: derive a single ContextSurface bundle from the captured
+    ;; snapshot. Pure data transformation only — publishes nothing.
+    (let [sid (:source/id snapshot)
+          payload (:payload snapshot)
+          surfaces [(surf/make-context-surface
+                      {:id (keyword (name (or sid :fake)) "ctx")
+                       :descriptor {:name (str sid) :payload payload}
+                       :materializer (fn ([] payload) ([_ _] payload) ([_ _ _] payload))})]]
+      {:logical-id sid
+       :source-id sid
+       :payload (or payload {:source/id sid})
+       :surfaces surfaces}))
   (close! [this]
     (reset! closed? true)
     (reset! subs {})))

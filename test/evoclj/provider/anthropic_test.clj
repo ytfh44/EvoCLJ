@@ -117,6 +117,33 @@
                (:messages req))))
       (is (m/validate an/ModelCallOutputSchema result)))))
 
+(defn- model-call-result
+  "A minimal ModelCallOutputSchema-valid result carrying `usage`."
+  [usage]
+  {:model/output {:text "hello from claude"}
+   :usage usage})
+
+(deftest model-call-output-schema-usage-contract
+  (testing "legacy usage without :model-reasoning-tokens still validates"
+    (is (m/validate an/ModelCallOutputSchema
+                    (model-call-result {:model-input-tokens 15 :model-output-tokens 9}))))
+  (testing "a non-negative :model-reasoning-tokens int validates"
+    (is (m/validate an/ModelCallOutputSchema
+                    (model-call-result {:model-input-tokens 15 :model-output-tokens 9
+                                        :model-reasoning-tokens 7}))))
+  (testing "the :int type carries no range constraint (decided schema,
+            matching openai.clj): even a negative int validates"
+    (is (m/validate an/ModelCallOutputSchema
+                    (model-call-result {:model-input-tokens 15 :model-output-tokens 9
+                                        :model-reasoning-tokens -1}))))
+  (testing "a non-int :model-reasoning-tokens is rejected"
+    (is (not (m/validate an/ModelCallOutputSchema
+                         (model-call-result {:model-input-tokens 15 :model-output-tokens 9
+                                             :model-reasoning-tokens "3"}))))
+    (is (not (m/validate an/ModelCallOutputSchema
+                         (model-call-result {:model-input-tokens 15 :model-output-tokens 9
+                                             :model-reasoning-tokens 1.5}))))))
+
 (deftest error-mapping
   (testing "429 is transient"
     (let [fx (make-server (fn [_] [429 "{\"type\":\"error\"}"]))
