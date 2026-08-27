@@ -1,34 +1,40 @@
 (ns evoclj.promotion.current
-  "component — the CURRENT generation pointer and its compare-and-set.
+  "component - the CURRENT generation pointer and its compare-and-set.
 
   This namespace owns the ONLY code path that CHANGES the generations
   CURRENT pointer (Global Constraint 15; the component promotion
   transaction is the only caller). It is deliberately small: reading
   the pointer, and moving it with a compare-and-set. Nothing else in
-  the codebase may write the `current` column (evoclj.store.recovery
+  the codebase may write the current column (evoclj.store.recovery
   reads it; evoclj.promotion.promote moves it exclusively through
-  `cas-current!`).
+  cas-current!).
 
-  Database Invariant 6 (CURRENT is exactly one row) is enforced by the
-  partial unique index `generations_current_unique` (001-init.sql,
-  component) at the database level: at most one row may carry
-  current = 1. Exactly-one is guaranteed by this CAS: the seed
-  generation is activated with current = 1, and every promotion clears
-  the parent and sets the child inside ONE transaction, so a second
-  current = 1 row can never be created.
+  Fleet S1 (DAG S1) - CURRENT as singleton reference: Database Invariant 6
+  (CURRENT is exactly one row) transitions from predicate to definition.
+  Before S1: enforced by the partial unique index generations_current_unique
+  (001-init.sql, at most one row may carry current = 1) plus CAS protocol.
+  After S1: kernel_state table (id INTEGER PRIMARY KEY CHECK(id=1) WITHOUT ROWID,
+  current_generation TEXT NOT NULL REFERENCES generations(id), updated_at TEXT NOT NULL)
+  is the singleton definition - at most one row can exist by CHECK + PK, and
+  deletion is forbidden by trigger. The partial index and generations.current
+  column are retained as a derived sync for backward compat (transitional);
+  triggers kernel_state_sync_current_after_insert/update keep generations.current
+  in sync (kernel_state is authority, generations.current is derived until S1b
+  removes the predicate). Exactly-one after seed is definition, not protocol.
 
-  THE CAS (normative, component):
+  THE CAS (normative, component - legacy predicate):
 
       UPDATE generations SET current = 0 WHERE current = 1 AND id = ?
 
-  — the affected-rows check decides the race: 1 row means this caller
+  - the affected-rows check decides the race: 1 row means this caller
   cleared the pointer it expected to hold and may now set the child
   (current = 1); 0 rows means the pointer already moved underneath it
   (:stale). The pointer is only ever written inside a BEGIN IMMEDIATE
   transaction (see promote.clj), so a concurrent promotion serializes
-  on SQLite's write lock: the loser's transaction starts only after
-  the winner committed, reads the moved pointer, and reports :stale
-  instead of overwriting it.
+  on SQLite write lock. Fleet S1 prefers kernel_state CAS
+  (UPDATE kernel_state SET current_generation = ? WHERE id=1 AND
+  current_generation = expected) via CurrentStore; this namespace retains
+  the predicate CAS as fallback for empty singleton (empty DB, transitional).
 
   The public functions are CONNECTION-based (they run on the caller's
   open transaction connection, like evoclj.store.event's private raw
@@ -41,7 +47,7 @@
 
   Fleet R (definition > validation): this namespace is the INTERNAL
   impl for the CURRENT pointer. Only evoclj.store.current-store and
-  evoclj.promotion.promote may call cas-current! — all other callers
+  evoclj.promotion.promote may call cas-current! - all other callers
   must go via the narrow CurrentStore handle
   (evoclj.store.current-store/make-current-store). The handle never
   exposes :sqlite; db-of is a migration shim only. Business code that
