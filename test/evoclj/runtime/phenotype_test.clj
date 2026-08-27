@@ -129,6 +129,20 @@
        nil
        (catch clojure.lang.ExceptionInfo e e)))
 
+(def ^:private removed-tombstone-key
+  "The M19 removal-tombstone key the provider registry stores in its
+  flat atom (::removed, resolved to :evoclj.provider.registry/removed)
+  to track tools that were registered and later unregistered. It is an
+  internal registry bookkeeping key — never a registered provider — so
+  helpers that enumerate the registered tool-ids exclude it."
+  :evoclj.provider.registry/removed)
+
+(defn- registered-tool-ids
+  "The set of tool-id keys registered in `registry`, excluding the
+  registry's internal removal-tombstone key."
+  [registry]
+  (set (remove #{removed-tombstone-key} (keys @registry))))
+
 ;; ============================================================================
 ;; Step 1 — two Phenotypes from one Genome: isolated SCI, shared compiled data
 ;; ============================================================================
@@ -204,7 +218,7 @@
     (testing "halt! never closes or replaces host-owned resources"
       (is (identical? registry (get-in p [:providers :registry])))
       (is (identical? usage (get-in p [:capabilities :usage])))
-      (is (= #{:fixture/echo} (set (keys @registry))))
+      (is (= #{:fixture/echo} (registered-tool-ids registry)))
       (is (= {} @usage))
       (testing "the phenotype's owned sci-runtime is still intact for inspection"
         (is (= #{:program/route}
@@ -234,7 +248,7 @@
       (is (identical? usage (get-in p [:capabilities :usage])))
       (is (= [] (get-in p [:capabilities :leases]))))
     (testing "construction registers nothing and consumes no calls"
-      (is (= #{:fixture/echo} (set (keys @registry))))
+      (is (= #{:fixture/echo} (registered-tool-ids registry)))
       (is (= {} @usage)))
     (testing "the declared stores pass through untouched"
       (is (= (:stores deps) (:stores p))))
