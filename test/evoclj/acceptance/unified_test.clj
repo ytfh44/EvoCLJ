@@ -42,7 +42,9 @@
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite]
             [evoclj.store.session :as session]
-            [evoclj.store.event :as event])
+            [evoclj.store.event :as event]
+            [rewrite-clj.node :as rewrite-node]
+            [rewrite-clj.parser :as rewrite-parser])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
@@ -65,6 +67,37 @@
 (defn- src-not-contains?
   [rel substr]
   (not (src-contains? rel substr)))
+
+(defn- ns-required-namespaces
+  "Namespaces that the ns form of src-text actually requires (:require / :use /
+   :require-macros). Parses the ns form with rewrite-clj rather than scanning the
+   whole file, so docstring/comment prose cannot create a false dependency edge
+   (e.g. a docstring quoting \"evoclj.environment.bundle\")."
+  [src-text]
+  (when (and src-text (str/includes? src-text "(ns"))
+    (try
+      (let [forms (rewrite-node/children (rewrite-parser/parse-string-all src-text))]
+        (when (seq forms)
+          (let [ns-sexpr (rewrite-node/sexpr (first forms))]
+            (->> (rest ns-sexpr)
+                 (filter #(and (seq? %)
+                               (contains? #{:require :require-macros :use} (first %))))
+                 (mapcat rest)
+                 (keep (fn [libspec]
+                         (cond
+                           (symbol? libspec) (str libspec)
+                           (or (vector? libspec) (seq? libspec) (list? libspec))
+                           (some-> (first libspec) str)
+                           :else nil)))
+                 (set)))))
+      (catch Exception _ #{}))))
+
+(defn- ns-requires?
+  "True if the ns form of src-text requires the namespace named by ns-symbol.
+   Used for dependency-direction checks on real :require deps (parsed from the ns
+   form), not a whole-file string scan, so prose cannot false-positive."
+  [src-text ns-symbol]
+  (boolean (some #{ns-symbol} (ns-required-namespaces src-text))))
 
 (def ^:private clj-ignore #{"node_modules" ".git" ".cpcache" ".tmp" ".codegraph" ".pi"})
 
@@ -406,30 +439,34 @@
           assembler-clj (slurp-src "evoclj/runtime/assembler.clj")
           broker-clj (slurp-src "evoclj/capability/broker.clj")
           dispatch-clj (slurp-src "evoclj/intent/dispatch.clj")]
+      ;; Dependency edges are read from the ns :require/:use block (parsed with
+      ;; rewrite-clj), NOT a whole-file string scan, so docstring/comment prose
+      ;; (e.g. a docstring quoting "evoclj.environment.bundle") cannot create a
+      ;; false dependency edge.
       ;; LiveSource is leaf: does not require revision/bundle/assembler/mount
-      (is (not (str/includes? source-clj "evoclj.environment.revision")) "LiveSource must not depend on Revision")
-      (is (not (str/includes? source-clj "evoclj.environment.bundle")) "LiveSource must not depend on Bundle")
-      (is (not (str/includes? source-clj "evoclj.runtime.assembler")) "LiveSource must not depend on Assembler")
-      (is (not (str/includes? source-clj "evoclj.store.binding")) "LiveSource must not depend on Bindings")
+      (is (not (ns-requires? source-clj "evoclj.environment.revision")) "LiveSource must not depend on Revision")
+      (is (not (ns-requires? source-clj "evoclj.environment.bundle")) "LiveSource must not depend on Bundle")
+      (is (not (ns-requires? source-clj "evoclj.runtime.assembler")) "LiveSource must not depend on Assembler")
+      (is (not (ns-requires? source-clj "evoclj.store.binding")) "LiveSource must not depend on Bindings")
       ;; Revision does not depend on Bundle/Assembler
-      (is (not (str/includes? revision-clj "evoclj.environment.bundle")) "Revision must not depend on Bundle")
-      (is (not (str/includes? revision-clj "evoclj.runtime.assembler")) "Revision must not depend on Assembler")
+      (is (not (ns-requires? revision-clj "evoclj.environment.bundle")) "Revision must not depend on Bundle")
+      (is (not (ns-requires? revision-clj "evoclj.runtime.assembler")) "Revision must not depend on Assembler")
       ;; Bundle depends on Revision & Surface, not on Bindings/Assembler
-      (is (str/includes? bundle-clj "evoclj.environment.revision") "Bundle must depend on Revision")
-      (is (str/includes? bundle-clj "evoclj.environment.surface") "Bundle must depend on Surface")
-      (is (not (str/includes? bundle-clj "evoclj.runtime.assembler")) "Bundle must not depend on Assembler")
+      (is (ns-requires? bundle-clj "evoclj.environment.revision") "Bundle must depend on Revision")
+      (is (ns-requires? bundle-clj "evoclj.environment.surface") "Bundle must depend on Surface")
+      (is (not (ns-requires? bundle-clj "evoclj.runtime.assembler")) "Bundle must not depend on Assembler")
       ;; Bindings depend on Bundle, not on Assembler
-      (is (str/includes? store-binding-clj "evoclj.environment.surface") "Bindings must depend on Bundle/Surface")
+      (is (ns-requires? store-binding-clj "evoclj.environment.surface") "Bindings must depend on Bundle/Surface")
       ;; Assembler depends on Bindings & Materializer, is trusted to produce Model request
-      (is (str/includes? assembler-clj "evoclj.context.materializer") "Assembler must depend on Materializer (Context)")
-      (is (str/includes? assembler-clj "evoclj.environment.revision") "Assembler must see Revision for provenance")
+      (is (ns-requires? assembler-clj "evoclj.context.materializer") "Assembler must depend on Materializer (Context)")
+      (is (ns-requires? assembler-clj "evoclj.environment.revision") "Assembler must see Revision for provenance")
       ;; Broker is separate, policy-only, does not depend on Surface vs Binding confusion
-      (is (str/includes? broker-clj "evoclj.capability.policy") "Broker must depend on policy")
-      (is (not (str/includes? broker-clj "evoclj.environment.surface")) "Broker must not depend on Surface (Surface vs Binding vs Capability distinction)")
-      (is (not (str/includes? broker-clj "evoclj.context.materializer")) "Broker must not depend on Materializer")
+      (is (ns-requires? broker-clj "evoclj.capability.policy") "Broker must depend on policy")
+      (is (not (ns-requires? broker-clj "evoclj.environment.surface")) "Broker must not depend on Surface (Surface vs Binding vs Capability distinction)")
+      (is (not (ns-requires? broker-clj "evoclj.context.materializer")) "Broker must not depend on Materializer")
       ;; Dispatch is the only place that composes Broker + Binding/Call
-      (is (str/includes? dispatch-clj "evoclj.binding.call") "Dispatch must compose via generic CallBinding")
-      (is (str/includes? dispatch-clj "evoclj.capability.broker") "Dispatch must delegate to Broker")
+      (is (ns-requires? dispatch-clj "evoclj.binding.call") "Dispatch must compose via generic CallBinding")
+      (is (ns-requires? dispatch-clj "evoclj.capability.broker") "Dispatch must delegate to Broker")
       ;; Surface vs Binding vs Capability distinction: surface defines capabilities, binding pins revision, broker decides allow/deny
       (let [surface-clj (slurp-src "evoclj/environment/surface.clj")
             ctx-binding-clj (slurp-src "evoclj/context/binding.clj")
