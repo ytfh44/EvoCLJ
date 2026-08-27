@@ -40,6 +40,22 @@
 (defn- fresh-registry []
   (reg/create-registry))
 
+(defn- publish!
+  "Drive the full production publication path for a skill source (E2/INV-06).
+
+  E2 contract: SkillSource/snapshot! is PURE — it captures and parses but
+  performs NO registry mutation and NO publication. All publication belongs to
+  the registry's refresh! single transaction (Source -> Revision -> Projector
+  -> Bundle). So a test must register the source into its registry and run
+  refresh!, rather than relying on a stale snapshot! side effect (the old
+  refresh-skills! publish path is gone). Registers the source once (idempotent),
+  then refreshes."
+  [registry source]
+  (let [sid (or (:source/id source) (:source-id source))]
+    (when-not (or (nil? sid) (contains? (:sources @registry) sid))
+      (reg/register-source! registry source))
+    (reg/refresh! registry)))
+
 (defn- setup-skill!
   "Create a skill 'debugging' under skills-root and return {:registry :cas :skills-root :cas-root :skill-name :tree-id}"
   []
@@ -50,7 +66,7 @@
         _ (write-skill! skills-root "debugging"
                         "---\nname: debugging\ndescription: Debugging helper\n---\n# Body\nHello skill\n")
         source (adapter/make-skill-source {:source/id :skills/test :roots [skills-root] :cas cas-handle :registry registry})
-        _ (adapter/refresh-skills! source)
+        _ (publish! registry source)
         bundle (adapter/get-skill-bundle registry "debugging")]
     {:registry registry
      :cas cas-handle
