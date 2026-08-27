@@ -12,6 +12,7 @@
   Schema unchanged; do not add kernel_state here (fleet S1 will)."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
+            [evoclj.evolution.candidate-states :as cstates]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
@@ -61,16 +62,9 @@
     (with-open [stmt (.createStatement conn)]
       (.execute stmt (str "PRAGMA busy_timeout = " ms)))))
 
-(def ^:private db-state->state
-  {"materialized" :materialized
-   "evaluating" :evaluation-pending
-   "eligible" :evaluated
-   "promoted" :promoted
-   "rejected" :rejected
-   "stale" :stale})
-
-(def ^:private state->db-state
-  (into {} (map (fn [[db s]] [s db]) db-state->state)))
+;; Single-source DB mapping — delegates to candidate-states (definition > validation)
+(def ^:private db-state->state cstates/db-state->kw)
+(def ^:private state->db-state cstates/kw->db-state)
 
 (defn- canonical
   [x]
@@ -201,6 +195,13 @@
     (throw (err/error :candidate/store-invalid
                       "transition! requires a CandidateStore"
                       {:reason :not-a-candidate-store})))
+  ;; Fleet S2 — reject non-persisted targets before the DB CHECK (NULL would fail).
+  (when-not (state->db-state new-state)
+    (throw (err/error :candidate/invalid-transition
+                      "target state has no DB mapping (not persistable in 5.1)"
+                      {:candidate/id (types/session-id candidate-id)
+                       :expected-state expected-state
+                       :new-state new-state})))
   (let [cid (types/session-id candidate-id)
         key (str cid)
         db (.-db ^CandidateStore store)]
