@@ -332,9 +332,15 @@
             (when (some? sc)
               (when-not (json-schema/validate (:mcp/output-schema desc) sc)
                 (throw (err/error :provider/output-invalid "structuredContent failed mcp/output-schema" {:value (err/sanitize sc)}))))
-            (let [env (:value edn-result)]
-              (when-not (m/validate (:provider/output-schema desc) env)
-                (throw (err/error :provider/output-invalid "envelope failed provider/output-schema" {:value (err/sanitize env)}))))
+            ;; Protocol contract (INV-05 / WO-M9): :output-schema describes the
+            ;; FULL result value that execute-request! returns — for MCP that is
+            ;; the {:value <envelope> :audit <map>} map, NOT the inner envelope.
+            ;; The dispatcher's validate-output! also validates this same value.
+            ;; Validating only (:value edn-result) here checked the inner envelope
+            ;; against a schema meant for the whole result, rejecting every valid
+            ;; call that declared a :value-shaped :output-schema (BT6a).
+            (when-not (m/validate (:provider/output-schema desc) edn-result)
+              (throw (err/error :provider/output-invalid "output failed provider/output-schema" {:value (err/sanitize edn-result)})))
             ;; M10: write back the ACTUAL measured latency (carried on the
             ;; call-tool result as :mcp/latency-ms) onto the pooled entry's
             ;; runtime stats. This replaces the previous hardcoded

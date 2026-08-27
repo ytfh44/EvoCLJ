@@ -406,11 +406,13 @@
             ;; provider output-schema validation. The descriptor carries a
             ;; REAL output schema (fail-closed), so validate it directly via
             ;; the single Malli implementation — no reflection / ns-resolve.
-            (let [env (:value edn-result)
-                  out (:output-schema descriptor)]
+            ;; Protocol contract (INV-05): :output-schema describes the FULL
+            ;; result value execute-request! returns ({:value <envelope> :audit
+            ;; <map>}), not the inner envelope (mirror of mcp-bridge BT6a fix).
+            (let [out (:output-schema descriptor)]
               (try
-                (when-not (m/validate out env)
-                  (throw (err/error :provider/output-invalid "envelope failed provider/output-schema" {:value (err/sanitize env)})))
+                (when-not (m/validate out edn-result)
+                  (throw (err/error :provider/output-invalid "output failed provider/output-schema" {:value (err/sanitize edn-result)})))
                 (catch Exception e
                   (when (= :provider/output-invalid (:error/type (ex-data e))) (throw e)))))
             (when (and manager conn-key)
