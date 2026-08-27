@@ -87,8 +87,8 @@ passing and remain green.
 
 ```
 [WO-T5 path-5] real docs/: 28 files, 74 unique refs, exit 1
-  INVALID docs\codebase\REPAIR-PLAN.md : 125 2acea8e5
-  INVALID docs\codebase\REPAIR-PLAN.md : 125 9d622fa5
+  INVALID docs\codebase\REPAIR-PLAN.md : 125 T1-impl-1
+  INVALID docs\codebase\REPAIR-PLAN.md : 125 T1-impl-2
 ```
 
 These are the two ledger **agent-instance-ids** (not commit refs) recorded in D1 as `D1-followup` — i.e. the remaining invalid refs are exactly the two REPAIR-PLAN doc-hash agent-ids, matching the D1 note ("仅剩 2 个 REPAIR-PLAN:125 agent-instance-id(裁定非 commit 引用·D1-followup)"). INV-08: the current-closure-report share is closed; these 2 are adjudicated non-commit refs, tracked as out-of-scope.
@@ -119,7 +119,7 @@ BT11 ("E2+B1 遗漏回归合并跟进") confirmed unchanged — every count matc
 | unified | `evoclj.acceptance.unified-test` | 1F | 1F / 0E | `dependency-direction-stable` :411 — `source.clj` docstring literal trips `str/includes?` (LiveSource "depends" on Bundle by string match) |
 | phenotype | `evoclj.runtime.phenotype-test` | 2F | 2F / 0E | M19 tombstone `:evoclj.provider.registry/removed` pollutes the registry-key set (:207/:237) |
 | cli.skill | `evoclj.cli.skill-test` | 13F + 2E | 13F / 2E | CLI skill commands (vendor/list/inspect) fail against the E2/S10 publish+removal path; `NoSuchFileException` + nil catalog entries |
-| doc-hash agent-ids | `REPAIR-PLAN.md:125` | 2 | 2 | `2acea8e5` + `9d622fa5` — non-commit agent-instance-ids, D1-followup |
+| doc-hash agent-ids | `REPAIR-PLAN.md:125` | 2 | 2 | `T1-impl-1` + `T1-impl-2` — non-commit agent-instance-ids, D1-followup |
 
 All five BT11 namespaces plus the 2 doc-hash agent-ids **remain exactly as documented** as out-of-scope.
 
@@ -147,7 +147,7 @@ All five BT11 namespaces plus the 2 doc-hash agent-ids **remain exactly as docum
 **What REMAINS as tracked out-of-scope field.**
 - BT6a–d: mcp_dispatch 12F, tool_loop 2F+1E, prompt_injection 4F, cli_test 2F (ledger lists these as [★候选] blockers to be adjudicated separately).
 - BT11: adapter 6F+9E, failpoint 16F, unified 1F, phenotype 2F, cli.skill 13F+2E.
-- D1-followup: the 2 REPAIR-PLAN.md:125 agent-instance-ids (2acea8e5 / 9d622fa5).
+- D1-followup: the 2 REPAIR-PLAN.md:125 agent-instance-ids (T1-impl-1 / T1-impl-2).
 
 **The previously-blocking e2e — e2e#2 (M1) — is now GREEN.**
 - **e2e#2 (M1) `evoclj.mcp.manager-contract-test` → 0 failures, 0 errors** (8 tests / 47 assertions). The
