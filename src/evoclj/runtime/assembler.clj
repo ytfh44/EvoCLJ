@@ -72,8 +72,13 @@
          {messages :messages provenance :prompt/provenance} (trust/prioritized-prompt
                                                              (merge (trust/split-base-messages base-messages)
                                                                     {:extra seg-messages}))
-         ;; tool-map: wire name -> binding (for scheduler)
-         tool-map (into {} (map (fn [t] [(:tool/id t) t]) (or requested-tools [])))
+         ;; tool-map: wire name -> binding (for scheduler). The scheduler
+         ;; resolves model-requested calls by the WIRE function name
+         ;; (:tool/name tc), and the wire name is the declaration's :name
+         ;; (see evoclj.provider.openai/wire-tools and the scheduler's
+         ;; tool-map-of) — never :tool/id (the EvoCLJ tool identity), which
+         ;; is a separate key (:tool) that must not double as the wire name.
+         tool-map (into {} (map (fn [t] [(:name t) t]) (or requested-tools [])))
          manifest {:context/manifest-version 1
                    :bindings (mapv (fn [b] {:binding/id (:binding/id b)
                                             :logical/id (:logical/id b)
