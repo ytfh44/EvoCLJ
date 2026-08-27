@@ -124,7 +124,7 @@
                               (jdbc/execute! conn ["UPDATE kernel_state SET current_generation = ? WHERE id=1" "no-such-generation"])))))))
 
 (deftest singleton-seeded-from-existing-current
-  (testing "real v6 -> 7 migration seeds kernel_state from existing current=1 row"
+  (testing "real v6 -> 8 migration seeds kernel_state from existing current=1 row"
     (let [p (temp-db-path)
           db (sqlite/spec p)
           v6-files ["001-init.sql" "002-memory.sql" "003-routing.sql" "004-enrichment.sql" "005-deploy.sql" "006-session-bindings.sql"]
@@ -146,9 +146,9 @@
       ;; insert a generation with current=1 at v6
       (insert-generation! db g1 {:current true})
       (is (= 1 (-> (sqlite/query db ["SELECT current FROM generations WHERE id=?" g1]) first :current)))
-      ;; migrate to 007 should create kernel_state and seed from existing current
+      ;; migrate to 008 should create kernel_state and seed from existing current
       (let [result (migrate/migrate! db)]
-        (is (= 7 (:version result))))
+        (is (= 8 (:version result))))
       (is (= g1 (-> (sqlite/query db ["SELECT current_generation FROM kernel_state WHERE id=1"]) first :current_generation)))
       (is (= 1 (-> (sqlite/query db ["SELECT current FROM generations WHERE id=?" g1]) first :current)))
       (is (= 1 (count (sqlite/query db ["SELECT id FROM kernel_state"])))))))
