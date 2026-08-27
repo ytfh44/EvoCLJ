@@ -423,23 +423,36 @@
 (deftest step-4-materialization-enforces-record-mutation-agreement
   (let [store (fresh-store)
         c (candidate/create-candidate (candidate-request))]
-    (testing "a candidate whose evidence disagrees with the mutation is rejected"
-      (is (= :candidate/evidence-mismatch
-             (thrown-error-type
-              #(candidate/materialize-candidate! (:handle store) c (mutation* {:evidence/id (str "sha256:" (apply str (repeat 64 "d")))}))))))
-    (testing "a candidate whose parent Genome disagrees is rejected"
-      (is (= :candidate/parent-mismatch
-             (thrown-error-type
-              #(candidate/materialize-candidate! (:handle store) c (assoc (mutation*)
-                               :parent/genome-id (str "sha256:" (apply str (repeat 64 "b")))))))))
+    (testing "S3: evidence mismatch is normalized to mutation (not rejected)"
+      (let [other-evidence (str "sha256:" (apply str (repeat 64 "d")))
+            m (mutation* {:evidence/id other-evidence})
+            ;; Fresh candidate with original evidence — materialize normalizes to mutation
+            persisted (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request)) m)]
+        (is (= other-evidence (:evidence/id persisted)) "derived from mutation")
+        (is (= other-evidence (:evidence/id (candidate/find-candidate (:handle store) (:candidate/id persisted)))))))
+    (testing "S3: parent Genome mismatch is normalized to mutation"
+      (let [store2 (fresh-store)
+            other-parent (str "sha256:" (apply str (repeat 64 "b")))
+            m (assoc (mutation*) :parent/genome-id parent-genome-id)
+            ;; Use same generation so FK stays valid; candidate claims other parent but store derives
+            c2 (candidate/create-candidate (assoc (candidate-request) :parent/genome-id other-parent))
+            persisted (candidate/materialize-candidate! (:handle store2) c2 m)]
+        (is (= parent-genome-id (:parent/genome-id persisted)) "derived from mutation")))
     (testing "a candidate whose mutation id disagrees is rejected"
       (is (= :candidate/mutation-mismatch
              (thrown-error-type
               #(candidate/materialize-candidate! (:handle store) c (mutation* {:mutation/id (uuid 77)}))))))
-    (testing "a candidate whose risk disagrees is rejected"
-      (is (= :candidate/risk-mismatch
-             (thrown-error-type
-              #(candidate/materialize-candidate! (:handle store) c (mutation* {:risk :parameter}))))))
+    (testing "S3: risk mismatch is normalized to mutation"
+      (let [store2 (fresh-store)
+            m (mutation* {:risk :parameter})
+            persisted (candidate/materialize-candidate! (:handle store2) (candidate/create-candidate (candidate-request {:risk :parameter})) m)]
+        (is (= :parameter (:risk persisted)) "derived from mutation")
+        ;; Also test that candidate with different risk is normalized
+        (let [store3 (fresh-store)
+              m3 (mutation* {:risk :behavioral})
+              c3 (candidate/create-candidate (candidate-request {:risk :parameter}))
+              persisted3 (candidate/materialize-candidate! (:handle store3) c3 m3)]
+          (is (= :behavioral (:risk persisted3)) "mismatched candidate risk normalized to mutation"))))
     (testing "a non-proposed candidate cannot be materialized"
       (is (= :candidate/not-proposed
              (thrown-error-type

@@ -5,16 +5,29 @@
   dependency on any promotion/current namespace (Global Constraint 15
   keeps promotion a separate subsystem; component owns CURRENT).
 
+  S3 NORMALIZATION (Fleet S3, DAG S3 — definition > validation):
+    Candidate previously duplicated Mutation fields (parent_genome_id,
+    evidence_id, risk). The mutation is now the single definition;
+    candidates store only mutation_id + genome_id + parent_generation_id
+    + state. The duplicate fields are DERIVED via JOIN mutations at
+    read time (candidates_normalized view / store JOIN). Physical
+    candidates columns are kept for backward compat but the store
+    derives them from the mutation on write and DB triggers enforce
+    equality, so a risk/evidence mismatch is unrepresentable via the
+    normalized path. CandidateSchema keeps the derived keys for
+    backward-compat reads but they are deprecated as independent
+    storage — use the mutation as source.
+
   THE CANDIDATE RECORD (docs 'Detailed Public Data Contracts'):
 
       {:candidate/id uuid?
-       :parent/generation-id stable-id?
-       :parent/genome-id GenomeId
-       :candidate/genome-id GenomeId
-       :mutation/id uuid?
-       :evidence/id ArtifactId
-       :risk keyword?
-       :state keyword?
+       :parent/generation-id stable-id?          ; stored
+       :parent/genome-id GenomeId                ; DERIVED via JOIN mutations (deprecated as stored)
+       :candidate/genome-id GenomeId             ; stored
+       :mutation/id uuid?                        ; stored (FK)
+       :evidence/id ArtifactId                   ; DERIVED via JOIN mutations (deprecated)
+       :risk keyword?                            ; DERIVED via JOIN mutations (deprecated)
+       :state keyword?                           ; stored
        :created-at inst?}
 
   STATE MACHINE (normative, component):
@@ -69,11 +82,14 @@
   mutations). As the FK's lineage precondition, the mutation row is
   ensured (INSERT OR IGNORE by :mutation/id) in the same transaction
   — the mutations table is append-only proposals (Global Constraint
-  4-6) and its rows are immutable once written. The candidate record
-  must AGREE with the mutation it materializes (same :mutation/id,
-  :parent/genome-id, :evidence/id, :risk); a record that disagrees
-  with its own lineage is rejected. The record stores only
-  references (genome/evidence/mutation ids); the candidate Genome
+  4-6) and its rows are immutable once written. S3: the candidate
+  record's duplicate fields (:parent/genome-id, :evidence/id, :risk)
+  are DERIVED from the mutation (definition > validation) — the store
+  overwrites any candidate-supplied values with the mutation's values
+  and the DB triggers enforce equality, so a mismatch is unrepresentable
+  via the normalized path. Only :mutation/id is definitionally
+  agreement-checked; the other fields are normalized. The record stores
+  only references (genome/evidence/mutation ids); the candidate Genome
   BODY (component patch output) is put into the CAS by the
   orchestrator, not by this namespace.
 
@@ -121,7 +137,14 @@
 
 (def CandidateSchema
   "The public Candidate record contract map returned by
-  create-candidate / materialize-candidate! / find-candidate."
+  create-candidate / materialize-candidate! / find-candidate.
+
+  S3: :parent/genome-id, :evidence/id, :risk are DERIVED via JOIN
+  mutations (definition > validation) and are deprecated as independent
+  storage. They remain in the map for backward-compat reads but the
+  store derives them from the mutation on write; a mismatch is
+  unrepresentable via the normalized path (DB triggers + store
+  derivation). New code should treat the mutation as the source."
   [:map {:closed true}
    [:candidate/id uuid?]
    [:parent/generation-id string?]
@@ -136,7 +159,12 @@
 (def CreateCandidateRequest
   "The create-candidate input contract (closed): the identity and
   provenance a :proposed candidate is created from. :created-at is
-  optional and defaults to now."
+  optional and defaults to now.
+
+  S3: :parent/genome-id, :evidence/id, :risk are deprecated duplicates
+  — they are derived from the mutation at materialization. The request
+  still carries them for backward compat but materialize-candidate!
+  normalizes them from the mutation (definition > validation)."
   [:map {:closed true}
    [:parent/generation-id string?]
    [:parent/genome-id [:fn types/genome-id?]]
@@ -200,11 +228,13 @@
     mutation))
 
 (defn- validate-agreement!
-  "The candidate record must agree with the mutation it materializes:
-  same mutation id, same parent Genome, same evidence pack, same risk
-  class. A record that disagrees with its own lineage would corrupt
-  the lineage integrity guarantees (Database Invariant 8, Global
-  Constraint 17)."
+  "S3: definition > validation — only :mutation/id is definitionally
+  agreement-checked. The candidate's duplicate fields (:parent/genome-id,
+  :evidence/id, :risk) are DERIVED from the mutation via JOIN at read
+  time and normalized at write time (store derives, DB triggers enforce).
+  A mismatch is unrepresentable via the normalized path; this function
+  is retained only for the FK identity check and is deprecated for the
+  other fields (see normalize-candidate)."
   [candidate mutation]
   (when (not= (:mutation/id candidate) (:mutation/id mutation))
     (throw (err/error :candidate/mutation-mismatch
@@ -212,25 +242,18 @@
                       {:candidate/id (:candidate/id candidate)
                        :candidate/mutation-id (:candidate/id candidate)
                        :mutation-id (:mutation/id mutation)})))
-  (when (not= (:parent/genome-id candidate) (:parent/genome-id mutation))
-    (throw (err/error :candidate/parent-mismatch
-                      "candidate :parent/genome-id disagrees with the mutation's parent"
-                      {:candidate/id (:candidate/id candidate)
-                       :candidate/parent-genome-id (:parent/genome-id candidate)
-                       :mutation/parent-genome-id (:parent/genome-id mutation)})))
-  (when (not= (:evidence/id candidate) (:evidence/id mutation))
-    (throw (err/error :candidate/evidence-mismatch
-                      "candidate :evidence/id disagrees with the mutation's evidence pack"
-                      {:candidate/id (:candidate/id candidate)
-                       :candidate/evidence-id (:evidence/id candidate)
-                       :mutation/evidence-id (:evidence/id mutation)})))
-  (when (not= (:risk candidate) (:risk mutation))
-    (throw (err/error :candidate/risk-mismatch
-                      "candidate :risk disagrees with the mutation's risk class"
-                      {:candidate/id (:candidate/id candidate)
-                       :candidate/risk (:risk candidate)
-                       :mutation/risk (:risk mutation)})))
   candidate)
+
+(defn- normalize-candidate
+  "S3 normalization: derive duplicate fields from mutation (definition >
+  validation). Returns candidate with :parent/genome-id, :evidence/id,
+  :risk overwritten from mutation, making a risk/evidence mismatch
+  unrepresentable via the normalized path."
+  [candidate mutation]
+  (assoc candidate
+         :parent/genome-id (:parent/genome-id mutation)
+         :evidence/id (:evidence/id mutation)
+         :risk (:risk mutation)))
 
 ;; --- Step 1: creation --------------------------------------------------------
 
@@ -292,20 +315,26 @@
   (INSERT OR IGNORE — its write takes SQLite's write lock, so a
   concurrent materialization of the same parent+mutation serializes
   and observes the first committed row), then the dedup lookup, then
-  the candidate row insert. The candidate record must be :proposed
-  and must AGREE with the mutation (same :mutation/id,
-  :parent/genome-id, :evidence/id, :risk). The row stores only
-  references; the candidate Genome body (component patch output) is
-  put into the CAS by the orchestrator, not here.
+  the candidate row insert. S3: the candidate record is NORMALIZED —
+  :parent/genome-id, :evidence/id, :risk are derived from the mutation
+  (definition > validation) before the store write, so a mismatch is
+  unrepresentable via the normalized path; only :mutation/id agreement
+  is checked. The row stores only references; the candidate Genome body
+  (component patch output) is put into the CAS by the orchestrator, not
+  here.
 
   Fleet R: delegates to evoclj.store.candidate-store/materialize! via
   the narrow CandidateStore handle. Requires a CandidateStore; legacy
   {:sqlite :cas} maps are rejected with :candidate/store-invalid.
 
+  S3: duplicate fields are normalized, so :candidate/parent-mismatch,
+  :candidate/evidence-mismatch, :candidate/risk-mismatch are no longer
+  thrown via the normalized path — they are deprecated. Only
+  :candidate/mutation-mismatch remains for the FK identity.
+
   Typed errors: :candidate/store-invalid, :candidate/invalid,
   :candidate/not-proposed, :candidate/mutation-invalid,
-  :candidate/mutation-mismatch, :candidate/parent-mismatch,
-  :candidate/evidence-mismatch, :candidate/risk-mismatch."
+  :candidate/mutation-mismatch."
   [store candidate mutation]
   (validate-store! store)
   (validate-candidate! candidate)
@@ -316,7 +345,8 @@
                        :state (:state candidate)})))
   (validate-mutation-shape! mutation)
   (validate-agreement! candidate mutation)
-  (let [result (candidate-store/materialize! store candidate mutation)]
+  (let [normalized (normalize-candidate candidate mutation)
+        result (candidate-store/materialize! store normalized mutation)]
     (validate-candidate! result)
     result))
 
