@@ -72,7 +72,8 @@
   Prefers the singleton: UPDATE kernel_state SET current_generation = ?
   WHERE id=1 AND current_generation = ?. On success the kernel_state
   trigger syncs generations.current; on miss (empty or stale) falls
-  back to the legacy predicate CAS.
+  back to the legacy predicate CAS. Exceptions (FK violation, CHECK,
+  schema) propagate — zero rows is the only fallback trigger.
 
   Must be called INSIDE the promotion transaction (BEGIN IMMEDIATE)
   after the new generation row exists. See promotion.current docstring
@@ -81,11 +82,8 @@
   Fleet R: only evoclj.store.current-store and evoclj.promotion.promote
   may call this."
   [conn expected-generation-id new-generation-id]
-  (let [updated (try
-                  (let [cnt (first (jdbc/execute! conn ["UPDATE kernel_state SET current_generation = ?, updated_at = datetime('now') WHERE id = 1 AND current_generation = ?" new-generation-id expected-generation-id]))]
-                    (if (vector? cnt) (first cnt) cnt))
-                  (catch Exception _
-                    0))]
+  (let [cnt (first (jdbc/execute! conn ["UPDATE kernel_state SET current_generation = ?, updated_at = datetime('now') WHERE id = 1 AND current_generation = ?" new-generation-id expected-generation-id]))
+        updated (if (vector? cnt) (first cnt) cnt)]
     (if (= 1 updated)
       :ok
       (current/cas-current! conn expected-generation-id new-generation-id))))

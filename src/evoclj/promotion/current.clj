@@ -102,37 +102,51 @@
 
 (defn cas-current!
   "THE CURRENT compare-and-set (component). Called INSIDE the promotion
-  transaction (BEGIN IMMEDIATE), after the new generation row exists:
+  transaction (BEGIN IMMEDIATE), after the new generation row exists.
 
+  Fleet S1 (singleton): prefers kernel_state singleton. First attempts:
+
+      UPDATE kernel_state SET current_generation = ?, updated_at = datetime('now')
+       WHERE id = 1 AND current_generation = <expected>
+
+  On 1 row the trigger syncs generations.current and we return :ok.
+  On 0 rows (empty singleton before first seed, or stale expected) we
+  fall back to the legacy predicate CAS (generations.current). Exceptions
+  (FK violation, CHECK, schema) propagate — they are not treated as
+  zero rows.
+
+  Legacy predicate CAS (fallback):
       1. UPDATE generations SET current = 0
          WHERE current = 1 AND id = <expected-generation-id>
       2. UPDATE generations SET current = 1 WHERE id = <new-generation-id>
 
   Step 1 is the race decision: 1 affected row means this caller held
   the pointer it expected and cleared it; 0 rows means the pointer
-  moved underneath it and the caller must report :stale (the
-  promotions table records nothing; CURRENT is untouched). When step 1
+  moved underneath it and the caller must report :stale. When step 1
   succeeds, step 2 activates the new generation and MUST affect
-  exactly one row (the caller inserted it in the same transaction).
+  exactly one row.
 
   Returns :ok, or :stale when the expected generation is no longer
-  current. Throws :promotion/cas-invalid when step 2 does not affect
-  exactly one row — a caller bug, since under BEGIN IMMEDIATE the
-  pointer cannot move between step 1 and step 2."
+  current."
   [conn expected-generation-id new-generation-id]
-  (let [cleared (raw-update! conn
-                             "UPDATE generations SET current = 0
+  (let [updated (raw-update! conn
+                             "UPDATE kernel_state SET current_generation = ?, updated_at = datetime('now') WHERE id = 1 AND current_generation = ?"
+                             [new-generation-id expected-generation-id])]
+    (if (= 1 updated)
+      :ok
+      (let [cleared (raw-update! conn
+                                 "UPDATE generations SET current = 0
                               WHERE current = 1 AND id = ?"
-                             [expected-generation-id])]
-    (if (zero? cleared)
-      :stale
-      (let [activated (raw-update! conn
-                                   "UPDATE generations SET current = 1
+                                 [expected-generation-id])]
+        (if (zero? cleared)
+          :stale
+          (let [activated (raw-update! conn
+                                       "UPDATE generations SET current = 1
                                     WHERE id = ?"
-                                   [new-generation-id])]
-        (when-not (= 1 activated)
-          (throw (err/error :promotion/cas-invalid
-                            "CAS activated an unknown new generation"
-                            {:new-generation-id new-generation-id
-                             :activated activated})))
-        :ok))))
+                                       [new-generation-id])]
+            (when-not (= 1 activated)
+              (throw (err/error :promotion/cas-invalid
+                                "CAS activated an unknown new generation"
+                                {:new-generation-id new-generation-id
+                                 :activated activated})))
+            :ok))))))

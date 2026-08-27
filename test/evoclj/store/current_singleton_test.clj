@@ -7,7 +7,8 @@
   - deletion forbidden by trigger (definition-level exactly-one after seed)
   - sync: kernel_state current_generation -> generations.current via triggers
   - seed: migration seeds kernel_state from existing current=1 row"
-  (:require [clojure.java.jdbc :as jdbc]
+  (:require [clojure.java.io :as io]
+            [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.store.current-store :as cs]
             [evoclj.store.migrate :as migrate]
@@ -123,24 +124,34 @@
                               (jdbc/execute! conn ["UPDATE kernel_state SET current_generation = ? WHERE id=1" "no-such-generation"])))))))
 
 (deftest singleton-seeded-from-existing-current
-  (testing "migration seeds kernel_state when a generations.current=1 row exists at migration time"
+  (testing "real v6 -> 7 migration seeds kernel_state from existing current=1 row"
     (let [p (temp-db-path)
-          db (sqlite/spec p)]
-      ;; Build DB up to version 6, insert a current generation, then run full migrate to 7
-      ;; To simulate, we create a DB, migrate to current version (7) on empty, then insert
-      ;; generations and manually run the seed INSERT SELECT (the migration's seed logic).
-      ;; Instead verify the seed path by constructing a DB that has generations before 007.
-      ;; Workaround: create a temp DB, apply 001-006 manually via direct SQL? Simpler:
-      ;; verify that fresh DB with inserted generations and kernel_state delete+seed works.
-      (migrate/migrate! db)
+          db (sqlite/spec p)
+          v6-files ["001-init.sql" "002-memory.sql" "003-routing.sql" "004-enrichment.sql" "005-deploy.sql" "006-session-bindings.sql"]
+          split-statements @(ns-resolve 'evoclj.store.migrate 'split-statements)]
+      ;; Build a real v6 DB by applying 001-006 exactly as migrate does
+      (jdbc/with-db-transaction [conn (sqlite/spec db)]
+        (sqlite/enable-foreign-keys! conn)
+        (doseq [f v6-files]
+          (let [sql (slurp (io/resource (str "migrations/" f)))
+                stmts (split-statements sql)]
+            (doseq [stmt stmts]
+              (jdbc/execute! conn [stmt]))
+            (let [applied (-> (jdbc/query conn ["SELECT value FROM meta WHERE key = ?" "applied_migrations"]) first :value)
+                  updated (if (seq applied) (str applied " " f) f)]
+              (jdbc/execute! conn ["INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)" "applied_migrations" updated]))))
+        (jdbc/execute! conn ["INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)" "schema_version" "6"]))
+      ;; v6 has no kernel_state table
+      (is (= 0 (count (sqlite/query db ["SELECT name FROM sqlite_master WHERE type='table' AND name='kernel_state'"]))))
+      ;; insert a generation with current=1 at v6
       (insert-generation! db g1 {:current true})
-      ;; Remove kernel_state trigger temporarily to allow delete + reseed (proves seed SQL)
-      (sqlite/with-db [conn db]
-        (try (jdbc/execute! conn ["DROP TRIGGER kernel_state_no_delete"]) (catch Exception _ nil))
-        (jdbc/execute! conn ["DELETE FROM kernel_state"])
-        (jdbc/execute! conn ["CREATE TRIGGER kernel_state_no_delete BEFORE DELETE ON kernel_state BEGIN SELECT RAISE(ABORT, 'kernel_state is a singleton - deletion forbidden'); END;"])
-        (jdbc/execute! conn ["INSERT INTO kernel_state (id, current_generation, updated_at) SELECT 1, id, created_at FROM generations WHERE current = 1 LIMIT 1"]))
-      (is (= g1 (-> (sqlite/query db ["SELECT current_generation FROM kernel_state WHERE id=1"]) first :current_generation))))))
+      (is (= 1 (-> (sqlite/query db ["SELECT current FROM generations WHERE id=?" g1]) first :current)))
+      ;; migrate to 007 should create kernel_state and seed from existing current
+      (let [result (migrate/migrate! db)]
+        (is (= 7 (:version result))))
+      (is (= g1 (-> (sqlite/query db ["SELECT current_generation FROM kernel_state WHERE id=1"]) first :current_generation)))
+      (is (= 1 (-> (sqlite/query db ["SELECT current FROM generations WHERE id=?" g1]) first :current)))
+      (is (= 1 (count (sqlite/query db ["SELECT id FROM kernel_state"])))))))
 
 (deftest current-store-prefers-singleton
   (let [p (fresh-db-path)
