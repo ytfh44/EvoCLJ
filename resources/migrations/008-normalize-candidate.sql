@@ -21,6 +21,20 @@ SELECT
 FROM candidates c
 JOIN mutations m ON c.mutation_id = m.id;
 
+-- Backfill: repair existing mismatched rows (mutation is definition).
+-- Triggers only prevent future mismatches; existing rows that diverged
+-- before this migration must be normalized to the mutation values.
+-- Null-safe IS NOT ensures NULL vs non-NULL mismatches are repaired.
+UPDATE candidates SET
+  parent_genome_id = m.parent_genome_id,
+  evidence_id = m.evidence_id,
+  risk = m.risk
+FROM mutations m
+WHERE candidates.mutation_id = m.id
+  AND (candidates.parent_genome_id IS NOT m.parent_genome_id
+       OR candidates.evidence_id IS NOT m.evidence_id
+       OR candidates.risk IS NOT m.risk);
+
 -- Enforce mismatch unrepresentable: candidate columns must equal mutation columns.
 -- Keeps physical columns for backward compat but aborts on divergence.
 -- Use SELECT RAISE(...) WHERE ... to avoid CASE END confusing the migration splitter.
@@ -49,16 +63,10 @@ BEGIN
     WHERE NEW.risk IS NOT (SELECT risk FROM mutations WHERE id = NEW.mutation_id);
 END;
 
--- S3 fix: enforce mutation immutability — reject any UPDATE to
--- parent_genome_id, evidence_id, risk, or the entire row. Uses
--- SELECT RAISE(ABORT ...) with NULL-safe IS NOT comparisons.
-CREATE TRIGGER IF NOT EXISTS mutations_no_update
-BEFORE UPDATE ON mutations
-FOR EACH ROW
-BEGIN
-  SELECT RAISE(ABORT, 'mutations are immutable');
-END;
-
+-- S3 fix: enforce mutation immutability — field-specific trigger only.
+-- Keep ONE trigger with intended scope (field-specific) and null-safe IS NOT.
+-- The broad BEFORE UPDATE ON mutations (no column list) would make a
+-- field-specific trigger unreachable, so only the column-scoped trigger remains.
 CREATE TRIGGER IF NOT EXISTS mutations_immutable_fields
 BEFORE UPDATE OF parent_genome_id, evidence_id, risk ON mutations
 FOR EACH ROW
