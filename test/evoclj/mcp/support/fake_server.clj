@@ -103,11 +103,11 @@
 
 (defn knob-env
   "Build the FAKE_* environment overlay for `opts`
-  {:mode :delay-ms :tool-count :page-size}. PATH/SystemRoot are passed
-  through defensively so the child resolves `node` regardless of whether
-  the SDK merges or replaces the parent environment."
+  {:mode :delay-ms :tool-count :page-size :output-schema?}. PATH/SystemRoot
+  are passed through defensively so the child resolves `node` regardless of
+  whether the SDK merges or replaces the parent environment."
   ([] (knob-env {}))
-  ([{:keys [mode delay-ms tool-count page-size] :or {mode :ok}}]
+  ([{:keys [mode delay-ms tool-count page-size output-schema?] :or {mode :ok}}]
    (when-not (contains? known-modes mode)
      (throw (ex-info "unknown fake-server mode"
                      {:error/type :support/server-invalid-mode
@@ -118,7 +118,8 @@
             "SystemRoot" (or (System/getenv "SystemRoot") "")}
      (some? delay-ms)   (assoc "FAKE_DELAY_MS" (str (long delay-ms)))
      (some? tool-count) (assoc "FAKE_TOOL_COUNT" (str (long tool-count)))
-     (some? page-size)  (assoc "FAKE_PAGE_SIZE" (str (long page-size))))))
+     (some? page-size)  (assoc "FAKE_PAGE_SIZE" (str (long page-size)))
+     output-schema?     (assoc "FAKE_OUTPUT_SCHEMA" "1"))))
 
 (defn knob-args
   "CLI-flag form of the knobs, understood by fake-mcp-server.mjs (flags
@@ -126,7 +127,7 @@
   reach the PRODUCTION client's subprocess on SDK 2.0.0 — see DEVIATION
   RECORD 2 in the ns docstring."
   ([] (knob-args {}))
-  ([{:keys [mode delay-ms tool-count page-size] :or {mode :ok} :as _opts}]
+  ([{:keys [mode delay-ms tool-count page-size output-schema?] :or {mode :ok} :as _opts}]
    (when-not (contains? known-modes mode)
      (throw (ex-info "unknown fake-server mode"
                      {:error/type :support/server-invalid-mode
@@ -135,7 +136,8 @@
    (vec (concat ["--mode" (name mode)]
                 (when (some? delay-ms)   ["--delay-ms"   (str (long delay-ms))])
                 (when (some? tool-count) ["--tool-count" (str (long tool-count))])
-                (when (some? page-size)  ["--page-size"  (str (long page-size))])))))
+                (when (some? page-size)  ["--page-size"  (str (long page-size))])
+                (when output-schema?     ["--output-schema"])))))
 
 (defn transport-config
   "The stdio transport-config for a fake server with `opts`, suitable for

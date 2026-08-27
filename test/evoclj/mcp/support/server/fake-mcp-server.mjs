@@ -19,6 +19,12 @@
  *   FAKE_TOOL_COUNT  number of tools generated (huge/many-pages/ok),
  *                    default 50; huge interprets it as KB of description text
  *   FAKE_PAGE_SIZE   page size for many-pages pagination, default 10
+ *   FAKE_OUTPUT_SCHEMA  when truthy ("1"), every generated tool also
+ *                    declares an outputSchema (propertyless object schema)
+ *                    so it passes EvoCLJ's fail-closed discovery gate;
+ *                    default unset (tools carry NO outputSchema, the pinned
+ *                    harness contract asserted by codec_closure_test /
+ *                    adapter_m16_test)
  *
  * Behaviour:
  *   initialize                 -> protocolVersion echoes the requested value
@@ -70,6 +76,20 @@ const DELAY_MS = Math.max(0, numOr(argValue("--delay-ms") ?? envOr("FAKE_DELAY_M
 const TOOL_COUNT = Math.max(0, numOr(argValue("--tool-count") ?? envOr("FAKE_TOOL_COUNT"), 50));
 const PAGE_SIZE = Math.max(1, numOr(argValue("--page-size") ?? envOr("FAKE_PAGE_SIZE"), 10));
 
+// Opt-in: when set, makeTool() also emits an outputSchema (a propertyless
+// object schema) so the tools are acceptable to EvoCLJ's fail-closed
+// stable-descriptor (which rejects schema-less tools). OFF by default so the
+// pinned harness contract (fake tools carry NO outputSchema, asserted by
+// codec_closure_test / adapter_m16_test) stays intact for all existing suites.
+const WITH_OUTPUT_SCHEMA = (() => {
+  const flag = argv.includes("--output-schema");
+  const env = process.env["FAKE_OUTPUT_SCHEMA"];
+  return Boolean(
+    flag ||
+    (env !== undefined && env !== "" && env !== "0" && env.toLowerCase() !== "false")
+  );
+})();
+
 const KNOWN_MODES = new Set([
   "ok", "slow", "malformed", "huge", "many-pages",
   "infinite-cursor", "crash-after-init", "no-response",
@@ -101,11 +121,15 @@ function respondError(id, code, message) {
 }
 
 function makeTool(name, description) {
-  return {
+  const tool = {
     name,
     description: description ?? `fake tool ${name}`,
     inputSchema: { type: "object", properties: {}, required: [] },
   };
+  if (WITH_OUTPUT_SCHEMA) {
+    tool.outputSchema = { type: "object", properties: {}, required: [] };
+  }
+  return tool;
 }
 
 function allTools() {

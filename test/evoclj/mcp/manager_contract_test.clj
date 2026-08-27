@@ -298,12 +298,20 @@
           ;; RECORD 4）。语义对象不变：本用例经 release 收割自己的 client。
           pre-existing (fake/processes-matching-pids
                         fake/fake-server-process-pattern)]
-      (fake/with-fake-server [srv {:mode :ok :tool-count 2}]
+      (fake/with-fake-server [srv {:mode :ok :tool-count 2 :output-schema? true}]
         (let [tcfg (:config srv)
               ;; no :discover-fn anywhere -> evoclj.mcp.source/discover-tools
               ;; takes its LIVE path: manager/get-or-open! on an EMPTY pool
               ;; (first open through the production open-fn) followed by
               ;; mcp-client/list-all-tools against the real client.
+              ;; :output-schema? true makes the T1 fake server declare an
+              ;; outputSchema on each tool, because the M11/M20 fail-closed
+              ;; discovery gate (stable-descriptor) rejects a schema-less
+              ;; discovered tool with :mcp/schema-required (this fixture
+              ;; predates that gate). The default fake tools carry NO
+              ;; output schema — a pinned contract asserted by
+              ;; codec_closure_test / adapter_m16_test — so the output
+              ;; schema is opt-in here, on THIS live-discovery path only.
               source (mcp-source/make-mcp-source
                       {:source/id        :wo-m1/live-disc
                        :transport-config tcfg
@@ -320,10 +328,10 @@
             (is (= 2 (count tools)) (pr-str (keys tools)))
             (is (contains? tools ["live-disc" "fake-tool-0"]) "fake-server tool 0 discovered under its composite tool-id")
             (is (contains? tools ["live-disc" "fake-tool-1"]) "fake-server tool 1 discovered under its composite tool-id")
-            (is (= "fake-tool-0" (get-in tools ["live-disc" "fake-tool-0" :mcp/name])))
-            (is (= "fake-tool-1" (get-in tools ["live-disc" "fake-tool-1" :mcp/name])))
+            (is (= "fake-tool-0" (get-in tools [["live-disc" "fake-tool-0"] :mcp/name])))
+            (is (= "fake-tool-1" (get-in tools [["live-disc" "fake-tool-1"] :mcp/name])))
             (is (= {"type" "object" "properties" {} "required" []}
-                   (get-in tools ["live-disc" "fake-tool-0" :mcp/input-schema]))
+                   (get-in tools [["live-disc" "fake-tool-0"] :mcp/input-schema]))
                 "raw remote inputSchema normalized to string-keyed EDN")
             (let [entry (manager/pool-get mgr @ck)]
               (is (= :ready (:state entry)) (pr-str entry))
