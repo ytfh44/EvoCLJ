@@ -237,14 +237,19 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private activate-stages
-  "stage -> [published? event?] expected when the hook throws at that point."
-  {:after-db-insert       [false false]
-   :after-publish-runtime [true false]
-   :before-event-append   [true false]
-   :after-event-append    [true true]})
+  "stage -> [row-present? published? event?] expected when the hook throws at
+   that point. WO-B1 two-phase: a PRE-COMMIT throw is a byte-comparable
+   rollback — the staged durable row is deleted and runtime deltas are undone
+   (row absent, mounts empty, no event); the POST-COMMIT throw
+   (:after-event-append) never rolls back (row present, mounts published,
+   event appended)."
+  {:after-db-insert       [false false false]
+   :after-publish-runtime [false false false]
+   :before-event-append   [false false false]
+   :after-event-append    [true  true  true]})
 
 (deftest activate-seams-propagate-and-are-positioned
-  (doseq [[stage [published? event?]] activate-stages]
+  (doseq [[stage [row-present? published? event?]] activate-stages]
     (testing (str "activate! :" (name stage) " — throw reaches caller")
       (let [db (fresh-db)
             sid (seed-session! db)
@@ -259,20 +264,24 @@
           (catch Throwable t (reset! caught t)))
         (is (identical? sent @caught) "hook exception must propagate unchanged")
         (let [row (any-row db sid)]
-          (is (some? row) "durable row insert already happened at every stage")
-          (is (= "active" (:state row))))
+          (if row-present?
+            (do (is (some? row) "committed activation persists the durable row")
+                (is (= "active" (:state row))))
+            (is (nil? row) "WO-B1: pre-commit fault rolls the staged row back byte-comparably")))
         (if published?
-          (is (seq @mounts) "runtime publish already happened")
-          (is (empty? @mounts) "runtime publish not yet reached"))
+          (is (seq @mounts) "runtime publish done and not rolled back")
+          (is (empty? @mounts) "runtime publish rolled back (or not yet reached)"))
         (if event?
           (is (= 1 (count (activated-events db sid :binding/activated))) "event appended")
-          (is (zero? (count (activated-events db sid :binding/activated))) "event not yet appended"))))))
+          (is (zero? (count (activated-events db sid :binding/activated))) "no event; rolled back or not reached"))))))
 
 (def ^:private reload-stages
-  "stage -> revision-id expected in the active row when the hook throws."
-  {:after-db-insert       :b
-   :after-publish-runtime :b
-   :before-event-append   :b
+  "stage -> revision source expected in the active row when the hook throws.
+   WO-B1 two-phase: a PRE-COMMIT throw restores the pre-image row (revision A);
+   the POST-COMMIT throw (:after-event-append) keeps the reloaded revision B."
+  {:after-db-insert       :a
+   :after-publish-runtime :a
+   :before-event-append   :a
    :after-event-append    :b})
 
 (deftest reload-seams-propagate-and-are-positioned
@@ -285,7 +294,8 @@
             cas-handle (fresh-cas-with! "content-A" "content-B")
             _ (binding/activate! db sid a {:cas cas-handle})
             sent (seam-ex stage)
-            caught (atom nil)]
+            caught (atom nil)
+            expect-rev (if (= :a row-rev) (:revision/id a) (:revision/id b))]
         (try
           (binding/reload! db sid [:skill "debugging"] b
                            {:cas cas-handle
@@ -294,8 +304,8 @@
         (is (identical? sent @caught) "hook exception must propagate unchanged")
         (let [row (active-row db sid)]
           (is (some? row))
-          (is (= (:revision/id b) (:revision_id row))
-              "durable row update already happened at every stage"))
+          (is (= expect-rev (:revision_id row))
+              "WO-B1: pre-commit fault restores revision A; post-commit fault keeps revision B"))
         (if (= :after-event-append stage)
           (is (= 1 (count (activated-events db sid :binding/reloaded))) "reloaded event appended")
           (is (zero? (count (activated-events db sid :binding/reloaded))) "reloaded event not yet appended"))))))
@@ -317,8 +327,10 @@
         (catch Throwable t (reset! caught t)))
       (is (identical? sent @caught) "hook exception must propagate unchanged")
       (let [row (any-row db sid)]
-        (is (= "inactive" (:state row)) "row already flipped to inactive"))
-      (is (empty? @mounts) ":after-unpublish fires after unpublish-runtime!")
+        (is (= "active" (:state row))
+            "WO-B1: pre-commit fault restores the pre-image row (byte-comparable rollback)"))
+      (is (seq @mounts)
+          "WO-B1: runtime mounts restored by compensation (not left torn)")
       (is (zero? (count (activated-events db sid :binding/deactivated)))
           "deactivated event not yet appended"))))
 
@@ -392,7 +404,7 @@
       (is (= :error (:status res)))
       (is (identical? sent (:error res)))
       (is (nil? (reg/current registry)) "publish never happened")))
-  (testing ":mid-publish — fires after CAS swap, before listener notification"
+  (testing ":mid-publish — fires after the atomic swap AND after listener notification"
     (let [source (fake/make-fake-source :t2/mid "A")
           registry (reg/create-registry)
           _ (reg/register-source! registry source)
@@ -410,8 +422,10 @@
       (is (identical? sent (:error res)))
       (is (= (rev/payload->id "A") (-> @fire-time :current :revision/id))
           "CAS swap already done at fire time")
-      (is (empty? (:calls @fire-time)) "listeners not yet notified at fire time")
-      (is (empty? @calls) "fault aborts before listener notification")
+      (is (= [:notified] (:calls @fire-time))
+          "E2: apply-chain-swap! notifies listeners before the :mid-publish seam")
+      (is (= [:notified] @calls)
+          "E2: listener notification is not undone by the :mid-publish fault")
       (is (= (rev/payload->id "A") (:revision/id (reg/current registry)))
           "swapped state stays visible (degradation marks status only)")
       (is (= :degraded (:status (reg/status registry)))))))
@@ -576,6 +590,6 @@
                          (mapcat #(re-seq #"\(fault/trigger!\s+opts\s+(:[a-zA-Z0-9*+!?_<>./'-]+)" %))
                          (map second))
                    sources)]
-    (is (= 11 (count declared)) "docstring declares exactly 11 legal stages")
+    (is (= 12 (count declared)) "docstring declares exactly 12 legal stages")
     (is (= declared used)
         "docstring legal-stage list must equal the set of trigger! stages wired in production")))
