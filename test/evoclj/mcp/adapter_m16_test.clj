@@ -70,8 +70,8 @@
    selection + real stable-descriptor normalization."
   [raw-tools version]
   (->(mcp-source/->McpSource :m16/disc {:type :stdio :command "echo" :args []}
-      nil (atom {}) (atom false)
-      {:mcp/server-id "m16" :mcp/version version} (fn [] raw-tools))
+      nil (atom false)
+      {:mcp/server-id "m16" :mcp/version version} (fn [] raw-tools) (atom nil) (atom nil))
      (assoc :tools-change-cb (fn []))))
 
 (defn- strip-version-stamp

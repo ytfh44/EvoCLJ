@@ -124,8 +124,8 @@
   fresh one (host-owned pools are the normal case); every other field
   matches the factory's output. snapshot!/discover-tools run unchanged."
   [tcfg]
-  (->(mcp-source/->McpSource :m4/src-disc tcfg nil (atom {}) (atom false)
-      {:mcp/server-id "src-disc"} nil)
+  (->(mcp-source/->McpSource :m4/src-disc tcfg nil (atom false)
+      {:mcp/server-id "src-disc"} nil (atom nil) (atom nil))
      (assoc :tools-change-cb (fn []))))
 
 (defn- assert-no-new-children!
@@ -176,7 +176,11 @@
 
 (deftest m4-c1b-source-discovery-nonpooled-reaps-every-child
   (testing "manager-less McpSource snapshots (live discover-tools): zero surviving clients"
-    (fake/with-fake-server [srv {:mode :ok :tool-count 2}]
+    ;; :output-schema? makes the fake tools declare an outputSchema so live
+    ;; discovery passes the fail-closed stable-descriptor gate (schema-less
+    ;; tools are rejected); without it the tools carry NO outputSchema and
+    ;; stable-descriptor throws :mcp/schema-required.
+    (fake/with-fake-server [srv {:mode :ok :tool-count 2 :output-schema? true}]
       (let [src (managerless-mcp-source (:config srv))]
         (let [snap0 (env-src/snapshot! src)]
           (is (= 2 (count (get-in snap0 [:payload :tools]))) (pr-str snap0)))

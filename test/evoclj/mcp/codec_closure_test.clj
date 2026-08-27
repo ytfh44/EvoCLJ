@@ -128,10 +128,11 @@
                    :mcp/server-id "missing-in"
                    :discover-fn discover-fn})
           d (capture-throw #(evoclj.environment.source/snapshot! source))]
-      ;; discovery fails (snapshot! wraps the schema failure as :mcp/discover-failed),
-      ;; and the underlying cause is the fail-closed :mcp/schema-required.
+      ;; discovery fails; the M16 adapter path re-throws the typed
+      ;; fail-closed :mcp/schema-required directly (no :cause wrap), so
+      ;; the :error/type is on the top-level ex-data, not on :cause.
       (is (some? d) "discovery must fail, not silently produce a :any descriptor")
-      (is (= :mcp/schema-required (:error/type (:cause d)))
+      (is (= :mcp/schema-required (:error/type d))
           "missing input schema fails closed via :mcp/schema-required, not :any"))))
 
 (deftest source-rejects-missing-output-schema-fail-closed
@@ -150,7 +151,7 @@
                    :discover-fn discover-fn})
           d (capture-throw #(evoclj.environment.source/snapshot! source))]
       (is (some? d) "discovery must fail, not silently produce a :any descriptor")
-      (is (= :mcp/schema-required (:error/type (:cause d)))
+      (is (= :mcp/schema-required (:error/type d))
           "missing output schema fails closed via :mcp/schema-required, not :any"))))
 
 ;; ---------------------------------------------------------------------------

@@ -14,7 +14,9 @@
     (is (= 1 (count result)))
     (let [mutation (first result)]
       (is (= :program (:risk mutation)))
-      (is (= "default/noop" (:hypothesis/id mutation)))
+      (is (= #uuid "a6a3aef6-7424-36a4-b04b-130292eddcc3" (:hypothesis/id mutation))
+          "hypothesis id is the deterministic name-based UUID (uuid? gate)")
+      (is (uuid? (:hypothesis/id mutation)))
       (is (= 1 (count (:ops mutation))))
       (is (= :replace-form (get-in mutation [:ops 0 :op])))
       (is (= "sha256:parent" (get-in mutation [:ops 0 :expect/hash]))))))

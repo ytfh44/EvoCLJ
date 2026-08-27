@@ -560,7 +560,11 @@
         (fake/with-fake-server [srv {:mode :ok :tool-count 1}]
           (let [managed (mcp/open! (:config srv))]
             (try
-              (is (pos? (mcp/ping! managed)) "server answers ping (via list-all-tools)")
+              ;; ping! now performs a real SDK ping round-trip and returns
+              ;; the liveness map {:mcp/ping :ok :mcp/ping-roundtrip-ms ...},
+              ;; not a numeric count (that contract changed).
+              (let [ping-res (mcp/ping! managed)]
+                (is (= :ok (:mcp/ping ping-res)) "server answers ping"))
               (finally
                 (mcp/close! managed))))))
       (is (empty? (fake/await-no-new-process-matching
