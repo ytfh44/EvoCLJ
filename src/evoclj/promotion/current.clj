@@ -37,7 +37,16 @@
   auto-manages transactions around every statement and org.xerial's
   setAutoCommit(false) opens its own deferred transaction, so neither
   can coexist with the explicit BEGIN IMMEDIATE that must hold
-  SQLite's write lock before the pointer read."
+  SQLite's write lock before the pointer read.
+
+  Fleet R (definition > validation): this namespace is the INTERNAL
+  impl for the CURRENT pointer. Only evoclj.store.current-store and
+  evoclj.promotion.promote may call cas-current! — all other callers
+  must go via the narrow CurrentStore handle
+  (evoclj.store.current-store/make-current-store). The handle never
+  exposes :sqlite; db-of is a migration shim only. Business code that
+  needs to read CURRENT outside a transaction must use
+  current-store/current-generation via the handle."
   (:require [evoclj.kernel.error :as err]
             [evoclj.store.sqlite :as sqlite]))
 

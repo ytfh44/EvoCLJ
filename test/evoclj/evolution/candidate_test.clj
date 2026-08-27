@@ -46,6 +46,7 @@
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.evolution.candidate :as candidate]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -160,7 +161,8 @@
 (defn- fresh-store
   "A migrated temp database seeded with the parent generation row
   (current = 1, Database Invariant 6) plus a temp CAS root. Returns
-  the executor :stores map {:sqlite ... :cas ...}."
+  a map {:db <sqlite spec> :handle <CandidateStore> :cas <CAS>}.
+  Business code must use :handle; :db is for test verification only."
   []
   (let [path (temp-db-path)
         db (sqlite/spec path)
@@ -175,13 +177,13 @@
                      :state "active"
                      :current 1
                      :created_at "2025-01-01T00:00:00Z"}))
-    {:sqlite db :cas (cas/->cas cas-root)}))
+    {:db db :handle (candidate-store/make-candidate-store db) :cas (cas/->cas cas-root)}))
 
 (defn- current-flag
   "The generations :current value for `generation-id` — the CURRENT
-  pointer (Database Invariant 6)."
-  [store]
-  (:current (first (sqlite/query (:sqlite store)
+  pointer (Database Invariant 6). Takes raw db spec for verification."
+  [db]
+  (:current (first (sqlite/query db
                                  ["SELECT current FROM generations WHERE id = ?"
                                   generation-id]))))
 
@@ -288,30 +290,29 @@
     (testing "the same parent+mutation materialized twice is one auditable candidate"
       (let [c1 (candidate/create-candidate (candidate-request))
             c2 (candidate/create-candidate (candidate-request)) ; fresh uuid, same identity
-            m1 (candidate/materialize-candidate! store c1 m)
-            m2 (candidate/materialize-candidate! store c2 m)]
+            m1 (candidate/materialize-candidate! (:handle store) c1 m)
+            m2 (candidate/materialize-candidate! (:handle store) c2 m)]
         (is (not= (:candidate/id c1) (:candidate/id c2))
             "the two CREATION records are distinct")
         (is (= (:candidate/id m1) (:candidate/id m2))
             "the second materialization returns the SAME candidate")
         (is (= :materialized (:state m1)))
-        (is (= 1 (count (candidate/find-candidates-by-parent store parent-genome-id)))
+        (is (= 1 (count (candidate/find-candidates-by-parent (:handle store) parent-genome-id)))
             "exactly one row — auditable, deduplicated")
         (is (= (:candidate/id m1)
-               (:candidate/id (candidate/find-candidate store (:candidate/id m1))))
+               (:candidate/id (candidate/find-candidate (:handle store) (:candidate/id m1))))
             "the persisted row resolves by id")))
     (testing "identical mutation CONTENT under a different uuid also dedupes"
       (let [m2 (assoc m :mutation/id (uuid 42))
             c (candidate/create-candidate (assoc (candidate-request)
                                                  :mutation/id (uuid 42)))
-            m3 (candidate/materialize-candidate! store c m2)
-            first-id (:candidate/id (first (candidate/find-candidates-by-parent
-                                            store parent-genome-id)))]
+            m3 (candidate/materialize-candidate! (:handle store) c m2)
+            first-id (:candidate/id (first (candidate/find-candidates-by-parent (:handle store) parent-genome-id)))]
         (is (= first-id (:candidate/id m3))
             "re-proposing the same mutation content lands on the SAME candidate")
-        (is (= 1 (count (candidate/find-candidates-by-parent store parent-genome-id)))
+        (is (= 1 (count (candidate/find-candidates-by-parent (:handle store) parent-genome-id)))
             "still exactly one candidate row")
-        (is (= 2 (count (sqlite/query (:sqlite store)
+        (is (= 2 (count (sqlite/query (:db store)
                                       ["SELECT * FROM mutations WHERE parent_genome_id = ?"
                                        parent-genome-id])))
             "both PROPOSALS stay durable — the candidate dedupes, the proposals are auditable")))))
@@ -321,17 +322,15 @@
         m (mutation*)]
     (testing "different mutation content under the same parent is a separate candidate"
       (let [m-other (assoc-in m [:ops 0 :value] [:different])
-            c1 (candidate/materialize-candidate!
-                store (candidate/create-candidate (candidate-request)) m)
-            c2 (candidate/materialize-candidate!
-                store (candidate/create-candidate (candidate-request)) m-other)]
+            c1 (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request)) m)
+            c2 (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request)) m-other)]
         (is (not= (:candidate/id c1) (:candidate/id c2)))
-        (is (= 2 (count (candidate/find-candidates-by-parent store parent-genome-id))))))
+        (is (= 2 (count (candidate/find-candidates-by-parent (:handle store) parent-genome-id))))))
     (testing "a mutation whose parent differs yields a separate candidate
               under the other parent (and never touches CURRENT)"
       (let [other-genome (str "sha256:" (apply str (repeat 64 "b")))
             other-generation "generation-2"
-            _ (sqlite/with-db [conn (:sqlite store)]
+            _ (sqlite/with-db [conn (:db store)]
                 (jdbc/insert! conn :generations
                               {:id other-generation
                                :genome_id other-genome
@@ -342,10 +341,8 @@
                                :created_at "2025-01-02T00:00:00Z"}))
             m-other (assoc m :parent/genome-id other-genome
                              :mutation/id (uuid 77))
-            c1 (candidate/materialize-candidate!
-                store (candidate/create-candidate (candidate-request)) m)
-            c2 (candidate/materialize-candidate!
-                store (candidate/create-candidate
+            c1 (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request)) m)
+            c2 (candidate/materialize-candidate! (:handle store) (candidate/create-candidate
                        {:parent/generation-id other-generation
                         :parent/genome-id other-genome
                         :candidate/genome-id candidate-genome-id
@@ -354,10 +351,10 @@
                         :risk :behavioral})
                 m-other)]
         (is (not= (:candidate/id c1) (:candidate/id c2)))
-        (is (= 2 (count (candidate/find-candidates-by-parent store parent-genome-id)))
+        (is (= 2 (count (candidate/find-candidates-by-parent (:handle store) parent-genome-id)))
             "the first scenario's two parent-genome candidates persist")
-        (is (= 1 (count (candidate/find-candidates-by-parent store other-genome))))
-        (is (= 1 (current-flag store))
+        (is (= 1 (count (candidate/find-candidates-by-parent (:handle store) other-genome))))
+        (is (= 1 (current-flag (:db store)))
             "the CURRENT pointer is untouched by either materialization")))))
 
 ;; ============================================================================
@@ -368,12 +365,12 @@
   (let [store (fresh-store)
         m (mutation*)
         c (candidate/create-candidate (candidate-request))
-        persisted (candidate/materialize-candidate! store c m)]
+        persisted (candidate/materialize-candidate! (:handle store) c m)]
     (testing "the returned candidate is :materialized with the same identity"
       (is (= (:candidate/id c) (:candidate/id persisted)))
       (is (= :materialized (:state persisted))))
     (testing "the row is persisted with the component vocabulary and full lineage"
-      (let [rows (sqlite/query (:sqlite store)
+      (let [rows (sqlite/query (:db store)
                                ["SELECT * FROM candidates WHERE id = ?"
                                 (str (:candidate/id c))])]
         (is (= 1 (count rows)))
@@ -386,46 +383,43 @@
           (is (= evidence-id (:evidence_id row)))
           (is (= "behavioral" (:risk row))))))
     (testing "the mutation-row lineage precondition was materialized too (FK)"
-      (is (= 1 (count (sqlite/query (:sqlite store)
+      (is (= 1 (count (sqlite/query (:db store)
                                     ["SELECT * FROM mutations WHERE id = ?"
                                      (str (uuid 1))])))))
     (testing "read-back round-trips the record"
-      (is (= persisted (candidate/find-candidate store (:candidate/id c)))))
+      (is (= persisted (candidate/find-candidate (:handle store) (:candidate/id c)))))
     (testing "the CURRENT pointer is untouched (no activation rights)"
-      (is (= 1 (current-flag store))))))
+      (is (= 1 (current-flag (:db store)))))))
 
 (deftest step-4-evaluation-pending-is-a-compare-and-set-transition
   (let [store (fresh-store)
         m (mutation*)
-        c (candidate/materialize-candidate!
-           store (candidate/create-candidate (candidate-request)) m)]
+        c (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request)) m)]
     (testing "a materialized candidate moves to :evaluation-pending"
-      (let [pending (candidate/mark-evaluation-pending! store (:candidate/id c))]
+      (let [pending (candidate/mark-evaluation-pending! (:handle store) (:candidate/id c))]
         (is (= :evaluation-pending (:state pending)))
         (is (= :evaluation-pending
-               (:state (candidate/find-candidate store (:candidate/id c)))))
+               (:state (candidate/find-candidate (:handle store) (:candidate/id c)))))
         (is (= "evaluating"
-               (:state (first (sqlite/query (:sqlite store)
+               (:state (first (sqlite/query (:db store)
                                             ["SELECT state FROM candidates WHERE id = ?"
                                              (str (:candidate/id c))])))))))
     (testing "re-transitioning from the wrong expected state fails"
       (is (= :candidate/invalid-transition
-             (thrown-error-type #(candidate/mark-evaluation-pending! store
+             (thrown-error-type #(candidate/mark-evaluation-pending! (:handle store)
                                                                     (:candidate/id c)))))
       (is (= :candidate/invalid-transition
-             (thrown-error-type #(candidate/transition-candidate!
-                                  store (:candidate/id c) :proposed :materialized)))))
+             (thrown-error-type #(candidate/transition-candidate! (:handle store) (:candidate/id c) :proposed :materialized)))))
     (testing "a target state with no 5.1 vocabulary value is not persistable"
       (is (= :candidate/invalid-transition
-             (thrown-error-type #(candidate/transition-candidate!
-                                  store (:candidate/id c) :materialized :proposed)))))
+             (thrown-error-type #(candidate/transition-candidate! (:handle store) (:candidate/id c) :materialized :proposed)))))
     (testing "transitioning an unknown candidate fails"
       (is (= :candidate/not-found
-             (thrown-error-type #(candidate/mark-evaluation-pending! store (uuid 999))))))
+             (thrown-error-type #(candidate/mark-evaluation-pending! (:handle store) (uuid 999))))))
     (testing "find-candidate on an unknown id returns nil"
-      (is (nil? (candidate/find-candidate store (uuid 999)))))
+      (is (nil? (candidate/find-candidate (:handle store) (uuid 999)))))
     (testing "the CURRENT pointer is untouched by the transition"
-      (is (= 1 (current-flag store))))))
+      (is (= 1 (current-flag (:db store)))))))
 
 (deftest step-4-materialization-enforces-record-mutation-agreement
   (let [store (fresh-store)
@@ -433,32 +427,28 @@
     (testing "a candidate whose evidence disagrees with the mutation is rejected"
       (is (= :candidate/evidence-mismatch
              (thrown-error-type
-              #(candidate/materialize-candidate!
-                store c (mutation* {:evidence/id (str "sha256:" (apply str (repeat 64 "d")))}))))))
+              #(candidate/materialize-candidate! (:handle store) c (mutation* {:evidence/id (str "sha256:" (apply str (repeat 64 "d")))}))))))
     (testing "a candidate whose parent Genome disagrees is rejected"
       (is (= :candidate/parent-mismatch
              (thrown-error-type
-              #(candidate/materialize-candidate!
-                store c (assoc (mutation*)
+              #(candidate/materialize-candidate! (:handle store) c (assoc (mutation*)
                                :parent/genome-id (str "sha256:" (apply str (repeat 64 "b")))))))))
     (testing "a candidate whose mutation id disagrees is rejected"
       (is (= :candidate/mutation-mismatch
              (thrown-error-type
-              #(candidate/materialize-candidate!
-                store c (mutation* {:mutation/id (uuid 77)}))))))
+              #(candidate/materialize-candidate! (:handle store) c (mutation* {:mutation/id (uuid 77)}))))))
     (testing "a candidate whose risk disagrees is rejected"
       (is (= :candidate/risk-mismatch
              (thrown-error-type
-              #(candidate/materialize-candidate! store c (mutation* {:risk :parameter}))))))
+              #(candidate/materialize-candidate! (:handle store) c (mutation* {:risk :parameter}))))))
     (testing "a non-proposed candidate cannot be materialized"
       (is (= :candidate/not-proposed
              (thrown-error-type
-              #(candidate/materialize-candidate!
-                store (assoc c :state :materialized) (mutation*))))))
+              #(candidate/materialize-candidate! (:handle store) (assoc c :state :materialized) (mutation*))))))
     (testing "a mutation that is not a map is rejected"
       (is (= :candidate/mutation-invalid
              (thrown-error-type
-              #(candidate/materialize-candidate! store c {:not :a-mutation})))))))
+              #(candidate/materialize-candidate! (:handle store) c {:not :a-mutation})))))))
 
 (deftest step-4-the-store-boundary-is-validated
   (let [c (candidate/create-candidate (candidate-request))
@@ -470,7 +460,7 @@
     (is (= :candidate/store-invalid
            (thrown-error-type
             #(candidate/materialize-candidate!
-              {:sqlite (sqlite/spec (temp-db-path))} c m))))
+              {:db (sqlite/spec (temp-db-path))} c m))))
     (is (= :candidate/store-invalid
            (thrown-error-type
             #(candidate/find-candidate {} (uuid 1)))))))

@@ -77,31 +77,31 @@
   BODY (component patch output) is put into the CAS by the
   orchestrator, not by this namespace.
 
-  `store` is the executor :stores map {:sqlite <db> :cas <CAS root>},
-  exactly as in evoclj.evolution.evidence — this namespace writes
-  only candidate/mutation ROWS and never opens or closes a
-  connection.
+  `store` is a CandidateStore handle
+  (evoclj.store.candidate-store/make-candidate-store) — the narrow
+  opaque authority that alone may do jdbc on candidates/mutations.
+  Passing a raw {:sqlite ... :cas ...} map is rejected with
+  :candidate/store-invalid.
+
+  NO ACTIVATION RIGHTS: this namespace still has no function that
+  reads or writes the generations CURRENT pointer and no dependency on
+  any promotion/current namespace.
 
   Error contract (Global Constraint 22 — plain serializable data):
-  :candidate/store-invalid (:reason :not-a-map :sqlite-missing
-  :cas-missing), :candidate/invalid (contract violation, Malli
+  :candidate/store-invalid (:reason :not-a-candidate-store),
+  :candidate/invalid (contract violation, Malli
   explanations), :candidate/mutation-invalid,
   :candidate/mutation-mismatch, :candidate/parent-mismatch,
   :candidate/evidence-mismatch, :candidate/risk-mismatch,
   :candidate/not-proposed, :candidate/not-found,
   :candidate/invalid-transition."
-  (:require [clojure.edn :as edn]
-            [clojure.java.jdbc :as jdbc]
-            [malli.core :as m]
+  (:require [malli.core :as m]
             [malli.error :as me]
-            [evoclj.genome.hash :as hash]
             [evoclj.genome.schema :as gschema]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
-            [evoclj.store.sqlite :as sqlite])
-  (:import (java.time Instant)
-           (java.time.format DateTimeFormatter)
-           (java.util Date UUID)))
+            [evoclj.store.candidate-store :as candidate-store])
+  (:import (java.util Date UUID)))
 
 ;; --- state machine (component fragment; M8 adds :evaluated/:invalid) ---------
 
@@ -123,25 +123,6 @@
    :materialized #{:evaluation-pending}})
 
 (declare find-candidate)
-
-;; --- the component state vocabulary mapping (documented deviation) -----------
-
-(def ^:private db-state->state
-  "Map from the component candidates.state CHECK vocabulary to the
-  plan's machine states. The 5.1 schema predates the machine, so the
-  in-memory machine states are mapped at the row boundary; :proposed
-  has no schema value (rows exist only from :materialized onward) and
-  :invalid has none either (M8 must resolve its persistence)."
-  {"materialized" :materialized
-   "evaluating" :evaluation-pending
-   "eligible" :evaluated
-   "promoted" :promoted
-   "rejected" :rejected
-   "stale" :stale})
-
-(def ^:private state->db-state
-  "Inverse of db-state->state."
-  (into {} (map (fn [[db s]] [s db]) db-state->state)))
 
 ;; --- the public Candidate contract (docs 'Detailed Public Data Contracts') ---
 
@@ -194,23 +175,14 @@
   c)
 
 (defn- validate-store!
-  "Validate the executor :stores map {:sqlite ... :cas ...} (the
-  shape evoclj.evolution.evidence defines). This namespace writes only
-  rows; the :cas key is required for the boundary's shape so callers
-  pass the same :stores map everywhere."
+  "Validate that store is a CandidateStore handle. Any map (including
+  the legacy {:sqlite ... :cas ...} shape) is rejected with
+  :candidate/store-invalid."
   [store]
-  (when-not (map? store)
+  (when-not (instance? evoclj.store.candidate_store.CandidateStore store)
     (throw (err/error :candidate/store-invalid
-                      "store must be the executor :stores map {:sqlite ... :cas ...}"
-                      {:reason :not-a-map :value (err/sanitize store)})))
-  (when-not (contains? store :sqlite)
-    (throw (err/error :candidate/store-invalid
-                      "store must carry the :sqlite handle"
-                      {:reason :sqlite-missing})))
-  (when-not (contains? store :cas)
-    (throw (err/error :candidate/store-invalid
-                      "store must carry the :cas handle"
-                      {:reason :cas-missing})))
+                      "store must be a CandidateStore handle (evoclj.store.candidate-store/make-candidate-store)"
+                      {:reason :not-a-candidate-store :value (err/sanitize store)})))
   store)
 
 (defn- validate-mutation-shape!
@@ -267,36 +239,6 @@
                        :mutation/risk (:risk mutation)})))
   candidate)
 
-;; --- timestamps --------------------------------------------------------------
-
-(def ^:private timestamp-fmt DateTimeFormatter/ISO_INSTANT)
-
-(defn- canonical-timestamp
-  "Canonical ISO-8601 UTC string for a timestamp value (a
-  java.util.Date, java.time.Instant, or ISO-8601 string); nil means
-  now."
-  [ts]
-  (let [inst (cond
-               (nil? ts) (Instant/now)
-               (instance? Instant ts) ts
-               (instance? Date ts) (.toInstant ^Date ts)
-               (string? ts) (Instant/parse ts)
-               :else (throw (err/error :candidate/invalid
-                                       "timestamp must be an inst, Instant, or ISO-8601 string"
-                                       {:timestamp ts})))]
-    (.format timestamp-fmt inst)))
-
-(defn- set-busy-timeout!
-  "Set SQLite's busy_timeout on the open connection carried by `db`
-  (the spec-with-connection map sqlite/with-db binds). A contended
-  write waits for SQLite's write lock instead of failing with
-  SQLITE_BUSY — the same pattern evoclj.store.session uses for its
-  compare-and-set."
-  [db ms]
-  (let [^java.sql.Connection conn (:connection db)]
-    (with-open [stmt (.createStatement conn)]
-      (.execute stmt (str "PRAGMA busy_timeout = " ms)))))
-
 ;; --- Step 1: creation --------------------------------------------------------
 
 (defn create-candidate
@@ -327,33 +269,13 @@
 
 ;; --- Step 3: the uniqueness rule (parent-genome-id, mutation-hash) -----------
 
-(defn- canonical
-  "Deterministic EDN form for hashing: maps sorted by their pr-str key
-  form, sets by their pr-str element form, collections realized
-  eagerly. Any EDN-safe value yields a stable pr-str, so the content
-  hash is a pure function of logical content (Global Constraint 6)."
-  [x]
-  (cond
-    (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map (fn [[k v]] [k (canonical v)])) x)
-    (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map canonical) x)
-    (vector? x) (mapv canonical x)
-    (seq? x) (mapv canonical x)
-    :else x))
-
 (defn mutation-hash
   "The deterministic content hash of a Mutation IR — the uniqueness
   rule's second component (component Step 3).
 
-  sha256 over the canonical pr-str of the mutation EXCLUDING
-  :mutation/id: the uuid is proposal-assignment metadata, not
-  content. Two mutations with identical declarative content (parent
-  Genome, hypothesis, evidence, risk, ops, expected effect) therefore
-  hash identically, so re-proposing the same mutation lands on the
-  same candidate; different content hashes differently."
+  Delegates to evoclj.store.candidate-store/mutation-hash (single source)."
   [mutation]
-  (hash/text-digest (pr-str (canonical (dissoc mutation :mutation/id)))))
+  (candidate-store/mutation-hash mutation))
 
 (defn dedupe-key
   "The normative candidate uniqueness rule (component Step 3): a
@@ -364,100 +286,7 @@
   {:parent/genome-id parent-genome-id
    :mutation/hash (mutation-hash mutation)})
 
-;; --- row mapping ---------------------------------------------------------------
-
-(defn- row->mutation
-  "Reconstruct the Mutation IR content from a mutations row, for
-  recomputing the content hash during the dedup lookup. The 5.1
-  mutations table stores the exact IR (ops/expected_effect as EDN), so
-  the recomputed hash is byte-identical to the original proposal's."
-  [{:keys [id parent_genome_id hypothesis_id evidence_id risk ops
-           expected_effect]}]
-  {:mutation/id (UUID/fromString id)
-   :parent/genome-id parent_genome_id
-   :hypothesis/id (UUID/fromString hypothesis_id)
-   :evidence/id evidence_id
-   :risk (keyword risk)
-   :ops (edn/read-string ops)
-   :expected-effect (edn/read-string expected_effect)})
-
-(defn- row->candidate
-  "Convert a candidates DB row into the public Candidate record. The
-  component :state vocabulary is mapped to the machine states (see
-  db-state->state); an unknown value fails loudly."
-  [row]
-  (let [state (get db-state->state (:state row))]
-    (when-not state
-      (throw (err/error :candidate/invalid
-                        "candidates row carries an unknown state"
-                        {:candidate/id (:id row) :state (:state row)})))
-    {:candidate/id (UUID/fromString (:id row))
-     :parent/generation-id (:parent_generation_id row)
-     :parent/genome-id (:parent_genome_id row)
-     :candidate/genome-id (:genome_id row)
-     :mutation/id (UUID/fromString (:mutation_id row))
-     :evidence/id (:evidence_id row)
-     :risk (keyword (:risk row))
-     :state state
-     :created-at (Date/from (Instant/parse (:created_at row)))}))
-
 ;; --- Step 4: persistence -------------------------------------------------------
-
-(defn- insert-mutation-row!
-  "Ensure the mutation row exists (INSERT OR IGNORE by :mutation/id) —
-  the candidate's lineage precondition (the candidates.mutation_id
-  FK). Mutations are immutable, append-only proposals (Global
-  Constraints 4-6, 16); a duplicate uuid is ignored. Afterwards the
-  row's parent Genome is verified against the mutation being
-  materialized: reusing a mutation uuid across parents is a broken
-  caller and fails loudly."
-  [conn mutation ts]
-  (jdbc/execute! conn
-                 ["INSERT OR IGNORE INTO mutations
-                   (id, parent_genome_id, hypothesis_id, evidence_id,
-                    risk, ops, expected_effect, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                  (str (:mutation/id mutation))
-                  (:parent/genome-id mutation)
-                  (str (:hypothesis/id mutation))
-                  (:evidence/id mutation)
-                  (name (:risk mutation))
-                  (pr-str (:ops mutation))
-                  (pr-str (:expected-effect mutation))
-                  ts])
-  (let [row (first (jdbc/query conn
-                               ["SELECT parent_genome_id FROM mutations WHERE id = ?"
-                                (str (:mutation/id mutation))]))]
-    (when (and row (not= (:parent/genome-id mutation) (:parent_genome_id row)))
-      (throw (err/error :candidate/mutation-mismatch
-                        "an existing mutation row with this id belongs to a different parent genome"
-                        {:mutation/id (:mutation/id mutation)
-                         :row/parent-genome-id (:parent_genome_id row)})))))
-
-(defn- find-by-dedupe-key
-  "The dedup lookup under the uniqueness rule: the earliest candidate
-  row (created_at, then id) whose parent Genome and mutation CONTENT
-  (mutation-hash recomputed from the stored mutation rows) match.
-  Content-based, never uuid-based — two proposals of identical content
-  dedupe to the first candidate. Returns a raw candidates row or nil."
-  [conn parent-genome-id mh]
-  (let [rows (jdbc/query conn
-                         ["SELECT id, parent_genome_id, hypothesis_id, evidence_id,
-                                  risk, ops, expected_effect
-                          FROM mutations WHERE parent_genome_id = ?"
-                          parent-genome-id])
-        matching-ids (into #{}
-                           (keep (fn [row]
-                                   (when (= mh (mutation-hash (row->mutation row)))
-                                     (:id row))))
-                           rows)]
-    (when (seq matching-ids)
-      (let [placeholders (apply str (interpose ", " (repeat (count matching-ids) "?")))
-            sql (str "SELECT * FROM candidates
-                      WHERE parent_genome_id = ? AND mutation_id IN (" placeholders ")
-                      ORDER BY created_at ASC, id ASC")
-            params (into [parent-genome-id] matching-ids)]
-        (first (jdbc/query conn (into [sql] params)))))))
 
 (defn materialize-candidate!
   "Materialize the immutable Candidate record for a parent Genome and
@@ -476,6 +305,10 @@
   references; the candidate Genome body (component patch output) is
   put into the CAS by the orchestrator, not here.
 
+  Fleet R: delegates to evoclj.store.candidate-store/materialize! via
+  the narrow CandidateStore handle. Requires a CandidateStore; legacy
+  {:sqlite :cas} maps are rejected with :candidate/store-invalid.
+
   Typed errors: :candidate/store-invalid, :candidate/invalid,
   :candidate/not-proposed, :candidate/mutation-invalid,
   :candidate/mutation-mismatch, :candidate/parent-mismatch,
@@ -490,31 +323,9 @@
                        :state (:state candidate)})))
   (validate-mutation-shape! mutation)
   (validate-agreement! candidate mutation)
-  (let [db (:sqlite store)
-        mh (mutation-hash mutation)
-        ts (canonical-timestamp (:created-at candidate))]
-    (sqlite/with-db [conn db]
-      (set-busy-timeout! conn 10000)
-      ;; lineage precondition first — see the namespace docstring for
-      ;; why the write-before-read order is the dedup serialization point
-      (insert-mutation-row! conn mutation ts)
-      (if-let [row (find-by-dedupe-key conn (:parent/genome-id candidate) mh)]
-        (validate-candidate! (row->candidate row))
-        (do
-          (jdbc/insert! conn :candidates
-                        {:id (str (:candidate/id candidate))
-                         :parent_generation_id (:parent/generation-id candidate)
-                         :parent_genome_id (:parent/genome-id candidate)
-                         :genome_id (:candidate/genome-id candidate)
-                         :mutation_id (str (:mutation/id candidate))
-                         :evidence_id (:evidence/id candidate)
-                         :risk (name (:risk candidate))
-                         :state "materialized"
-                         :created_at ts})
-          (validate-candidate!
-           (row->candidate
-            (first (jdbc/query conn ["SELECT * FROM candidates WHERE id = ?"
-                                     (str (:candidate/id candidate))])))))))))
+  (let [result (candidate-store/materialize! store candidate mutation)]
+    (validate-candidate! result)
+    result))
 
 (defn transition-candidate!
   "Compare-and-set state transition for a persisted candidate (component Step 4). Changes :state alone via one atomic UPDATE matched on
@@ -523,84 +334,56 @@
   :evaluation-pending (the :proposed → :materialized edge is realized
   by materialize-candidate!; :evaluated/:invalid arrive with M8).
 
+  Fleet R: delegates to evoclj.store.candidate-store/transition! via
+  the narrow CandidateStore handle. Requires a CandidateStore; legacy
+  {:sqlite :cas} maps are rejected.
+
   Typed errors: :candidate/invalid-transition (not an edge, a target
   state with no 5.1 vocabulary value, or the stored state is not
   expected-state — including a concurrent worker that already won the
   compare-and-set), :candidate/not-found, :candidate/invalid."
   [store candidate-id expected-state new-state]
+  (validate-store! store)
   (when-not (and (keyword? expected-state) (keyword? new-state))
     (throw (err/error :candidate/invalid-transition
                       "transition states must be keywords"
                       {:expected-state expected-state :new-state new-state})))
-  (when-not (contains? (get transitions expected-state #{}) new-state)
+  (when-not (contains? (get transitions expected-state) new-state)
     (throw (err/error :candidate/invalid-transition
-                      "not an edge of the candidate state machine"
+                      "not a valid transition for the component machine"
                       {:candidate/id (types/session-id candidate-id)
                        :expected-state expected-state
                        :new-state new-state})))
-  (when-not (contains? state->db-state new-state)
-    (throw (err/error :candidate/invalid-transition
-                      "the target state has no component vocabulary value"
-                      {:candidate/id (types/session-id candidate-id)
-                       :expected-state expected-state
-                       :new-state new-state})))
-  (let [cid (types/session-id candidate-id)
-        key (str cid)
-        ts (canonical-timestamp nil)]
-    (sqlite/with-db [conn (:sqlite store)]
-      (set-busy-timeout! conn 10000)
-      (let [count (first (jdbc/execute! conn
-                                        ["UPDATE candidates
-                                          SET state = ?
-                                          WHERE id = ? AND state = ?"
-                                         (state->db-state new-state)
-                                         key
-                                         (state->db-state expected-state)]))]
-        (when-not (= 1 count)
-          (let [row (first (jdbc/query conn
-                                       ["SELECT state FROM candidates WHERE id = ?"
-                                        key]))]
-            (if row
-              (throw (err/error :candidate/invalid-transition
-                                "candidate is not in the expected state"
-                                {:candidate/id cid
-                                 :expected-state expected-state
-                                 :new-state new-state
-                                 :actual-state (db-state->state (:state row))}))
-              (throw (err/error :candidate/not-found
-                                "no candidate with this id"
-                                {:candidate/id cid})))))))
-    (find-candidate store cid)))
+  (let [_ (candidate-store/transition! store candidate-id expected-state new-state)]
+    (find-candidate store candidate-id)))
 
 (defn mark-evaluation-pending!
   "Transition a :materialized candidate to :evaluation-pending
-  (component Step 4, stored as 'evaluating' in the 5.1 vocabulary).
-  The transition is a compare-and-set: a candidate not currently
-  :materialized (or already pending) fails with
-  :candidate/invalid-transition."
+  (the only persisted transition in this task). Compare-and-set on
+  the stored state."
   [store candidate-id]
   (transition-candidate! store candidate-id :materialized :evaluation-pending))
 
-;; --- reads ---------------------------------------------------------------------
-
 (defn find-candidate
   "The Candidate record for `candidate-id`, or nil when no candidate
-  has that id. Read-only — no activation rights."
+  has that id. Read-only — no activation rights.
+
+  Fleet R: delegates to evoclj.store.candidate-store/find-candidate via
+  the narrow CandidateStore handle. Requires a CandidateStore; legacy
+  {:sqlite :cas} maps are rejected."
   [store candidate-id]
   (validate-store! store)
-  (some-> (first (sqlite/query (:sqlite store)
-                               ["SELECT * FROM candidates WHERE id = ?"
-                                (str (types/session-id candidate-id))]))
-          row->candidate
+  (some-> (candidate-store/find-candidate store candidate-id)
           validate-candidate!))
 
 (defn find-candidates-by-parent
   "Every Candidate record whose parent Genome is `parent-genome-id`,
-  in deterministic creation order (created_at, then id). Read-only."
+  in deterministic creation order (created_at, then id). Read-only.
+
+  Fleet R: delegates to evoclj.store.candidate-store/find-candidates-by-parent
+  via the narrow CandidateStore handle. Requires a CandidateStore; legacy
+  {:sqlite :cas} maps are rejected."
   [store parent-genome-id]
   (validate-store! store)
-  (->> (sqlite/query (:sqlite store)
-                     ["SELECT * FROM candidates WHERE parent_genome_id = ?
-                       ORDER BY created_at ASC, id ASC"
-                      parent-genome-id])
-       (mapv (fn [row] (validate-candidate! (row->candidate row))))))
+  (->> (candidate-store/find-candidates-by-parent store parent-genome-id)
+       (mapv validate-candidate!)))
