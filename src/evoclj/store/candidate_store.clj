@@ -195,6 +195,13 @@
     (throw (err/error :candidate/store-invalid
                       "transition! requires a CandidateStore"
                       {:reason :not-a-candidate-store})))
+  ;; Fleet S2 — reject non-persisted targets before the DB CHECK (NULL would fail).
+  (when-not (state->db-state new-state)
+    (throw (err/error :candidate/invalid-transition
+                      "target state has no DB mapping (not persistable in 5.1)"
+                      {:candidate/id (types/session-id candidate-id)
+                       :expected-state expected-state
+                       :new-state new-state})))
   (let [cid (types/session-id candidate-id)
         key (str cid)
         db (.-db ^CandidateStore store)]

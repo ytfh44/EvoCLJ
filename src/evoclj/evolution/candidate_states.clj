@@ -80,7 +80,7 @@
 
 (def kw->db-state
   "Keyword → DB string. Non-persisted states (e.g. :proposed, :invalid,
-  :canary, :canary-failed, :evaluation-pending aliases) map to nil."
+  :canary, :canary-failed) map to nil; :evaluation-pending maps to \"evaluating\"."
   (into {} (map (fn [[db kw]] [kw db]) db-state->kw)))
 
 ;; Legacy alias names expected by callers that used the old private vars

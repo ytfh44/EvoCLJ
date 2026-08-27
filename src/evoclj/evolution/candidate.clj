@@ -347,6 +347,15 @@
                       {:candidate/id (types/session-id candidate-id)
                        :expected-state expected-state
                        :new-state new-state})))
+  ;; Fleet S2 — guard persisted transitions: future states (:canary,
+  ;; :invalid, etc.) have no 5.1 DB mapping (nil) and would hit the CHECK
+  ;; constraint as NULL. Reject cleanly before the DB update.
+  (when-not (cstates/kw->db new-state)
+    (throw (err/error :candidate/invalid-transition
+                      "target state has no DB mapping (not persistable in 5.1)"
+                      {:candidate/id (types/session-id candidate-id)
+                       :expected-state expected-state
+                       :new-state new-state})))
   (let [_ (candidate-store/transition! store candidate-id expected-state new-state)]
     (find-candidate store candidate-id)))
 
