@@ -46,6 +46,7 @@
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.evolution.candidate :as candidate]
+            [evoclj.evolution.candidate-states :as cstates]
             [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
@@ -259,11 +260,9 @@
     (testing "no dependency on promotion or current-generation namespaces"
       (is (not-any? #(re-find #"(?i)promotion|current" (str %))
                     (map str (keys (ns-aliases 'evoclj.evolution.candidate))))))
-    (testing "the state machine surface is the component subset"
-      (is (= #{:proposed :materialized :evaluation-pending} candidate/states))
-      (is (= {:proposed #{:materialized}
-              :materialized #{:evaluation-pending}}
-             candidate/transitions)))))
+    (testing "the state machine surface is the canonical closed machine (Fleet S2 single source)"
+      (is (= candidate/states evoclj.evolution.candidate-states/candidate-states))
+      (is (= candidate/transitions evoclj.evolution.candidate-states/candidate-transitions)))))
 
 ;; ============================================================================
 ;; Step 3 — the uniqueness rule: (parent-genome-id, mutation-hash)

@@ -41,7 +41,8 @@
   :promotion/invalid-transition (not an edge of the closed table),
   :promotion/ineligible (an ineligible candidate attempted a
   deployment entry it may not take)."
-  (:require [evoclj.kernel.error :as err]))
+  (:require [evoclj.evolution.candidate-states :as cstates]
+            [evoclj.kernel.error :as err]))
 
 ;; --- the state vocabularies ----------------------------------------------------
 
@@ -54,12 +55,8 @@
   #{:rejected :stale :canary :promoted :canary-failed})
 
 (def candidate-states
-  "The full candidate state vocabulary: the component base machine plus
-  the M8 evaluation outcomes (:evaluated :invalid) and the M9
-  deployment states."
-  (into #{} (concat [:proposed :materialized :evaluation-pending
-                     :evaluated :invalid]
-                    deployment-states)))
+  "Single-source alias — delegates to cstates/candidate-states (definition > validation)."
+  cstates/candidate-states)
 
 ;; --- the pure, closed transition tables ---------------------------------------
 
@@ -75,23 +72,8 @@
    :rolled-back #{}})
 
 (def candidate-transitions
-  "The closed candidate state machine (data, no SQL): the component
-  base fragment (:proposed → :materialized → :evaluation-pending,
-  realized by evolution/candidate.clj), M8's evaluation outcomes
-  (:evaluation-pending → #{:evaluated :invalid}), and the M9
-  deployment fragment. :evaluated is the ONLY entry point into the
-  deployment states; :rejected :stale :promoted :canary-failed (and
-  :invalid) are terminal."
-  {:proposed #{:materialized}
-   :materialized #{:evaluation-pending}
-   :evaluation-pending #{:evaluated :invalid}
-   :evaluated #{:canary :promoted :rejected :stale}
-   :canary #{:promoted :canary-failed}
-   :invalid #{}
-   :rejected #{}
-   :stale #{}
-   :promoted #{}
-   :canary-failed #{}})
+  "Single-source alias — delegates to cstates/candidate-transitions (definition > validation)."
+  cstates/candidate-transitions)
 
 ;; --- typed errors ---------------------------------------------------------------
 

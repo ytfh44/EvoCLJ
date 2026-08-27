@@ -672,11 +672,9 @@
     (testing "there is NO mechanism yet to call G2 'better' (promotion is M9)"
       (is (nil? (find-ns 'evoclj.promotion.core))
           "no promotion namespace exists anywhere in the codebase")
-      (is (= #{:proposed :materialized :evaluation-pending} candidate/states)
-          "the candidate state machine has no promotion edges")
-      (is (= {:proposed #{:materialized}
-              :materialized #{:evaluation-pending}}
-             candidate/transitions))
+      (is (= candidate/states evoclj.evolution.candidate-states/candidate-states)
+          "the candidate state machine is the canonical closed machine")
+      (is (= candidate/transitions evoclj.evolution.candidate-states/candidate-transitions))
       (is (= 1 (count (sqlite/query (:sqlite store)
                                     ["SELECT * FROM generations"])))
           "no new generation row was created")

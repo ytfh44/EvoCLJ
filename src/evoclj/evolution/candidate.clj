@@ -97,30 +97,23 @@
   :candidate/invalid-transition."
   (:require [malli.core :as m]
             [malli.error :as me]
+            [evoclj.evolution.candidate-states :as cstates]
             [evoclj.genome.schema :as gschema]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
             [evoclj.store.candidate-store :as candidate-store])
   (:import (java.util Date UUID)))
 
-;; --- state machine (component fragment; M8 adds :evaluated/:invalid) ---------
+;; --- state machine — single canonical source (definition > validation) --------
+;; Delegates to evoclj.evolution.candidate-states; do not duplicate literals here.
 
 (def states
-  "The component candidate states. :proposed is the pre-persistence
-  record state; :materialized and :evaluation-pending are persisted.
-  The :evaluated and :invalid states arrive with the evaluator in
-  M8."
-  #{:proposed :materialized :evaluation-pending})
+  "Alias for cstates/candidate-states (single source; backwards-compat alias)."
+  cstates/candidate-states)
 
 (def transitions
-  "State machine edges. :proposed → :materialized is realized by
-  materialize-candidate! (a row is created at materialization), not
-  by transition-candidate!, which operates on persisted rows only.
-  The only persisted edge in this task is :materialized →
-  :evaluation-pending. M8 appends :evaluation-pending → #{:evaluated
-  :invalid}; M9 appends the deployment states."
-  {:proposed #{:materialized}
-   :materialized #{:evaluation-pending}})
+  "Alias for cstates/candidate-transitions (single source)."
+  cstates/candidate-transitions)
 
 (declare find-candidate)
 
@@ -137,7 +130,7 @@
    [:mutation/id uuid?]
    [:evidence/id [:fn types/artifact-id?]]
    [:risk gschema/RiskClassSchema]
-   [:state keyword?]
+   [:state cstates/candidate-state-enum]
    [:created-at [:fn inst?]]])
 
 (def CreateCandidateRequest
