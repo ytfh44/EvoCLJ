@@ -38,6 +38,7 @@
             [evoclj.genome.path :as gpath]
             [evoclj.genome.patch :as patch]
             [evoclj.promotion.current :as current]
+            [evoclj.helpers :as h]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -141,6 +142,9 @@
 ;; 1. the demo mutator produces genomes that pass compiler topology validation
 ;; ============================================================================
 
+
+;; S4 helper — collapsed to evoclj.helpers
+(def ^:private assert-validated h/assert-validated-simple)
 (deftest demo-mutator-produces-topology-valid-genomes
   (let [parent (seed-loaded-genome)
         proposed (core/propose-mutations (demo/demo-mutator)
@@ -160,13 +164,11 @@
         (is (every? #(uuid? (:hypothesis/id %)) proposed))))
     (testing "each proposed mutation is schema-valid against the parent
               once the orchestrator completes its lineage fields"
-      (is (= (completed-mutation parent m)
-             (mutation/validate-mutation (completed-mutation parent m)
-                                         parent))))
+      (assert-validated (completed-mutation parent m) (mutation/validate-mutation (completed-mutation parent m) parent)))
     (testing "applying + compiling the mutation yields a topology-valid
               candidate G2 (compiler topology passes)"
       (let [candidate (patch/apply-mutation parent
-                                            (completed-mutation parent m)
+                                            (mutation/validate-mutation (completed-mutation parent m) parent)
                                             (temp-dir "evoclj-demo-candidates-"))
             compiled (compiler/compile-genome
                       (assoc candidate :programs [(route-descriptor)])
@@ -201,9 +203,9 @@
                        (first (core/propose-mutations
                                (demo/demo-mutator)
                                (demo-context parent)))))
-            apply1 (patch/apply-mutation parent (propose)
+            apply1 (patch/apply-mutation parent (mutation/validate-mutation (propose) parent)
                                          (temp-dir "evoclj-demo-det-cand-1-"))
-            apply2 (patch/apply-mutation parent (propose)
+            apply2 (patch/apply-mutation parent (mutation/validate-mutation (propose) parent)
                                          (temp-dir "evoclj-demo-det-cand-2-"))]
         (is (= (:genome/id apply1) (:genome/id apply2)))))))
 

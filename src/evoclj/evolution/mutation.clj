@@ -81,9 +81,126 @@
             [evoclj.genome.hash :as hash]
             [evoclj.genome.path :as path]
             [evoclj.genome.patch-edn :as patch-edn]
+            [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file Paths)))
+
+;; ----------------------------------------------------------------------
+;; S4 — RawMutation vs ValidatedMutation (definition > validation)
+;; ----------------------------------------------------------------------
+
+;; Sealed types via closure + private field: the secret object is never stored
+;; in a var and cannot be retrieved via #'var. The factory closes over the
+;; secret and stores it in a private field; validated-mutation? checks
+;; instance? and identical? on the field via direct field access, not a var.
+
+(deftype MutableAssetRef [parent_genome_id canonical_path ^:private secret]
+  clojure.lang.ILookup
+  (valAt [this k] (.valAt this k nil))
+  (valAt [this k notFound]
+    (case k
+      :parent-genome-id parent_genome_id
+      :canonical-path canonical_path
+      notFound))
+  Object
+  (toString [this] (str "MutableAssetRef[" canonical_path "]")))
+(alter-meta! #'->MutableAssetRef assoc :private true)
+
+(let [asset-ref-secret (Object.)]
+  (defn- ->mutable-asset-ref
+    "Create a sealed MutableAssetRef — private, only called from validate-mutation."
+    [parent-id canonical]
+    (MutableAssetRef. parent-id canonical asset-ref-secret))
+
+  (defn mutable-asset-ref?
+    "True when x is a sealed MutableAssetRef produced by validate-mutation."
+    [x]
+    (and (instance? MutableAssetRef x)
+         (identical? (.-secret ^MutableAssetRef x) asset-ref-secret))))
+
+(deftype VerifiedDigest [digest ^:private secret]
+  clojure.lang.ILookup
+  (valAt [this k] (.valAt this k nil))
+  (valAt [this k notFound]
+    (case k
+      :digest digest
+      notFound))
+  Object
+  (toString [this] (str "VerifiedDigest[" digest "]")))
+(alter-meta! #'->VerifiedDigest assoc :private true)
+
+(let [verified-secret (Object.)]
+  (defn- ->verified-digest
+    "Construct a sealed VerifiedDigest after checking the digest is a canonical artifact-id."
+    [d]
+    (when d
+      (when-not (types/artifact-id? d)
+        (throw (err/error :mutation/hash-invalid
+                          "VerifiedDigest must be sha256:<64 hex>"
+                          {:digest d})))
+      (VerifiedDigest. d verified-secret)))
+
+  (defn verified-digest?
+    "True when x is a sealed VerifiedDigest."
+    [x]
+    (and (instance? VerifiedDigest x)
+         (identical? (.-secret ^VerifiedDigest x) verified-secret))))
+
+(deftype ValidatedMutation [raw_mutation canonical_ops asset_refs verified_digests ^:private secret]
+  clojure.lang.ILookup
+  (valAt [this k] (.valAt this k nil))
+  (valAt [this k notFound]
+    (case k
+      :raw-mutation raw_mutation
+      :canonical-ops canonical_ops
+      :asset-refs asset_refs
+      :verified-digests verified_digests
+      notFound))
+  clojure.lang.Counted
+  (count [this] 4)
+  Object
+  (toString [this] (str "ValidatedMutation[" (:mutation/id raw_mutation) "]")))
+(alter-meta! #'->ValidatedMutation assoc :private true)
+
+(let [validated-secret (Object.)]
+  (defn validated-mutation?
+    "True when x is a ValidatedMutation — sealed, only produced by validate-mutation."
+    [x]
+    (and (instance? ValidatedMutation x)
+         (identical? (.-secret ^ValidatedMutation x) validated-secret)))
+
+  (defn- make-validated-mutation
+    [raw canonical refs digests]
+    (ValidatedMutation. raw canonical refs digests validated-secret))
+
+  (defn validated->raw
+    [vm]
+    (when (validated-mutation? vm)
+      (.-raw_mutation ^ValidatedMutation vm)))
+
+  (defn validated-ops
+    [vm]
+    (when (validated-mutation? vm)
+      (.-canonical_ops ^ValidatedMutation vm)))
+
+  (defn validated-refs
+    [vm]
+    (when (validated-mutation? vm)
+      (.-asset_refs ^ValidatedMutation vm)))
+
+  (defn validated-digests
+    [vm]
+    (when (validated-mutation? vm)
+      (.-verified_digests ^ValidatedMutation vm))))
+
+(defn raw-mutation?
+  [x]
+  (and (map? x)
+       (not (validated-mutation? x))
+       (contains? x :mutation/id)
+       (vector? (:ops x))
+       (every? (fn [op] (string? (:file op))) (:ops x))))
 
 ;; --- path safety (Step 3: reuse evoclj.genome.path) -------------------------
 
@@ -192,51 +309,57 @@
 
 (defn validate-mutation
   "Validate a Mutation IR against the schema AND the patch
-  preconditions (component).
+  preconditions (component) and return a ValidatedMutation.
 
-  With no context, applies the schema gate (envelope, all op variants,
-  Step 2 :expect/hash) plus the path-safety and protected-path gates.
+  S4: RawMutation (file : String) is validated into ValidatedMutation
+  (MutableAssetRef + VerifiedDigest). The ValidatedMutation bundles:
+
+    :raw-mutation   — the original RawMutation map (file is String)
+    :canonical-ops  — ops where :file is the canonical relative path
+    :asset-refs     — vector<MutableAssetRef> (parent-genome-id + canonical-path)
+    :verified-digests— vector<VerifiedDigest|nil> (one per op)
+
+  Only constructible via this function, which checks, in order:
+
+    - canonical path (normalize-relative-path + allowed-genome-path? / symlink)
+    - protected path (manifest.edn, kernel/, eval/, capability/, evolution)
+    - mutable class (declared :evolution :mutable)
+    - hash (VerifiedDigest must be sha256:<64 hex>)
+
+  With no context, applies the schema gate plus path-safety and protected-path gates.
   With a parent context — the loaded parent Genome map
-  ({:genome/id :manifest :genome/root :files}, as produced by
-  evoclj.genome.load) or a bare manifest map — additionally anchors
-  the symlink-escape check at :genome/root and enforces the
-  declared-mutable-class gate from :manifest's :evolution :mutable.
+  ({:genome/id :manifest :genome/root :files}) or a bare manifest map — additionally anchors
+  the symlink-escape check at :genome/root and enforces the declared-mutable-class gate.
 
-  Returns the mutation unchanged when valid. Throws ExceptionInfo with
+  Returns a ValidatedMutation when valid. Throws ExceptionInfo with
   a stable :error/type: :mutation/invalid, :mutation/op-invalid,
-  :mutation/path-invalid, :mutation/protected-path, or
-  :mutation/undeclared-mutable-class."
+  :mutation/path-invalid, :mutation/protected-path,
+  :mutation/undeclared-mutable-class, or :mutation/hash-invalid."
   ([mutation]
    (validate-mutation mutation nil))
   ([mutation parent-context]
-   ;; Op-level shape first, so a malformed op inside an otherwise valid
-   ;; envelope surfaces as :mutation/op-invalid (with the precise op)
-   ;; rather than being swallowed by the envelope gate.
    (doseq [op (:ops mutation)]
      (ms/validate-op op))
    (ms/validate-mutation mutation)
    (let [manifest (manifest-of parent-context)
-         base (some-> parent-context :genome/root)]
-     (doseq [op (:ops mutation)]
-       (let [canonical (canonical-file (:file op))]
-         (check-resolves-inside-root! base canonical)
-         (check-not-protected! manifest canonical)
-         (check-declared-mutable-class! manifest canonical))))
-   mutation))
+         base (some-> parent-context :genome/root)
+         parent-id (or (some-> parent-context :genome/id)
+                       (:parent/genome-id mutation))
+         validated-pairs (mapv (fn [op]
+                                 (let [canonical (canonical-file (:file op))]
+                                   (check-resolves-inside-root! base canonical)
+                                   (check-not-protected! manifest canonical)
+                                   (check-declared-mutable-class! manifest canonical)
+                                   [canonical (->verified-digest (:expect/hash op))]))
+                               (:ops mutation))
+         canonicals (mapv first validated-pairs)
+         verified-digests (mapv second validated-pairs)
+         canonical-ops (mapv (fn [op canonical] (assoc op :file canonical))
+                             (:ops mutation) canonicals)
+         asset-refs (mapv (fn [canonical] (->mutable-asset-ref parent-id canonical))
+                          canonicals)]
+     (make-validated-mutation mutation canonical-ops asset-refs verified-digests))))
 
-;; ============================================================================
-;; component — dual-parent crossover (host opt-in)
-;;
-;; The crossover mutation recombines TWO parent Genomes into one child
-;; by topology-aware recombination: split parent A's topology at a
-;; node (the cut), take that node's subtree from parent B, re-resolve
-;; dependencies, and gate the child through the topology compiler
-;; (Global Constraint: the child must satisfy compiler topology
-;; validity). It is PURE and DETERMINISTIC (Global Constraints 1 and
-;; 6) and is NOT part of the default mutation distribution — a host
-;; opts in by calling `crossover` directly; :crossover never appears
-;; in a Mutation IR's :ops and is rejected by the default op schema.
-;; ============================================================================
 
 (def default-op-distribution
   "The default mutation op distribution — the closed thirteen-op

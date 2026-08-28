@@ -17,7 +17,9 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [evoclj.helpers :as h :refer [with-temp-dirs]]
             [evoclj.compiler.topology :as topology]
+            [evoclj.evolution.mutation :as mutation]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.load :as load]
             [evoclj.genome.patch :as patch]
@@ -63,66 +65,34 @@
    "skills/notes.txt" notes-source
    "programs/route.clj" route-source})
 
-;; --- temp-dir helpers -----------------------------------------------------
+;; --- temp-dir helpers — collapsed to evoclj.helpers -------------------------
 
-(defn- temp-dir! ^Path []
-  (Files/createTempDirectory "evoclj-patch-test" (make-array FileAttribute 0)))
-
-(defn- delete-recursively! [^Path dir]
-  (when (Files/exists dir (make-array LinkOption 0))
-    (let [f (.toFile dir)]
-      (when (.isDirectory f)
-        (doseq [c (.listFiles f)]
-          (delete-recursively! (.toPath c))))
-      (Files/delete dir))))
-
-(defmacro with-temp-dirs [names & body]
-  (let [names (vec names)]
-    `(let [~@(mapcat (fn [n] [n `(temp-dir!)]) names)]
-       (try
-         ~@body
-         (finally
-           (doseq [~'d ~names]
-             (delete-recursively! ~'d)))))))
+(def ^:private temp-dir! h/temp-dir!)
+(def ^:private delete-recursively! h/delete-recursively!)
+(def ^:private try-create-symlink! h/try-create-symlink!)
+(def ^:private text-of h/text-of)
+(def ^:private dir-entries h/dir-entries)
+(def ^:private thrown-error h/thrown-error)
 
 (defn- write-genome! [^Path dir]
   (doseq [[rel content] fixture-files]
-    (let [p (.resolve dir rel)]
-      (Files/createDirectories (.getParent p) (make-array FileAttribute 0))
-      (Files/write p (.getBytes ^String content StandardCharsets/UTF_8)
-                   (make-array OpenOption 0))))
+    (h/write-text! dir rel content))
   dir)
-
-(defn- try-create-symlink!
-  "Best-effort Files/createSymbolicLink. Returns false when the host
-  refuses (Windows hosts without Developer Mode or symlink privileges)."
-  [^Path target ^Path link]
-  (try
-    (Files/createSymbolicLink link target (make-array FileAttribute 0))
-    true
-    (catch Exception _ false)))
-
-(defn- text-of [file-value]
-  (apply str (map char (:bytes file-value))))
-
-(defn- dir-entries [^Path dir]
-  (->> (.list (.toFile dir)) sort vec))
-
-(defn- thrown-error [f]
-  (try (f) nil (catch clojure.lang.ExceptionInfo e e)))
 
 ;; --- mutation fixtures ----------------------------------------------------
 
 (defn- mutation-with
-  "A schema-valid Mutation envelope carrying `ops`, pinned to `parent`."
+  "A schema-valid Mutation envelope carrying `ops`, pinned to `parent` — returns sealed ValidatedMutation."
   [parent ops]
-  {:mutation/id (java.util.UUID/randomUUID)
-   :parent/genome-id (:genome/id parent)
-   :hypothesis/id (java.util.UUID/randomUUID)
-   :evidence/id "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-   :risk :behavioral
-   :ops ops
-   :expected-effect {:primary-metric :task/success :direction :increase}})
+  (mutation/validate-mutation
+    {:mutation/id (java.util.UUID/randomUUID)
+     :parent/genome-id (:genome/id parent)
+     :hypothesis/id (java.util.UUID/randomUUID)
+     :evidence/id "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+     :risk :behavioral
+     :ops ops
+     :expected-effect {:primary-metric :task/success :direction :increase}}
+    parent))
 
 ;; --- step 1: EDN nested set ------------------------------------------------
 

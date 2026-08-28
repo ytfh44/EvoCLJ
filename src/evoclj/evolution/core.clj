@@ -123,6 +123,7 @@
             [evoclj.compiler.core :as compiler]
             [evoclj.evolution.budget :as budget]
             [evoclj.evolution.candidate :as candidate]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.evolution.diagnose :as diagnose]
             [evoclj.evolution.evidence :as evidence]
             [evoclj.evolution.evidence-schema :as es]
@@ -509,7 +510,7 @@
       (emit-event! system (mutation-proposed-event mutation))
 
       (phase! system :apply-patch)
-      (let [candidate-genome (patch/apply-mutation parent mutation
+      (let [candidate-genome (patch/apply-mutation parent (mutation/validate-mutation mutation parent)
                                                    (:candidates-dir system))]
         (try
           (phase! system :compile-candidate)
@@ -524,11 +525,12 @@
                              :mutation/id (:mutation/id mutation)
                              :evidence/id (:evidence/id mutation)
                              :risk (:risk mutation)})
+                  candidate-store-handle (candidate-store/make-candidate-store (:sqlite (:store system)))
                   materialized (candidate/materialize-candidate!
-                                (:store system) proposed mutation)
+                                candidate-store-handle proposed mutation)
                   pending (if (= :materialized (:state materialized))
                             (candidate/mark-evaluation-pending!
-                             (:store system) (:candidate/id materialized))
+                             candidate-store-handle (:candidate/id materialized))
                             ;; dedupe: an earlier cycle already moved
                             ;; this candidate to :evaluation-pending
                             materialized)]

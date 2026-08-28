@@ -1,7 +1,12 @@
 (ns evoclj.genome.patch
   "Deterministic mutation application (component).
 
-  `apply-mutation` turns a validated Mutation IR plus a loaded immutable
+  S4: `apply-mutation` ONLY accepts sealed ValidatedMutation (the validated right).
+  RawMutation (file String) must first be validated via
+  evoclj.evolution.mutation/validate-mutation; patch never re-validates
+  raw maps — it rejects them with :patch/mutation-invalid.
+
+  `apply-mutation` turns a ValidatedMutation plus a loaded immutable
   parent Genome into a newly loaded immutable candidate Genome with a
   new :genome/id:
 
@@ -226,27 +231,73 @@
 
 ;; --- public entry point ----------------------------------------------------
 
+(defn- revalidate-canonical-ops!
+  "Defense in depth: re-validate the canonical ops of a ValidatedMutation
+  against the current parent manifest, even though validate-mutation already
+  checked. This ensures a ValidatedMutation forged via stolen secret or
+  created against a different manifest cannot bypass protected-path or
+  mutable-class gates when applied to this parent."
+  [parent validated]
+  (let [manifest (or (:manifest parent) (when (map? parent) parent))
+        ops (mutation/validated-ops validated)]
+    (doseq [op ops]
+      (let [canonical (:file op)]
+        (when-let [reason (mutation/protected-path-reason manifest canonical)]
+          (throw (err/error :mutation/protected-path
+                            "mutation targets a kernel-protected Genome path (re-validated at patch)"
+                            {:path canonical :reason reason})))
+        (when manifest
+          (let [declared (get-in manifest [:evolution :mutable])
+                cls (keyword (str/replace (first (str/split canonical #"/")) #"\.[^.]+$" ""))]
+            (when (and (set? declared) (not (contains? declared cls)))
+              (throw (err/error :mutation/undeclared-mutable-class
+                                "mutation targets an undeclared mutable asset class (re-validated at patch)"
+                                {:path canonical :class cls :declared (vec (sort declared))})))))))))
+
+(defn- ensure-validated!
+  "Ensure `mutation` is a sealed ValidatedMutation. S4: patch ONLY
+  accepts the validated right (MutableAssetRef + VerifiedDigest) produced
+  by `validate-mutation`. RawMutation maps (file String) are REJECTED
+  without re-validation — caller must validate first (definition >
+  validation). The sealed ValidatedMutation is checked via closure + private
+  field (identical? on closed-over secret), not a retrievable var. As
+  defense in depth, the canonical ops are re-validated against the current
+  parent manifest for protected-path and mutable-class, so a forged
+  ValidatedMutation (even with stolen secret) cannot bypass those gates."
+  [mutation parent]
+  (if (mutation/validated-mutation? mutation)
+    (do (revalidate-canonical-ops! parent mutation)
+        mutation)
+    (throw (err/error :patch/mutation-invalid
+                      "mutation must be a ValidatedMutation (call evoclj.evolution.mutation/validate-mutation first); RawMutation is not accepted"
+                      {:value (err/sanitize mutation)}))))
+
 (defn apply-mutation
   "Apply `mutation` to the loaded immutable `parent` Genome, staging a
   candidate bundle under `output-dir` and returning the newly loaded
   immutable candidate Genome (a map with a new :genome/id and
   :genome/root pointing at the finalized candidate directory).
 
-  `parent` must be a loaded Genome map (evoclj.genome.load/load-genome),
-  `mutation` a validated Mutation IR, and `output-dir` a
-  java.nio.file.Path or string. On any failure the staging directory is
-  removed, so no partial candidate is ever left behind."
+  S4: `mutation` MUST be a sealed ValidatedMutation (only constructible via
+  evoclj.evolution.mutation/validate-mutation). RawMutation maps are
+  rejected without re-validation.
+
+  `parent` must be a loaded Genome map (evoclj.genome.load/load-genome)
+  and `output-dir` a java.nio.file.Path or string. On any failure the
+  staging directory is removed, so no partial candidate is ever left behind."
   [parent mutation output-dir]
-  (mutation/validate-mutation mutation parent)
-  (let [output-dir (ensure-dir! (coerce-path output-dir))
-        staging (staging-dir! output-dir)]
-    (try
-      (let [contents (textual-files parent)
-            contents' (apply-ops! contents mutation)]
-        (write-staged-files! staging parent contents'))
-      (catch Throwable t
-        (delete-recursively! staging)
-        (throw t)))
-    (let [candidate (load/load-genome staging)
-          final-root (finalize! output-dir staging (:genome/id candidate))]
-      (assoc candidate :genome/root final-root))))
+  (let [validated (ensure-validated! mutation parent)
+        effective-mutation (assoc (mutation/validated->raw validated)
+                                  :ops (mutation/validated-ops validated))]
+    (let [output-dir (ensure-dir! (coerce-path output-dir))
+          staging (staging-dir! output-dir)]
+      (try
+        (let [contents (textual-files parent)
+              contents' (apply-ops! contents effective-mutation)]
+          (write-staged-files! staging parent contents'))
+        (catch Throwable t
+          (delete-recursively! staging)
+          (throw t)))
+      (let [candidate (load/load-genome staging)
+            final-root (finalize! output-dir staging (:genome/id candidate))]
+        (assoc candidate :genome/root final-root)))))

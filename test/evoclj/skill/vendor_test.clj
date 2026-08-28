@@ -2,6 +2,7 @@
   "Ownership split: external Skills vs vendored Genome skills."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
+            [evoclj.helpers :as h]
             [evoclj.skill.vendor :as vendor]
             [evoclj.evolution.mutation :as mutation]
             [evoclj.evolution.guard :as guard]
@@ -15,27 +16,10 @@
            (java.nio.charset StandardCharsets)
            (java.util UUID)))
 
-(defn- temp-dir!
-  ^Path []
-  (Files/createTempDirectory "evoclj-vendor-test" (make-array FileAttribute 0)))
-
-(defn- delete-recursively!
-  [^Path dir]
-  (when (Files/exists dir (make-array LinkOption 0))
-    (let [f (.toFile dir)]
-      (when (.isDirectory f)
-        (doseq [c (.listFiles f)]
-          (delete-recursively! (.toPath c))))
-      (Files/deleteIfExists dir))
-    nil))
-
-(defn- write-text!
-  [^Path dir rel ^String content]
-  (let [p (.resolve dir rel)]
-    (let [parent (.getParent p)]
-      (when parent (Files/createDirectories parent (make-array FileAttribute 0))))
-    (Files/write p (.getBytes content StandardCharsets/UTF_8) (make-array OpenOption 0))
-    p))
+;; temp helpers collapsed to evoclj.helpers
+(def ^:private temp-dir! h/temp-dir!)
+(def ^:private delete-recursively! h/delete-recursively!)
+(def ^:private write-text! h/write-text!)
 
 (def ^:private manifest-source
   (pr-str {:genome/format 1
@@ -72,14 +56,7 @@
 (def ^:private snapshot-limits
   {:max-depth 20 :max-files 2000 :max-total-bytes (* 20 1024 1024) :max-file-bytes (* 5 1024 1024)})
 
-(defn- try-create-symlink!
-  "Best-effort Files/createSymbolicLink. Returns false when the host
-  refuses (Windows hosts without Developer Mode or symlink privileges)."
-  [^Path target ^Path link]
-  (try
-    (Files/createSymbolicLink link target (make-array FileAttribute 0))
-    true
-    (catch Exception _ false)))
+(def ^:private try-create-symlink! h/try-create-symlink!)
 
 (defn- put-tree!
   "Store an arbitrary tree-manifest map into CAS and return its tree id."
@@ -97,6 +74,9 @@
 ;; 1. external Skill never mutation target (fails via allowlist)
 ;; ---------------------------------------------------------------------------
 
+
+;; S4 helper — collapsed to evoclj.helpers
+(def ^:private assert-validated h/assert-validated-simple)
 (deftest external-skill-never-mutation-target
   (testing "attempt to mutate external skill path fails via allowlist"
     (let [genome-dir (temp-dir!)
@@ -164,12 +144,12 @@
                        :ops [{:op :replace-text :file target :anchor "Body A original" :text "Body A updated" :expect/hash digest}]
                        :expected-effect {:primary-metric :task/success :direction :increase}}]
               ;; allowlist should accept
-              (is (= mut (mutation/validate-mutation mut parent)) "vendored path allowed")
-              (is (= mut (guard/validate-mutation-ownership! mut parent)))
+              (assert-validated mut (mutation/validate-mutation mut parent))
+              (assert-validated mut (guard/validate-mutation-ownership! mut parent))
               ;; patch application should succeed with new candidate
               (let [out-dir (temp-dir!)]
                 (try
-                  (let [candidate (patch/apply-mutation parent mut (str out-dir))]
+                  (let [candidate (patch/apply-mutation parent (mutation/validate-mutation mut parent) (str out-dir))]
                     (is (contains? (:files candidate) target))
                     (let [cbytes (get-in candidate [:files target :bytes])
                           cstr (String. (byte-array cbytes) StandardCharsets/UTF_8)]
