@@ -39,6 +39,7 @@
   Every scenario is fail-closed and typed: malformed kinds never
   silently grant."
   (:require [clojure.test :refer [deftest is testing]]
+            [evoclj.broker.registry :as reg]
             [evoclj.capability.broker :as broker]
             [evoclj.intent.core :as intent]
             [evoclj.provider.fixture :as fixture]
@@ -202,8 +203,8 @@
             branch. (Before M14 the dual branch was hard-coded, so this
             request would have been denied even without a tool lease.)"
     (let [request-only-registry
-          {:filesystem/path
-           [{:source :request :action-from :request}]}
+          (reg/make-registry {:filesystem/path
+           [{:source :request :action-from :request}]})
           normalized {:tool/id path-tool-id
                       :resource {:kind :filesystem/path
                                  :path "/work/secret"
