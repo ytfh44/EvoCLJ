@@ -34,6 +34,7 @@
    :event/session-id <uuid>   ; the operator session anchoring the
                               ; :promotion/rollback event (must exist
                               ; with its :session/created root)
+   :activation-handle (ActivationHandle) ; S5 sealed: activation only via handle
    :failpoint (fn [])}        ; OPTIONAL TEST SEAM: called inside the
                               ; transaction after both state changes,
                               ; immediately before the CAS pointer
@@ -120,6 +121,7 @@
             [malli.error :as me]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
+            [evoclj.promotion.activation :as activation]
             [evoclj.promotion.current :as current]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -151,6 +153,7 @@
             [:cas any?]]]
    [:resolution/id [:fn types/resolution-id?]]
    [:event/session-id [:fn types/session-id?]]
+   [:activation-handle {:optional true} [:fn activation/activation-handle?]]
    [:failpoint {:optional true} fn?]])
 
 (defn- schema-error!
@@ -382,6 +385,8 @@
   change and no event."
   [system request]
   (validate-system! system)
+  (when (contains? system :activation-handle)
+    (activation/assert-activation-handle! (:activation-handle system)))
   (validate-request! request)
   (let [db (get-in system [:store :sqlite])
         cas-config (get-in system [:store :cas])

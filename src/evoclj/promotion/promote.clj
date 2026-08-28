@@ -101,7 +101,8 @@
        :event/session-id <uuid>  ; the operator session anchoring the
                                  ; :promotion/* event (must exist with
                                  ; its :session/created root)
-       :failpoint (fn [])}       ; OPTIONAL TEST SEAM: called inside the
+       :activation-handle (ActivationHandle) ; S5 sealed: activation only via handle, not raw fn
+   :failpoint (fn [])}       ; OPTIONAL TEST SEAM: called inside the
                                  ; transaction after the new generation
                                  ; row exists, immediately before the
                                  ; CAS pointer move; a throw rolls back
@@ -138,6 +139,7 @@
             [evoclj.kernel.error :as err]
             [evoclj.promotion.current :as current]
             [evoclj.promotion.state :as state]
+             [evoclj.promotion.activation :as activation]
              [evoclj.security.sci-recheck :as recheck]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -171,6 +173,7 @@
             [:cas any?]]]
    [:resolution/id [:fn types/resolution-id?]]
    [:event/session-id [:fn types/session-id?]]
+   [:activation-handle {:optional true} [:fn activation/activation-handle?]]
    [:failpoint {:optional true} fn?]])
 
 (defn- schema-error!
@@ -528,6 +531,9 @@
   error vocabulary."
   [system request]
   (validate-system! system)
+  ;; S5: activation requires sealed handle when provided — arbitrary fn never accepted
+  (when (contains? system :activation-handle)
+    (activation/assert-activation-handle! (:activation-handle system)))
   (validate-request! request)
   (let [db (get-in system [:store :sqlite])
         cas-config (get-in system [:store :cas])

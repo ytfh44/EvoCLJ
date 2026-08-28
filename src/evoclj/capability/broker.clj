@@ -44,10 +44,14 @@
                         is enforced by the policy. nil means no usage
                         consumed.
   - :now                the decision instant, an #inst value.
-  - :registry           (optional) a resource-kind registry overriding
-                        the built-in default. Extensibility hook: new
-                        resource kinds are registered here, never by
-                        branching inside authorize.
+  - :registry           (optional) a sealed ResourceKindRegistry from
+                        evoclj.broker.registry overriding the built-in
+                        default. The registry is CLOSED — only
+                        allowlisted kinds (definition > validation)
+                        are accepted; an arbitrary keyword map is
+                        rejected with :registry/invalid-kind and an
+                        unregistered kind is denied with
+                        :capability/unknown-resource-kind.
 
   Fail-closed: no lease in :leases grants the request -> deny with
   :capability/missing; an UNREGISTERED resource kind -> deny with
@@ -60,47 +64,25 @@
   :capability/schema-invalid (or :intent/schema-invalid for a malformed
   intent), because garbage never authorizes and never hides a caller
   bug."
-  (:require [evoclj.capability.policy :as policy]
+  (:require [evoclj.broker.registry :as reg]
+            [evoclj.capability.policy :as policy]
             [evoclj.intent.schema :as intent-schema]
             [evoclj.kernel.error :as err]))
 
 ;; --- resource-kind registry -------------------------------------------------
 ;;
-;; The broker's former hard-coded :filesystem/path dual authorization
-;; (tool grant AND resource grant) is generalized into a REGISTRY of
-;; resource kinds. Each registered kind maps to a vector of authorization
-;; targets; every target must allow (evoclj.capability.policy/decide
-;; returns :allow) for the request as a whole to be allowed. The first
-;; target that denies short-circuits with that deny decision. This is the
-;; single dispatch mechanism: a request whose kind is NOT in the registry
-;; is rejected fail-closed (see authorize).
-;;
-;; A target is one of:
-;;   {:source :request  :action-from :request|:intent}
-;;     authorize the normalized request's :resource with the action taken
-;;     from the resource's :action (the operation projected by the
-;;     provider, e.g. evoclj.mcp.canonical/canonical-resource sets
-;;     :action :read for a filesystem read), falling back to the intent
-;;     action when the resource carries no :action;
-;;   {:source :tool     :action-from :request|:intent}
-;;     authorize a derived {:kind :tool :id <tool/id>} resource with the
-;;     given action source - this is the tool-grant half of the dual
-;;     authorization.
-;;
-;; The :filesystem/path entry is now just ONE registry entry whose
-;; target vector has two members (tool + request); there is no special
-;; case. New kinds are added by extending this map - never by branching
-;; inside authorize (extensibility, not two hard-coded branches).
+;; S6 — closed registry (definition > validation). The broker's
+;; former open map is now a sealed ResourceKindRegistry from
+;; evoclj.broker.registry. The closed allowlist
+;; reg/allowed-resource-kinds is the single definition; validation
+;; checks membership. New kinds are added by extending the allowlist
+;; definition, never by passing an arbitrary keyword map.
 
 (def ^:private default-resource-kind-registry
-  "The built-in resource-kind registry (fail-closed default). Unregistered
-  kinds are denied with :capability/unknown-resource-kind by authorize."
-  {:tool [{:source :request :action-from :request}]
-   :model [{:source :request :action-from :request}]
-   :memory [{:source :request :action-from :request}]
-   :filesystem [{:source :request :action-from :request}]
-   :filesystem/path [{:source :tool :action-from :intent}
-                     {:source :request :action-from :request}]})
+  "The sealed built-in resource-kind registry (fail-closed default).
+  Delegates to evoclj.broker.registry/default-registry — the closed
+  allowlist is the single source."
+  (reg/default-registry))
 
 (defn- resolve-target-resource
   "The canonical resource a target authorizes against."
@@ -136,9 +118,9 @@
   resource carries none. Pure: no I/O, no state change, no provider
   invocation - the effectful dispatcher arrives in component
 
-  Optional input: :registry overrides the built-in resource-kind registry
-  (extensibility / testing); when absent the
-  default-resource-kind-registry is used.
+  Optional input: :registry overrides the built-in sealed registry
+  (must be a ResourceKindRegistry from evoclj.broker.registry; an
+  arbitrary map is rejected with :registry/invalid-kind).
 
   See the namespace docstring for the input contract and the stable
   deny reason codes; an unregistered resource kind is denied with
@@ -150,10 +132,11 @@
     (throw (err/error :capability/schema-invalid
                       "normalized request must carry a :resource map"
                       {:value (err/sanitize normalized-request)})))
+  (reg/assert-registry! registry)
   (let [subject (policy/intent-subject intent)
-        reg (or registry default-resource-kind-registry)
+        reg-sealed (or registry default-resource-kind-registry)
         kind (:kind (:resource normalized-request))
-        targets (get reg kind)]
+        targets (reg/registry-get reg-sealed kind)]
     (if (nil? targets)
       ;; unregistered resource kind -> fail closed (no implicit default)
       {:decision :deny :reason :capability/unknown-resource-kind}
