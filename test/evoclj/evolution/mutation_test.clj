@@ -38,6 +38,7 @@
   still schema-valid end to end."
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
+            [evoclj.helpers :as h]
             [evoclj.compiler.topology :as topology]
             [evoclj.evolution.mutation :as mutation]
             [evoclj.evolution.mutation-schema :as ms]
@@ -64,6 +65,15 @@
 
 ;; --- the parent manifest (seed declaration) ----------------------------------
 
+
+;; S4 helper: assert ValidatedMutation right
+(defn- assert-validated
+  "Assert that validate-mutation returns a ValidatedMutation whose raw equals expected and whose asset-refs/verified-digests are typed."
+  [expected validated]
+  (clojure.test/is (mutation/validated-mutation? validated))
+  (clojure.test/is (= expected (mutation/validated->raw validated)))
+  (clojure.test/is (every? #(instance? evoclj.evolution.mutation.MutableAssetRef %) (:asset-refs validated)))
+  (clojure.test/is (every? #(or (nil? %) (instance? evoclj.evolution.mutation.VerifiedDigest %)) (:verified-digests validated))))
 (def ^:private seed-manifest
   "The seed Genome's manifest contract, reduced to the keys mutation
   preconditions read: the declared module paths (for the protected
@@ -252,7 +262,7 @@
     (testing "the normative Mutation shape validates at the schema level"
       (is (= m (ms/validate-mutation m))))
     (testing "and passes the full precondition pipeline against the parent manifest"
-      (is (= m (mutation/validate-mutation m seed-manifest))))))
+      (assert-validated m (mutation/validate-mutation m seed-manifest)))))
 
 (deftest step-1-all-thirteen-op-variants-validate
   (doseq [[label v] all-op-variants]
@@ -260,13 +270,12 @@
       (is (= v (ms/validate-op v))))
     (testing (str (name label) " validates inside a mutation against a
               policy that declares its asset class mutable")
-      (is (= (mutation* {:ops [v]})
-             (mutation/validate-mutation (mutation* {:ops [v]}) permissive-manifest))))))
+      (assert-validated (mutation* {:ops [v]}) (mutation/validate-mutation (mutation* {:ops [v]}) permissive-manifest)))))
 
 (deftest step-1-mutation-envelope-is-a-closed-contract
   (testing "a valid mutation validates unchanged"
     (is (= (mutation*) (ms/validate-mutation (mutation*))))
-    (is (= (mutation*) (mutation/validate-mutation (mutation*) seed-manifest))))
+    (assert-validated (mutation*) (mutation/validate-mutation (mutation*) seed-manifest)))
   (testing "unknown top-level keys are rejected (closed map)"
     (is (= :mutation/invalid
            (thrown-error-type #(ms/validate-mutation (assoc (mutation*) :bogus 1))))))
@@ -420,10 +429,7 @@
                 "parameters/temperature.edn"
                 "programs/route.clj"]]
     (testing (pr-str file)
-      (is (= (mutation* {:ops [(assoc (op) :file file)]})
-             (mutation/validate-mutation
-              (mutation* {:ops [(assoc (op) :file file)]})
-              seed-manifest))))))
+      (assert-validated (mutation* {:ops [(assoc (op) :file file)]}) (mutation/validate-mutation (mutation* {:ops [(assoc (op) :file file)]}) seed-manifest)))))
 
 (deftest step-3-without-a-manifest-path-safety-still-applies
   (testing "traversal and protected paths are rejected even with no manifest"
@@ -435,13 +441,12 @@
             #(mutation/validate-mutation (mutation* {:ops [(assoc (op) :file "manifest.edn")]}))))))
   (testing "the mutable-class gate needs the parent manifest; without it the
             mutation is still schema- and path-valid"
-    (is (= (mutation* {:ops [(assoc (op) :file "topology.edn")]})
-           (mutation/validate-mutation (mutation* {:ops [(assoc (op) :file "topology.edn")]}))))))
+    (assert-validated (mutation* {:ops [(assoc (op) :file "topology.edn")]}) (mutation/validate-mutation (mutation* {:ops [(assoc (op) :file "topology.edn")]})))))
 
 (deftest step-3-the-loaded-genome-context-form-is-supported
   (let [context {:genome/id genome-id :manifest seed-manifest :files {}}]
     (testing "a mutation validated against the loaded parent Genome map"
-      (is (= (mutation*) (mutation/validate-mutation (mutation*) context))))
+      (assert-validated (mutation*) (mutation/validate-mutation (mutation*) context)))
     (testing "undeclared classes are rejected through the genome context"
       (is (= :mutation/undeclared-mutable-class
              (thrown-error-type
@@ -451,35 +456,11 @@
 
 ;; --- symlink escape integration (through allowed-genome-path?) ---------------
 
-(defn- temp-dir!
-  ^Path []
-  (Files/createTempDirectory "evoclj-mutation-test" (make-array FileAttribute 0)))
-
-(defn- write-text-file!
-  "Write `content` to `dir`/`rel` (a Path), creating parent directories."
-  [^Path dir rel ^String content]
-  (let [p (.resolve dir rel)]
-    (Files/createDirectories (.getParent p) (make-array FileAttribute 0))
-    (Files/write p (.getBytes content StandardCharsets/UTF_8)
-                 (make-array java.nio.file.OpenOption 0))
-    p))
-
-(defn- try-create-symlink!
-  "Best-effort Files/createSymbolicLink. Returns false when the host
-  refuses (Windows hosts without Developer Mode or symlink privileges)."
-  [^Path target ^Path link]
-  (try
-    (Files/createSymbolicLink link target (make-array FileAttribute 0))
-    true
-    (catch Exception _ false)))
-
-(defn- delete-recursively! [^Path dir]
-  (when (Files/exists dir (make-array LinkOption 0))
-    (let [f (.toFile dir)]
-      (when (.isDirectory f)
-        (doseq [c (.listFiles f)]
-          (delete-recursively! (.toPath c))))
-      (Files/deleteIfExists dir))))
+;; temp helpers collapsed to evoclj.helpers
+(def ^:private temp-dir! h/temp-dir!)
+(def ^:private write-text-file! h/write-text!)
+(def ^:private try-create-symlink! h/try-create-symlink!)
+(def ^:private delete-recursively! h/delete-recursively!)
 
 (deftest step-3-symlink-escapes-are-rejected-through-allowed-genome-path
   (let [dir (temp-dir!)

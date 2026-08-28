@@ -209,6 +209,7 @@
             [evoclj.eval.runner :as runner]
             [evoclj.eval.workers :as workers]
             [evoclj.evolution.candidate :as candidate]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.genome.load :as load]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
@@ -377,7 +378,8 @@
   "The persisted Candidate record for `candidate-id`, required to be in
   :evaluation-pending (the machine's edge precondition)."
   [evaluator candidate-id]
-  (let [c (candidate/find-candidate (:store evaluator) candidate-id)]
+  (let [cstore (candidate-store/make-candidate-store (:sqlite (:store evaluator)))
+        c (candidate/find-candidate cstore candidate-id)]
     (when-not c
       (throw (err/error :eval/candidate-not-found
                         "no candidate with this id"

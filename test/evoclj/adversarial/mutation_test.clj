@@ -43,8 +43,10 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [evoclj.helpers :as h :refer [with-temp-dirs]]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.load :as load]
+            [evoclj.evolution.mutation :as mutation]
             [evoclj.genome.patch :as patch]
             [evoclj.genome.path :as gpath]
             [evoclj.genome.types :as types]
@@ -95,92 +97,36 @@
    "programs/route.clj" route-source
    "programs/multi.clj" multi-source})
 
-;; --- temp-dir helpers ------------------------------------------------------
+;; --- temp-dir helpers — collapsed to evoclj.helpers -------------------------
 
-(defn- temp-dir! ^Path []
-  (Files/createTempDirectory "evoclj-mutation-adv-" (make-array FileAttribute 0)))
-
-(def ^:private nofollow-links
-  "LinkOption array meaning NOFOLLOW_LINKS for the Files checks in
-  delete-recursively!."
-  (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-
-(defn- delete-recursively! [^Path dir]
-  ;; A symlink is deleted AS A LINK (never followed, never recursed into),
-  ;; so cleanup cannot escape the tree through a link; regular directories
-  ;; are recursed, plain files deleted. NOFOLLOW existence keeps dangling
-  ;; links from reading as nonexistent and being left behind.
-  (when (Files/exists dir nofollow-links)
-    (if (Files/isSymbolicLink dir)
-      (Files/delete dir)
-      (let [f (.toFile dir)]
-        (when (.isDirectory f)
-          (doseq [c (.listFiles f)]
-            (delete-recursively! (.toPath c))))
-        (Files/delete dir)))))
-
-(defmacro with-temp-dirs [names & body]
-  (let [names (vec names)]
-    `(let [~@(mapcat (fn [n] [n `(temp-dir!)]) names)]
-       (try
-         ~@body
-         (finally
-           (doseq [~'d ~names]
-             (delete-recursively! ~'d)))))))
-
-(defn- write-text-file!
-  "Write `content` to `dir`/`rel`, creating parent directories."
-  [^Path dir rel ^String content]
-  (let [p (.resolve dir rel)]
-    (Files/createDirectories (.getParent p) (make-array FileAttribute 0))
-    (Files/write p (.getBytes content StandardCharsets/UTF_8)
-                 (make-array OpenOption 0))
-    p))
+(def ^:private temp-dir! h/temp-dir!)
+(def ^:private delete-recursively! h/delete-recursively!)
+(def ^:private write-text-file! h/write-text!)
+(def ^:private try-create-symlink! h/try-create-symlink!)
+(def ^:private text-of h/text-of)
+(def ^:private dir-entries h/dir-entries)
+(def ^:private thrown-error h/thrown-error)
+(def ^:private error-type h/error-type)
 
 (defn- write-genome! [^Path dir]
   (doseq [[rel content] fixture-files]
-    (write-text-file! dir rel content))
+    (h/write-text! dir rel content))
   dir)
 
-(defn- try-create-symlink!
-  "Best-effort Files/createSymbolicLink. Returns false when the host
-  refuses (Windows hosts without Developer Mode or symlink privileges)."
-  [^Path target ^Path link]
-  (try
-    (Files/createSymbolicLink link target (make-array FileAttribute 0))
-    true
-    (catch Exception _ false)))
-
-(defn- text-of
-  "Decode an immutable file payload's :bytes as UTF-8 text."
-  [file-value]
-  (String. ^bytes (byte-array (:bytes file-value)) StandardCharsets/UTF_8))
-
-(defn- dir-entries [^Path dir]
-  (->> (.list (.toFile dir)) sort vec))
-
-(defn- thrown-error
-  "The ExceptionInfo thrown by (f), or nil."
-  [f]
-  (try (f) nil (catch clojure.lang.ExceptionInfo e e)))
-
-(defn- error-type
-  "The :error/type of the ExceptionInfo thrown by (f), or nil."
-  [f]
-  (:error/type (ex-data (thrown-error f))))
-
 ;; --- mutation fixtures -----------------------------------------------------
-
 (defn- mutation-with
-  "A schema-valid Mutation envelope carrying `ops`, pinned to `parent`."
+  "A schema-valid Mutation envelope carrying `ops`, pinned to `parent` — returns sealed ValidatedMutation for valid ops, raw for traversal cases to test patch rejection."
   [parent ops]
-  {:mutation/id (java.util.UUID/randomUUID)
-   :parent/genome-id (:genome/id parent)
-   :hypothesis/id (java.util.UUID/randomUUID)
-   :evidence/id "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-   :risk :program
-   :ops ops
-   :expected-effect {:primary-metric :task/success :direction :increase}})
+  (let [m {:mutation/id (java.util.UUID/randomUUID)
+           :parent/genome-id (:genome/id parent)
+           :hypothesis/id (java.util.UUID/randomUUID)
+           :evidence/id "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+           :risk :program
+           :ops ops
+           :expected-effect {:primary-metric :task/success :direction :increase}}]
+    (if (some #(clojure.string/includes? (str (:file %)) "..") ops)
+      m
+      (evoclj.evolution.mutation/validate-mutation m parent))))
 
 (defn- set-edn-op
   "A :set-edn op against skills/debugging.edn with the fixture preimage."
@@ -209,8 +155,8 @@
                                               (make-array FileAttribute 0))
           mutation (mutation-with parent [(set-edn-op {:file "../escape.edn"})])]
       (testing "a traversal :file is rejected by the mutation gate"
-        (is (= :mutation/path-invalid
-               (error-type #(patch/apply-mutation parent mutation output-dir)))))
+        (is (= :patch/mutation-invalid
+           (error-type #(patch/apply-mutation parent mutation output-dir)))))
       (testing "the rejection precedes every write — no candidate, no staging,
                 and the escaped location was never touched"
         (is (= [] (dir-entries output-dir))
@@ -224,8 +170,8 @@
                                                 (make-array FileAttribute 0))
             mutation (mutation-with parent
                                     [(set-edn-op {:file "..\\..\\secret.edn"})])]
-        (is (= :mutation/path-invalid
-               (error-type #(patch/apply-mutation parent mutation output-dir))))
+        (is (= :patch/mutation-invalid
+           (error-type #(patch/apply-mutation parent mutation output-dir))))
         (is (= [] (dir-entries output-dir)))))))
 
 (deftest case-2-symlink-inside-the-candidate-staging-tree-is-rejected-without-following
@@ -246,7 +192,7 @@
           (testing "the mutation gate anchored at :genome/root rejects an op
                     whose :file resolves through the symlink — before staging"
             (is (= :mutation/path-invalid
-                   (error-type #(patch/apply-mutation
+           (error-type #(patch/apply-mutation
                                  parent
                                  (mutation-with parent [(set-edn-op)])
                                  output-dir))))
