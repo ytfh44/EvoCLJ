@@ -40,11 +40,35 @@
 (def ^:private resolution-id (str "sha256:" (apply str (repeat 64 "r"))))
 (def ^:private generation-id "generation-1")
 
+;; --- VerifiedDigest helpers (Fleet P5/F) ---------------------------------------
+(defn- ->proof [id] (#'evoclj.store.existence/unsafe-verified-digest id))
+(defn- proof-candidate [c]
+  (if (and (map? c) (:candidate/genome-id c))
+    (update c :candidate/genome-id ->proof)
+    c))
+(defn- proof-mutation [m]
+  (if (map? m)
+    (cond-> m
+      (:parent/genome-id m) (update :parent/genome-id ->proof)
+      (:evidence/id m) (update :evidence/id ->proof)
+      (:payload-ref m) (update :payload-ref ->proof)
+      (:candidate/payload-ref m) (update :candidate/payload-ref ->proof))
+    m))
+(defn- materialize-with-proof! [store candidate mutation]
+  (candidate/materialize-candidate! store (proof-candidate candidate) (proof-mutation mutation)))
+
 (defn- fresh-db []
   (let [path (temp-db-path)
         db (sqlite/spec path)]
     (migrate/migrate! db)
     (sqlite/with-db [conn db]
+      (jdbc/insert! conn :artifacts {:hash parent-genome-id :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash candidate-genome-id :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash resolution-id :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash evidence-id :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash file-hash :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :genomes {:id parent-genome-id :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :genomes {:id candidate-genome-id :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :generations
                     {:id generation-id
                      :genome_id parent-genome-id
@@ -92,7 +116,7 @@
                    :mutation/id (:mutation/id mut)
                    :evidence/id evidence-id
                    :risk :behavioral})
-            materialized (candidate/materialize-candidate! h cand mut)]
+            materialized (materialize-with-proof! h cand mut)]
         (is (= :materialized (:state materialized)))
         ;; CURRENT still 1 — candidate path never touched generations.current, verify via raw db
         (let [row (first (sqlite/query db ["SELECT current FROM generations WHERE id = ?" generation-id]))]
@@ -150,7 +174,7 @@
                :evidence/id evidence-id
                :risk :behavioral})]
     (testing "new handle works directly"
-      (let [m (candidate/materialize-candidate! h cand mut)]
+      (let [m (materialize-with-proof! h cand mut)]
         (is (= :materialized (:state m)))))
     (testing "legacy {:sqlite :cas} map is rejected with :candidate/store-invalid"
       (let [mut2 (assoc mut :mutation/id (UUID/randomUUID))
@@ -161,7 +185,7 @@
                     :mutation/id (:mutation/id mut2)
                     :evidence/id evidence-id
                     :risk :behavioral})]
-        (is (= :candidate/store-invalid (:error/type (try (candidate/materialize-candidate! legacy cand2 mut2) (catch clojure.lang.ExceptionInfo e (ex-data e))))))
-        (is (thrown? clojure.lang.ExceptionInfo (candidate/materialize-candidate! legacy cand2 mut2)))
+        (is (= :candidate/store-invalid (:error/type (try (materialize-with-proof! legacy cand2 mut2) (catch clojure.lang.ExceptionInfo e (ex-data e))))))
+        (is (thrown? clojure.lang.ExceptionInfo (materialize-with-proof! legacy cand2 mut2)))
         (is (thrown? clojure.lang.ExceptionInfo (candidate/find-candidate legacy cand2)))
         (is (thrown? clojure.lang.ExceptionInfo (candidate/find-candidates-by-parent legacy parent-genome-id)))))))

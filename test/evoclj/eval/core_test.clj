@@ -50,6 +50,7 @@
             [evoclj.eval.replay :as replay]
             [evoclj.eval.static :as static]
             [evoclj.evolution.candidate :as candidate]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.metrics.core :as metrics]
             [evoclj.provider.protocol :as proto]
             [evoclj.store.cas :as cas]
@@ -185,6 +186,14 @@
         cas-root (temp-path! "evoclj-core-cas-")]
     (migrate/migrate! db)
     (sqlite/with-db [conn db]
+      ;; P5/F: ensure FK targets before generations
+      (jdbc/insert! conn :artifacts {:hash parent-genome-id :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash candidate-genome-id :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash resolution-id :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash evidence-id :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash file-hash :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :genomes {:id parent-genome-id :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :genomes {:id candidate-genome-id :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :generations
                     {:id generation-id
                      :genome_id parent-genome-id
@@ -195,6 +204,34 @@
                      :created_at "2025-01-01T00:00:00Z"}))
     {:sqlite db :cas (cas/->cas cas-root)}))
 
+;; --- VerifiedDigest helpers (Fleet P5/F) ---------------------------------------
+(defn- ->proof [id] (#'evoclj.store.existence/unsafe-verified-digest id))
+(defn- proof-candidate [c]
+  (if (and (map? c) (:candidate/genome-id c))
+    (update c :candidate/genome-id ->proof)
+    c))
+(defn- proof-mutation [m]
+  (if (map? m)
+    (cond-> m
+      (:parent/genome-id m) (update :parent/genome-id ->proof)
+      (:evidence/id m) (update :evidence/id ->proof)
+      (:payload-ref m) (update :payload-ref ->proof)
+      (:candidate/payload-ref m) (update :candidate/payload-ref ->proof))
+    m))
+(defn- materialize-with-proof! [store candidate mutation]
+  (let [h (evoclj.store.candidate-store/make-candidate-store (:sqlite store))
+        pc (proof-candidate candidate)
+        pm (proof-mutation mutation)]
+    (candidate/materialize-candidate! h pc pm)))
+
+(defn- mark-pending-via-store! [store candidate-id]
+  (let [h (evoclj.store.candidate-store/make-candidate-store (:sqlite store))]
+    (candidate/mark-evaluation-pending! h candidate-id)))
+
+(defn- find-candidate-via-store [store candidate-id]
+  (let [h (evoclj.store.candidate-store/make-candidate-store (:sqlite store))]
+    (candidate/find-candidate h candidate-id)))
+
 (defn- materialized-pending!
   "Materialize a fresh candidate from the fixture parent+mutation and
   transition it to :evaluation-pending. Returns the pending Candidate
@@ -202,8 +239,8 @@
   [store]
   (let [m (mutation*)
         c (candidate/create-candidate (candidate-request))
-        m1 (candidate/materialize-candidate! store c m)]
-    (candidate/mark-evaluation-pending! store (:candidate/id m1))))
+        m1 (materialize-with-proof! store c m)]
+    (mark-pending-via-store! store (:candidate/id m1))))
 
 ;; --- genome bundles (component paired-fixture style) --------------------------
 
@@ -435,7 +472,7 @@
                  (get-in hard [:detail :violations 0 :gate/id])))))
       (testing "the evaluation still completed: the candidate is :evaluated"
         (is (= :evaluated
-               (:state (candidate/find-candidate store (:candidate/id pending)))))))))
+               (:state (find-candidate-via-store store (:candidate/id pending)))))))))
 
 ;; ============================================================================
 ;; Step 3 — a finalized evaluation is immutable; reruns create new ids
@@ -490,7 +527,7 @@
                        ["SELECT id FROM eval_runs WHERE candidate_id = ?"
                         (str (:candidate/id pending))]))))
       (is (= :evaluated
-             (:state (candidate/find-candidate store (:candidate/id pending))))))))
+             (:state (find-candidate-via-store store (:candidate/id pending))))))))
 
 (deftest simulated-persistence-failure-rolls-back-atomically
   (let [store (fresh-store)
@@ -510,7 +547,7 @@
                           (str (:candidate/id pending))])))))
     (testing "the candidate state is untouched — still :evaluation-pending"
       (is (= :evaluation-pending
-             (:state (candidate/find-candidate store (:candidate/id pending))))))))
+             (:state (find-candidate-via-store store (:candidate/id pending))))))))
 
 ;; ============================================================================
 ;; Step 5 — Milestone 8 exit: eligibility with an evidence trail, no CURRENT
@@ -570,7 +607,7 @@
         (is (nil? (:paired-results-ref evaluation))
             "the evidence trail records exactly what ran: no paired artifact")
         (is (= :evaluated
-               (:state (candidate/find-candidate store (:candidate/id pending))))
+               (:state (find-candidate-via-store store (:candidate/id pending))))
             "evaluation completed — the candidate is :evaluated, not promoted")))))
 
 ;; ============================================================================
@@ -686,7 +723,7 @@
       (testing "the evaluation still completed normally"
         (is (false? (:eligible? (:eligibility evaluation))))
         (is (= :evaluated
-               (:state (candidate/find-candidate store
+               (:state (find-candidate-via-store store
                                                  (:candidate/id pending)))))))))
 
 (deftest without-collector-evaluation-is-a-metric-no-op

@@ -98,13 +98,18 @@
                                            (make-array FileAttribute 0)))
         cas-path (str (Files/createTempDirectory "evoclj-paired-cas-"
                                                  (make-array FileAttribute 0)))
-        db (sqlite/spec db-path)]
+        db (sqlite/spec db-path)
+        gid (str "sha256:" (apply str (repeat 64 "0")))
+        rid (str "sha256:" (apply str (repeat 64 "1")))]
     (migrate/migrate! db)
     (sqlite/with-db [conn db]
+      (jdbc/insert! conn :artifacts {:hash gid :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash rid :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :genomes {:id gid :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :generations
                     {:id generation-id
-                     :genome_id (str "sha256:" (apply str (repeat 64 "0")))
-                     :resolution_id (str "sha256:" (apply str (repeat 64 "1")))
+                     :genome_id gid
+                     :resolution_id rid
                      :parent_id nil
                      :state "active"
                      :current 0

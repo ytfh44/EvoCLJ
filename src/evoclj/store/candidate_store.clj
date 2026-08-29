@@ -17,14 +17,21 @@
     (candidates_normalized view) and the physical columns are kept
     for backward compat but enforced to equal the mutation row via
     DB triggers (008-normalize-candidate.sql) and store-level
-    derivation on write. See row->candidate and materialize!."
+    derivation on write. See row->candidate and materialize!.
+
+  P5/F (DAG P5/F — CAS FK / existence proof): genome/evidence/payload
+    references are existence proofs (VerifiedDigest) at the app boundary
+    and FOREIGN KEYs at rest (009-cas-fk-existence.sql). Raw payload_ref
+    strings are not proofs and are rejected where a proof is required
+    (existence/ensure-proof)."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [evoclj.evolution.candidate-states :as cstates]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
-            [evoclj.store.sqlite :as sqlite])
+            [evoclj.store.sqlite :as sqlite]
+            [evoclj.store.existence :as existence])
   (:import (java.time Instant)
            (java.time.format DateTimeFormatter)
            (java.util Date UUID)))
@@ -77,6 +84,7 @@
 (defn- canonical
   [x]
   (cond
+    (existence/verified-digest? x) (existence/digest-of x)
     (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
                    (map (fn [[k v]] [k (canonical v)])) x)
     (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
@@ -129,6 +137,23 @@
      :state state
      :created-at (Date/from (Instant/parse (:created_at row)))}))
 
+(defn- proof->digest
+  "Require a VerifiedDigest existence proof (Fleet P5/F) and return its
+  canonical sha256:<64 hex> digest. Raw strings are rejected — they are
+  not proofs (definition > validation). The caller must supply a
+  VerifiedDigest sealed by evoclj.store.existence (verified-digest or
+  the private unsafe-verified-digest for tests via var indirection)."
+  [x]
+  (existence/digest-of (existence/ensure-proof x)))
+
+(defn- payload-ref-of
+  "Extract payload_ref digest from candidate or mutation if present as proof/string."
+  [candidate mutation]
+  (when-let [v (or (:candidate/payload-ref candidate)
+                   (:payload-ref candidate)
+                   (:payload-ref mutation))]
+    (proof->digest v)))
+
 (defn- insert-mutation-row!
   [conn mutation ts]
   (jdbc/execute! conn
@@ -137,9 +162,9 @@
                     risk, ops, expected_effect, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                   (str (:mutation/id mutation))
-                  (:parent/genome-id mutation)
+                  (proof->digest (:parent/genome-id mutation))
                   (str (:hypothesis/id mutation))
-                  (:evidence/id mutation)
+                  (proof->digest (:evidence/id mutation))
                   (name (:risk mutation))
                   (pr-str (:ops mutation))
                   (pr-str (:expected-effect mutation))
@@ -147,7 +172,7 @@
   (let [row (first (jdbc/query conn
                                ["SELECT parent_genome_id FROM mutations WHERE id = ?"
                                 (str (:mutation/id mutation))]))]
-    (when (and row (not= (:parent/genome-id mutation) (:parent_genome_id row)))
+    (when (and row (not= (proof->digest (:parent/genome-id mutation)) (:parent_genome_id row)))
       (throw (err/error :candidate/mutation-mismatch
                         "an existing mutation row with this id belongs to a different parent genome"
                         {:mutation/id (:mutation/id mutation)
@@ -182,6 +207,11 @@
   "Materialize candidate via CandidateStore (internal Fleet R impl).
   See evoclj.evolution.candidate/materialize-candidate! for contract.
 
+  P5/F Existence proof (DAG P5/F): genome_id/evidence_id/payload_ref MUST be
+  VerifiedDigest proofs (sealed by evoclj.store.existence). Raw strings are
+  rejected at this boundary (existence/ensure-proof); the DB FK (009) is the
+  second enforcement at rest.
+
   S3 Normalization: parent_genome_id, evidence_id, risk are DERIVED
   from the mutation (definition > validation). The candidate map's
   duplicate fields are ignored; the mutation's values are written to
@@ -199,21 +229,26 @@
     (sqlite/with-db [conn db]
       (set-busy-timeout! conn 10000)
       (insert-mutation-row! conn mutation ts)
-      (if-let [row (find-by-dedupe-key conn (:parent/genome-id mutation) mh)]
+      (if-let [row (find-by-dedupe-key conn (proof->digest (:parent/genome-id mutation)) mh)]
         ;; find-by-dedupe-key now returns a JOIN-derived row; normalize via row->candidate
         (row->candidate row)
         (do
           ;; S3: derive duplicate fields from mutation, not candidate
+          (let [payload-ref (payload-ref-of candidate mutation)
+              parent-genome-id (proof->digest (:parent/genome-id mutation))
+              cand-genome-id (proof->digest (:candidate/genome-id candidate))
+              evid-id (proof->digest (:evidence/id mutation))]
           (jdbc/insert! conn :candidates
-                        {:id (str (:candidate/id candidate))
-                         :parent_generation_id (:parent/generation-id candidate)
-                         :parent_genome_id (:parent/genome-id mutation)
-                         :genome_id (:candidate/genome-id candidate)
-                         :mutation_id (str (:mutation/id mutation))
-                         :evidence_id (:evidence/id mutation)
-                         :risk (name (:risk mutation))
-                         :state "materialized"
-                         :created_at ts})
+                        (cond-> {:id (str (:candidate/id candidate))
+                                 :parent_generation_id (:parent/generation-id candidate)
+                                 :parent_genome_id parent-genome-id
+                                 :genome_id cand-genome-id
+                                 :mutation_id (str (:mutation/id mutation))
+                                 :evidence_id evid-id
+                                 :risk (name (:risk mutation))
+                                 :state "materialized"
+                                 :created_at ts}
+                          payload-ref (assoc :payload_ref payload-ref))))
           (row->candidate
            (first (jdbc/query conn
                               ["SELECT c.*, m.parent_genome_id AS m_parent_genome_id, m.evidence_id AS m_evidence_id, m.risk AS m_risk

@@ -42,15 +42,21 @@
     p))
 
 (defn- insert-generation! [db id {:keys [current parent genome]}]
-  (sqlite/with-db [conn db]
-    (jdbc/insert! conn :generations
-                  {:id id
-                   :genome_id (or genome hash1)
-                   :resolution_id "resolution-1"
-                   :parent_id parent
-                   :state "active"
-                   :current (if current 1 0)
-                   :created_at now})))
+  (let [gid (or genome hash1)
+        rid "resolution-1"]
+    (sqlite/with-db [conn db]
+      ;; P5/F: ensure FK targets for generations
+      (try (jdbc/insert! conn :artifacts {:hash gid :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
+      (try (jdbc/insert! conn :artifacts {:hash rid :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+      (try (jdbc/insert! conn :genomes {:id gid :created_at now}) (catch Exception _ nil))
+      (jdbc/insert! conn :generations
+                    {:id id
+                     :genome_id gid
+                     :resolution_id rid
+                     :parent_id parent
+                     :state "active"
+                     :current (if current 1 0)
+                     :created_at now}))))
 
 (deftest kernel-state-table-exists
   (let [p (fresh-db-path)
@@ -124,7 +130,7 @@
                               (jdbc/execute! conn ["UPDATE kernel_state SET current_generation = ? WHERE id=1" "no-such-generation"])))))))
 
 (deftest singleton-seeded-from-existing-current
-  (testing "real v6 -> 8 migration seeds kernel_state from existing current=1 row"
+  (testing "real v6 -> 9 migration seeds kernel_state from existing current=1 row"
     (let [p (temp-db-path)
           db (sqlite/spec p)
           v6-files ["001-init.sql" "002-memory.sql" "003-routing.sql" "004-enrichment.sql" "005-deploy.sql" "006-session-bindings.sql"]
@@ -146,9 +152,9 @@
       ;; insert a generation with current=1 at v6
       (insert-generation! db g1 {:current true})
       (is (= 1 (-> (sqlite/query db ["SELECT current FROM generations WHERE id=?" g1]) first :current)))
-      ;; migrate to 008 should create kernel_state and seed from existing current
+      ;; migrate to 009 should create kernel_state and seed from existing current
       (let [result (migrate/migrate! db)]
-        (is (= 8 (:version result))))
+        (is (= 9 (:version result))))
       (is (= g1 (-> (sqlite/query db ["SELECT current_generation FROM kernel_state WHERE id=1"]) first :current_generation)))
       (is (= 1 (-> (sqlite/query db ["SELECT current FROM generations WHERE id=?" g1]) first :current)))
       (is (= 1 (count (sqlite/query db ["SELECT id FROM kernel_state"])))))))
