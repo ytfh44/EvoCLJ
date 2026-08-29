@@ -228,6 +228,13 @@
         t2 "2025-01-01T00:01:00Z"
         t3 "2025-01-01T00:02:00Z"]
     (sqlite/with-db [conn db]
+      ;; Fleet P5/F + 011 FK: ensure artifacts/genomes exist before FK-dependent rows
+      (let [res-c (str "sha256:" (apply str (repeat 64 "c")))
+            res-d (str "sha256:" (apply str (repeat 64 "d")))]
+        (doseq [h [parent-id candidate-id rejected-id res-c res-d evidence-2 evidence-3 paired-2]]
+          (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, ?, ?, ?)" h "application/octet-stream" 0 t1]))
+        (doseq [g [parent-id candidate-id rejected-id]]
+          (jdbc/execute! conn ["INSERT OR IGNORE INTO genomes (id, created_at) VALUES (?, ?)" g t1])))
       (jdbc/insert! conn :generations
                     {:id "generation-1" :genome_id parent-id
                      :resolution_id (str "sha256:" (apply str (repeat 64 "c")))

@@ -71,8 +71,10 @@
 
 (defn- seed-generation! [db]
   (sqlite/with-db [conn db]
+    ;; Fleet P5/F + 011: FK targets for generations and sessions (artifacts/genomes before generations/sessions)
     (try (jdbc/insert! conn :artifacts {:hash parent-genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
     (try (jdbc/insert! conn :artifacts {:hash parent-resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+    (try (jdbc/insert! conn :artifacts {:hash phenotype :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
     (try (jdbc/insert! conn :genomes {:id parent-genome :created_at now}) (catch Exception _ nil))
     (jdbc/insert! conn :generations {:id seed-gen :genome_id parent-genome :resolution_id parent-resolution :parent_id nil :state "active" :current 1 :created_at now})))
 
@@ -80,6 +82,7 @@
   (sqlite/with-db [conn db]
     (try (jdbc/insert! conn :artifacts {:hash parent-genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
     (try (jdbc/insert! conn :artifacts {:hash parent-resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+    (try (jdbc/insert! conn :artifacts {:hash phenotype :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
     (try (jdbc/insert! conn :genomes {:id parent-genome :created_at now}) (catch Exception _ nil))
     (jdbc/insert! conn :generations {:id retired-gen :genome_id parent-genome :resolution_id parent-resolution :parent_id nil :state "retired" :current 0 :created_at now})))
 
@@ -116,7 +119,7 @@
   ([{:keys [n-candidates eligibility parent-generation genome-body]}]
    (let [db (fresh-db) cas-root (temp-cas-root) cas (cas/->cas cas-root)
          _ (seed-generation! db)
-         _ (sqlite/with-db [conn db] (try (jdbc/insert! conn :artifacts {:hash new-resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil)))
+         _ (sqlite/with-db [conn db] (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, ?, ?, ?)" new-resolution "application/edn" 0 now]))
          _ (when (and parent-generation (not= parent-generation seed-gen)) (add-retired-generation! db))
          parent-gen-id (or parent-generation seed-gen)
          elig (or eligibility {:eligible? true :reasons []})

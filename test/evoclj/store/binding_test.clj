@@ -64,10 +64,11 @@
 (defn- seed-generation! [db]
   (sqlite/with-db [conn db]
     (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
-      ;; P5/F: ensure FK targets exist before generations insert
-      (try (jdbc/insert! conn :artifacts {:hash genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
-      (try (jdbc/insert! conn :artifacts {:hash resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
-      (try (jdbc/insert! conn :genomes {:id genome :created_at now}) (catch Exception _ nil))
+      ;; Fleet P5/F FK (011): ensure FK targets exist before generations/sessions insert (artifacts/genomes before generations/sessions)
+      (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" genome])
+      (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" resolution])
+      (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" phenotype])
+      (jdbc/execute! conn ["INSERT OR IGNORE INTO genomes (id, created_at) VALUES (?, datetime('now'))" genome])
       (jdbc/insert! conn :generations
                     {:id gen
                      :genome_id genome

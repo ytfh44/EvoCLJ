@@ -107,9 +107,10 @@
   "Insert the CURRENT (current = 1) seed generation row."
   [db]
   (sqlite/with-db [conn db]
-    ;; P5/F: ensure FK targets
+    ;; Fleet P5/F + 011: FK targets for generations and sessions (artifacts/genomes before generations/sessions)
     (try (jdbc/insert! conn :artifacts {:hash parent-genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
     (try (jdbc/insert! conn :artifacts {:hash parent-resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+    (try (jdbc/insert! conn :artifacts {:hash phenotype :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
     (try (jdbc/insert! conn :genomes {:id parent-genome :created_at now}) (catch Exception _ nil))
     (jdbc/insert! conn :generations
                   {:id seed-gen
@@ -127,6 +128,7 @@
   (sqlite/with-db [conn db]
     (try (jdbc/insert! conn :artifacts {:hash parent-genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
     (try (jdbc/insert! conn :artifacts {:hash parent-resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+    (try (jdbc/insert! conn :artifacts {:hash phenotype :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
     (try (jdbc/insert! conn :genomes {:id parent-genome :created_at now}) (catch Exception _ nil))
     (jdbc/insert! conn :generations
                   {:id retired-gen
