@@ -67,6 +67,11 @@
   ([db sid]
    (sqlite/with-db [conn db]
      (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
+       ;; P5/F + P4: ensure FK targets for generations (genome + resolution)
+       (try (jdbc/insert! conn :artifacts {:hash genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
+       (try (jdbc/insert! conn :artifacts {:hash resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+       (try (jdbc/insert! conn :artifacts {:hash phenotype :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
+       (try (jdbc/insert! conn :genomes {:id genome :created_at now}) (catch Exception _ nil))
        (jdbc/insert! conn :generations
                      {:id gen
                       :genome_id genome
