@@ -494,10 +494,11 @@
 
 (def ^:private topology-a
   "Parent A's topology: a linear graph whose subtree at :node/planner
-  is {planner, finish}."
+  is {planner, finish}. Uses only executable node types so the fixture
+  compiles under the default runtime feature set (Definition > validation)."
   {:graph/id :graph/main
    :entry :node/entry
-   :nodes {:node/entry {:node/type :route :next :node/planner}
+   :nodes {:node/entry {:node/type :sci :program :program/route :next :node/planner}
            :node/planner {:node/type :llm :model :model/planner :next :node/finish}
            :node/finish {:node/type :emit}}
    :limits {:max-steps 64}})
@@ -505,10 +506,10 @@
 (def ^:private topology-b
   "Parent B's topology: the planner subtree grows an extra :node/tool
   and lacks :node/finish entirely — the graft the crossover must
-  transplant into the child."
+  transplant into the child. Uses only executable types."
   {:graph/id :graph/main
    :entry :node/entry
-   :nodes {:node/entry {:node/type :route :next :node/planner}
+   :nodes {:node/entry {:node/type :sci :program :program/route :next :node/planner}
            :node/planner {:node/type :sci :program :program/route :next :node/tool}
            :node/tool {:node/type :tool :tool :fixture/echo}}
    :limits {:max-steps 32}})
@@ -620,7 +621,7 @@
     (testing "a parent whose topology fails compiler validation is rejected"
       (let [bad {:graph/id :graph/main
                  :entry :node/ghost
-                 :nodes {:node/entry {:node/type :route :next :node/planner}
+                 :nodes {:node/entry {:node/type :sci :program :program/route :next :node/planner}
                          :node/planner {:node/type :llm :model :m :next :node/finish}
                          :node/finish {:node/type :emit}}}
             ctx-bad (genome-context seed-manifest bad)

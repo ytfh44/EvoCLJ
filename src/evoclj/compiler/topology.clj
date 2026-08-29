@@ -38,14 +38,32 @@
   Error types: :topology/invalid (malformed shapes, unknown node type,
   missing entry node, dangling :next, dangling :body, duplicate node
   ids, missing required node keys, invalid :limits, invalid
-  :max-iterations — distinguished by :reason) and :topology/cycle (a
+  :max-iterations — distinguished by :reason), :topology/cycle (a
   raw cycle without a :loop node, with the sorted cycle node ids in
-  :nodes)."
+  :nodes), and :topology/unsupported-node-type (a syntactically known
+  node type with no runtime handler — e.g. :route — rejected at
+  compile time because Definition > validation: only executable types
+  are representable via compile; the :reason is
+  :unsupported-node-type and :node/type carries the offending type)."
   (:require [evoclj.kernel.error :as err]))
 
-(def supported-node-types
-  "The normative v0 node type set."
+(def syntax-node-types
+  "The normative v0 syntax node type set — every type the compiler knows syntactically (definition).
+  :route is syntactically valid but not executable without a handler; see executable-node-types."
   #{:llm :sci :tool :route :loop :emit :memory/read :memory/write})
+
+(def executable-node-types
+  "The subset of syntax-node-types the runtime can execute today (handler exists).
+  Definition > validation: only executable types are representable via compile; :route is
+  syntax-only until its handler lands, so compile rejects it with :topology/unsupported-node-type
+  unless the caller provides an expanded runtime feature set that includes it."
+  #{:llm :sci :tool :loop :emit :memory/read :memory/write})
+
+(def supported-node-types
+  "Legacy alias for syntax-node-types. Prefer syntax-node-types / executable-node-types.
+  Kept for compatibility; new code should use executable-node-types for the runtime feature set
+  and syntax-node-types for the full syntactic set."
+  syntax-node-types)
 
 (def ^:private required-keys
   "Per-type keys a node must declare. :loop carries its normative component shape: :body (the iterated node id), :until (the done? program
@@ -144,12 +162,16 @@
 ;; --- per-node validation ---------------------------------------------------
 
 (defn- validate-node!
-  [id node]
+  [id node executable-types]
   (let [t (:node/type node)]
-    (when-not (contains? supported-node-types t)
+    (when-not (contains? syntax-node-types t)
       (throw (err/error :topology/invalid
                         "unsupported node type"
                         {:reason :unknown-node-type :node-id id :node/type t})))
+    (when-not (contains? executable-types t)
+      (throw (err/error :topology/unsupported-node-type
+                        "node type has no runtime handler (Definition > validation)"
+                        {:reason :unsupported-node-type :node-id id :node/type t})))
     (doseq [k attribute-keys]
       (when (and (contains? node k) (not (keyword? (get node k))))
         (throw (err/error :topology/invalid
@@ -277,6 +299,13 @@
   pairs, which is how duplicate ids can be expressed in pure EDN; they
   are rejected with :reason :duplicate-node-id.
 
+  `executable-types` is the runtime feature set — the set of node types
+  the target runtime can execute (handler exists). Definition >
+  validation: only executable types are representable via compile. By
+  default it is executable-node-types, so a topology containing :route
+  (syntax-only, no handler) fails with :topology/unsupported-node-type
+  unless the caller provides an expanded set that includes :route.
+
   Returns a pure data map {:graph/id ... :entry ... :nodes {node-id
   {:node/id ... :node/type ...}} :adjacency {node-id [successors]}
   :limits {...}} with every map sorted, so identical logical topologies
@@ -289,23 +318,34 @@
   :invalid-node-entry, :invalid-node-id, :invalid-node,
   :unknown-node-type, :invalid-attribute, :missing-required-key,
   :dangling-next, :dangling-body, :invalid-max-iterations,
-  :missing-entry, :duplicate-node-id) or
-  :topology/cycle (a raw cycle with no :loop node; :nodes holds the
-  sorted cycle ids)."
-  [topology]
-  (validate-shape! topology)
-  (let [entries (node-entries (:nodes topology))
-        node-map (normalize-nodes entries)
-        node-ids (set (keys node-map))
-        entry (:entry topology)]
-    (check-entry! entry node-ids)
-    (doseq [[id node] entries]
-      (validate-node! id node))
-    (check-nexts! entries node-ids)
-    (check-cycles! entries node-map)
-    (into (sorted-map-by canonical-compare)
-          {:graph/id (:graph/id topology)
-           :entry entry
-           :nodes node-map
-           :adjacency (build-adjacency node-map)
-           :limits (or (:limits topology) {})})))
+  :missing-entry, :duplicate-node-id), :topology/cycle (a raw cycle
+  with no :loop node; :nodes holds the sorted cycle ids), or
+  :topology/unsupported-node-type (a syntactically known type with no
+  runtime handler; :reason :unsupported-node-type, :node/type carries
+  the offending type; :route is the canonical example)."
+  ([topology] (compile-topology topology executable-node-types))
+  ([topology executable-types]
+   (when-not (set? executable-types)
+     (throw (err/error :topology/invalid
+                       "executable-types must be a set of keywords"
+                       {:reason :invalid-executable-types :value (err/sanitize executable-types)})))
+   (when-not (every? keyword? executable-types)
+     (throw (err/error :topology/invalid
+                       "executable-types must be a set of keywords"
+                       {:reason :invalid-executable-types :value (err/sanitize executable-types)})))
+   (validate-shape! topology)
+   (let [entries (node-entries (:nodes topology))
+         node-map (normalize-nodes entries)
+         node-ids (set (keys node-map))
+         entry (:entry topology)]
+     (check-entry! entry node-ids)
+     (doseq [[id node] entries]
+       (validate-node! id node executable-types))
+     (check-nexts! entries node-ids)
+     (check-cycles! entries node-map)
+     (into (sorted-map-by canonical-compare)
+           {:graph/id (:graph/id topology)
+            :entry entry
+            :nodes node-map
+            :adjacency (build-adjacency node-map)
+            :limits (or (:limits topology) {})}))))

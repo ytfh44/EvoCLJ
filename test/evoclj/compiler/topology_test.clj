@@ -12,6 +12,7 @@
   key order of the source topology (Step 4)."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.set :as set]
             [clojure.test :refer [deftest is testing]]
             [evoclj.compiler.topology :as topology]))
 
@@ -27,6 +28,40 @@
 (deftest supported-v0-node-types
   (is (= #{:llm :sci :tool :route :loop :emit :memory/read :memory/write}
          topology/supported-node-types)))
+
+(deftest syntax-vs-executable-split
+  (testing "syntax is the full v0 syntactic set including :route"
+    (is (= #{:llm :sci :tool :route :loop :emit :memory/read :memory/write}
+           topology/syntax-node-types))
+    (is (= topology/syntax-node-types topology/supported-node-types)))
+  (testing "executable is the runtime feature set (handler exists)"
+    (is (= #{:llm :sci :tool :loop :emit :memory/read :memory/write}
+           topology/executable-node-types))
+    (is (not (contains? topology/executable-node-types :route))))
+  (testing "known-unimplemented is exactly syntax minus executable"
+    (is (= #{:route} (set/difference topology/syntax-node-types topology/executable-node-types)))))
+
+(deftest route-topology-rejected-without-handler
+  (testing ":route is syntax-only and unrepresentable via compile (Definition > validation)"
+    (let [t {:graph/id :graph/main
+             :entry :node/a
+             :nodes {:node/a {:node/type :route :next :node/b}
+                     :node/b {:node/type :emit}}}
+          e (compile-error t)]
+      (is (instance? clojure.lang.ExceptionInfo e))
+      (is (= :topology/unsupported-node-type (:error/type (ex-data e))))
+      (is (= :unsupported-node-type (:reason (ex-data e))))
+      (is (= :node/a (:node-id (ex-data e))))
+      (is (= :route (:node/type (ex-data e))))))
+  (testing "with an expanded runtime feature set that includes :route, the same topology compiles"
+    (let [t {:graph/id :graph/main
+             :entry :node/a
+             :nodes {:node/a {:node/type :route :next :node/b}
+                     :node/b {:node/type :emit}}}
+          c (topology/compile-topology t (conj topology/executable-node-types :route))]
+      (is (map? c))
+      (is (= :route (get-in c [:nodes :node/a :node/type])))
+      (is (= [:node/b] (get-in c [:adjacency :node/a]))))))
 
 ;; --- seed fixture ----------------------------------------------------------
 
