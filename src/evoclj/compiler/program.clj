@@ -53,6 +53,8 @@
   (:require [clojure.string :as str]
             [evoclj.kernel.error :as err]
             [evoclj.genome.path :as path]
+            [evoclj.store.schema :as schema-registry]
+            [malli.core :as m]
             [rewrite-clj.node :as rn]
             [rewrite-clj.parser :as rp]
             [rewrite-clj.zip :as rz])
@@ -431,6 +433,30 @@
 
 ;; --- public entry point ----------------------------------------------------
 
+(defn- resolve-schema!
+  "Resolve kw via the closed schema registry (evoclj.store.schema), fail-closed.
+  Definition > validation: phantom keywords (e.g. :schema/unicorn) are unrepresentable.
+  Returns the Malli schema value when registered, throws :program/invalid with
+  :reason :unknown-schema otherwise. The resolved schema is validated as a Malli
+  schema via m/schema."
+  [kw field]
+  (let [s (schema-registry/resolve-schema kw)]
+    (when-not s
+      (throw (err/error :program/invalid
+                        (str "unknown schema keyword " kw " — not registered")
+                        {:reason :unknown-schema
+                         :field field
+                         :schema kw
+                         :registered (vec (sort (keys (schema-registry/schema-registry))))})))
+    ;; ensure resolved value is a valid Malli schema (fail-closed on bad registry entry)
+    (try (m/schema s)
+         (catch Exception _
+           (throw (err/error :program/schema-invalid
+                             "resolved schema is not a valid Malli schema"
+                             {:reason :invalid-schema :field field :schema kw
+                              :value (err/sanitize s)}))))
+    s))
+
 (defn compile-program-descriptor
   "Validate a declared program descriptor against a loaded Genome and
   return a pure serializable ProgramDescriptor.
@@ -441,30 +467,44 @@
   result (its :files map holds the immutable program bytes).
 
   Validation order: descriptor shape (closed key set, value types) ->
-  canonical path + .clj extension -> file existence in the bundle ->
-  source readability (rewrite-clj structure parse) -> compile-policy
-  inspection -> entry symbol consistency (namespace declared by the
-  source, simple name defined at top level). Nothing is executed.
+  schema keyword resolution via the closed registry (evoclj.store.schema;
+  phantom keywords like :schema/unicorn fail with :program/invalid
+  :reason :unknown-schema — Definition > validation: only registered
+  schemas are representable) -> canonical path + .clj extension -> file
+  existence in the bundle -> source readability (rewrite-clj structure
+  parse) -> compile-policy inspection -> entry symbol consistency
+  (namespace declared by the source, simple name defined at top level).
+  Nothing is executed.
 
   Returns {:program/id ... :file <canonical path> :entry ... 
-  :input-schema ... :output-schema ... :source/digest <sha256:<64
+  :input-schema ... :output-schema ... :schema/input <Malli schema>
+  :schema/output <Malli schema> :source/digest <sha256:<64
   hex>> :source/ns [<declared namespaces>]}, where :source/digest is
   the Genome's canonical CRLF-normalized text digest of the program
   file (evoclj.genome.hash/text-digest — the same digest that appears
   in the Genome tree), so a compiled program's digest always matches
-  the Genome that declared it. The result round-trips through
-  pr-str / clojure.edn read-string (Global Constraint 22).
+  the Genome that declared it. The compiled descriptor carries the
+  resolved Malli schemas under :schema/input and :schema/output (and
+  aliased as :input-schema/schema / :output-schema/schema) so a phantom
+  keyword is unrepresentable — Definition > validation. The result
+  round-trips through pr-str / clojure.edn read-string (Global
+  Constraint 22).
 
   Throws ExceptionInfo with a stable :error/type: :program/invalid
   (:reason distinguishes :invalid-descriptor, :unknown-descriptor-key,
   :invalid-entry, :not-clojure-source, :invalid-genome, :entry-missing,
-  :entry-namespace-mismatch), :program/path-invalid,
+  :entry-namespace-mismatch, :unknown-schema), :program/path-invalid,
   :program/file-missing, :program/parse-error, or
   :program/policy-violation (see policy-violation for :reason values)."
   [descriptor loaded-genome]
   (validate-descriptor! descriptor)
   (validate-genome! loaded-genome)
-  (let [entry (:entry descriptor)
+  ;; PLT3: resolve schema keywords via closed registry, fail-closed on phantom
+  (let [input-kw (:input-schema descriptor)
+        output-kw (:output-schema descriptor)
+        input-schema (resolve-schema! input-kw :input-schema)
+        output-schema (resolve-schema! output-kw :output-schema)]
+    (let [entry (:entry descriptor)
         [file payload] (resolve-program-file! descriptor loaded-genome)
         source (String. ^bytes (byte-array (:bytes payload))
                         StandardCharsets/UTF_8)
@@ -497,7 +537,15 @@
       {:program/id (:program/id descriptor)
        :file file
        :entry entry
-       :input-schema (:input-schema descriptor)
-       :output-schema (:output-schema descriptor)
+       :input-schema input-kw
+       :output-schema output-kw
+       ;; PLT3: compiled descriptor carries resolved Malli schemas, not just keywords
+       ;; Definition > validation: phantom keyword unrepresentable — only registered schemas compile
+       :schema/input input-schema
+       :schema/output output-schema
+       :input-schema/schema input-schema
+       :output-schema/schema output-schema
+       :resolved/input-schema input-schema
+       :resolved/output-schema output-schema
        :source/digest (:digest payload)
-       :source/ns declared})))
+       :source/ns declared}))))
