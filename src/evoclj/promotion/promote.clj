@@ -19,7 +19,7 @@
       mark old active → superseded
       mark new generation → active
       CAS CURRENT pointer
-      append promotion event
+      append promotion event (OUTBOX — same transaction)
       COMMIT
 
   Serialization: the transaction is opened with BEGIN IMMEDIATE
@@ -63,24 +63,23 @@
   mapping: :evaluated ↔ 'eligible', :promoted ↔ 'promoted', :stale ↔
   'stale'.
 
-  PROMOTION EVENT ANCHORING (deviation from the letter of the
-  normative order, reported): evoclj.store.event/append-event! opens
-  its OWN BEGIN IMMEDIATE connection — by design, for per-session
-  sequence allocation — so it cannot run inside this namespace's
-  transaction (a nested BEGIN fails). The :promotion/promoted and
-  :promotion/stale events are therefore appended via
-  evoclj.store.event AFTER this transaction commits: the event always
-  references a COMMITTED promotion (never a dangling event), and the
-  append-only log is unchanged. The event is anchored to the operator
-  session carried by promotion-system (:event/session-id), which must
-  pre-exist pinned to the parent generation with its :session/created
-  root event — the host's job, exactly as evoclj.evolution.core
-  documents for its own event sink. The event's :generation/id is the
-  session's pinned (parent) generation; the metadata carries
-  :from/:to, and the promotions row carries the full lineage for
-  reconstruction (component). The anchor is validated INSIDE the
-  transaction so a promotion can never commit without an appendable
-  event anchor.
+  PROMOTION EVENT ANCHORING (Fleet P4 outbox — atomic, single transaction):
+  evoclj.store.event/append-event! previously opened its OWN BEGIN IMMEDIATE
+  connection, so it could not run inside this namespace's transaction (nested
+  BEGIN fails) — the gap this fleet closes. The :promotion/promoted and
+  :promotion/stale events are NOW appended INSIDE the same BEGIN IMMEDIATE
+  transaction that moves CURRENT (outbox pattern). A dedicated helper
+  insert-event-in-tx! allocates the per-session seq, verifies cause, computes
+  the hash chain (sha256 over canonical header via evoclj.genome.hash), and
+  INSERTs the event row on the SAME raw Connection before COMMIT. An outbox
+  row (promotion_outbox) FK-links the promotion and event (dispatched=0) in
+  the same commit. Either both promotion+CURRENT and event+outbox commit, or
+  a throw (including :failpoint) rolls back every write — no dagling promotion
+  without event, no event without promotion. The event remains anchored to the
+  operator session carried by promotion-system (:event/session-id), which must
+  pre-exist pinned to the parent generation with its :session/created root
+  event — validated INSIDE the transaction so a promotion can never commit
+  without an appendable anchor.
 
   INTERFACE (normative, component):
 
@@ -104,22 +103,24 @@
        :activation-handle (ActivationHandle) ; S5 sealed: activation only via handle, not raw fn
    :failpoint (fn [])}       ; OPTIONAL TEST SEAM: called inside the
                                  ; transaction after the new generation
-                                 ; row exists, immediately before the
-                                 ; CAS pointer move; a throw rolls back
-                                 ; every write
+                                 ; row exists AND after the promotion event
+                                 ; has been appended (same txn), immediately
+                                 ; before COMMIT; a throw rolls back every
+                                 ; write including the event/outbox
 
   OUTCOMES:
 
   - :promoted — pointer moved G42 → G43; the parent generation is
     :superseded ('retired'), the candidate is :promoted, a promotions
     row (decision 'promoted') records the lineage, and the
-    :promotion/promoted event is appended.
+    :promotion/promoted event is appended atomically.
   - :stale — the candidate's parent generation is no longer CURRENT
     (a sibling won the CAS). No promotions row is recorded (there is
     no :to generation for a non-move; the component promotions
     decision 'stale' is reserved for later host-level rejection
     bookkeeping). The losing candidate is marked :stale (component:
-    the CAS-loser edge), and the :promotion/stale event is appended.
+    the CAS-loser edge), and the :promotion/stale event is appended
+    atomically in the same transaction.
 
   Typed errors (Global Constraint 22 — plain serializable data):
   :promotion/invalid (request contract violation), :promotion/system-invalid,
@@ -237,6 +238,15 @@
       (.setObject stmt (inc i) v))
     (.executeUpdate stmt)))
 
+(defn- raw-insert!
+  "Execute a parameterized INSERT on `conn` inside the promotion
+  transaction; nil parameters bind as SQL NULL."
+  [^java.sql.Connection conn sql params]
+  (with-open [stmt (.prepareStatement conn sql)]
+    (doseq [[i v] (map-indexed vector params)]
+      (.setObject stmt (inc i) v))
+    (.executeUpdate stmt)))
+
 (defmacro ^:private with-promotion-tx
   "Open a connection, enable FK enforcement and a busy timeout, begin
   an IMMEDIATE write transaction, run body, commit, and roll back on
@@ -287,6 +297,101 @@
   [genome-id resolution-id]
   (str "generation-"
        (subs (hash/text-digest (str genome-id "\n" resolution-id)) 7 23)))
+
+;; --- event helpers (outbox pattern — same-connection insert) -----------------
+
+(defn- type->db
+  "The full keyword string stored in the event_type column."
+  [t]
+  (if-let [ns (namespace t)]
+    (str ns "/" (name t))
+    (name t)))
+
+(defn- canonical-header
+  "Deterministic canonical header an event hash is computed over."
+  [h]
+  (str (:session/id h) "\n"
+       (:event/seq h) "\n"
+       (type->db (:event/type h)) "\n"
+       (or (:cause/event-id h) "") "\n"
+       (or (:payload-ref h) "") "\n"
+       (or (:prev-hash h) "") "\n"
+       (:created-at h)))
+
+(defn- event-hash
+  "sha256:<64 hex> over the canonical header."
+  [h]
+  (hash/text-digest (canonical-header h)))
+
+(defn- edn-safe-metadata?
+  "Metadata must round-trip through pr-str / edn read-string."
+  [m]
+  (try
+    (map? (edn/read-string (pr-str m)))
+    (catch Exception _ false)))
+
+(defn- insert-event-in-tx!
+  "Append one :promotion/* event INSIDE the caller's open promotion
+  transaction (same Connection). Allocates per-session seq as
+  MAX(event_seq)+1, validates cause, links prev-hash, computes hash,
+  and INSERTs the row. Returns {:event/id <int> :event/seq <int>}.
+  Throws typed errors on violation — the promotion transaction rolls
+  back."
+  [conn session-key event-type metadata ts]
+  (let [session-id (types/session-id session-key)
+        ;; session must exist and carry phenotype/generation (validated earlier via read-event-anchor! but re-read for event fields)
+        sess (first (raw-query conn "SELECT generation_id, phenotype_id FROM sessions WHERE id = ?" [session-key]))
+        _ (when-not sess
+            (throw (err/error :store/session-not-found
+                              "cannot anchor the promotion event to an unknown operator session"
+                              {:session/id session-id})))
+        generation-id (:generation_id sess)
+        phenotype-id (:phenotype_id sess)
+        ;; newest event is the cause (the :session/created root or prior promotion event)
+        newest (first (raw-query conn "SELECT id, event_seq, event_hash FROM events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1" [session-key]))
+        cause-id (:id newest)
+        new-seq (if newest (inc (:event_seq newest)) 1)
+        prev-hash (:event_hash newest)
+        _ (when (nil? cause-id)
+            (throw (err/error :promotion/event-anchor-missing
+                              "the operator session must carry its :session/created root event first"
+                              {:session/id session-id})))
+        header {:session/id session-key
+                :event/seq new-seq
+                :event/type event-type
+                :cause/event-id (str cause-id)
+                :payload-ref nil
+                :prev-hash prev-hash
+                :created-at ts}
+        ev-hash (event-hash header)
+        _ (when-not (edn-safe-metadata? metadata)
+            (throw (err/error :store/event-invalid
+                              "metadata must be EDN-safe Clojure data"
+                              {:event/type event-type})))]
+    (raw-insert! conn
+                 "INSERT INTO events
+                       (session_id, event_seq, generation_id, phenotype_id,
+                        event_type, cause_event_id, payload_ref, payload,
+                        prev_hash, event_hash, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                 [session-key new-seq generation-id phenotype-id
+                  (type->db event-type) cause-id nil (pr-str metadata)
+                  prev-hash ev-hash ts])
+    ;; retrieve the inserted row's autoincrement id
+    (let [row (first (raw-query conn "SELECT id, event_seq FROM events WHERE session_id = ? AND event_seq = ?" [session-key new-seq]))]
+      {:event/id (:id row) :event/seq (:event_seq row) :event/hash ev-hash})))
+
+(defn- insert-outbox-in-tx!
+  "Insert the promotion_outbox row linking promotion and event in the
+  same transaction. promotion-id may be nil for stale path."
+  [conn promotion-id session-key event-id event-type event-seq ts]
+  (let [outbox-id (str (UUID/randomUUID))]
+    (raw-insert! conn
+                 "INSERT INTO promotion_outbox
+                    (id, promotion_id, session_id, event_id, event_type, event_seq, created_at, dispatched)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, 0)"
+                 [outbox-id promotion-id session-key event-id (type->db event-type) event-seq ts])
+    outbox-id))
 
 ;; --- in-transaction reads and verification -------------------------------------
 
@@ -427,13 +532,13 @@
   "Record the promotion decision (Database Invariant 5): one row
   referencing exactly this candidate and this finalized evaluation,
   naming the generation pair the pointer moved between."
-  [conn candidate-row evaluation-row from-gen to-gen reason ts]
+  [conn promotion-id candidate-row evaluation-row from-gen to-gen reason ts]
   (raw-update! conn
                "INSERT INTO promotions
                   (id, candidate_id, evaluation_id, from_generation_id,
                    to_generation_id, decision, reason, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-               [(str (UUID/randomUUID))
+               [promotion-id
                 (:id candidate-row)
                 (:id evaluation-row)
                 from-gen
@@ -487,41 +592,6 @@
                 parent-gen
                 ts]))
 
-(defn- append-promotion-event!
-  "Append the :promotion/promoted or :promotion/stale event through
-  evoclj.store.event AFTER the promotion transaction committed (the
-  documented deviation — append-event! owns its own BEGIN IMMEDIATE
-  transaction). The event is anchored to the operator session: its
-  :generation/id and :phenotype/id are the session's pinned values
-  (append-event! enforces the match), its :cause is the session's
-  newest event (its :session/created root), and the metadata carries
-  the move. A failed append is loud — the promotion itself is already
-  committed, and the operator must reconcile."
-  [db session-key result]
-  (let [sess (first (sqlite/query db
-                                  ["SELECT generation_id, phenotype_id FROM sessions WHERE id = ?"
-                                   session-key]))
-        newest (first (sqlite/query db
-                                    ["SELECT MAX(id) AS id FROM events WHERE session_id = ?"
-                                     session-key]))]
-    (when-not sess
-      (throw (err/error :store/session-not-found
-                        "cannot anchor the promotion event to an unknown operator session"
-                        {:session/id session-key})))
-    (event/append-event! db
-                         {:session/id (types/session-id session-key)
-                          :generation/id (:generation_id sess)
-                          :phenotype/id (:phenotype_id sess)
-                          :event/type (if (= :promoted (:status result))
-                                        :promotion/promoted
-                                        :promotion/stale)
-                          :cause/event-id (:id newest)
-                          :payload-ref nil
-                          :metadata (if (= :promoted (:status result))
-                                      {:from (:from result) :to (:to result)}
-                                      {:expected (:expected result)
-                                       :current (:current result)})})))
-
 ;; --- the public entry point --------------------------------------------------------
 
 (defn promote!
@@ -544,93 +614,100 @@
         expected-parent (:expected-parent-generation request)
         ts (canonical-timestamp nil)]
     ;; THE PROMOTION TRANSACTION (the normative order; the outcome map
-    ;; is returned, or a throw rolls back every write).
-    (let [result (with-promotion-tx [conn db]
-                   (let [candidate (read-candidate-row! conn candidate-id)
-                         evaluation (read-evaluation! conn candidate-id evaluation-id)
-                         eligibility (edn/read-string (:eligibility evaluation))
-                         _ (state/deployment-transition :evaluated eligibility :promoted)
-                         ;; the event anchor must exist before we commit anything
-                         _ (read-event-anchor! conn session-key)
-                         ;; read CURRENT
-                         current-row (current/read-current conn)]
-                     (when-not current-row
-                       (throw (err/error :promotion/cas-invalid
-                                         "no CURRENT generation to promote from"
-                                         {})))
-                     (let [current-gen (:id current-row)
-                           candidate-parent (:parent_generation_id candidate)]
-                       (cond
-                         ;; compare CURRENT == candidate.parent — the CAS-loser
-                         ;; test: the candidate's parent is no longer current
-                         (not= current-gen candidate-parent)
-                         (do (record-stale! conn candidate)
-                             {:status :stale
-                              :current current-gen
-                              :expected expected-parent})
+    ;; is returned, or a throw rolls back every write INCLUDING the event/outbox).
+    (with-promotion-tx [conn db]
+      (let [candidate (read-candidate-row! conn candidate-id)
+            evaluation (read-evaluation! conn candidate-id evaluation-id)
+            eligibility (edn/read-string (:eligibility evaluation))
+            _ (state/deployment-transition :evaluated eligibility :promoted)
+            ;; the event anchor must exist before we commit anything
+            _ (read-event-anchor! conn session-key)
+            ;; read CURRENT
+            current-row (current/read-current conn)]
+        (when-not current-row
+          (throw (err/error :promotion/cas-invalid
+                            "no CURRENT generation to promote from"
+                            {})))
+        (let [current-gen (:id current-row)
+              candidate-parent (:parent_generation_id candidate)]
+          (cond
+            ;; compare CURRENT == candidate.parent — the CAS-loser
+            ;; test: the candidate's parent is no longer current
+            (not= current-gen candidate-parent)
+            (let [result {:status :stale
+                          :current current-gen
+                          :expected expected-parent}
+                  metadata {:expected expected-parent :current current-gen}
+                  ev (insert-event-in-tx! conn session-key :promotion/stale metadata ts)
+                  _ (insert-outbox-in-tx! conn nil session-key (:event/id ev) :promotion/stale (:event/seq ev) ts)]
+              (record-stale! conn candidate)
+              ;; test seam: a throw here must roll back every write INCLUDING the event/outbox
+              (when-let [hook (:failpoint system)]
+                (hook))
+              result)
 
-                         ;; the caller's expectation must agree with the
-                         ;; candidate's lineage (Database Invariant 8) — a
-                         ;; broken caller fails loudly rather than promoting
-                         ;; against a different parent
-                         (not= expected-parent candidate-parent)
-                         (throw (err/error :promotion/parent-mismatch
-                                           "expected parent disagrees with the candidate's lineage"
-                                           {:candidate/id candidate-id
-                                            :expected-parent expected-parent
-                                            :candidate/parent candidate-parent
-                                            :current current-gen}))
+            ;; the caller's expectation must agree with the
+            ;; candidate's lineage (Database Invariant 8) — a
+            ;; broken caller fails loudly rather than promoting
+            ;; against a different parent
+            (not= expected-parent candidate-parent)
+            (throw (err/error :promotion/parent-mismatch
+                              "expected parent disagrees with the candidate's lineage"
+                              {:candidate/id candidate-id
+                               :expected-parent expected-parent
+                               :candidate/parent candidate-parent
+                               :current current-gen}))
 
-                         ;; promote: full lineage verification, then the writes
-                         :else
-                         (let [new-gen (new-generation-id (:genome_id candidate)
-                                                          resolution-id)
-                               reason {:expected-parent expected-parent
-                                       :candidate-state :evaluated
-                                       :eligibility eligibility
-                                       :to-generation new-gen}]
-                           ;; Database Invariant 7: the Genome exists and
-                           ;; re-hashes before activation
-                           ;; Database Invariant 7: the Genome exists and
-                            ;; re-hashes before activation; its verified
-                            ;; body IS the candidate's evolvable SCI program
-                            ;; source, which we run through the SCI sandbox
-                            ;; static recheck gate BEFORE any write (fail-closed).
-                            (let [source (verify-genome-integrity! cas-config (:genome_id candidate))
-                                  gate (sci-sandbox-gate source)]
-                              (when-not (:passed? gate)
-                                (throw (err/error :promotion/sci-sandbox-failed
-                                                  "sci sandbox recheck failed"
-                                                  {:reason "sci sandbox recheck failed"
-                                                   :violations (:violations gate)}))))
-                           ;; mark new generation → active FIRST: the
-                           ;; promotions.to_generation_id FK requires the
-                           ;; target row to pre-exist (documented reorder,
-                           ;; same transaction)
-                           (insert-new-generation! conn candidate resolution-id
-                                                   expected-parent new-gen ts)
-                           ;; insert promotion decision
-                           (insert-promotion-row! conn candidate evaluation
-                                                  expected-parent new-gen reason ts)
-                           ;; mark old active → superseded
-                           (supersede-generation! conn expected-parent)
-                           ;; mark the candidate :promoted
-                           (mark-candidate-promoted! conn candidate)
-                           ;; test seam: a throw here must roll back every write
-                           (when-let [hook (:failpoint system)]
-                             (hook))
-                           ;; CAS CURRENT pointer — the final in-transaction guard
-                           (let [cas-result (current/cas-current! conn
-                                                                  expected-parent
-                                                                  new-gen)]
-                             (when (= :stale cas-result)
-                               (throw (err/error :promotion/cas-invalid
-                                                 "CURRENT moved underneath the promotion"
-                                                 {:expected-parent expected-parent
-                                                  :to-generation new-gen})))
-                             {:status :promoted :from expected-parent :to new-gen}))))))]
-      ;; append the promotion event AFTER the commit (documented
-      ;; deviation — see the namespace docstring), then return the
-      ;; outcome unchanged
-      (append-promotion-event! db session-key result)
-      result)))
+            ;; promote: full lineage verification, then the writes
+            :else
+            (let [new-gen (new-generation-id (:genome_id candidate)
+                                             resolution-id)
+                  reason {:expected-parent expected-parent
+                          :candidate-state :evaluated
+                          :eligibility eligibility
+                          :to-generation new-gen}
+                  promotion-id (str (UUID/randomUUID))]
+              ;; Database Invariant 7: the Genome exists and
+              ;; re-hashes before activation; its verified
+              ;; body IS the candidate's evolvable SCI program
+              ;; source, which we run through the SCI sandbox
+              ;; static recheck gate BEFORE any write (fail-closed).
+              (let [source (verify-genome-integrity! cas-config (:genome_id candidate))
+                    gate (sci-sandbox-gate source)]
+                (when-not (:passed? gate)
+                  (throw (err/error :promotion/sci-sandbox-failed
+                                    "sci sandbox recheck failed"
+                                    {:reason "sci sandbox recheck failed"
+                                     :violations (:violations gate)}))))
+              ;; mark new generation → active FIRST: the
+              ;; promotions.to_generation_id FK requires the
+              ;; target row to pre-exist (documented reorder,
+              ;; same transaction)
+              (insert-new-generation! conn candidate resolution-id
+                                      expected-parent new-gen ts)
+              ;; insert promotion decision
+              (insert-promotion-row! conn promotion-id candidate evaluation
+                                     expected-parent new-gen reason ts)
+              ;; mark old active → superseded
+              (supersede-generation! conn expected-parent)
+              ;; mark the candidate :promoted
+              (mark-candidate-promoted! conn candidate)
+              ;; CAS CURRENT pointer — the final in-transaction guard
+              (let [cas-result (current/cas-current! conn
+                                                     expected-parent
+                                                     new-gen)]
+                (when (= :stale cas-result)
+                  (throw (err/error :promotion/cas-invalid
+                                    "CURRENT moved underneath the promotion"
+                                    {:expected-parent expected-parent
+                                     :to-generation new-gen})))
+                ;; append promotion event + outbox ATOMICALLY in same txn
+                (let [metadata {:from expected-parent :to new-gen}
+                      ev (insert-event-in-tx! conn session-key :promotion/promoted metadata ts)
+                      _ (insert-outbox-in-tx! conn promotion-id session-key (:event/id ev) :promotion/promoted (:event/seq ev) ts)
+                      result {:status :promoted :from expected-parent :to new-gen}]
+                  ;; test seam: a throw here must roll back every write INCLUDING the event/outbox
+                  (when-let [hook (:failpoint system)]
+                    (hook))
+                  result))))))))
+)
