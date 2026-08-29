@@ -78,11 +78,34 @@
 
 (use-fixtures :each (fn [f] (f) (cleanup!)))
 
+;; --- Fleet P5/F VerifiedDigest helpers (artifacts/genomes FK at rest + proof at boundary) ---
+(defn- ->proof [id] (#'evoclj.store.existence/unsafe-verified-digest id))
+(defn- proof-candidate [c]
+  (cond-> c
+    (:candidate/genome-id c) (update :candidate/genome-id ->proof)
+    (:candidate/payload-ref c) (update :candidate/payload-ref ->proof)
+    (:payload-ref c) (update :payload-ref ->proof)))
+(defn- proof-mutation [m]
+  (cond-> m
+    (:parent/genome-id m) (update :parent/genome-id ->proof)
+    (:evidence/id m) (update :evidence/id ->proof)
+    (:payload-ref m) (update :payload-ref ->proof)))
+(defn- materialize-with-proof! [store c m]
+  (candidate/materialize-candidate! store (proof-candidate c) (proof-mutation m)))
+(defn- store-materialize-with-proof! [store c m]
+  (candidate-store/materialize! store (proof-candidate c) (proof-mutation m)))
+
 (defn- fresh-store []
   (let [path (temp-db-path)
-        db (sqlite/spec path)]
+        db (sqlite/spec path)
+        other-parent (str "sha256:" (apply str (repeat 64 "b")))]
     (migrate/migrate! db)
     (sqlite/with-db [conn db]
+      ;; Fleet P5/F FK (009) + 011: artifacts/genomes must exist before generations/candidates
+      (doseq [h [parent-genome-id candidate-genome-id resolution-id evidence-id other-evidence file-hash other-parent]]
+        (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, ?, ?, ?)" h "text/plain" 0 "2025-01-01T00:00:00Z"]))
+      (doseq [g [parent-genome-id candidate-genome-id other-parent]]
+        (jdbc/execute! conn ["INSERT OR IGNORE INTO genomes (id, created_at) VALUES (?, ?)" g "2025-01-01T00:00:00Z"]))
       (jdbc/insert! conn :generations
                     {:id generation-id :genome_id parent-genome-id :resolution_id resolution-id
                      :parent_id nil :state "active" :current 1 :created_at "2025-01-01T00:00:00Z"}))
@@ -97,7 +120,7 @@
           ;; Candidate claims different risk and evidence — old code would throw :candidate/risk-mismatch
           c (candidate/create-candidate (candidate-request {:risk :parameter :evidence/id other-evidence}))
           ;; S3: materialize normalizes — no throw, persisted equals mutation
-          persisted (candidate/materialize-candidate! (:handle store) c m)]
+          persisted (materialize-with-proof! (:handle store) c m)]
       (is (= :behavioral (:risk persisted)) "risk derived from mutation, not candidate")
       (is (= evidence-id (:evidence/id persisted)) "evidence derived from mutation")
       (is (= parent-genome-id (:parent/genome-id persisted)) "parent derived from mutation")
@@ -118,7 +141,7 @@
           ;; Candidate claims different parent but same generation (generation-1 matches mutation's parent)
           ;; S3 normalizes parent to mutation's value, so FK stays valid
           c (candidate/create-candidate (candidate-request {:parent/genome-id other-parent}))
-          persisted (candidate/materialize-candidate! (:handle store) c m)]
+          persisted (materialize-with-proof! (:handle store) c m)]
       ;; Normalized to mutation's parent, not candidate's
       (is (= parent-genome-id (:parent/genome-id persisted)))
       (is (= parent-genome-id (:parent/genome-id (candidate/find-candidate (:handle store) (:candidate/id persisted)))))))
@@ -128,7 +151,7 @@
           m (mutation* {:mutation/id (uuid 77)})
           c (candidate/create-candidate (candidate-request {:mutation/id (uuid 1)}))]
       (is (= :candidate/mutation-mismatch
-             (:error/type (ex-data (try (candidate/materialize-candidate! (:handle store) c m) (catch clojure.lang.ExceptionInfo e e))))))))
+             (:error/type (ex-data (try (materialize-with-proof! (:handle store) c m) (catch clojure.lang.ExceptionInfo e e))))))))
 
   (testing "Store-level derivation: candidate-store/materialize! derives even when candidate map is mismatched"
     (let [store (fresh-store)
@@ -142,7 +165,7 @@
                       :risk :parameter            ;; mismatched
                       :state :proposed
                       :created-at (java.util.Date.)}
-          persisted (candidate-store/materialize! (:handle store) mismatched m)]
+          persisted (store-materialize-with-proof! (:handle store) mismatched m)]
       (is (= :topology (:risk persisted)) "store derives risk from mutation")
       (is (= evidence-id (:evidence/id persisted)) "store derives evidence from mutation"))))
 
@@ -151,7 +174,7 @@
     (let [store (fresh-store)
           m (mutation* {:risk :behavioral})
           c (candidate/create-candidate (candidate-request))
-          _ (candidate/materialize-candidate! (:handle store) c m)
+          _ (materialize-with-proof! (:handle store) c m)
           ;; Try raw mismatched insert bypassing store — should abort
           raw-id (str (uuid 999))
           try-insert (fn [risk evidence parent]
@@ -181,7 +204,7 @@
     (let [store (fresh-store)
           m (mutation* {:risk :meta})
           c (candidate/create-candidate (candidate-request {:risk :meta}))
-          persisted (candidate/materialize-candidate! (:handle store) c m)
+          persisted (materialize-with-proof! (:handle store) c m)
           view-row (first (sqlite/query (:db store) ["SELECT risk, evidence_id, parent_genome_id FROM candidates_normalized WHERE id = ?" (str (:candidate/id persisted))]))]
       (is (= "meta" (:risk view-row)))
       (is (= evidence-id (:evidence_id view-row)))
@@ -192,8 +215,8 @@
     (let [store (fresh-store)
           m1 (mutation* {:mutation/id (uuid 10) :risk :parameter})
           m2 (assoc (mutation* {:mutation/id (uuid 11) :risk :topology}) :ops [{:op :set-edn :file "skills/debugging.edn" :path [:workflow :before-edit] :expect/hash file-hash :value [:other]}])
-          c1 (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request {:mutation/id (uuid 10) :risk :parameter})) m1)
-          c2 (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request {:mutation/id (uuid 11) :risk :topology})) m2)
+          c1 (materialize-with-proof! (:handle store) (candidate/create-candidate (candidate-request {:mutation/id (uuid 10) :risk :parameter})) m1)
+          c2 (materialize-with-proof! (:handle store) (candidate/create-candidate (candidate-request {:mutation/id (uuid 11) :risk :topology})) m2)
           by-parent (candidate/find-candidates-by-parent (:handle store) parent-genome-id)]
       (is (= 2 (count by-parent)))
       (is (= #{:parameter :topology} (set (map :risk by-parent))))
