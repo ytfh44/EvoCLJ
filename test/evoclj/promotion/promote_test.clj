@@ -107,6 +107,10 @@
   "Insert the CURRENT (current = 1) seed generation row."
   [db]
   (sqlite/with-db [conn db]
+    ;; P5/F: ensure FK targets
+    (try (jdbc/insert! conn :artifacts {:hash parent-genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
+    (try (jdbc/insert! conn :artifacts {:hash parent-resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+    (try (jdbc/insert! conn :genomes {:id parent-genome :created_at now}) (catch Exception _ nil))
     (jdbc/insert! conn :generations
                   {:id seed-gen
                    :genome_id parent-genome
@@ -121,6 +125,9 @@
   candidate's composite parent FK (Database Invariant 8 fixtures)."
   [db]
   (sqlite/with-db [conn db]
+    (try (jdbc/insert! conn :artifacts {:hash parent-genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
+    (try (jdbc/insert! conn :artifacts {:hash parent-resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+    (try (jdbc/insert! conn :genomes {:id parent-genome :created_at now}) (catch Exception _ nil))
     (jdbc/insert! conn :generations
                   {:id retired-gen
                    :genome_id parent-genome
@@ -134,12 +141,17 @@
   "Insert the mutation row a candidate's mutation_id FK needs;
   returns the mutation id."
   [conn]
-  (let [mutation-id (random-uuid)]
+  (let [mutation-id (random-uuid)
+        eid (str "sha256:" (apply str (repeat 64 "e")))]
+    ;; P5/F: ensure artifact for evidence and genome
+    (try (jdbc/insert! conn :artifacts {:hash parent-genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
+    (try (jdbc/insert! conn :artifacts {:hash eid :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+    (try (jdbc/insert! conn :genomes {:id parent-genome :created_at now}) (catch Exception _ nil))
     (jdbc/insert! conn :mutations
                   {:id (str mutation-id)
                    :parent_genome_id parent-genome
                    :hypothesis_id (str (random-uuid))
-                   :evidence_id (str "sha256:" (apply str (repeat 64 "e")))
+                   :evidence_id eid
                    :risk "parameter"
                    :ops (pr-str [])
                    :expected_effect (pr-str {})
@@ -151,14 +163,20 @@
   parent generation; returns the candidate id."
   [db candidate-id parent-generation-id genome-id]
   (sqlite/with-db [conn db]
-    (let [mutation-id (add-mutation! conn)]
+    (let [mutation-id (add-mutation! conn)
+          eid (str "sha256:" (apply str (repeat 64 "e")))]
+      ;; P5/F: ensure FK targets for candidate
+      (try (jdbc/insert! conn :artifacts {:hash genome-id :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
+      (try (jdbc/insert! conn :artifacts {:hash eid :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+      (try (jdbc/insert! conn :genomes {:id genome-id :created_at now}) (catch Exception _ nil))
+      (try (jdbc/insert! conn :genomes {:id parent-genome :created_at now}) (catch Exception _ nil))
       (jdbc/insert! conn :candidates
                     {:id (str candidate-id)
                      :parent_generation_id parent-generation-id
                      :parent_genome_id parent-genome
                      :genome_id genome-id
                      :mutation_id (str mutation-id)
-                     :evidence_id (str "sha256:" (apply str (repeat 64 "e")))
+                     :evidence_id eid
                      :risk "parameter"
                      :state "eligible"
                      :created_at now})))
@@ -222,6 +240,8 @@
          cas-root (temp-cas-root)
          cas (cas/->cas cas-root)
          _ (seed-generation! db)
+         _ (sqlite/with-db [conn db]
+             (try (jdbc/insert! conn :artifacts {:hash new-resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil)))
          _ (when (and parent-generation (not= parent-generation seed-gen))
              (add-retired-generation! db))
          parent-gen-id (or parent-generation seed-gen)

@@ -125,6 +125,26 @@
   [f]
   (:error/type (ex-data (try (f) nil (catch clojure.lang.ExceptionInfo e e)))))
 
+;; --- VerifiedDigest helpers (Fleet P5/F) ---------------------------------------
+;; After inserting artifacts/genomes (FK targets), supply VerifiedDigest
+;; existence proofs via the private unsafe constructor. Use #' to make
+;; the opt-out explicit (definition > validation).
+(defn- ->proof [id] (#'evoclj.store.existence/unsafe-verified-digest id))
+(defn- proof-candidate [c]
+  (if (and (map? c) (:candidate/genome-id c))
+    (update c :candidate/genome-id ->proof)
+    c))
+(defn- proof-mutation [m]
+  (if (map? m)
+    (cond-> m
+      (:parent/genome-id m) (update :parent/genome-id ->proof)
+      (:evidence/id m) (update :evidence/id ->proof)
+      (:payload-ref m) (update :payload-ref ->proof)
+      (:candidate/payload-ref m) (update :candidate/payload-ref ->proof))
+    m))
+(defn- materialize-with-proof! [store candidate mutation]
+  (candidate/materialize-candidate! store (proof-candidate candidate) (proof-mutation mutation)))
+
 ;; --- temp stores (test temp dirs only) ---------------------------------------
 
 (def ^:private temp-paths (atom []))
@@ -170,6 +190,12 @@
         cas-root (temp-cas-dir)]
     (migrate/migrate! db)
     (sqlite/with-db [conn db]
+      (jdbc/insert! conn :artifacts {:hash parent-genome-id :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash candidate-genome-id :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash resolution-id :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :artifacts {:hash evidence-id :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :genomes {:id parent-genome-id :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :genomes {:id candidate-genome-id :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :generations
                     {:id generation-id
                      :genome_id parent-genome-id
@@ -247,7 +273,7 @@
   (let [publics (ns-publics 'evoclj.evolution.candidate)
         names (set (map (comp name key) publics))]
     (testing "the public surface is exactly the documented candidate API"
-      (is (= #{"create-candidate" "materialize-candidate!"
+      (is (= #{"create-candidate" "create-candidate-with-proof" "materialize-candidate!"
                "transition-candidate!" "mark-evaluation-pending!"
                "find-candidate" "find-candidates-by-parent"
                "mutation-hash" "dedupe-key"
@@ -289,8 +315,8 @@
     (testing "the same parent+mutation materialized twice is one auditable candidate"
       (let [c1 (candidate/create-candidate (candidate-request))
             c2 (candidate/create-candidate (candidate-request)) ; fresh uuid, same identity
-            m1 (candidate/materialize-candidate! (:handle store) c1 m)
-            m2 (candidate/materialize-candidate! (:handle store) c2 m)]
+            m1 (materialize-with-proof! (:handle store) c1 m)
+            m2 (materialize-with-proof! (:handle store) c2 m)]
         (is (not= (:candidate/id c1) (:candidate/id c2))
             "the two CREATION records are distinct")
         (is (= (:candidate/id m1) (:candidate/id m2))
@@ -305,7 +331,7 @@
       (let [m2 (assoc m :mutation/id (uuid 42))
             c (candidate/create-candidate (assoc (candidate-request)
                                                  :mutation/id (uuid 42)))
-            m3 (candidate/materialize-candidate! (:handle store) c m2)
+            m3 (materialize-with-proof! (:handle store) c m2)
             first-id (:candidate/id (first (candidate/find-candidates-by-parent (:handle store) parent-genome-id)))]
         (is (= first-id (:candidate/id m3))
             "re-proposing the same mutation content lands on the SAME candidate")
@@ -321,8 +347,8 @@
         m (mutation*)]
     (testing "different mutation content under the same parent is a separate candidate"
       (let [m-other (assoc-in m [:ops 0 :value] [:different])
-            c1 (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request)) m)
-            c2 (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request)) m-other)]
+            c1 (materialize-with-proof! (:handle store) (candidate/create-candidate (candidate-request)) m)
+            c2 (materialize-with-proof! (:handle store) (candidate/create-candidate (candidate-request)) m-other)]
         (is (not= (:candidate/id c1) (:candidate/id c2)))
         (is (= 2 (count (candidate/find-candidates-by-parent (:handle store) parent-genome-id))))))
     (testing "a mutation whose parent differs yields a separate candidate
@@ -330,18 +356,21 @@
       (let [other-genome (str "sha256:" (apply str (repeat 64 "b")))
             other-generation "generation-2"
             _ (sqlite/with-db [conn (:db store)]
-                (jdbc/insert! conn :generations
-                              {:id other-generation
+                (do
+                  (jdbc/insert! conn :artifacts {:hash other-genome :media_type "application/octet-stream" :size 64 :created_at "2025-01-02T00:00:00Z"})
+                  (jdbc/insert! conn :genomes {:id other-genome :created_at "2025-01-02T00:00:00Z"})
+                  (jdbc/insert! conn :generations
+                               {:id other-generation
                                :genome_id other-genome
                                :resolution_id resolution-id
                                :parent_id generation-id
                                :state "active"
                                :current 0
-                               :created_at "2025-01-02T00:00:00Z"}))
+                               :created_at "2025-01-02T00:00:00Z"})))
             m-other (assoc m :parent/genome-id other-genome
                              :mutation/id (uuid 77))
-            c1 (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request)) m)
-            c2 (candidate/materialize-candidate! (:handle store) (candidate/create-candidate
+            c1 (materialize-with-proof! (:handle store) (candidate/create-candidate (candidate-request)) m)
+            c2 (materialize-with-proof! (:handle store) (candidate/create-candidate
                        {:parent/generation-id other-generation
                         :parent/genome-id other-genome
                         :candidate/genome-id candidate-genome-id
@@ -364,7 +393,7 @@
   (let [store (fresh-store)
         m (mutation*)
         c (candidate/create-candidate (candidate-request))
-        persisted (candidate/materialize-candidate! (:handle store) c m)]
+        persisted (materialize-with-proof! (:handle store) c m)]
     (testing "the returned candidate is :materialized with the same identity"
       (is (= (:candidate/id c) (:candidate/id persisted)))
       (is (= :materialized (:state persisted))))
@@ -393,7 +422,7 @@
 (deftest step-4-evaluation-pending-is-a-compare-and-set-transition
   (let [store (fresh-store)
         m (mutation*)
-        c (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request)) m)]
+        c (materialize-with-proof! (:handle store) (candidate/create-candidate (candidate-request)) m)]
     (testing "a materialized candidate moves to :evaluation-pending"
       (let [pending (candidate/mark-evaluation-pending! (:handle store) (:candidate/id c))]
         (is (= :evaluation-pending (:state pending)))
@@ -425,9 +454,11 @@
         c (candidate/create-candidate (candidate-request))]
     (testing "S3: evidence mismatch is normalized to mutation (not rejected)"
       (let [other-evidence (str "sha256:" (apply str (repeat 64 "d")))
+            _ (sqlite/with-db [conn (:db store)]
+                (jdbc/insert! conn :artifacts {:hash other-evidence :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"}))
             m (mutation* {:evidence/id other-evidence})
             ;; Fresh candidate with original evidence — materialize normalizes to mutation
-            persisted (candidate/materialize-candidate! (:handle store) (candidate/create-candidate (candidate-request)) m)]
+            persisted (materialize-with-proof! (:handle store) (candidate/create-candidate (candidate-request)) m)]
         (is (= other-evidence (:evidence/id persisted)) "derived from mutation")
         (is (= other-evidence (:evidence/id (candidate/find-candidate (:handle store) (:candidate/id persisted)))))))
     (testing "S3: parent Genome mismatch is normalized to mutation"
@@ -436,42 +467,42 @@
             m (assoc (mutation*) :parent/genome-id parent-genome-id)
             ;; Use same generation so FK stays valid; candidate claims other parent but store derives
             c2 (candidate/create-candidate (assoc (candidate-request) :parent/genome-id other-parent))
-            persisted (candidate/materialize-candidate! (:handle store2) c2 m)]
+            persisted (materialize-with-proof! (:handle store2) c2 m)]
         (is (= parent-genome-id (:parent/genome-id persisted)) "derived from mutation")))
     (testing "a candidate whose mutation id disagrees is rejected"
       (is (= :candidate/mutation-mismatch
              (thrown-error-type
-              #(candidate/materialize-candidate! (:handle store) c (mutation* {:mutation/id (uuid 77)}))))))
+              #(materialize-with-proof! (:handle store) c (mutation* {:mutation/id (uuid 77)}))))))
     (testing "S3: risk mismatch is normalized to mutation"
       (let [store2 (fresh-store)
             m (mutation* {:risk :parameter})
-            persisted (candidate/materialize-candidate! (:handle store2) (candidate/create-candidate (candidate-request {:risk :parameter})) m)]
+            persisted (materialize-with-proof! (:handle store2) (candidate/create-candidate (candidate-request {:risk :parameter})) m)]
         (is (= :parameter (:risk persisted)) "derived from mutation")
         ;; Also test that candidate with different risk is normalized
         (let [store3 (fresh-store)
               m3 (mutation* {:risk :behavioral})
               c3 (candidate/create-candidate (candidate-request {:risk :parameter}))
-              persisted3 (candidate/materialize-candidate! (:handle store3) c3 m3)]
+              persisted3 (materialize-with-proof! (:handle store3) c3 m3)]
           (is (= :behavioral (:risk persisted3)) "mismatched candidate risk normalized to mutation"))))
     (testing "a non-proposed candidate cannot be materialized"
       (is (= :candidate/not-proposed
              (thrown-error-type
-              #(candidate/materialize-candidate! (:handle store) (assoc c :state :materialized) (mutation*))))))
+              #(materialize-with-proof! (:handle store) (assoc c :state :materialized) (mutation*))))))
     (testing "a mutation that is not a map is rejected"
       (is (= :candidate/mutation-invalid
              (thrown-error-type
-              #(candidate/materialize-candidate! (:handle store) c {:not :a-mutation})))))))
+              #(materialize-with-proof! (:handle store) c {:not :a-mutation})))))))
 
 (deftest step-4-the-store-boundary-is-validated
   (let [c (candidate/create-candidate (candidate-request))
         m (mutation*)]
     (is (= :candidate/store-invalid
-           (thrown-error-type #(candidate/materialize-candidate! nil c m))))
+           (thrown-error-type #(materialize-with-proof! nil c m))))
     (is (= :candidate/store-invalid
-           (thrown-error-type #(candidate/materialize-candidate! {} c m))))
+           (thrown-error-type #(materialize-with-proof! {} c m))))
     (is (= :candidate/store-invalid
            (thrown-error-type
-            #(candidate/materialize-candidate!
+            #(materialize-with-proof!
               {:db (sqlite/spec (temp-db-path))} c m))))
     (is (= :candidate/store-invalid
            (thrown-error-type

@@ -64,6 +64,10 @@
 (defn- seed-generation! [db]
   (sqlite/with-db [conn db]
     (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
+      ;; P5/F: ensure FK targets exist before generations insert
+      (try (jdbc/insert! conn :artifacts {:hash genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
+      (try (jdbc/insert! conn :artifacts {:hash resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+      (try (jdbc/insert! conn :genomes {:id genome :created_at now}) (catch Exception _ nil))
       (jdbc/insert! conn :generations
                     {:id gen
                      :genome_id genome
@@ -130,10 +134,10 @@
 (deftest migration-creates-session-bindings-table
   (let [db (fresh-db)
         tables (set (map :name (sqlite/query db ["SELECT name FROM sqlite_master WHERE type='table'"])))]
-    (testing "session_bindings table exists after migrate! to latest (6)"
+    (testing "session_bindings table exists after migrate! to latest"
       (is (contains? tables "session_bindings"))
-      (is (= 6 migrate/latest-version))
-      (is (= 6 (:version (migrate/migrate! db))) "migrate is noop on fresh db"))
+      (is (= migrate/latest-version (:version (migrate/migrate! db)))
+          "migrate is noop on fresh db"))
     (testing "columns exist"
       (let [cols (set (map :name (sqlite/query db ["PRAGMA table_info(session_bindings)"])))]
         (doseq [c ["id" "session_id" "binding_type" "logical_id" "revision_id" "bundle_id" "state" "activated_at" "deactivated_at" "metadata_edn"]]

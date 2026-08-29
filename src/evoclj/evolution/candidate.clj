@@ -117,7 +117,8 @@
             [evoclj.genome.schema :as gschema]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
-            [evoclj.store.candidate-store :as candidate-store])
+            [evoclj.store.candidate-store :as candidate-store]
+            [evoclj.store.existence :as existence])
   (:import (java.util Date UUID)))
 
 ;; --- state machine — single canonical source (definition > validation) --------
@@ -257,6 +258,32 @@
 
 ;; --- Step 1: creation --------------------------------------------------------
 
+(declare create-candidate)
+
+(defn create-candidate-with-proof
+  "Create a NEW :proposed Candidate record via existence proof (Fleet P5/F).
+
+  Like create-candidate but genome/evidence ids are supplied as
+  VerifiedDigest existence proofs (evoclj.store.existence/verified-digest)
+  instead of raw sha256 strings. The proof guarantees the CAS artifact
+  exists; raw payload_ref strings are rejected at this boundary
+  (definition > validation). Returns the same Candidate map shape as
+  create-candidate, with :candidate/genome-id and :evidence/id as plain
+  digest strings (the proof is unwrapped after verification) so the
+  persisted shape is unchanged.
+
+  Typed errors: :existence/invalid-proof when a proof is not a
+  VerifiedDigest, plus :candidate/invalid as in create-candidate."
+  [request]
+  (let [proof-genome (:candidate/existence-proof request)
+        proof-evidence (:evidence/existence-proof request)
+        genome-id (when proof-genome (existence/digest-of (existence/ensure-proof proof-genome)))
+        evidence-id (when proof-evidence (existence/digest-of (existence/ensure-proof proof-evidence)))
+        req2 (cond-> request
+               genome-id (assoc :candidate/genome-id genome-id)
+               evidence-id (assoc :evidence/id evidence-id))]
+    (create-candidate req2)))
+
 (defn create-candidate
   "Create a NEW :proposed Candidate record (component Step 1).
 
@@ -323,6 +350,11 @@
   (component patch output) is put into the CAS by the orchestrator, not
   here.
 
+  P5/F: genome_id/evidence_id/payload_ref MUST be VerifiedDigest proofs
+  (evoclj.store.existence). Raw strings are rejected at this boundary
+  (existence/ensure-proof); the DB FK (009) is the second enforcement
+  at rest.
+
   Fleet R: delegates to evoclj.store.candidate-store/materialize! via
   the narrow CandidateStore handle. Requires a CandidateStore; legacy
   {:sqlite :cas} maps are rejected with :candidate/store-invalid.
@@ -337,18 +369,31 @@
   :candidate/mutation-mismatch."
   [store candidate mutation]
   (validate-store! store)
-  (validate-candidate! candidate)
-  (when-not (= :proposed (:state candidate))
-    (throw (err/error :candidate/not-proposed
-                      "only a :proposed candidate can be materialized"
-                      {:candidate/id (:candidate/id candidate)
-                       :state (:state candidate)})))
-  (validate-mutation-shape! mutation)
-  (validate-agreement! candidate mutation)
-  (let [normalized (normalize-candidate candidate mutation)
-        result (candidate-store/materialize! store normalized mutation)]
-    (validate-candidate! result)
-    result))
+  ;; P5/F: VerifiedDigest is required at this boundary (definition >
+  ;; validation). Unwrap for validation via ensure-proof (rejects raw
+  ;; strings), then delegate to the store with the original proof
+  ;; objects — the store is the second enforcement and does its own
+  ;; proof->digest.
+  (let [to-digest (fn [v] (existence/digest-of (existence/ensure-proof v)))
+        c-str (cond-> candidate
+                (:candidate/genome-id candidate) (update :candidate/genome-id to-digest)
+                (:candidate/payload-ref candidate) (update :candidate/payload-ref to-digest)
+                (:payload-ref candidate) (update :payload-ref to-digest))
+        m-str (cond-> mutation
+                (:parent/genome-id mutation) (update :parent/genome-id to-digest)
+                (:evidence/id mutation) (update :evidence/id to-digest)
+                (:payload-ref mutation) (update :payload-ref to-digest))]
+    (validate-candidate! c-str)
+    (when-not (= :proposed (:state c-str))
+      (throw (err/error :candidate/not-proposed
+                        "only a :proposed candidate can be materialized"
+                        {:candidate/id (:candidate/id c-str)
+                         :state (:state c-str)})))
+    (validate-mutation-shape! m-str)
+    (validate-agreement! c-str m-str)
+    (let [result (candidate-store/materialize! store candidate mutation)]
+      (validate-candidate! result)
+      result)))
 
 (defn transition-candidate!
   "Compare-and-set state transition for a persisted candidate (component Step 4). Changes :state alone via one atomic UPDATE matched on
