@@ -31,7 +31,7 @@
   the highest migration file number on the classpath; the equality is
   enforced fail-closed by validate-migration-chain! on every
   migration-files/migrate! call."
-  10)
+  11)
 
 (def ^:private version-key "schema_version")
 (def ^:private applied-key "applied_migrations")
@@ -314,4 +314,3 @@
       ;; codebase. Fail cleanly rather than half-apply.
       :else
       (mismatch! :version-ahead latest-version version))))
-

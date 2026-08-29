@@ -5,7 +5,8 @@
   episodic_memory table (migration 002) scoped to the requesting
   session. These tests exercise normalize-request and
   execute-request! directly with real temp databases."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.java.jdbc :as jdbc]
+            [clojure.test :refer [deftest is testing]]
             [evoclj.provider.memory :as mem]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -21,6 +22,21 @@
 
 (defn- sid [n]
   (UUID/fromString (format "00000000-0000-0000-0000-%012d" n)))
+
+(def ^:private gen "mem-gen-1")
+(def ^:private genome (str "sha256:" (apply str (repeat 64 "a"))))
+(def ^:private resolution (str "sha256:" (apply str (repeat 64 "c"))))
+(def ^:private phenotype (str "sha256:" (apply str (repeat 64 "b"))))
+
+(defn- ensure-session! [db session-id]
+  (sqlite/with-db [conn db]
+    (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" genome])
+    (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" resolution])
+    (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" phenotype])
+    (jdbc/execute! conn ["INSERT OR IGNORE INTO genomes (id, created_at) VALUES (?, datetime('now'))" genome])
+    (jdbc/execute! conn ["INSERT OR IGNORE INTO generations (id, genome_id, resolution_id, parent_id, state, current, created_at) VALUES (?, ?, ?, NULL, 'active', 0, datetime('now'))" gen genome resolution])
+    (jdbc/execute! conn ["INSERT OR IGNORE INTO sessions (id, generation_id, genome_id, resolution_id, phenotype_id, state, created_at) VALUES (?, ?, ?, ?, ?, 'created', datetime('now'))" (str session-id) gen genome resolution phenotype])))
+
 
 (defn- read-intent [session key & [limit]]
   {:intent/id (random-uuid)
@@ -57,6 +73,7 @@
     (let [db (temp-db)
           p (mem/memory-provider {:store db})
           s (sid 1)
+          _ (ensure-session! db s)
           _ (execute p (write-intent s :note {:text "hello" :n 1}))
           out (execute p (read-intent s :note))]
       (is (true? (:memory/found out)))
@@ -75,6 +92,7 @@
     (let [db (temp-db)
           p (mem/memory-provider {:store db})
           s (sid 1)
+          _ (ensure-session! db s)
           _ (execute p (write-intent s :k {:v 1}))
           _ (execute p (write-intent s :k {:v 2}))
           out (execute p (read-intent s :k))]
@@ -84,6 +102,8 @@
   (testing "a session CANNOT read another session's memory (feature R2"
     (let [db (temp-db)
           p (mem/memory-provider {:store db})
+          _ (ensure-session! db (sid 1))
+          _ (ensure-session! db (sid 2))
           _ (execute p (write-intent (sid 1) :k "secret"))
           out (execute p (read-intent (sid 2) :k))]
       (is (false? (:memory/found out)))
@@ -113,6 +133,7 @@
     (let [db (temp-db)
           c (atom 0)
           p (mem/memory-provider {:store db :execution-count c})
+          _ (ensure-session! db (sid 1))
           _ (execute p (write-intent (sid 1) :k 1))
           _ (execute p (read-intent (sid 1) :k))]
       (is (= 2 @c)))))

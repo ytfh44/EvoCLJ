@@ -11,10 +11,10 @@
 
   State machine (normative, docs component):
 
-      :created → :resolving → :running ↔ :waiting → :completed
-                               ├──────────────→ :failed
-                               ├──────────────→ :cancelled
-                               └──────────────→ :budget-exhausted
+      :created -> :resolving -> :running <-> :waiting -> :completed
+                               |------------> :failed
+                               |------------> :cancelled
+                               `------------> :budget-exhausted
 
   Terminal states (:completed :failed :cancelled :budget-exhausted)
   accept no further transitions. transition-session! rejects a
@@ -29,54 +29,40 @@
   :phenotype/id, :state, :created-at, :routing. Pinned identity fields
   are immutable after insert.
 
-  Known deviation: the component sessions schema defines no data
-  column, so the transition `data` argument is validated at the module
-  boundary (Global Constraint 22) but NOT persisted. The :routing
-  input IS persisted (component, additive migration 003-routing.sql):
-  the allocation version and bucket that decided the session's
-  generation are written at insert and never touched again, so routing
-  can be audited later. Terminal-state classification is driven by
-  :state, which is persisted. The Database Invariant 2 guarantee is
-  enforced at the application layer (the only write path is the state
-  CAS) because the schema committed in component has no sessions
-  trigger and migrations were out of scope there."
+  Fleet R horizontal (narrow handle): this namespace is the business
+  layer; persistence is via evoclj.store.session-store/SessionStore
+  (opaque deftype). Raw maps are rejected (definition > validation).
+  Fleet S2: state vocabulary and transitions are defined in
+  evoclj.store.session-states (single canonical source).
+  Fleet P5/F: genome/phenotype/resolution existence is enforced via
+  VerifiedDigest and FK at rest (011)."
   (:require [clojure.edn :as edn]
-            [clojure.java.jdbc :as jdbc]
             [malli.core :as m]
             [malli.error :as me]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
-            [evoclj.store.sqlite :as sqlite])
-  (:import (java.time Instant)
-           (java.time.format DateTimeFormatter)
-           (java.util Date UUID)))
+            [evoclj.store.session-states :as sstates]
+            [evoclj.store.session-store :as ss]
+            [evoclj.store.existence :as existence])
+  (:import (java.util Date UUID)))
 
-;; --- state machine (normative) ---------------------------------------------
+;; --- state machine (canonical — delegates to session-states) ---------------
 
 (def states
-  "Every state in the component state machine."
-  #{:created :resolving :running :waiting
-    :completed :failed :cancelled :budget-exhausted})
+  "Every state in the component state machine (alias for session-states/session-states)."
+  sstates/session-states)
 
 (def transitions
-  "State machine edges: source state → the set of allowed target
-  states. Terminal states have no entry, and therefore no outgoing
-  edges, so a transition FROM :completed/:failed/:cancelled/
-  :budget-exhausted is always invalid."
-  {:created #{:resolving}
-   :resolving #{:running}
-   :running #{:waiting :failed :cancelled :budget-exhausted}
-   :waiting #{:running :completed}})
+  "State machine edges (alias for session-states/session-transitions)."
+  sstates/session-transitions)
 
 (def terminal-states
-  "States that accept no further transitions."
-  #{:completed :failed :cancelled :budget-exhausted})
+  "States that accept no further transitions (alias)."
+  sstates/terminal-states)
 
 (defn- valid-transition?
-  "True when (expected-state → new-state) is an edge of the state
-  machine. Unknown states and terminal sources fail."
   [expected-state new-state]
-  (contains? (get transitions expected-state #{}) new-state))
+  (sstates/valid-transition? expected-state new-state))
 
 ;; --- boundary validation ----------------------------------------------------
 
@@ -98,7 +84,10 @@
    [:phenotype/id [:fn types/artifact-id?]]
    [:generation/id string?]
    [:routing {:optional true} routing-schema]
-   [:created-at {:optional true} [:fn inst?]]])
+   [:created-at {:optional true} [:fn inst?]]
+   [:genome/existence-proof {:optional true} any?]
+   [:resolution/existence-proof {:optional true} any?]
+   [:phenotype/existence-proof {:optional true} any?]])
 
 (def SessionSchema
   "The public Session contract map returned by create-session! and
@@ -109,12 +98,11 @@
    [:genome/id [:fn types/genome-id?]]
    [:resolution/id [:fn types/resolution-id?]]
    [:phenotype/id [:fn types/artifact-id?]]
-   [:state keyword?]
+   [:state sstates/session-state-enum]
    [:created-at [:fn inst?]]
    [:routing [:maybe routing-schema]]])
 
 (defn- schema-error!
-  "Throw :store/session-invalid with a humanized Malli explanation."
   [kind expl]
   (throw (err/error :store/session-invalid
                     (str kind " does not satisfy the session contract")
@@ -133,10 +121,6 @@
   s)
 
 (defn- edn-safe-map?
-  "True when x is nil or a map that round-trips through
-  pr-str / clojure.edn read-string, so no function, Java object, or
-  lazy sequence can cross the transition boundary (Global Constraint
-  22)."
   [x]
   (or (nil? x)
       (and (map? x)
@@ -144,55 +128,22 @@
              (map? (edn/read-string (pr-str x)))
              (catch Exception _ false)))))
 
-;; --- persistence helpers ------------------------------------------------------
-
-(def ^:private timestamp-fmt DateTimeFormatter/ISO_INSTANT)
-
-(defn- canonical-timestamp
-  "Canonical ISO-8601 UTC string for a timestamp value (a
-  java.util.Date, java.time.Instant, or ISO-8601 string); nil means
-  now."
-  [ts]
-  (let [inst (cond
-               (nil? ts) (Instant/now)
-               (instance? Instant ts) ts
-               (instance? Date ts) (.toInstant ^Date ts)
-               (string? ts) (Instant/parse ts)
-               :else (throw (err/error :store/session-invalid
-                                       "timestamp must be an inst, Instant, or ISO-8601 string"
-                                       {:timestamp ts})))]
-    (.format timestamp-fmt inst)))
-
-(defn- row->session
-  "Convert a sessions DB row into the public Session contract map."
-  [row]
-  {:session/id (UUID/fromString (:id row))
-   :generation/id (:generation_id row)
-   :genome/id (:genome_id row)
-   :resolution/id (:resolution_id row)
-   :phenotype/id (:phenotype_id row)
-   :state (keyword (:state row))
-   :created-at (Date/from (Instant/parse (:created_at row)))
-   :routing (when (some? (:routing_deployment_version row))
-              {:deployment-version (:routing_deployment_version row)
-               :bucket (:routing_bucket row)})})
-
-(defn- set-busy-timeout!
-  "Set SQLite's busy_timeout on the open connection carried by `db`.
-
-  `db` is the spec-with-connection map that evoclj.store.sqlite/with-db
-  binds: java.jdbc 0.7.12 stores the live Connection under :connection
-  (see add-connection / db-find-connection). The pragma must run
-  through raw JDBC because java.jdbc's execute! routes PRAGMA
-  statements through PreparedStatement.executeUpdate, and sqlite-jdbc
-  classifies this PRAGMA as a query and throws a driver error (Query
-  returns results). The setting applies to the same connection the
-  compare-and-set UPDATE below runs on, so a contended UPDATE waits for
-  a concurrent writer's commit instead of failing with SQLITE_BUSY."
-  [db ms]
-  (let [^java.sql.Connection conn (:connection db)]
-    (with-open [stmt (.createStatement conn)]
-      (.execute stmt (str "PRAGMA busy_timeout = " ms)))))
+(defn- normalize-store
+  "Normalize `store` to a SessionStore. Accepts a SessionStore or a
+  raw sqlite spec (string/path/spec-map). Raw executor maps {:sqlite ...} are rejected
+  with :store/session-invalid (Fleet R: not a SessionStore)."
+  [store]
+  (cond
+    (instance? evoclj.store.session_store.SessionStore store) store
+    (and (map? store) (contains? store :sqlite)) (throw (err/error :store/session-invalid
+                                   "store must be a SessionStore handle (evoclj.store.session-store/make-session-store)"
+                                   {:reason :not-a-session-store :value (err/sanitize store)}))
+    (and (map? store) (contains? store :subprotocol)) (ss/make-session-store store)
+    (string? store) (ss/make-session-store store)
+    (map? store) (throw (err/error :store/session-invalid
+                                   "store must be a SessionStore handle (evoclj.store.session-store/make-session-store)"
+                                   {:reason :not-a-session-store :value (err/sanitize store)}))
+    :else (ss/make-session-store store)))
 
 ;; --- public API ---------------------------------------------------------------
 
@@ -204,53 +155,21 @@
   persisted Session contract map. The pinned identity fields are
   immutable after insert — no API can change them later.
 
-  Typed errors: :store/session-invalid (contract violation, including
-  unknown keys — the trust boundary is a closed map),
-  :store/generation-not-found (no generation row with that id). The
-  optional :routing input {:deployment-version string? :bucket int?}
-  is the component routing decision (evoclj.promotion.canary) and is
-  persisted into the sessions routing columns (003-routing.sql) so the
-  decision can be audited later."
+  `store` is a SessionStore handle (evoclj.store.session-store/make-session-store).
+  Raw maps are rejected (Fleet R). For backward compat a raw sqlite spec
+  (string path) is auto-wrapped, but new code must pass a handle.
+
+  Typed errors: :store/session-invalid, :store/session-invalid :not-a-session-store,
+  :store/generation-not-found. Optional :genome/existence-proof etc. may
+  carry VerifiedDigest proofs (Fleet P5/F)."
   [store request]
   (validate-create-request request)
-  (let [sid (UUID/randomUUID)
-        ts (canonical-timestamp (:created-at request))
-        routing (:routing request)]
-    (sqlite/with-db [conn store]
-      (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?"
-                                         (:generation/id request)]))
-        (throw (err/error :store/generation-not-found
-                          "cannot pin a session to an unknown generation"
-                          {:generation/id (:generation/id request)})))
-      (jdbc/insert! conn :sessions
-                    {:id (str sid)
-                     :generation_id (:generation/id request)
-                     :genome_id (:genome/id request)
-                     :resolution_id (:resolution/id request)
-                     :phenotype_id (:phenotype/id request)
-                     :state (name :created)
-                     :routing_deployment_version (:deployment-version routing)
-                     :routing_bucket (:bucket routing)
-                     :created_at ts}))
-    (get-session store sid)))
+  (let [ss-store (normalize-store store)
+        sid (ss/insert-session! ss-store request)]
+    (get-session ss-store sid)))
 
 (defn transition-session!
-  "Compare-and-set state transition (component Step 4).
-
-  Sets the session's state to `new-state` ONLY when the stored state
-  is exactly `expected-state`, in one atomic UPDATE, and returns the
-  updated Session contract map. `data` is transition metadata (nil or
-  an EDN-safe map), validated at the boundary (Global Constraint 22)
-  but not persisted — the component schema has no data column (see the
-  namespace docstring).
-
-  Typed errors:
-    :store/session-invalid      — non-keyword states or non-EDN data
-    :store/session-not-found    — no session with this id
-    :session/invalid-transition — (expected-state → new-state) is not
-      an edge of the state machine, or the stored state is not
-      `expected-state` (including a concurrent worker that already won
-      the compare-and-set)."
+  "Compare-and-set state transition (component Step 4)."
   [store session-id expected-state new-state data]
   (when-not (and (keyword? expected-state) (keyword? new-state))
     (throw (err/error :store/session-invalid
@@ -266,39 +185,14 @@
                       {:session/id (types/session-id session-id)
                        :expected-state expected-state
                        :new-state new-state})))
-  (let [sid (types/session-id session-id)
-        key (str sid)
-        ts (canonical-timestamp nil)]
-    (sqlite/with-db [conn store]
-      ;; busy_timeout makes a contended UPDATE wait for SQLite's write
-      ;; lock instead of failing with SQLITE_BUSY, so a racing worker
-      ;; observes 0 affected rows (and :session/invalid-transition)
-      ;; rather than a raw driver error.
-      (set-busy-timeout! conn 10000)
-      (let [count (first (jdbc/execute! conn
-                                        ["UPDATE sessions
-                                          SET state = ?, updated_at = ?
-                                          WHERE id = ? AND state = ?"
-                                         (name new-state) ts key (name expected-state)]))]
-        (when-not (= 1 count)
-          (let [row (first (jdbc/query conn ["SELECT state FROM sessions WHERE id = ?" key]))]
-            (if row
-              (throw (err/error :session/invalid-transition
-                                "session is not in the expected state"
-                                {:session/id sid
-                                 :expected-state expected-state
-                                 :new-state new-state
-                                 :actual-state (keyword (:state row))}))
-              (throw (err/error :store/session-not-found
-                                "no session with this id"
-                                {:session/id sid})))))))
-    (get-session store sid)))
+  (let [ss-store (normalize-store store)]
+    (ss/transition-session! ss-store session-id expected-state new-state)))
 
 (defn get-session
   "The session as the public Session contract map, or nil when no
   session has `session-id`. Read-only."
   [store session-id]
-  (some-> (first (sqlite/query store ["SELECT * FROM sessions WHERE id = ?"
-                                      (str (types/session-id session-id))]))
-          row->session
-          validate-session))
+  (let [ss-store (normalize-store store)]
+    (some-> (ss/find-session ss-store session-id)
+            validate-session)))
+  

@@ -57,6 +57,11 @@
   "Insert the generation row sessions are pinned to (once per db)."
   [db]
   (sqlite/with-db [conn db]
+    ;; Fleet P5/F FK (011): generations/genome_id -> genomes -> artifacts
+    (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" genome])
+    (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" resolution])
+    (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" phenotype])
+    (jdbc/execute! conn ["INSERT OR IGNORE INTO genomes (id, created_at) VALUES (?, datetime('now'))" genome])
     (jdbc/insert! conn :generations
                   {:id gen
                    :genome_id genome

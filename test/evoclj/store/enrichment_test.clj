@@ -18,6 +18,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.store.cas :as cas]
             [evoclj.store.enrichment :as enrich]
+            [evoclj.store.enrichment-store :as es]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
@@ -39,17 +40,17 @@
 
 (defn- temp-stores!
   "A migrated sqlite database in a temp file plus a fresh temp CAS
-  root, as the executor :stores map {:sqlite <db> :cas <cas>}. The temp
-  paths are recorded for cleanup."
+  root, as an EnrichmentStore handle. The temp paths are recorded for cleanup."
   []
   (let [db-path (str (Files/createTempFile "evoclj-enrichment-" ".db"
                                            (make-array FileAttribute 0)))
         cas-path (str (Files/createTempDirectory "evoclj-enrichment-cas-"
                                                  (make-array FileAttribute 0)))
-        db (sqlite/spec db-path)]
+        db (sqlite/spec db-path)
+        cas (cas/->cas cas-path)]
     (migrate/migrate! db)
     (swap! store-paths conj db-path cas-path)
-    {:sqlite db :cas (cas/->cas cas-path) :paths [db-path cas-path]}))
+    (es/make-enrichment-store db cas)))
 
 (defn- dispose-stores!
   "Delete the temp paths created by temp-stores! (idempotent)."
@@ -159,25 +160,25 @@
 ;; ============================================================================
 
 (deftest store-validation-errors
-  (testing "a non-map store is rejected"
+  (testing "a non-handle store is rejected"
     (let [e (try (enrich/put-enrichment! "not-a-map" (valid-request))
                  nil
                  (catch clojure.lang.ExceptionInfo e e))]
       (is (some? e))
       (is (= :enrichment/store-invalid (:error/type (ex-data e))))
-      (is (= :not-a-map (:reason (ex-data e))))))
-  (testing "a store without :sqlite is rejected"
+      (is (= :not-an-enrichment-store (:reason (ex-data e))))))
+  (testing "a raw {:cas :x} map is rejected (not a handle)"
     (let [e (try (enrich/put-enrichment! {:cas :x} (valid-request))
                  nil
                  (catch clojure.lang.ExceptionInfo e e))]
       (is (= :enrichment/store-invalid (:error/type (ex-data e))))
-      (is (= :sqlite-missing (:reason (ex-data e))))))
-  (testing "a store without :cas is rejected"
+      (is (= :not-an-enrichment-store (:reason (ex-data e))))))
+  (testing "a raw {:sqlite :x} map is rejected (not a handle)"
     (let [e (try (enrich/put-enrichment! {:sqlite :x} (valid-request))
                  nil
                  (catch clojure.lang.ExceptionInfo e e))]
       (is (= :enrichment/store-invalid (:error/type (ex-data e))))
-      (is (= :cas-missing (:reason (ex-data e)))))))
+      (is (= :not-an-enrichment-store (:reason (ex-data e)))))))
 
 ;; ============================================================================
 ;; request validation
@@ -220,14 +221,14 @@
         _ (enrich/put-enrichment! store (valid-request))]
     (testing "a direct UPDATE on an inserted row is rejected by the trigger"
       (is (thrown-with-msg? java.sql.SQLException #"append-only"
-                            (sqlite/exec! (:sqlite store)
+                            (sqlite/exec! (es/db-of store)
                                           ["UPDATE enrichments SET payload_ref = 'x'"]))))
     (testing "a direct DELETE is rejected by the trigger"
       (is (thrown-with-msg? java.sql.SQLException #"append-only"
-                            (sqlite/exec! (:sqlite store)
+                            (sqlite/exec! (es/db-of store)
                                           ["DELETE FROM enrichments"]))))
     (testing "the inserted row survives both rejected attempts"
-      (is (= 1 (count (sqlite/query (:sqlite store)
+      (is (= 1 (count (sqlite/query (es/db-of store)
                                     ["SELECT id FROM enrichments"])))))))
 
 ;; ============================================================================
