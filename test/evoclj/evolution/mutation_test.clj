@@ -615,6 +615,18 @@
         (is (= :evolution/crossover-invalid (:error/type (ex-data e))))
         (is (= :cut-node-missing-a (:reason (ex-data e))))))))
 
+(deftest ecross-ignores-non-loop-exit-metadata
+  (testing "only Loop :exit participates in crossover graph closure"
+    (let [topology-a-with-metadata
+          (-> topology-a
+              (assoc-in [:nodes :node/entry :exit] :node/metadata)
+              (assoc-in [:nodes :node/metadata] {:node/type :emit}))
+          child (mutation/crossover-topologies
+                 topology-a-with-metadata topology-b :node/entry)]
+      (is (contains? (:nodes child) :node/metadata)
+          "a sequential node's extra :exit metadata is not a graph edge")
+      (is (map? (topology/compile-topology child))))))
+
 (deftest ecross-malformed-inputs-are-rejected-with-typed-errors
   (let [ctx-a (genome-context seed-manifest topology-a)
         ctx-b (genome-context seed-manifest topology-b)]

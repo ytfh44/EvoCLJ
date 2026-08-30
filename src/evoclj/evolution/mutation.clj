@@ -389,7 +389,7 @@
   [node]
   (cond-> []
     (:next node) (conj (:next node))
-    (:exit node) (conj (:exit node))
+    (and (= :loop (:node/type node)) (:exit node)) (conj (:exit node))
     (:body node) (conj (:body node))))
 
 (defn- subtree-ids
@@ -418,7 +418,9 @@
         (map (fn [[id node]]
                [id (cond-> node
                      (contains? a-subtree (:next node)) (assoc :next cut)
-                     (contains? a-subtree (:exit node)) (assoc :exit cut)
+                     (and (= :loop (:node/type node))
+                          (contains? a-subtree (:exit node)))
+                     (assoc :exit cut)
                      (contains? a-subtree (:body node)) (assoc :body cut))]))
         retained))
 
