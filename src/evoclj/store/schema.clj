@@ -64,7 +64,7 @@
   integers, doubles, strings, arrays, or string-keyed objects. Nested
   values are intentionally open because this registry schema describes the
   wire envelope, while provider-specific payloads own deeper validation."
-  [:or :nil :boolean :int :double :string [:vector :any] [:map {:closed false}]])
+  [:or :nil :boolean :int :double :string [:vector :any] [:map-of :string :any]])
 
 (def ^:private registry
   "Closed registry: keyword -> Malli schema value.

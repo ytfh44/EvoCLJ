@@ -182,6 +182,25 @@
                  (every? #(contains? input-entries (key %)) output-entries)))]
     (and input-compatible? no-unknown-keys?)))
 
+(defn- map-of-subtype?
+  "Check subtyping for homogeneous Malli :map-of schemas and for a
+  closed explicit :map flowing into :map-of. An open explicit map can
+  contain keys outside the target key schema, so it is not accepted."
+  [output-form input-form]
+  (let [input-key (second input-form)
+        input-value (nth input-form 2)]
+    (if (= :map-of (first output-form))
+      (and (subtype-form? (second output-form) input-key)
+           (subtype-form? (nth output-form 2) input-value))
+      (let [[output-properties output-entries] (map-form-parts output-form)
+            output-closed? (true? (:closed output-properties))
+            output-entries (map map-entry-info output-entries)]
+        (and output-closed?
+             (every? (fn [[key {:keys [schema]}]]
+                       (and (subtype-form? (schema-form key) input-key)
+                            (subtype-form? schema input-value)))
+                     output-entries))))))
+
 (defn- subtype-form?
   "A conservative structural Malli subtype relation for the closed registry.
   Equality and :any are handled for every schema; common collection forms
@@ -206,6 +225,8 @@
     (and (vector? output-form) (vector? input-form))
     (case [(first output-form) (first input-form)]
       [:map :map] (map-subtype? output-form input-form)
+      [:map :map-of] (map-of-subtype? output-form input-form)
+      [:map-of :map-of] (map-of-subtype? output-form input-form)
       [:vector :vector] (subtype-form? (second output-form) (second input-form))
       [:set :set] (subtype-form? (second output-form) (second input-form))
       [:maybe :maybe] (subtype-form? (second output-form) (second input-form))
