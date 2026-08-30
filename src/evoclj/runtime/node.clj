@@ -301,7 +301,7 @@
   evoclj.compiler.topology/required-keys for the implemented types."
   {:sci #{:program}
    :tool #{:tool}
-   :loop #{:body :until :max-iterations}
+   :loop #{:body :exit :until :max-iterations}
    :emit #{}
    :memory/read #{:memory}
    :memory/write #{:memory}})
@@ -309,7 +309,7 @@
 (def ^:private handler-attribute-keys
   "Node keys whose value must be a keyword when present (mirrors the
   compiler's attribute rule)."
-  [:program :tool :next :body :until :memory])
+  [:program :tool :next :exit :body :until :memory])
 
 (defn validate-node!
   "Validate the compiled node map for `expected-type` (the handler's
@@ -344,14 +344,22 @@
                          :node/type expected-type
                          :key k
                          :value (err/sanitize (get node k))}))))
+  (when (and (= :loop expected-type) (contains? node :next))
+    (throw (err/error :node/invalid
+                      "a :loop node must use :exit; :next is not a Region edge"
+                      {:reason :loop-next-forbidden
+                       :node/type expected-type
+                       :key :next})))
   node)
 
 (defn successor
-  "The transition's :next vector for a compiled node: the node's
-  single :next keyword wrapped in a vector (the normative [:node/x]
-  shape), or [] when the node declares no successor."
+  "The transition's normal successor vector for a compiled node:
+  sequential nodes use :next, while a :loop uses its Region :exit.
+  The controlled :body edge is selected only by the loop handler."
   [node]
-  (if-let [nxt (:next node)]
+  (if-let [nxt (if (= :loop (:node/type node))
+                 (:exit node)
+                 (:next node))]
     [nxt]
     []))
 

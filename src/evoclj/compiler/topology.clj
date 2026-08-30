@@ -11,16 +11,14 @@
      :adjacency {node-id [successor-ids]}                 ; sorted map
      :limits {:max-steps 64}}
 
-  Rules (Step 2): arbitrary graph cycles are rejected; only explicit
-  :loop nodes may iterate. A cycle in the :next graph that contains no
-  :loop node throws :topology/cycle. The :loop node's normative shape
-  (component) is validated here: :body (the node id iterated — must be
-  a declared node, :reason :dangling-body), :until (a keyword program
-  id), a positive integer :max-iterations (:reason
-  :invalid-max-iterations), and :next (the exit node). The :body edge
-  is the sanctioned iteration edge; the body node's :next back to the
-  :loop closes the iteration at runtime under the :max-iterations
-  cap.
+  Rules (Step 2 / PLT2): sequential control flow uses :next edges.
+  A :loop node is an explicit Region/Loop with :body, :exit, :until,
+  and positive :max-iterations. Its body region must return to the
+  loop through ordinary :next edges; :exit is the only normal successor.
+  The normal control-flow graph follows :next for sequential nodes and
+  :exit for loop nodes, so an arbitrary cycle — including an exit-edge
+  bypass L -> X -> L — is rejected. The :body edge is represented in
+  the loop region and is never treated as a free graph successor.
 
   Properties:
 
@@ -86,25 +84,48 @@
   syntax-node-types)
 
 (def ^:private required-keys
-  "Per-type keys a node must declare. :loop carries its normative component shape: :body (the iterated node id), :until (the done? program
-  id), a positive integer :max-iterations (checked in validate-node!),
-  and :next (the exit node)."
+  "Per-type keys a node must declare. A :loop carries an explicit
+  Region/Loop shape: :body is the iterated node id, :exit is the normal
+  successor, :until is the done? program id, and :max-iterations is a
+  positive integer."
   {:llm #{:model}
    :sci #{:program}
    :tool #{:tool}
    :route #{:next}
-   :loop #{:next :body :until :max-iterations}
+   :loop #{:exit :body :until :max-iterations}
    :emit #{}
    :memory/read #{:memory}
    :memory/write #{:memory}})
 
 (def ^:private attribute-keys
   "Keys whose value must be a keyword when present."
-  [:model :program :tool :memory :next :body :until])
+  [:model :program :tool :memory :next :exit :body :until])
 
 (def ^:private schema-keys
   "Optional typing keys whose value must be a registered schema keyword."
   [:input-schema :output-schema])
+
+(def RegionSchema
+  "The pure Region language used by the compiled topology. Seq and Branch
+  are reserved structural forms; Loop is the currently executable form."
+  [:multi {:dispatch :region/type}
+   [:seq [:map {:closed true}
+          [:region/type [:= :seq]]
+          [:entry keyword?]
+          [:nodes [:vector keyword?]]]]
+   [:branch [:map {:closed true}
+             [:region/type [:= :branch]]
+             [:branches [:vector [:vector keyword?]]]]]
+   [:loop [:map {:closed true}
+           [:region/type [:= :loop]]
+           [:body keyword?]
+           [:exit keyword?]
+           [:until keyword?]
+           [:max pos-int?]]]])
+
+(def Region
+  "Alias for RegionSchema for callers that refer to the IR union as Region."
+  RegionSchema)
 
 (def ^:private canonical-compare
   "Total order over canonical EDN scalar keys. Uses compare when the
@@ -252,41 +273,48 @@
                  (schema-form input-schema)))
 
 (defn- check-typing!
-  "Enforce compositional edge typing: for every :next and :body edge, check output(from) <: input(to) via malli.
-  Gamma |- n1 : A -> B   Gamma |- n2 : B -> C
-  ------------------------------------------- (Seq)
-  Gamma |- n1;n2 : A -> C
-  i.e., for edge A :next/:body -> B, require output(A) <: input(B)."
+  "Enforce compositional edge typing. Sequential nodes use :next;
+  Loop nodes use :body and :exit. Every edge requires
+  output(from) <: input(to) under the PLT4 typing judgment."
   [node-map]
   (doseq [[from-id node] node-map]
-    (doseq [edge-key [:next :body]]
-      (when-let [to-id (get node edge-key)]
-        (when-let [to-node (get node-map to-id)]
-          (let [from-kw (or (:output-schema node) :schema/any)
-                to-kw   (or (:input-schema to-node) :schema/any)
-                from-schema (or (:schema/output node)
-                                (:output-schema/schema node)
-                                (:resolved/output-schema node)
-                                (when (:output-schema node) (resolve-node-schema! (:output-schema node) :output-schema from-id))
-                                (schema/resolve-schema :schema/any))
-                to-schema   (or (:schema/input to-node)
+    (let [edge-keys (if (= :loop (:node/type node))
+                      [:body :exit]
+                      [:next])]
+      (doseq [edge-key edge-keys]
+        (when-let [to-id (get node edge-key)]
+          (when-let [to-node (get node-map to-id)]
+            (let [from-kw (or (:output-schema node) :schema/any)
+                  to-kw (or (:input-schema to-node) :schema/any)
+                  from-schema (or (:schema/output node)
+                                  (:output-schema/schema node)
+                                  (:resolved/output-schema node)
+                                  (when (:output-schema node)
+                                    (resolve-node-schema!
+                                     (:output-schema node) :output-schema from-id))
+                                  (schema/resolve-schema :schema/any))
+                  to-schema (or (:schema/input to-node)
                                 (:input-schema/schema to-node)
                                 (:resolved/input-schema to-node)
-                                (when (:input-schema to-node) (resolve-node-schema! (:input-schema to-node) :input-schema to-id))
+                                (when (:input-schema to-node)
+                                  (resolve-node-schema!
+                                   (:input-schema to-node) :input-schema to-id))
                                 (schema/resolve-schema :schema/any))]
-            (when-not (subtype? from-schema to-schema)
-              (throw (err/error :topology/type-mismatch
-                                (str "edge type mismatch " from-id " -> " to-id " (" from-kw " -> " to-kw ")")
-                                {:reason :type-mismatch
-                                 :from from-id
-                                 :to to-id
-                                 :edge edge-key
-                                 :output-schema from-kw
-                                 :input-schema to-kw
-                                 :output-type from-schema
-                                 :input-type to-schema
-                                 :output-schema/schema from-schema
-                                 :input-schema/schema to-schema})))))))))
+              (when-not (subtype? from-schema to-schema)
+                (throw (err/error
+                        :topology/type-mismatch
+                        (str "edge type mismatch " from-id " -> " to-id
+                             " (" from-kw " -> " to-kw ")")
+                        {:reason :type-mismatch
+                         :from from-id
+                         :to to-id
+                         :edge edge-key
+                         :output-schema from-kw
+                         :input-schema to-kw
+                         :output-type from-schema
+                         :input-type to-schema
+                         :output-schema/schema from-schema
+                         :input-schema/schema to-schema}))))))))))
 
 ;; --- top-level shape validation -------------------------------------------
 
@@ -389,27 +417,37 @@
       (throw (err/error :topology/invalid
                         "a :loop node must carry a positive integer :max-iterations"
                         {:reason :invalid-max-iterations :node-id id
-                         :value (err/sanitize (:max-iterations node))})))))
+                         :value (err/sanitize (:max-iterations node))})))
+
+    (when (and (= :loop t) (contains? node :next))
+      (throw (err/error :topology/invalid
+                        "a :loop node must use :exit; :next is a sequential edge"
+                        {:reason :loop-next-forbidden
+                         :node-id id
+                         :node/type t
+                         :key :next})))
+    node))
 
 ;; --- edge validation -------------------------------------------------------
 
 (defn- check-nexts!
-  "Reject any :next edge that points to an undeclared node id, and any
-  :loop node whose :body points to an undeclared node id (component:
-  the :body edge is the sanctioned iteration edge, so a dangling
-  :body must fail at compile time, never mid-task)."
+  "Reject dangling normal and loop-region edges. Sequential nodes use
+  :next; explicit loops use :body and :exit."
   [entries node-ids]
   (doseq [[id node] entries]
-    (when-let [nxt (:next node)]
-      (when-not (contains? node-ids nxt)
-        (throw (err/error :topology/invalid
-                          "node :next points to an undeclared node"
-                          {:reason :dangling-next :node-id id :next nxt}))))
-    (when-let [body (:body node)]
-      (when-not (contains? node-ids body)
-        (throw (err/error :topology/invalid
-                          "a :loop node :body points to an undeclared node"
-                          {:reason :dangling-body :node-id id :body body}))))))
+    (let [edge-keys (if (= :loop (:node/type node))
+                      [:body :exit]
+                      [:next])]
+      (doseq [edge-key edge-keys]
+        (when-let [target (get node edge-key)]
+          (when-not (contains? node-ids target)
+            (throw (err/error :topology/invalid
+                              "topology edge points to an undeclared node"
+                              {:reason (if (= :body edge-key)
+                                         :dangling-body
+                                         :dangling-next)
+                               :node-id id
+                               edge-key target}))))))))
 
 (defn- check-entry!
   [entry node-ids]
@@ -418,15 +456,71 @@
                       "entry node is not declared in :nodes"
                       {:reason :missing-entry :entry entry}))))
 
-;; --- cycle detection (Step 2) ---------------------------------------------
+;; --- cycle and Region validation (PLT2) ------------------------------------
+
+(defn- normal-successor
+  "The normal control-flow successor. A sequential node follows :next;
+  a loop follows :exit. The :body edge is validated as a Region edge and
+  is intentionally excluded from this graph."
+  [node]
+  (when node
+    (if (= :loop (:node/type node))
+      (:exit node)
+      (:next node))))
+
+(defn- invalid-loop-region!
+  "Throw a deterministic error for a loop body that is not a bounded
+  Region returning to its owning loop."
+  [loop-id loop-node path detail]
+  (throw (err/error :topology/invalid
+                    "loop body must form a bounded region returning to its loop"
+                    {:reason :invalid-loop-region
+                     :detail detail
+                     :loop/id loop-id
+                     :body (:body loop-node)
+                     :exit (:exit loop-node)
+                     :path (vec path)})))
+
+(defn- check-loop-regions!
+  "Validate every Loop Region independently of the normal graph. Starting
+  at :body, normal successors must eventually return to the owning loop;
+  a body cannot be the loop itself, end at nil, revisit a node, or include
+  the loop's :exit node."
+  [node-map]
+  (doseq [[loop-id loop-node] node-map
+          :when (= :loop (:node/type loop-node))]
+    (let [body (:body loop-node)
+          exit (:exit loop-node)]
+      (when (= body loop-id)
+        (invalid-loop-region! loop-id loop-node [] :body-is-loop))
+      (loop [id body
+             path []
+             seen #{}]
+        (cond
+          (= id loop-id)
+          (when (some #{exit} path)
+            (invalid-loop-region! loop-id loop-node path :body-exit-overlap))
+
+          (nil? id)
+          (invalid-loop-region! loop-id loop-node path :body-does-not-return)
+
+          (contains? seen id)
+          (invalid-loop-region! loop-id loop-node path :body-cycle)
+
+          :else
+          (if-let [node (get node-map id)]
+            (recur (normal-successor node)
+                   (conj path id)
+                   (conj seen id))
+            (invalid-loop-region! loop-id loop-node path :body-target-missing)))))))
 
 (defn- walk-chain
-  "Walk the functional :next graph starting at `start` without revisiting
-  already-analyzed nodes. Returns [newly-visited-ids cycles] where each
-  cycle is a vector of node ids in walk order."
+  "Walk the functional normal control-flow graph starting at `start`
+  without revisiting already-analyzed nodes. Returns [newly-visited-ids
+  cycles] where each cycle is a vector of node ids in walk order."
   [start next-of visited]
   (loop [id start
-         seen []           ; ordered ids on the current walk
+         seen []
          seen-set #{}
          cycles []]
     (cond
@@ -445,26 +539,34 @@
       (recur (next-of id) (conj seen id) (conj seen-set id) cycles))))
 
 (defn- check-cycles!
-  "Reject every cycle in the :next graph that contains no :loop node
-  (Step 2: arbitrary graph cycles are rejected; only explicit :loop
-  nodes may iterate). Offending cycle ids are reported sorted so error
-  data is deterministic."
+  "Reject every cycle in the normal control-flow graph. Since Loop nodes
+  follow :exit here and their :body edge is excluded, both arbitrary
+  sequential cycles and the illegal exit-edge bypass L -> X -> L are
+  rejected. The controlled body -> ... -> L return is checked separately
+  by check-loop-regions!."
   [entries node-map]
-  (let [next-of (fn [id] (:next (get node-map id)))
+  (let [next-of (fn [id] (normal-successor (get node-map id)))
         cycles (loop [todo (seq (map first entries))
                       visited #{}
                       acc []]
                  (if-let [start (first todo)]
                    (if (contains? visited start)
                      (recur (next todo) visited acc)
-                     (let [[new-visited new-cycles] (walk-chain start next-of visited)]
-                       (recur (next todo) new-visited (into acc new-cycles))))
+                     (let [[new-visited new-cycles]
+                           (walk-chain start next-of visited)]
+                       (recur (next todo)
+                              new-visited
+                              (into acc new-cycles))))
                    acc))]
     (doseq [cycle cycles]
-      (when-not (some #(= :loop (get-in node-map [% :node/type])) cycle)
-        (throw (err/error :topology/cycle
-                          "arbitrary graph cycles are rejected; only :loop nodes may iterate"
-                          {:nodes (vec (sort cycle))}))))))
+      (throw (err/error :topology/cycle
+                        "normal control-flow cycles are rejected; Loop iterations must return through :body"
+                        {:reason (if (some #(= :loop
+                                                (get-in node-map [% :node/type]))
+                                           cycle)
+                                   :loop-control-cycle
+                                   :cycle)
+                         :nodes (vec (sort cycle))})))))
 
 ;; --- normalization ---------------------------------------------------------
 
@@ -491,13 +593,31 @@
                            (assoc node :input-schema in-kw :output-schema out-kw :schema/input in-schema :schema/output out-schema :input-schema/schema in-schema :output-schema/schema out-schema :resolved/input-schema in-schema :resolved/output-schema out-schema))]))
         node-map)))
 
+(defn- build-regions
+  "Compile the explicit Loop Regions into a deterministic map keyed by
+  their owning loop node id. The descriptor uses :max rather than the
+  source node's :max-iterations so the Region language is independent
+  of the node encoding."
+  [node-map]
+  (into (sorted-map-by canonical-compare)
+        (keep (fn [[id node]]
+                (when (= :loop (:node/type node))
+                  [id (into (sorted-map-by canonical-compare)
+                            {:region/type :loop
+                             :body (:body node)
+                             :exit (:exit node)
+                             :until (:until node)
+                             :max (:max-iterations node)})])))
+        node-map))
+
 (defn- build-adjacency
-  "Sorted map of node id to the vector of successor node ids reachable
-  via :next (empty vector for terminal nodes)."
+  "Sorted map of normal successor ids. Sequential nodes use :next;
+  Loop nodes expose only their :exit. Their controlled :body edge lives
+  in :regions and is not a free adjacency edge."
   [node-map]
   (into (sorted-map-by canonical-compare)
         (map (fn [[id node]]
-               [id (if-let [nxt (:next node)] [nxt] [])]))
+               [id (if-let [nxt (normal-successor node)] [nxt] [])]))
         node-map))
 
 ;; --- public entry point ----------------------------------------------------
@@ -521,17 +641,17 @@
 
   Compositional typing (PLT4): each node declares optional :input-schema
   and :output-schema keywords (resolved via the closed schema registry,
-  defaulting to :schema/any when absent). For every edge A :next -> B
-  (and :body) the compiler checks output(A) <: input(B) via malli
-  subtype (m/validate); a mismatched edge throws
-  :topology/type-mismatch :reason :type-mismatch (Definition > validation).
-  Judgment: Gamma ; epsilon |- n : A -> B, with Seq rule Gamma |- n1:A->B, n2:B->C => n1;n2:A->C.
+  defaulting to :schema/any when absent). Sequential :next edges and a
+  Loop's :body/:exit edges are checked with output(A) <: input(B).
+  The normalized typing judgment is Gamma ; epsilon |- n : A -> B,
+  with the Seq rule and explicit Loop Region back-edge validation.
 
   Returns a pure data map {:graph/id ... :entry ... :nodes {node-id
-  {:node/id ... :node/type ... :input-schema ... :output-schema ... :schema/input ...}} :adjacency {node-id [successors]}
-  :limits {...}} with every map sorted, so identical logical topologies
-  compile to equal values with identical serialization regardless of
-  EDN key order (Step 4).
+  {:node/id ... :node/type ... :input-schema ... :output-schema ... :schema/input ...}}
+  :regions {loop-id {:region/type :loop :body ... :exit ... :until ... :max ...}}
+  :adjacency {node-id [normal-successors]} :limits {...}} with every
+  map sorted, so identical logical topologies compile to equal values with
+  identical serialization regardless of EDN key order (Step 4).
 
   Throws ExceptionInfo with a stable :error/type: :topology/invalid
   (malformed shapes; the :reason distinguishes :invalid-topology,
@@ -563,15 +683,17 @@
      (check-entry! entry node-ids)
      (doseq [[id node] entries]
        (validate-node! id node executable-types))
-     (check-nexts! entries node-ids)
-     (check-cycles! entries node-map)
-     ;; PLT4: inject typing (defaults to :schema/any) and enforce edge typing
-     ;; The typing judgment is Gamma ; epsilon |- n : A -> B, with Seq rule.
-     (let [typed-map (inject-typing! node-map)]
-       (check-typing! typed-map)
-       (into (sorted-map-by canonical-compare)
-             {:graph/id (:graph/id topology)
-              :entry entry
-              :nodes typed-map
-              :adjacency (build-adjacency typed-map)
-              :limits (or (:limits topology) {})})))))
+    (check-nexts! entries node-ids)
+    (check-loop-regions! node-map)
+    (check-cycles! entries node-map)
+    ;; PLT4: inject typing (defaults to :schema/any) and enforce edge typing.
+    (let [typed-map (inject-typing! node-map)
+          regions (build-regions typed-map)]
+      (check-typing! typed-map)
+      (into (sorted-map-by canonical-compare)
+            {:graph/id (:graph/id topology)
+             :entry entry
+             :nodes typed-map
+             :regions regions
+             :adjacency (build-adjacency typed-map)
+             :limits (or (:limits topology) {})})))))

@@ -136,18 +136,23 @@
       (into (sorted-map) (map (fn [d] [(:program/id d) d])) compiled))))
 
 (defn- check-topology-programs!
-  "Fail closed when the compiled topology references a :sci program id
-  with no compiled descriptor (no silent data loss at the boundary)."
+  "Fail closed when a compiled topology references a program without
+  a compiled descriptor. :sci nodes use :program; Loop Regions use
+  :until. Both are definition-level program references and must resolve
+  before a phenotype can be instantiated."
   [compiled-topology programs]
-  (doseq [pid (->> (:nodes compiled-topology)
-                   (keep (fn [[_ node]]
-                           (when (= :sci (:node/type node))
-                             (:program node))))
-                   distinct)]
+  (doseq [[node-id node] (:nodes compiled-topology)
+          :let [pid (case (:node/type node)
+                      :sci (:program node)
+                      :loop (:until node)
+                      nil)]
+          :when pid]
     (when-not (contains? programs pid)
       (throw (err/error :compiler/program-unresolved
                         "topology references a program with no compiled descriptor"
-                        {:program-id pid})))))
+                        {:program-id pid
+                         :node/id node-id
+                         :node/type (:node/type node)})))))
 
 ;; --- Phenotype identity ----------------------------------------------------
 

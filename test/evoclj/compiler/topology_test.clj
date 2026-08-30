@@ -176,34 +176,44 @@
     (is (= :topology/cycle (:error/type (ex-data e))))
     (is (= [:node/a] (:nodes (ex-data e))))))
 
-(deftest explicit-loop-node-cycle-is-allowed
-  (testing "a self-cycle through a :loop node compiles"
+(deftest explicit-loop-region-is-validated
+  (testing "a Loop Region returns through its body edge and exits normally"
     (let [c (topology/compile-topology
              {:graph/id :graph/main
-              :entry :node/b
-              :nodes {:node/b {:node/type :loop
-                               :body :node/body
-                               :until :program/done?
-                               :max-iterations 8
-                               :next :node/b}
-                      :node/body {:node/type :emit}}})]
+              :entry :node/loop
+              :nodes {:node/loop {:node/type :loop
+                                  :body :node/body
+                                  :until :program/done?
+                                  :max-iterations 8
+                                  :exit :node/finish}
+                      :node/body {:node/type :emit
+                                  :next :node/loop}
+                      :node/finish {:node/type :emit}}})]
       (is (map? c))
-      (is (= [:node/b] (get-in c [:adjacency :node/b])))))
-  (testing "a :next cycle that passes through a :loop node compiles"
-    (let [c (topology/compile-topology
+      (is (= [:node/finish] (get-in c [:adjacency :node/loop])))
+      (is (= {:region/type :loop
+              :body :node/body
+              :exit :node/finish
+              :until :program/done?
+              :max 8}
+             (get-in c [:regions :node/loop])))))
+  (testing "an exit-edge bypass L -> X -> L is rejected"
+    (let [e (compile-error
              {:graph/id :graph/main
-              :entry :node/a
-              :nodes {:node/a {:node/type :sci
-                               :program :program/route
-                               :next :node/b}
-                      :node/b {:node/type :loop
-                               :body :node/body
-                               :until :program/done?
-                               :max-iterations 8
-                               :next :node/a}
-                      :node/body {:node/type :emit}}})]
-      (is (= [:node/b] (get-in c [:adjacency :node/a])))
-      (is (= [:node/a] (get-in c [:adjacency :node/b]))))))
+              :entry :node/loop
+              :nodes {:node/loop {:node/type :loop
+                                  :body :node/body
+                                  :until :program/done?
+                                  :max-iterations 8
+                                  :exit :node/bypass}
+                      :node/body {:node/type :emit
+                                  :next :node/loop}
+                      :node/bypass {:node/type :emit
+                                    :next :node/loop}}})]
+      (is (instance? clojure.lang.ExceptionInfo e))
+      (is (= :topology/cycle (:error/type (ex-data e))))
+      (is (= :loop-control-cycle (:reason (ex-data e))))
+      (is (= [:node/bypass :node/loop] (:nodes (ex-data e)))))))
 
 ;; --- ordering independence (Step 4) ---------------------------------------
 
@@ -309,9 +319,11 @@
                                 :max-iterations 2
                                 :input-schema :schema/int
                                 :output-schema :schema/string
-                                :next :node/exit}
+                                :exit :node/exit}
                     :node/body {:node/type :emit
-                                :input-schema :schema/int}
+                                :input-schema :schema/int
+                                :output-schema :schema/int
+                                :next :node/loop}
                     :node/exit {:node/type :emit}}})]
     (is (= :topology/type-mismatch (:error/type (ex-data e))))
     (is (= :body (:edge (ex-data e))))
