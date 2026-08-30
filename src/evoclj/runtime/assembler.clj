@@ -6,11 +6,14 @@
   merges history, active bindings, catalog, and tool catalog binding
   into a wire-ready request. Tool catalog is pinned for a whole
   tool-loop; context is rebuilt each round so activate_skill becomes
-  visible immediately."
+  visible immediately. Pin and refresh operations delegate to
+  evoclj.runtime.tool-surface (C3) to keep this namespace a pure
+  function without duplicated pin/refresh logic."
   (:require [evoclj.context.materializer :as mat]
             [evoclj.context.prompt-trust :as trust]
             [evoclj.environment.revision :as rev]
-            [evoclj.kernel.error :as err]))
+            [evoclj.kernel.error :as err]
+            [evoclj.runtime.tool-surface :as tool-surface]))
 
 (defn base->prepared
   "Assemble PreparedModelCall.
@@ -35,28 +38,22 @@
   ([base-call session-bindings catalog tool-catalog-binding history {:keys [cas policy]}]
    (let [base-messages (:base/messages base-call (:messages base-call []))
          requested-tools (:requested-tools base-call (:tools base-call))
-         ;; tool catalog: use provided binding or derive from catalog
+         ;; tool catalog: use provided binding or derive via ToolSurface pin
          tool-catalog (or tool-catalog-binding
-                          {:binding/id (random-uuid)
-                           :revision-ids catalog})
-         ;; context materialization: rebuild each time
-         effective (if (seq session-bindings)
-                     (if cas
-                       (mat/materialize {:history history
-                                         :bindings session-bindings
-                                         :catalog catalog
-                                         :policy policy
-                                         :cas cas})
-                       ;; WO-S1 / INV-04: an unresolved placeholder (a
-                       ;; skill/artifact reference we cannot resolve) FAILS
-                       ;; CLOSED — never emit a degraded "binding:..."
-                       ;; placeholder segment.
-                        (throw (err/error :assembler/placeholder-unresolved
-                                          "cannot resolve session binding placeholders without a CAS resolver"
-                                          {:bindings (mapv :logical/id session-bindings)})))
-                     {:effective/history history
-                      :effective/segments []
-                      :effective/bindings []})
+                          (:surface/binding (tool-surface/pin catalog)))
+         ;; context materialization: delegate refresh variability to ToolSurface
+         ;; so pin vs refresh concerns stay decoupled (C3). The wrapper surface
+         ;; carries the pinned binding; refresh-context recomputes
+         ;; EffectiveContext from fresh bindings and CAS with fail-closed
+         ;; handling for missing CAS.
+         surface (if tool-catalog-binding
+                   {:surface/tools catalog
+                    :surface/pinned-at (:captured-at tool-catalog-binding)
+                    :surface/binding tool-catalog-binding}
+                   (tool-surface/pin catalog))
+         {:keys [context]} (tool-surface/refresh-context surface session-bindings cas
+                                                         {:catalog catalog :history history :policy policy})
+         effective context
          segments (:effective/segments effective [])
          ;; S13 PROVENANCE + KERNEL PRIORITY: the trusted assembler must
          ;; (1) tag each message with a provenance header and (2) emit
@@ -99,17 +96,16 @@
       :effective effective})))
 
 (defn pin-catalog
-  "Capture tool catalog binding at start of a tool-loop. Returns the
-  binding to be pinned and reused across rounds."
+  "Capture tool catalog binding at start of a tool-loop. Delegates to
+  evoclj.runtime.tool-surface/pin and returns the binding for backward
+  compatibility. The full ToolSurface is available via tool-surface/pin."
   [catalog]
-  {:binding/id (random-uuid)
-   :revision-ids catalog
-   :captured-at (System/currentTimeMillis)})
+  (:surface/binding (tool-surface/pin catalog)))
 
 (defn capture-tool-catalog-binding
-  "Alias for pin-catalog for scheduler compatibility."
+  "Alias for pin-catalog for scheduler compatibility. Delegates to ToolSurface."
   [catalog]
-  (pin-catalog catalog))
+  (:surface/binding (tool-surface/pin catalog)))
 
 (defn base-call-from-intent
   "Extract BaseModelCall from an intent. Tolerates both new and legacy payload shapes."

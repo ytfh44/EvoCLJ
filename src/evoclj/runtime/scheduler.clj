@@ -137,6 +137,7 @@
             [evoclj.provider.dialect :as dialect]
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.assembler :as assembler]
+            [evoclj.runtime.tool-surface :as tool-surface]
             [evoclj.runtime.node :as node]
             [evoclj.sci.boundary :as boundary]
             [evoclj.store.binding :as binding-store]
@@ -521,18 +522,29 @@
           ;; still safe: no registry, no S14 enforcement gate.
           _ (when-let [provider-registry (:registry (:dispatch executor))]
               (registry/resolve-tool-catalog provider-registry pinned-source))
-          pinned (try (assembler/capture-tool-catalog-binding pinned-source)
-                      (catch Throwable _
-                        (assembler/capture-tool-catalog-binding initial-tools)))]
+          ;; C3: pin ToolSurface once for the whole loop (pin stability).
+          ;; The ToolSurface value {:surface/tools :surface/binding :surface/pinned-at}
+          ;; is captured once; only the binding is passed to the assembler.
+          pinned-surface (try (tool-surface/pin pinned-source)
+                              (catch Throwable _
+                                (tool-surface/pin initial-tools)))
+          pinned (:surface/binding pinned-surface)]
       (loop [current-base-call base-call
              current-intent intent
              cause cause
              outputs outputs
              rounds rounds
-             pinned pinned]
+             pinned pinned
+             pinned-surface pinned-surface]
         (let [cause-id (if (map? cause) (:event/id cause) cause)
               bindings (fetch-bindings executor pin cause-id)
               cas (:cas (:stores executor))
+              ;; C3: refresh variability — recompute EffectiveContext each round
+              ;; from fresh SessionBindings and CAS. Pin stays constant while
+              ;; context may change (e.g. activate_skill creates a new binding).
+              _refreshed (try (tool-surface/refresh-context pinned-surface bindings cas
+                                                            {:catalog {} :history ""})
+                              (catch Throwable _ nil))
               prepared (try
                          (assembler/assemble current-base-call
                                              {:session-bindings bindings
@@ -587,7 +599,8 @@
                      (:last-event executed)
                      (:outputs executed)
                      (dec rounds)
-                     pinned))
+                     pinned
+                     pinned-surface))
             step))))))
 
 ;; --- terminal session outcomes ----------------------------------------------
