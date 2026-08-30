@@ -53,6 +53,7 @@
   (:require [clojure.string :as str]
             [evoclj.kernel.error :as err]
             [evoclj.genome.path :as path]
+            [evoclj.sci.computation :as computation]
             [evoclj.store.schema :as schema-registry]
             [malli.core :as m]
             [rewrite-clj.node :as rn]
@@ -60,7 +61,15 @@
             [rewrite-clj.zip :as rz])
   (:import (java.nio.charset StandardCharsets)))
 
-;; --- policy rule data ------------------------------------------------------
+;; --- policy rule data (single source: computation/host-surface) ---------------
+
+;; The single authoritative allow surface lives in
+;; evoclj.sci.computation/host-surface (C4/D4). The compiler static
+;; policy delegates host-namespace checks to
+;; computation/host-allowed-namespaces (single implementation, INV-05)
+;; so the explicit host allow list is not duplicated here.
+
+
 
 (def ^:private forbidden-names
   "Symbol names rejected wherever they appear: they grant execution or
@@ -317,7 +326,13 @@
   [source]
   (let [root (rp/parse-string-all source)
         declared (top-level-ns-names root)
-        allowlist (conj declared core-namespace)
+        ;; Single source host-surface: compile-time allowlist is the
+        ;; declared namespaces plus clojure.core plus every explicitly
+        ;; allowed host namespace from computation (e.g. evo.api.intent).
+        ;; No duplicated literal (INV-05); runtime SCI context uses the
+        ;; same host-surface set for its :allow (GC-07).
+        allowlist (into (conj declared core-namespace)
+                        computation/host-allowed-namespaces)
         violation (or (reader-eval-violation root)
                       (scan-elements (top-level-forms root) allowlist))]
     {:declared (vec declared)

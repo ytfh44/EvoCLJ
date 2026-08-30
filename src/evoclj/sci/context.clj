@@ -53,50 +53,23 @@
   static access are denied by the allowlist. The SCI layer is useful
   for pure decision logic but useless as an ambient shell."
   (:require [evoclj.kernel.error :as err]
+            [evoclj.sci.computation :as computation]
             [evoclj.sci.expose :as expose]
             [sci.core :as sci]))
 
-;; --- the explicit allow surface -------------------------------------------
+;; --- the explicit allow surface (single source: evoclj.sci.computation) --------
 
-(def ^:private core-allow-list
-  "The explicit set of pure clojure.core symbols evolvable programs may
-  use. Every symbol an SCI program resolves is checked against this set
-  (plus the exposed API namespace symbols below); anything else throws
-  at analysis time. The set covers: definition and control forms
-  (including the special forms SCI expands macros into: fn*, let*,
-  loop*, case*, if), arithmetic, comparison, predicates, collection
-  and sequence operations, pure data constructors, pr-str, and
-  ex-info/ex-message/ex-data. Excluded by construction: require/use,
-  eval/load-*, read-string, slurp/spit, IO and interop forms, class
-  loading, and every mutation/concurrency primitive (atom, ref, delay,
-  future, promise, agent, swap!, deref, alter-var-root)."
-  '#{def defn defn- ns fn fn* let let* loop loop* case case* if do quote
-     recur throw
-     cond and or when when-not when-let when-some if-let if-some
-     -> ->> some-> some->> as-> cond-> cond->> doto
-     + - * / inc dec max min mod rem quot
-     = == not= < > <= >= zero? pos? neg? even? odd?
-     number? integer? int? float? double? boolean? keyword? symbol?
-     string? char? vector? map? set? seq? coll? sequential? associative?
-     counted? empty? seqable? nil? some? true? false? not
-     count first second last rest next nnext nth nthnext butlast take
-     drop take-while drop-while range
-     get get-in assoc assoc-in dissoc update update-in merge merge-with
-     select-keys keys vals find contains? key val conj cons into vector
-     vec list list* set seq mapv reverse sort sort-by
-     apply comp partial constantly identity juxt complement
-     map filter remove reduce reduce-kv keep keep-indexed partition
-     partition-all group-by frequencies empty not-empty
-     seq-to-map-for-destructuring
-     str subs format name namespace keyword symbol gensym
-     hash-map hash-set array-map pr-str
-     ex-info ex-message ex-data})
+
+;; Deprecated alias: the single authoritative core allow list lives in
+;; evoclj.sci.computation/core-allow-set (C4/D4). Kept here as an alias
+;; so external callers that resolved the private var continue to work,
+;; but no duplicated literal exists (INV-05, GC-07).
+(def ^:private core-allow-list computation/core-allow-set)
 
 (defn- exposed-symbols
-  "The fully qualified symbols of every var in an API namespace map,
-  e.g. {'evo.api.intent {'tool-call f}} -> #{'evo.api.intent/tool-call}.
-  These are the only host values callable from inside the sandbox, and
-  each one is enumerated explicitly in the :allow set."
+  "Deprecated forwarding to the single implementation in computation.
+  Kept for internal call sites; the authoritative version is the
+  computation host-surface derivation."
   [api-namespaces]
   (into #{}
         (for [[ns-sym varmap] api-namespaces
@@ -104,10 +77,12 @@
           (symbol (str ns-sym) (str var-name)))))
 
 (defn- allow-set
-  "The complete explicit :allow set: the pure clojure.core symbols plus
-  every exposed API namespace symbol."
+  "Deprecated forwarding: delegates to the single host-surface derivation
+  in evoclj.sci.computation. The authoritative allowed set is
+  computation/host-surface for the default namespaces, or a computed
+  union for custom api-namespaces."
   [api-namespaces]
-  (into core-allow-list (exposed-symbols api-namespaces)))
+  (into computation/core-allow-set (exposed-symbols api-namespaces)))
 
 ;; --- configuration validation ----------------------------------------------
 
