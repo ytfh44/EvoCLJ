@@ -55,6 +55,7 @@
             [evoclj.kernel.error :as err]
             [evoclj.provider.dialect :as dialect]
             [evoclj.provider.protocol :as proto]
+            [evoclj.provider.request :as request]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m])
   (:import (com.openai.client.okhttp OpenAIOkHttpClient)
@@ -112,23 +113,7 @@
    :required-action :invoke
    :retry {:safe? true}})
 
-;; --- EDN -> SDK conversion -----------------------------------------------------
-
-(defn- edn->json
-  "Convert EDN-safe data into JSON-compatible Java values for the
-  SDK: keywords/symbols become strings (names only), sets become
-  vectors, maps keep keyword-free string keys. Scalar values pass
-  through. Throws :provider/input-invalid on anything non-EDN."
-  [x]
-  (cond
-    (or (nil? x) (true? x) (false? x) (number? x) (string? x)) x
-    (keyword? x) (name x)
-    (symbol? x) (str x)
-    (map? x) (into {} (map (fn [[k v]] [(edn->json k) (edn->json v)])) x)
-    (or (vector? x) (set? x) (list? x)) (mapv edn->json x)
-    :else (throw (err/error :provider/input-invalid
-                            "options must be plain EDN-safe data"
-                            {:reason :not-edn-safe :value (err/sanitize x)}))))
+;; --- EDN -> SDK conversion (delegates to provider.request) -----------------------
 
 (defn- message->param
   "Convert one EDN message into the SDK message param. Roles:
@@ -151,7 +136,7 @@
       :assistant (let [b (.content (ChatCompletionAssistantMessageParam/builder) content)]
                    (if-let [tool-calls (:tool-calls msg)]
                      (.build (.putAdditionalProperty
-                              b "tool_calls" (JsonValue/from (edn->json tool-calls))))
+                              b "tool_calls" (JsonValue/from (request/edn->json tool-calls))))
                      (.build b)))
       :tool (do
               (when-not (and (string? (:tool-call-id msg))
@@ -173,40 +158,19 @@
   [model-id]
   (second (str/split model-id #"/")))
 
-(defn- supported-option?
-  "The v1 supported call options. :max-tool-rounds is a
-  scheduler-level option (the model tool-calling loop bound) — the
-  adapter validates it but never serializes it to the wire."
-  [k]
-  (contains? #{:temperature :max-tokens :seed :reasoning
-              :server-side-search :max-tool-rounds} k))
-
-(defn- wire-tools
-  "The wire tools declaration from the payload :tools vector:
-  each entry {:name :description :parameters :tool} becomes the
-  OpenAI function-tool shape; the internal :tool id (the mapping
-  back to the EvoCLJ tool) is stripped before serialization."
-  [tools]
-  (mapv (fn [t]
-          (cond-> {:type "function"
-                   :function {:name (:name t)
-                              :description (or (:description t) "")
-                              :parameters (or (:parameters t) {})}}
-            (contains? t :tool) (assoc :tool/id (:tool t))))
-        tools))
-
 (defn- build-params
   "Build the SDK ChatCompletionCreateParams from the authorized EDN
   request: the body is assembled on the SDK Body builder (model,
   messages, supported options via builder methods, dialect extras
   and the tools declaration via putAdditionalProperty) and attached
-  to the outer params."
+  to the outer params. Delegates edn->json, wire-tools, and
+  supported-option? to provider.request."
   [request dialect]
   (let [opts (or (:options request) {})
         extra (dialect/openai-request-extra dialect opts)
         extra (if (seq (:tools request))
                 (assoc extra :tools (mapv #(dissoc % :tool/id)
-                                          (wire-tools (:tools request))))
+                                          (request/wire-tools (:tools request))))
                 extra)
         b (-> (ChatCompletionCreateParams$Body/builder)
               (.model (model-request-name (:model/id request))))
@@ -220,7 +184,7 @@
             (.seed b (long s)) b)
         b (reduce (fn [b [k v]]
                     (.putAdditionalProperty b (str/replace (name k) "-" "_")
-                                            (JsonValue/from (edn->json v))))
+                                            (JsonValue/from (request/edn->json v))))
                   b extra)
         params (.build (.body (ChatCompletionCreateParams/builder) (.build b)))]
     params))
@@ -278,7 +242,8 @@
 (defn- parse-http-response!
   "Validate the raw HTTP result and parse the JSON body into EDN:
   non-2xx statuses become typed errors; malformed JSON becomes
-  :provider/model-error."
+  :provider/model-error. Delegates to provider.request/parse-response
+  (single dispatch point)."
   [raw dialect]
   (let [status (:http/status raw)]
     (when-not (<= 200 status 299)
@@ -296,7 +261,7 @@
                                        "model endpoint returned malformed JSON"
                                        {:reason :bad-json
                                         :message (str (.getMessage e))}))))]
-      (dialect/parse-openai-response dialect parsed))))
+      (request/parse-response :openai dialect parsed))))
 
 ;; --- the provider ----------------------------------------------------------------
 
@@ -369,7 +334,7 @@
                               {:reason :messages-invalid
                                :value (err/sanitize (:messages payload))})))
           (doseq [k (keys (or (:options payload) {}))]
-            (when-not (supported-option? k)
+            (when-not (request/supported-option? :openai k)
               (throw (err/error :provider/input-invalid
                                 (str "unsupported model-call option " k)
                                 {:reason :unknown-option :option k}))))

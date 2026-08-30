@@ -16,17 +16,17 @@
   BEFORE authorization; execute-request! builds the SDK request
   (model, max_tokens, system prompt, user/assistant messages, vendor
   additionalProperties), calls the endpoint, parses the raw JSON via
-  evoclj.provider.dialect/parse-anthropic-response, and returns the
-  canonical provider result with usage and cost.
+  provider.request/parse-response (single dispatch point), and returns
+  the canonical provider result with usage and cost.
 
-  Anthropic content blocks: only text blocks are returned as :text;
-  tool_use blocks are ignored in v1. Reasoning (thinking blocks) is
-  not interleaved into the output in v1."
+  Anthropic content blocks: text blocks concatenate into :text;
+  tool_use blocks become :tool-calls entries."
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [evoclj.kernel.error :as err]
             [evoclj.provider.dialect :as dialect]
             [evoclj.provider.protocol :as proto]
+            [evoclj.provider.request :as request]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m])
   (:import (com.anthropic.client.okhttp AnthropicOkHttpClient)
@@ -43,15 +43,17 @@
    [:options {:optional true} :map]])
 
 (def ModelCallOutputSchema
-  "The model-call output contract: text output and usage counters.
-   Usage also carries an optional :model-reasoning-tokens int
-   (provider-reported reasoning token count, may be 0): the shared
-   dialect/provider-result constructor always emits the key while
-   legacy results predate it."
+  "The model-call output contract: text output, optional tool-calls,
+   and usage counters."
   [:map {:closed true}
    [:model/output [:map {:closed false}
                    [:text string?]
                    [:reasoning {:optional true} string?]]]
+   [:tool-calls {:optional true}
+    [:vector [:map {:closed false}
+              [:tool/call-id string?]
+              [:tool/name string?]
+              [:tool/arguments :map]]]]
    [:usage [:map {:closed true}
             [:model-input-tokens :int]
             [:model-output-tokens :int]
@@ -67,35 +69,17 @@
    :required-action :invoke
    :retry {:safe? true}})
 
-(defn- edn->json
-  "EDN-safe data to JSON-compatible Java values (same rules as the
-  OpenAI adapter)."
-  [x]
-  (cond
-    (or (nil? x) (true? x) (false? x) (number? x) (string? x)) x
-    (keyword? x) (name x)
-    (symbol? x) (str x)
-    (map? x) (into {} (map (fn [[k v]] [(edn->json k) (edn->json v)])) x)
-    (or (vector? x) (set? x) (list? x)) (mapv edn->json x)
-    :else (throw (err/error :provider/input-invalid
-                            "options must be plain EDN-safe data"
-                            {:reason :not-edn-safe :value (err/sanitize x)}))))
-
 (defn- model-request-name
   "The wire model id (the part after the provider prefix)."
   [model-id]
   (second (str/split model-id #"/")))
 
-(defn- supported-option?
-  "v1 supported call options: temperature and max-tokens."
-  [k]
-  (contains? #{:temperature :max-tokens :max-tool-rounds} k))
-
 (defn- build-params
   "Build the SDK MessageCreateParams: system messages become the
   system prompt, user/assistant messages become message params,
   supported options map to builder methods, and any dialect extra
-  params merge via additionalProperties."
+  params merge via additionalProperties. Delegates edn->json to
+  provider.request."
   [request]
   (let [opts (or (:options request) {})
         messages (:messages request)
@@ -122,7 +106,7 @@
                   b turns)
         b (reduce (fn [b [k v]]
                     (.putAdditionalProperty b (str/replace (name k) "-" "_")
-                                            (JsonValue/from (edn->json v))))
+                                            (JsonValue/from (request/edn->json v))))
                   b (get-in request [:options :extra-params] {}))
         params (.build (.body (MessageCreateParams/builder) (.build b)))]
     params))
@@ -161,6 +145,10 @@
                         {:status :io-error})))))
 
 (defn- parse-http-response!
+  "Validate the raw HTTP result and parse the JSON body into EDN:
+  non-2xx statuses become typed errors; malformed JSON becomes
+  :provider/model-error. Delegates to provider.request/parse-response
+  (single dispatch point)."
   [raw]
   (let [status (:http/status raw)]
     (when-not (<= 200 status 299)
@@ -178,7 +166,7 @@
                                        "model endpoint returned malformed JSON"
                                        {:reason :bad-json
                                         :message (str (.getMessage e))}))))]
-      (dialect/parse-anthropic-response parsed))))
+      (request/parse-response :anthropic nil parsed))))
 
 (defn anthropic-provider
   "Build one Anthropic-compatible provider.
@@ -220,7 +208,7 @@
                               {:reason :messages-invalid
                                :value (err/sanitize (:messages payload))})))
           (doseq [k (keys (or (:options payload) {}))]
-            (when-not (supported-option? k)
+            (when-not (request/supported-option? :anthropic k)
               (throw (err/error :provider/input-invalid
                                 (str "unsupported model-call option " k)
                                 {:reason :unknown-option :option k}))))
@@ -241,5 +229,8 @@
               raw (execute-raw! client params)
               parsed (parse-http-response! raw)
               usage (:usage parsed)
-              cost (dialect/estimate-cost (:model/cost entry) usage)]
-          (dialect/provider-result (:model/output parsed) usage cost))))))
+              cost (dialect/estimate-cost (:model/cost entry) usage)
+              result (dialect/provider-result (:model/output parsed) usage cost)]
+          (if (:tool-calls parsed)
+            (assoc result :tool-calls (:tool-calls parsed))
+            result))))))

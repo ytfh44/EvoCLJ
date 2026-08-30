@@ -207,19 +207,30 @@
 
 (defn parse-anthropic-response
   "Parse a decoded Anthropic messages response map into the
-  canonical provider result: content blocks are concatenated (text
-  blocks only; tool_use blocks are ignored in v1), usage carries
-  input/output tokens. No reasoning extraction: Anthropic reasoning
-  lives in the thinking block and is not interleaved in v1."
+  canonical provider result: text blocks concatenate into :text;
+  tool_use blocks become :tool-calls entries (retaining the
+  tool-use id, name, and input map). Usage carries input/output
+  tokens. No reasoning extraction: Anthropic reasoning lives in
+  the thinking block and is not interleaved in v1."
   [response]
   (let [content (:content response)
+        blocks (if (vector? content) content [])
         texts (keep (fn [b] (when (and (map? b) (= "text" (:type b)))
                                (:text b)))
-                    (if (vector? content) content []))
+                    blocks)
+        tool-calls (keep (fn [b]
+                           (when (and (map? b) (= "tool_use" (:type b)))
+                             (when (and (string? (:id b)) (string? (:name b)))
+                               {:tool/call-id (:id b)
+                                :tool/name (:name b)
+                                :tool/arguments (if (map? (:input b)) (:input b) {})})))
+                         blocks)
+        tool-calls (seq tool-calls)
         usage (:usage response)]
-    {:model/output {:text (apply str texts)}
-     :usage {:input-tokens (get-in usage [:input_tokens] 0)
-             :output-tokens (get-in usage [:output_tokens] 0)}}))
+    (cond-> {:model/output {:text (apply str texts)}
+             :usage {:input-tokens (get-in usage [:input_tokens] 0)
+                     :output-tokens (get-in usage [:output_tokens] 0)}}
+      tool-calls (assoc :tool-calls (vec tool-calls)))))
 
 ;; --- cost ----------------------------------------------------------------------
 
