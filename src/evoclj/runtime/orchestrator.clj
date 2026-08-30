@@ -274,3 +274,18 @@
                        pinned
                        pinned-surface))
               step)))))))
+
+;; CodeModeOrchestrator — empty PTC orchestrator with fail-safe off switch.
+;; No actual code execution. Reads :ptc from the per-session executor map
+;; (kernel/system :build) at call time; when :ptc is missing the check falls
+;; back to false and fails safe. When enabled, delegates the full tool-calling
+;; loop to a fresh TraditionalOrchestrator. This empty implementation preserves
+;; the existing broker-per-tool-call contract (GC-07/08) — future PTC code
+;; execution will still require broker dispatch per tool call.
+(defrecord CodeModeOrchestrator []
+  Orchestrator
+  (orchestrate [_this executor pin cause intent outputs]
+    (let [enabled? (boolean (:enabled? (:ptc executor)))]
+      (if (not enabled?)
+        (throw (err/error :ptc/not-enabled "PTC is disabled" {:ptc (:ptc executor)}))
+        (orchestrate (->TraditionalOrchestrator) executor pin cause intent outputs)))))

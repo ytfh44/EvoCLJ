@@ -5,7 +5,8 @@
   per-provider option allowlists. Providers delegate here so
   edn->json and supported-option? are defined once (INV-05).
   Parse dispatch is the single entry point (parse-response
-  provider raw) and fixes the anthropic tool_use dropping."
+  provider raw) and fixes the anthropic tool_use dropping.
+  :code is parsed but not executed (carried through as {:language :source})."
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [evoclj.kernel.error :as err]
@@ -31,7 +32,8 @@
   :text is the concatenated visible text, :reasoning is an
   optional interleaved reasoning trace, :tool-calls is the
   optional vector of parsed tool calls, :usage carries token
-  counters."
+  counters, :code is an optional parsed code block
+  {:language <keyword> :source <string>} (parsed but not executed)."
   [:map
    [:text string?]
    [:reasoning {:optional true} string?]
@@ -41,7 +43,7 @@
               [:tool/name string?]
               [:tool/arguments :map]]]]
    [:usage {:optional true} :map]
-   [:code {:optional true} :int]])
+   [:code {:optional true} [:map [:language keyword?] [:source string?]]]])
 
 ;; --- EDN -> JSON (single definition) ----------------------------------------
 

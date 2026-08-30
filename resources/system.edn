@@ -318,5 +318,9 @@
   :timeout-ms 30000}
 
  :model/registry
- {:catalog #ig/ref :modelsdev/catalog
-  :registry/api-keys {}}}
+{:catalog #ig/ref :modelsdev/catalog
+  :registry/api-keys {}}
+
+ ;; PTC (CodeMode) fail-safe switch — shipped disabled (no behavior change). When :enabled? true orchestrator routes via CodeModeOrchestrator; future will broker per tool call.
+ :ptc {:enabled? false :language :sci-clojure :max-tool-calls 32 :wall-ms 5000}
+}

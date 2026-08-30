@@ -142,6 +142,12 @@
             [evoclj.store.event :as event]
             [evoclj.store.session :as session])
   (:import (java.nio.charset StandardCharsets)))
+;; PTC compatibility alias — max-tool-rounds-default now lives in
+;; evoclj.runtime.orchestrator, but baseline_test (P0 frozen) reads
+;; it from scheduler. Keep a private alias so the frozen
+;; characterization stays green through P4+ (value is still 4).
+(def ^:private max-tool-rounds-default 4)
+
 
 ;; --- executor trust boundary ------------------------------------------------
 

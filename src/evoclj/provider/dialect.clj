@@ -136,6 +136,19 @@
       (catch Exception _ {}))
     {}))
 
+(defn- extract-code-block
+  "Extract the first fenced code block from text.
+
+  When text is a string, finds the first ```lang\\ncode\\n``` or ```\\ncode\\n```
+  block (dot-all, non-greedy). Returns nil when no block is found, otherwise
+  {:language <keyword> :source <trimmed-string>} defaulting language to :clojure
+  when the fence has no language tag. Pure EDN, no network."
+  [text]
+  (when (string? text)
+    (when-let [[_ lang code] (re-find #"(?s)```(?:(\w+)\n)?(.*?)\n```" text)]
+      {:language (keyword (or lang "clojure"))
+       :source (str/trim (or code ""))})))
+
 (defn parse-openai-response
   "Parse a decoded OpenAI-compatible chat-completions response map
   into the canonical provider result.
@@ -145,7 +158,12 @@
   the first choice message becomes :model/output :reasoning. A nil
   or :none interleaved dialect extracts no reasoning.
 
+  Also extracts the first fenced code block from the visible text
+  via extract-code-block; when present the result carries :code
+  {:language <keyword> :source <string>} (parsed but not executed).
+
   Returns {:model/output {:text <str> :reasoning <str or absent>}
+           :code {:language <keyword> :source <string>}?
            :usage {:input-tokens <int> :output-tokens <int>
                    :reasoning-tokens <int or absent>}}.
   Throws :provider/output-invalid when the response has no choices
@@ -172,7 +190,8 @@
         tool-calls (seq tool-calls)
         usage (:usage response)
         reasoning-tokens (get-in usage [:completion_tokens_details
-                                        :reasoning_tokens])]
+                                        :reasoning_tokens])
+        code (extract-code-block text)]
     (when-not (and (vector? choices) (seq choices) (map? message))
       (throw (ex-info "openai response has no usable first choice"
                       {:error/type :provider/output-invalid
@@ -189,7 +208,8 @@
                                                   :completion_tokens
                                                   :total_tokens
                                                   :prompt_tokens_details
-                                                  :completion_tokens_details])))))
+                                                  :completion_tokens_details]))
+      code (assoc :code code))))
 
 (defn tool-calls->wire
   "Convert the parsed tool-call records [{:tool/call-id :tool/name
@@ -211,13 +231,20 @@
   tool_use blocks become :tool-calls entries (retaining the
   tool-use id, name, and input map). Usage carries input/output
   tokens. No reasoning extraction: Anthropic reasoning lives in
-  the thinking block and is not interleaved in v1."
+  the thinking block and is not interleaved in v1.
+
+  Also extracts the first fenced code block from the concatenated
+  text via extract-code-block; when present the result carries
+  :code {:language <keyword> :source <string>} (parsed but not
+  executed). Pure EDN, no network."
   [response]
   (let [content (:content response)
         blocks (if (vector? content) content [])
         texts (keep (fn [b] (when (and (map? b) (= "text" (:type b)))
                                (:text b)))
                     blocks)
+        text (apply str texts)
+        code (extract-code-block text)
         tool-calls (keep (fn [b]
                            (when (and (map? b) (= "tool_use" (:type b)))
                              (when (and (string? (:id b)) (string? (:name b)))
@@ -227,10 +254,11 @@
                          blocks)
         tool-calls (seq tool-calls)
         usage (:usage response)]
-    (cond-> {:model/output {:text (apply str texts)}
+    (cond-> {:model/output {:text text}
              :usage {:input-tokens (get-in usage [:input_tokens] 0)
                      :output-tokens (get-in usage [:output_tokens] 0)}}
-      tool-calls (assoc :tool-calls (vec tool-calls)))))
+      tool-calls (assoc :tool-calls (vec tool-calls))
+      code (assoc :code code))))
 
 ;; --- cost ----------------------------------------------------------------------
 

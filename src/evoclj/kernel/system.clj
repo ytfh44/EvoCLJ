@@ -355,17 +355,19 @@
   constructed inside an isolated SCI runtime and is never a host
   component (Global Constraints 22, 23)."
 
-  (let [limits (or (:scheduler config) {})]
+  (let [limits (or (:scheduler config) {}) ptc (or (:ptc config) {:enabled? false})]
     {:scheduler scheduler/run-session!
      :stores {:sqlite (:sqlite (:store config))
               :cas (:cas (:store config))}
      :dispatch (:dispatch config)
      :limits limits
+     :ptc ptc
      :build (fn [phenotype]
               {:phenotype phenotype
                :stores {:sqlite (:sqlite (:store config))
                         :cas (:cas (:store config))}
-               :dispatch (:dispatch config)})}))
+               :dispatch (:dispatch config)
+               :ptc ptc})}))
 
 (defmethod ig/halt-key! :runtime/executor
   [_ _component]
