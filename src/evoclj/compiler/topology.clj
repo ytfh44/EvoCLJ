@@ -193,6 +193,12 @@
     (= input-form :any) true
     (= input-form [:any]) true
     (= output-form input-form) true
+    (and (vector? output-form) (= :or (first output-form))
+         (vector? input-form) (= :or (first input-form)))
+    (every? (fn [output-alternative]
+              (some #(subtype-form? output-alternative %)
+                    (next input-form)))
+            (next output-form))
     (and (vector? input-form) (= :or (first input-form)))
     (some #(subtype-form? output-form %) (next input-form))
     (and (vector? output-form) (= :or (first output-form)))
@@ -204,10 +210,6 @@
       [:set :set] (subtype-form? (second output-form) (second input-form))
       [:maybe :maybe] (subtype-form? (second output-form) (second input-form))
       [:maybe :or] (subtype-form? output-form input-form)
-      [:or :or] (every? #(some (fn [candidate]
-                                  (subtype-form? candidate (second input-form)))
-                                (next input-form))
-                        (next output-form))
       [:or :any] true
       [:enum :enum] (every? (set (next input-form)) (next output-form))
       [:= :=] (= (second output-form) (second input-form))
