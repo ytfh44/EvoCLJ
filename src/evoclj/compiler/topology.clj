@@ -384,7 +384,7 @@
                      out-schema (resolve-node-schema! out-kw :output-schema id)]
                  [id (into (sorted-map-by canonical-compare)
                            (assoc node :input-schema in-kw :output-schema out-kw :schema/input in-schema :schema/output out-schema :input-schema/schema in-schema :output-schema/schema out-schema :resolved/input-schema in-schema :resolved/output-schema out-schema))]))
-        node-map))
+        node-map)))
 
 (defn- build-adjacency
   "Sorted map of node id to the vector of successor node ids reachable
@@ -470,5 +470,3 @@
               :nodes typed-map
               :adjacency (build-adjacency typed-map)
               :limits (or (:limits topology) {})})))))
-
-)
