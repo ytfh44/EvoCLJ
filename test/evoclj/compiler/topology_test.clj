@@ -257,3 +257,90 @@
                             :nodes {:node/a {:node/type :emit}}
                             :limits {:max-steps 0}})]
       (is (= :invalid-limits (:reason (ex-data e)))))))
+ 
+;; --- compositional edge typing (PLT4) -------------------------------------
+
+(deftest compositional-edge-types-are-checked
+  (let [compiled (topology/compile-topology
+                  {:graph/id :graph/typed
+                   :entry :node/source
+                   :nodes {:node/source {:node/type :emit
+                                         :output-schema :schema/string
+                                         :next :node/sink}
+                           :node/sink {:node/type :emit
+                                       :input-schema :schema/string}}})]
+    (testing "registered schema keywords resolve into compiled node data"
+      (is (= :schema/string
+             (get-in compiled [:nodes :node/source :output-schema])))
+      (is (= :string
+             (get-in compiled [:nodes :node/source :schema/output])))
+      (is (= :schema/any
+             (get-in compiled [:nodes :node/sink :output-schema])))
+      (is (= :any
+             (get-in compiled [:nodes :node/sink :schema/output]))))
+    (testing "typed compiled topology remains pure EDN"
+      (is (= compiled (edn/read-string (pr-str compiled)))))))
+
+(deftest mismatched-next-edge-is-rejected-at-compile-time
+  (let [e (compile-error
+           {:graph/id :graph/typed
+            :entry :node/source
+            :nodes {:node/source {:node/type :emit
+                                  :output-schema :schema/string
+                                  :next :node/sink}
+                    :node/sink {:node/type :emit
+                                :input-schema :schema/int}}})]
+    (is (instance? clojure.lang.ExceptionInfo e))
+    (is (= :topology/type-mismatch (:error/type (ex-data e))))
+    (is (= :type-mismatch (:reason (ex-data e))))
+    (is (= :next (:edge (ex-data e))))
+    (is (= :node/source (:from (ex-data e))))
+    (is (= :node/sink (:to (ex-data e))))
+    (is (= :schema/string (:output-schema (ex-data e))))
+    (is (= :schema/int (:input-schema (ex-data e))))))
+
+(deftest mismatched-body-edge-is-rejected-at-compile-time
+  (let [e (compile-error
+           {:graph/id :graph/typed-loop
+            :entry :node/loop
+            :nodes {:node/loop {:node/type :loop
+                                :body :node/body
+                                :until :program/done?
+                                :max-iterations 2
+                                :input-schema :schema/int
+                                :output-schema :schema/string
+                                :next :node/exit}
+                    :node/body {:node/type :emit
+                                :input-schema :schema/int}
+                    :node/exit {:node/type :emit}}})]
+    (is (= :topology/type-mismatch (:error/type (ex-data e))))
+    (is (= :body (:edge (ex-data e))))
+    (is (= :node/loop (:from (ex-data e))))
+    (is (= :node/body (:to (ex-data e))))))
+
+(deftest phantom-topology-schema-is-rejected
+  (let [e (compile-error
+           {:graph/id :graph/typed
+            :entry :node/source
+            :nodes {:node/source {:node/type :emit
+                                  :input-schema :schema/unicorn}}})]
+    (is (instance? clojure.lang.ExceptionInfo e))
+    (is (= :topology/invalid (:error/type (ex-data e))))
+    (is (= :unknown-schema (:reason (ex-data e))))
+    (is (= :schema/unicorn (:schema (ex-data e))))
+    (is (= :input-schema (:field (ex-data e))))))
+
+(deftest structural-subtyping-allows-json-union-output
+  (testing "a JSON string output is accepted by the generic JSON schema"
+    (let [compiled (topology/compile-topology
+                    {:graph/id :graph/typed
+                     :entry :node/source
+                     :nodes {:node/source {:node/type :emit
+                                           :output-schema :schema/string
+                                           :next :node/sink}
+                             :node/sink {:node/type :emit
+                                         :input-schema :schema/json}}})]
+      (is (= :schema/string
+             (get-in compiled [:nodes :node/source :output-schema])))
+      (is (= :schema/json
+             (get-in compiled [:nodes :node/sink :input-schema]))))))

@@ -1,11 +1,14 @@
 (ns evoclj.store.schema
-  "Central Malli schema registry for program descriptor phantom checks (PLT3).
+  "Central Malli schema registry for program descriptor phantom checks (PLT3) and topology compositional typing (PLT4).
 
   Definition > validation: only registered schema keywords are representable.
   compile-program-descriptor resolves :input-schema / :output-schema via this
   registry and fails closed on phantom keywords (e.g. :schema/unicorn).
-  The compiled descriptor carries the resolved Malli schema values, not just
-  the keyword, so a phantom keyword is unrepresentable in compiled form.
+  PLT4 extends the same closed registry to topology nodes: each node carries
+  :input-schema/:output-schema keywords that resolve to Malli values, and edge
+  typing checks output(A) <: input(B) via malli. The compiled descriptor/node
+  carries the resolved Malli schema values, not just the keyword, so a phantom
+  keyword or a mismatched edge is unrepresentable in compiled form.
 
   Global Constraint 22: registry values are plain EDN Malli schemas round-tripping
   through pr-str / clojure.edn read-string."
@@ -32,12 +35,49 @@
              [:intent/type :keyword]
              [:payload :map]]]])
 
+;; PLT4 primitive schemas for compositional typing
+;; Each is a plain Malli value (Global Constraint 22) and enables
+;; edge-type tests like A:JSON->String -> B:Int->Intent mismatch.
+
+(def string-schema
+  "Malli schema for :schema/string — primitive string."
+  :string)
+
+(def int-schema
+  "Malli schema for :schema/int — primitive int."
+  :int)
+
+(def any-schema
+  "Malli schema for :schema/any — top type, accepts anything."
+  :any)
+
+(def number-schema
+  "Malli schema for :schema/number."
+  :double)
+
+(def boolean-schema
+  "Malli schema for :schema/boolean."
+  :boolean)
+
+(def json-schema
+  "Malli schema for :schema/json — a JSON-shaped value: null, booleans,
+  integers, doubles, strings, arrays, or string-keyed objects. Nested
+  values are intentionally open because this registry schema describes the
+  wire envelope, while provider-specific payloads own deeper validation."
+  [:or :nil :boolean :int :double :string [:vector :any] [:map-of :string :any]])
+
 (def ^:private registry
   "Closed registry: keyword -> Malli schema value.
   Definition > validation: only these keywords are representable.
   Phantom keywords (e.g. :schema/unicorn) are absent by definition."
   {:schema/route-input route-input-schema
-   :schema/intent-or-route intent-or-route-schema})
+   :schema/intent-or-route intent-or-route-schema
+   :schema/string string-schema
+   :schema/int int-schema
+   :schema/any any-schema
+   :schema/number number-schema
+   :schema/boolean boolean-schema
+   :schema/json json-schema})
 
 ;; Validate registry itself at load time: every value must be a valid Malli schema
 (doseq [[k v] registry]
