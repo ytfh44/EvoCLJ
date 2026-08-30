@@ -47,6 +47,7 @@
   the focused modules (:genome/schema-invalid, :resolution/*,
   :topology/*, :program/*) pass through unchanged."
   (:require [clojure.edn :as edn]
+            [evoclj.capability.core :as capability]
             [evoclj.kernel.error :as err]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.schema :as schema]
@@ -191,13 +192,15 @@
   re-validated by evoclj.genome.schema/validate-manifest; every
   registry descriptor is compiled by
   evoclj.compiler.program/compile-program-descriptor; and every program
-  referenced by a :sci node in the compiled topology must have a
-  compiled descriptor.
+  referenced by a :sci or Loop :until node in the compiled topology must
+  have a compiled descriptor. The topology's static Effects must also be
+  declared by the manifest's Requested capability set
+  (Effects ⊆ Requested); runtime lease checks complete the upper bound.
 
   Returns a pure data map with exactly the normative CompiledGenome key
   set (Detailed Public Data Contracts): :compiled/genome-id,
   :compiled/resolution-id, :compiled/phenotype-id, :abi, :manifest,
-  :topology, :programs (sorted :program/id => ProgramDescriptor),
+  :topology, :effects, :programs (sorted :program/id => ProgramDescriptor),
   :requested-capabilities, and :resolution. :compiled/phenotype-id is
   sha256:<64 hex> over the canonical serialization of the manifest's
   :abi map concatenated with the Genome ID and the Resolution ID, so
@@ -219,8 +222,12 @@
   (validate-loaded-genome! loaded-genome)
   (let [manifest (:manifest loaded-genome)
         abi (:abi manifest)
+        requested-capabilities (:capabilities/requested manifest)
         compiled-topology (topology/compile-topology
                            (module-value loaded-genome :topology))
+        _ (capability/validate-effect-lattice!
+           (:effects compiled-topology)
+           requested-capabilities)
         resolution-map (resolution/resolve-models
                         (module-value loaded-genome :models)
                         provider-catalog)
@@ -235,6 +242,7 @@
            :abi abi
            :manifest manifest
            :topology compiled-topology
+           :effects (:effects compiled-topology)
            :programs programs
-           :requested-capabilities (:capabilities/requested manifest)
+           :requested-capabilities requested-capabilities
            :resolution resolution-map})))

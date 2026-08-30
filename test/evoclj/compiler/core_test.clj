@@ -42,7 +42,7 @@
   "The normative CompiledGenome key set (Detailed Public Data
   Contracts)."
   #{:compiled/genome-id :compiled/resolution-id :compiled/phenotype-id
-    :abi :manifest :topology :programs :requested-capabilities
+    :abi :manifest :topology :effects :programs :requested-capabilities
     :resolution})
 
 (defn- fixture-root

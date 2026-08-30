@@ -356,3 +356,35 @@
              (get-in compiled [:nodes :node/source :output-schema])))
       (is (= :schema/json
              (get-in compiled [:nodes :node/sink :input-schema]))))))
+
+(deftest topology-effect-lattice-is-checked
+  (let [t {:graph/id :graph/effect
+           :entry :node/tool
+           :nodes {:node/tool {:node/type :tool
+                               :tool :fixture/echo}}}]
+    (testing "the compiler derives the static effect category"
+      (is (= #{:tool/call}
+             (:effects (topology/compile-topology t)))))
+    (testing "Effects, Requested, and Granted can be checked together"
+      (is (map? (topology/compile-topology
+                 t topology/executable-node-types
+                 {:requested #{:tool/call}
+                  :granted #{:tool/call}}))))
+    (testing "an undeclared effect is unrepresentable"
+      (let [e (try (topology/compile-topology
+                    t topology/executable-node-types
+                    {:requested #{}
+                     :granted #{:tool/call}})
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (= :capability/lattice-invalid (:error/type (ex-data e))))
+        (is (= :effect-not-requested (:reason (ex-data e))))))
+    (testing "a requested effect without a host grant is rejected"
+      (let [e (try (topology/compile-topology
+                    t topology/executable-node-types
+                    {:requested #{:tool/call}
+                     :granted #{}})
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (= :capability/lattice-invalid (:error/type (ex-data e))))
+        (is (= :requested-not-granted (:reason (ex-data e))))))))

@@ -124,6 +124,17 @@
   (let [db (sqlite/spec (temp-db-path))]
     (migrate/migrate! db)
     (sqlite/with-db [conn db]
+      (doseq [artifact-id [genome-id resolution-id phenotype-id]]
+        (jdbc/execute!
+         conn
+         ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
+           VALUES (?, 'application/octet-stream', 0, datetime('now'))"
+          artifact-id]))
+      (jdbc/execute!
+       conn
+       ["INSERT OR IGNORE INTO genomes (id, created_at)
+        VALUES (?, datetime('now'))"
+        genome-id])
       (jdbc/insert! conn :generations
                     {:id generation-id
                      :genome_id genome-id
@@ -472,3 +483,20 @@
     (testing "the dispatch error record survives as a CAS artifact"
       (is (re-matches #"^sha256:[0-9a-f]{64}$" (:payload-ref failed)))
       (is (cas/exists? (:cas (:stores executor)) (:payload-ref failed))))))
+
+(deftest declared-capability-without-grant-fails-before-session-start
+  (let [{:keys [executor]} (build-executor (tool-only-topology) false)
+        executor (update-in executor [:phenotype :compiled]
+                            assoc :requested-capabilities #{:tool/call})
+        sid (create-pinned-session executor)
+        e (try
+            (scheduler/run-session! executor sid {:text "abc"})
+            nil
+            (catch clojure.lang.ExceptionInfo e e))]
+    (testing "the runtime enforces Requested ⊆ Granted before execution"
+      (is (= :capability/lattice-invalid (:error/type (ex-data e))))
+      (is (= :requested-not-granted (:reason (ex-data e)))))
+    (testing "the failed preflight leaves the session in :created"
+      (is (= :created
+             (:state (session/get-session
+                      (:sqlite (:stores executor)) sid)))))))

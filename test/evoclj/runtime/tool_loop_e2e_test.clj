@@ -146,6 +146,17 @@
         db (sqlite/spec db-path)
         _ (migrate/migrate! db)
         _ (sqlite/with-db [conn db]
+            (doseq [artifact-id [genome-id resolution-id phenotype-id]]
+              (jdbc/execute!
+               conn
+               ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
+                 VALUES (?, 'application/octet-stream', 0, datetime('now'))"
+                artifact-id]))
+            (jdbc/execute!
+             conn
+             ["INSERT OR IGNORE INTO genomes (id, created_at)
+              VALUES (?, datetime('now'))"
+              genome-id])
             (jdbc/insert! conn :generations
                           {:id generation-id
                            :genome_id genome-id
