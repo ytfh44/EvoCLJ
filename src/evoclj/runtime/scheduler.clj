@@ -134,10 +134,7 @@
             [evoclj.intent.core :as intent]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
-            [evoclj.provider.dialect :as dialect]
-            [evoclj.provider.registry :as registry]
-            [evoclj.runtime.assembler :as assembler]
-            [evoclj.runtime.tool-surface :as tool-surface]
+            [evoclj.runtime.orchestrator :as orchestrator]
             [evoclj.runtime.node :as node]
             [evoclj.sci.boundary :as boundary]
             [evoclj.store.binding :as binding-store]
@@ -331,17 +328,6 @@
          :outputs outputs
          :outcome :failed}))))
 
-
-(def ^:private max-tool-rounds-default 4)
-
-(defn- tool-map-of
-  "The wire function-name -> declaration map from a model-call
-  payload :tools vector (each {:name ... :tool <kw> ...})."
-  [intent]
-  (into {}
-        (map (fn [t] [(:name t) t]))
-        (get-in intent [:payload :tools])))
-
 (defn- record-bindings-degradation!
   "WO-B1: a failing durable-bindings query is NEVER silent. Append one
   typed causal event (:scheduler/bindings-degraded) carrying fully
@@ -397,211 +383,19 @@
         (record-bindings-degradation! executor pin (:event/id root) e)
         nil))))
 
-(defn- base-call-from-intent*
-  "Extract BaseModelCall from an intent, tolerating both new
-  :base/messages & legacy :messages shapes."
-  [intent]
-  (try
-    (assembler/base-call-from-intent intent)
-    (catch Throwable _
-      {:base/messages (or (get-in intent [:payload :base/messages])
-                          (get-in intent [:payload :messages]) [])
-       :requested-tools (or (get-in intent [:payload :requested-tools])
-                            (get-in intent [:payload :tools]) [])
-       :options (or (get-in intent [:payload :options]) {})
-       :model/id (get-in intent [:payload :model/id])})))
-
-(defn- tool-call-intent
-  "A validated :intent/tool-call for one model-requested tool call,
-  attributed to the same session/phenotype/node as the model-call
-  intent and chained to the causal event id. Carries a fresh
-  idempotency key: the tool may be a non-pure write and every
-  model-requested execution is its own request."
-  [intent cause tool-call tool-id]
-  (intent/tool-call
-   (:session/id intent)
-   (:phenotype/id intent)
-   (:node/id intent)
-   cause
-   {:tool/id tool-id :args (:tool/arguments tool-call)}
-   (:budget intent)))
-
-(defn- tool-result-msg
-  "The :role :tool message fed back to the model for one executed
-  tool call: the provider value on success, a short error text on
-  denial/failure (the model sees the failure as data and may react)."
-  [tool-call outcome value]
-  {:role :tool
-   :tool-call-id (:tool/call-id tool-call)
-   :content (if (= :ok outcome)
-              (pr-str value)
-              (str "error: " (name outcome)))})
-
-(defn- execute-tool-calls!
-  "Execute every model-requested tool call through the broker (each
-  its own :intent/tool-call with full event persistence) and collect
-  the tool-result messages. Unknown tool names fail the session with
-  :scheduler/unknown-tool (the tool-map is host-declared; the model
-  cannot invent tools)."
-  [executor pin cause intent calls]
-  (loop [acc {:last-event cause :outputs [] :tool-msgs []}
-         calls (seq calls)]
-    (if-let [{:keys [call tool-id]} (first calls)]
-      (let [cause-id (if (map? (:last-event acc))
-                       (:event/id (:last-event acc))
-                       (:last-event acc))
-            step (dispatch-intent!
-                  executor pin cause-id
-                  (tool-call-intent intent cause-id call tool-id)
-                  (:outputs acc))
-            value (peek (:outputs step))]
-        (recur {:last-event (:last-event step)
-                :outputs (:outputs step)
-                :tool-msgs (conj (:tool-msgs acc)
-                                 (tool-result-msg call (:outcome step) value))}
-               (next calls)))
-      acc)))
-
 (defn- dispatch-with-tools!
-  "Dispatch one intent with the model tool-calling loop (post-v0
-  extension 1), now routed through the trusted RequestAssembler.
+  "Thin dispatcher — DAG visit + Orchestrator dispatch.
 
-  Why not in the provider? The provider only knows the wire request
-  (messages/tools JSON). The scheduler must also know the wire
-  tool-name -> EvoCLJ tool binding mapping to execute tool calls.
-  If dynamic ToolSurface tools were only visible inside the provider,
-  the model would see tool A but the scheduler's dispatch-tool loop
-  would not know how to execute A (or vice versa): visible-to-model
-  and executable-by-scheduler would diverge. The Assembler is trusted
-  runtime code that produces BOTH sides together: the wire :tools
-  vector for the model AND the :tool-map {wire-name -> tool binding}
-  for the scheduler. It is the single place that merges BaseModelCall
-  + dynamic context + dynamic tool catalog so the two views stay
-  consistent.
-
-  Pinning: the whole loop pins its ToolCatalogBinding. Round 1 sees
-  A/B/C; if a LiveSource refresh publishes D between rounds, round 2
-  still works on the same pinned snapshot. Only the next independent
-  model call (new LLM node visit) sees the new catalog. Implemented
-  by capturing the binding once at loop start and reusing it.
-
-  Context rebuild: unlike tools, Context MUST be reassembled each
-  round. Round 1's model may call activate_skill, the tool execution
-  creates a new ContextBinding, and round 2 must see the newly
-  activated Skill instructions. Therefore the Assembler is called
-  every round with fresh SessionBindings/CAS; it cannot just append
-  the tool result to the original messages and re-call."
+  Resolves the Orchestrator from the executor (default
+  TraditionalOrchestrator) and delegates the tool-calling loop.
+  Pin stability and refresh variability are owned by ToolSurface
+  inside the orchestrator; the scheduler no longer contains the
+  130-line loop inline."
   [executor pin cause intent outputs]
-  (if (not= :intent/model-call (:intent/type intent))
-    ;; Non-model intents go directly through the broker (no assembler).
-    (let [cause-id (if (map? cause) (:event/id cause) cause)]
-      (dispatch-intent! executor pin cause-id intent outputs))
-    ;; Model-call path: trusted assembler owns the wire shape.
-    (let [rounds (get-in intent [:payload :options :max-tool-rounds]
-                         max-tool-rounds-default)
-          base-call (base-call-from-intent* intent)
-          ;; Pin the tool catalog once for the whole loop.
-          initial-tools (or (:requested-tools base-call)
-                            (get-in intent [:payload :tools]) [])
-          ;; Allow tests / dynamic hosts to supply a live catalog atom
-          ;; via executor's :tool-catalog. When present, pin its
-          ;; current snapshot; otherwise pin the base-call's own tools.
-          live-catalog (try (when-let [a (get-in executor [:stores :tool-catalog])]
-                               (when (instance? clojure.lang.Atom a) @a))
-                            (catch Throwable _ nil))
-          pinned-source (or live-catalog initial-tools)
-          ;; S14 (pin→provider resolution ENFORCED, not merely
-          ;; implemented): the wire catalog the assembler will advertise to
-          ;; the model must not carry a SILENT DANGLING TOOL REFERENCE. Before
-          ;; the loop runs, resolve every pinned tool id against the
-          ;; kernel-owned provider registry and FAIL CLOSED on a dangling id
-          ;; (:provider/catalog-unresolved-tool) — a catalog consumer either
-          ;; gets a fully-resolved reference or a typed error, never a partial
-          ;; reference with a dangling id handed to the model/broker. Guarded
-          ;; so a host that carries no registry atom (pure broker test) is
-          ;; still safe: no registry, no S14 enforcement gate.
-          _ (when-let [provider-registry (:registry (:dispatch executor))]
-              (registry/resolve-tool-catalog provider-registry pinned-source))
-          ;; C3: pin ToolSurface once for the whole loop (pin stability).
-          ;; The ToolSurface value {:surface/tools :surface/binding :surface/pinned-at}
-          ;; is captured once; only the binding is passed to the assembler.
-          pinned-surface (try (tool-surface/pin pinned-source)
-                              (catch Throwable _
-                                (tool-surface/pin initial-tools)))
-          pinned (:surface/binding pinned-surface)]
-      (loop [current-base-call base-call
-             current-intent intent
-             cause cause
-             outputs outputs
-             rounds rounds
-             pinned pinned
-             pinned-surface pinned-surface]
-        (let [cause-id (if (map? cause) (:event/id cause) cause)
-              bindings (fetch-bindings executor pin cause-id)
-              cas (:cas (:stores executor))
-              ;; C3: refresh variability — recompute EffectiveContext each round
-              ;; from fresh SessionBindings and CAS. Pin stays constant while
-              ;; context may change (e.g. activate_skill creates a new binding).
-              _refreshed (try (tool-surface/refresh-context pinned-surface bindings cas
-                                                            {:catalog {} :history ""})
-                              (catch Throwable _ nil))
-              prepared (try
-                         (assembler/assemble current-base-call
-                                             {:session-bindings bindings
-                                              :tool-catalog/binding pinned
-                                              :cas cas
-                                              :history ""})
-                         (catch Throwable _ nil))
-              tool-map (if prepared (:tool-map prepared) (tool-map-of current-intent))
-              effective-intent (if prepared
-                                 (-> current-intent
-                                     (assoc-in [:payload :messages] (:messages prepared))
-                                     (assoc-in [:payload :tools] (:tools prepared))
-                                     ;; keep base fields so a refreshed
-                                     ;; intent still carries the original
-                                     ;; lightweight declaration as well
-                                     (assoc-in [:payload :base/messages] (:base/messages current-base-call))
-                                     (assoc-in [:payload :requested-tools] (:requested-tools current-base-call)))
-                                 current-intent)
-              step (dispatch-intent! executor pin cause-id effective-intent outputs)
-              value (peek (:outputs step))
-              tool-calls (when (= :intent/model-call (:intent/type current-intent))
-                           (:tool-calls value))]
-          (if (and (seq tool-calls) (pos? rounds) (seq tool-map))
-            (let [calls (mapv (fn [tc]
-                                (if-let [t (get tool-map (:tool/name tc))]
-                                  {:call tc :tool-id (:tool t)}
-                                  (throw (err/error :scheduler/unknown-tool
-                                                    (str "model requested unknown tool "
-                                                         (:tool/name tc))
-                                                    {:tool/name (:tool/name tc)}))))
-                              tool-calls)
-                  executed (execute-tool-calls! executor pin (:last-event step) effective-intent calls)
-                  assistant-msg {:role :assistant
-                                 :content (get-in value [:model/output :text] "")
-                                 :tool-calls (dialect/tool-calls->wire tool-calls)}
-                  ;; Build the next raw conversation history from the
-                  ;; prepared's messages (which already include any
-                  ;; injected context) plus the new assistant + tool
-                  ;; results. On the next loop the assembler will
-                  ;; re-inject fresh context (replacing the stale
-                  ;; leading system message) so a binding created by
-                  ;; the just-executed tool is visible.
-                  prepared-msgs (if prepared (:messages prepared)
-                                  (get-in effective-intent [:payload :messages]))
-                  next-messages (into (vec prepared-msgs)
-                                      (cons assistant-msg (:tool-msgs executed)))
-                  next-base-call (assoc current-base-call
-                                         :base/messages next-messages
-                                         :messages next-messages)]
-              (recur next-base-call
-                     (assoc effective-intent :payload (assoc (:payload effective-intent) :messages next-messages))
-                     (:last-event executed)
-                     (:outputs executed)
-                     (dec rounds)
-                     pinned
-                     pinned-surface))
-            step))))))
+  (let [orchestrator (or (:orchestrator executor)
+                         (:orchestrator (:dispatch executor))
+                         (orchestrator/->TraditionalOrchestrator))]
+    (orchestrator/orchestrate orchestrator executor pin cause intent outputs)))
 
 ;; --- terminal session outcomes ----------------------------------------------
 
