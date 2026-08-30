@@ -35,6 +35,24 @@
     are rejected rather than dropped (Global Constraints 6 and 22: no
     silent data loss at a boundary).
 
+  Compositional typing (PLT4):
+    Each node carries :input-schema/:output-schema — keyword references
+    that resolve via the closed Malli registry (evoclj.store.schema,
+    Definition > validation: phantom keywords unrepresentable). After
+    resolution the compiled node stores the Malli value under
+    :schema/input, :schema/output, :input-schema/schema etc., plus the
+    original keyword. The typing judgment is Gamma ; epsilon |- n : A -> B
+    (node n in context Gamma with empty effect epsilon has input type A and
+    output type B). The sequence rule is:
+      Gamma |- n1 : A -> B   Gamma |- n2 : B -> C
+      ------------------------------------------- (Seq)
+      Gamma |- n1;n2 : A -> C
+    i.e., for every edge A :next -> B, the compiler checks output(A) <: input(B)
+    via malli subtype check. A mismatched edge is rejected at compile time with :topology/type-mismatch
+    (Definition > validation: mismatched edge unrepresentable). Without
+    explicit schemas a node defaults to :schema/any (top), so existing
+    untyped topologies remain compatible.
+
   Error types: :topology/invalid (malformed shapes, unknown node type,
   missing entry node, dangling :next, dangling :body, duplicate node
   ids, missing required node keys, invalid :limits, invalid
@@ -45,7 +63,9 @@
   compile time because Definition > validation: only executable types
   are representable via compile; the :reason is
   :unsupported-node-type and :node/type carries the offending type)."
-  (:require [evoclj.kernel.error :as err]))
+  (:require [evoclj.kernel.error :as err]
+            [evoclj.store.schema :as schema]
+            [malli.core :as m]))
 
 (def syntax-node-types
   "The normative v0 syntax node type set — every type the compiler knows syntactically (definition).
@@ -82,6 +102,10 @@
   "Keys whose value must be a keyword when present."
   [:model :program :tool :memory :next :body :until])
 
+(def ^:private schema-keys
+  "Optional typing keys whose value must be a registered schema keyword."
+  [:input-schema :output-schema])
+
 (def ^:private canonical-compare
   "Total order over canonical EDN scalar keys. Uses compare when the
   keys are mutually comparable; otherwise falls back to the canonical
@@ -92,6 +116,72 @@
       (if (keyword? c)
         (compare (pr-str a) (pr-str b))
         (if (neg? c) -1 (if (pos? c) 1 0))))))
+
+;; --- PLT4 typing helpers ----------------------------------------------------
+
+(defn- resolve-node-schema!
+  "Resolve schema keyword kw via closed registry, fail-closed for topology."
+  [kw field node-id]
+  (let [s (schema/resolve-schema kw)]
+    (when-not s
+      (throw (err/error :topology/invalid
+                        (str "unknown schema keyword " kw " — not registered")
+                        {:reason :unknown-schema :field field :node-id node-id :schema kw
+                         :registered (vec (sort (keys (schema/schema-registry))))})))
+    (try (m/schema s) (catch Exception _ (throw (err/error :topology/invalid "resolved schema is not a valid Malli schema" {:reason :invalid-schema :field field :node-id node-id :schema kw :value (err/sanitize s)})))) s))
+
+(defn- subtype?
+  "Check output(A) <: input(B) via malli.
+  For the closed primitive registry, subtype is equality or top (:any).
+  Uses malli.core/m-schema to normalize forms, so :any as top and identical
+  EDN forms are subtypes."
+  [output-schema input-schema]
+  (let [out (try (m/schema output-schema) (catch Exception _ nil))
+        in  (try (m/schema input-schema) (catch Exception _ nil))]
+    (if (and out in)
+      (let [out-form (m/form out)
+            in-form  (m/form in)]
+        (or (= out-form in-form)
+            (= in-form :any)
+            (= in-form [:any])))
+      false)))
+
+(defn- check-typing!
+  "Enforce compositional edge typing: for every :next and :body edge, check output(from) <: input(to) via malli.
+  Gamma |- n1 : A -> B   Gamma |- n2 : B -> C
+  ------------------------------------------- (Seq)
+  Gamma |- n1;n2 : A -> C
+  i.e., for edge A :next/:body -> B, require output(A) <: input(B)."
+  [node-map]
+  (doseq [[from-id node] node-map]
+    (doseq [edge-key [:next :body]]
+      (when-let [to-id (get node edge-key)]
+        (when-let [to-node (get node-map to-id)]
+          (let [from-kw (or (:output-schema node) :schema/any)
+                to-kw   (or (:input-schema to-node) :schema/any)
+                from-schema (or (:schema/output node)
+                                (:output-schema/schema node)
+                                (:resolved/output-schema node)
+                                (when (:output-schema node) (resolve-node-schema! (:output-schema node) :output-schema from-id))
+                                (schema/resolve-schema :schema/any))
+                to-schema   (or (:schema/input to-node)
+                                (:input-schema/schema to-node)
+                                (:resolved/input-schema to-node)
+                                (when (:input-schema to-node) (resolve-node-schema! (:input-schema to-node) :input-schema to-id))
+                                (schema/resolve-schema :schema/any))]
+            (when-not (subtype? from-schema to-schema)
+              (throw (err/error :topology/type-mismatch
+                                (str "edge type mismatch " from-id " -> " to-id " (" from-kw " -> " to-kw ")")
+                                {:reason :type-mismatch
+                                 :from from-id
+                                 :to to-id
+                                 :edge edge-key
+                                 :output-schema from-kw
+                                 :input-schema to-kw
+                                 :output-type from-schema
+                                 :input-type to-schema
+                                 :output-schema/schema from-schema
+                                 :input-schema/schema to-schema})))))))))
 
 ;; --- top-level shape validation -------------------------------------------
 
@@ -178,6 +268,11 @@
                           "node attribute must be a keyword"
                           {:reason :invalid-attribute :node-id id :key k
                            :value (err/sanitize (get node k))}))))
+    (doseq [k schema-keys]
+      (when (contains? node k)
+        (let [v (get node k)]
+          (when-not (keyword? v) (throw (err/error :topology/invalid "node schema must be a keyword" {:reason :invalid-attribute :node-id id :key k :value (err/sanitize v)})))
+          (resolve-node-schema! v k id))))
     (doseq [k (get required-keys t)]
       (when-not (contains? node k)
         (throw (err/error :topology/invalid
@@ -278,6 +373,19 @@
                          (assoc node :node/id id))]))
         entries))
 
+(defn- inject-typing!
+  "PLT4: resolve :input-schema/:output-schema via closed registry and inject resolved Malli values."
+  [node-map]
+  (into (sorted-map-by canonical-compare)
+        (map (fn [[id node]]
+               (let [in-kw (or (:input-schema node) :schema/any)
+                     out-kw (or (:output-schema node) :schema/any)
+                     in-schema (resolve-node-schema! in-kw :input-schema id)
+                     out-schema (resolve-node-schema! out-kw :output-schema id)]
+                 [id (into (sorted-map-by canonical-compare)
+                           (assoc node :input-schema in-kw :output-schema out-kw :schema/input in-schema :schema/output out-schema :input-schema/schema in-schema :output-schema/schema out-schema :resolved/input-schema in-schema :resolved/output-schema out-schema))]))
+        node-map))
+
 (defn- build-adjacency
   "Sorted map of node id to the vector of successor node ids reachable
   via :next (empty vector for terminal nodes)."
@@ -306,8 +414,16 @@
   (syntax-only, no handler) fails with :topology/unsupported-node-type
   unless the caller provides an expanded set that includes :route.
 
+  Compositional typing (PLT4): each node declares optional :input-schema
+  and :output-schema keywords (resolved via the closed schema registry,
+  defaulting to :schema/any when absent). For every edge A :next -> B
+  (and :body) the compiler checks output(A) <: input(B) via malli
+  subtype (m/validate); a mismatched edge throws
+  :topology/type-mismatch :reason :type-mismatch (Definition > validation).
+  Judgment: Gamma ; epsilon |- n : A -> B, with Seq rule Gamma |- n1:A->B, n2:B->C => n1;n2:A->C.
+
   Returns a pure data map {:graph/id ... :entry ... :nodes {node-id
-  {:node/id ... :node/type ...}} :adjacency {node-id [successors]}
+  {:node/id ... :node/type ... :input-schema ... :output-schema ... :schema/input ...}} :adjacency {node-id [successors]}
   :limits {...}} with every map sorted, so identical logical topologies
   compile to equal values with identical serialization regardless of
   EDN key order (Step 4).
@@ -318,9 +434,10 @@
   :invalid-node-entry, :invalid-node-id, :invalid-node,
   :unknown-node-type, :invalid-attribute, :missing-required-key,
   :dangling-next, :dangling-body, :invalid-max-iterations,
-  :missing-entry, :duplicate-node-id), :topology/cycle (a raw cycle
-  with no :loop node; :nodes holds the sorted cycle ids), or
-  :topology/unsupported-node-type (a syntactically known type with no
+  :missing-entry, :duplicate-node-id, :unknown-schema), :topology/cycle (a raw cycle
+  with no :loop node; :nodes holds the sorted cycle ids), :topology/type-mismatch
+  (edge output not subtype of input, :reason :type-mismatch, :from :to, :output-type :input-type),
+  or :topology/unsupported-node-type (a syntactically known type with no
   runtime handler; :reason :unsupported-node-type, :node/type carries
   the offending type; :route is the canonical example)."
   ([topology] (compile-topology topology executable-node-types))
@@ -343,9 +460,15 @@
        (validate-node! id node executable-types))
      (check-nexts! entries node-ids)
      (check-cycles! entries node-map)
-     (into (sorted-map-by canonical-compare)
-           {:graph/id (:graph/id topology)
-            :entry entry
-            :nodes node-map
-            :adjacency (build-adjacency node-map)
-            :limits (or (:limits topology) {})}))))
+     ;; PLT4: inject typing (defaults to :schema/any) and enforce edge typing
+     ;; The typing judgment is Gamma ; epsilon |- n : A -> B, with Seq rule.
+     (let [typed-map (inject-typing! node-map)]
+       (check-typing! typed-map)
+       (into (sorted-map-by canonical-compare)
+             {:graph/id (:graph/id topology)
+              :entry entry
+              :nodes typed-map
+              :adjacency (build-adjacency typed-map)
+              :limits (or (:limits topology) {})})))))
+
+)
