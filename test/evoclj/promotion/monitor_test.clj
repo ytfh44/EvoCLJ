@@ -46,6 +46,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.promotion.canary :as canary]
             [evoclj.promotion.monitor :as monitor]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
@@ -121,6 +122,10 @@
   "Insert the CURRENT G42 row (current = 1) and the canary G43 row
   (current = 0) sessions can be pinned to."
   [db]
+  (artifact/ensure-artifact! db genome "application/octet-stream" 0)
+  (artifact/ensure-artifact! db resolution "application/edn" 0)
+  (artifact/ensure-artifact! db phenotype "application/octet-stream" 0)
+  (artifact/ensure-genome! db genome)
   (sqlite/with-db [conn db]
     (doseq [[g current] [[g42 1] [g43 0]]]
       (jdbc/insert! conn :generations
@@ -131,7 +136,6 @@
                      :state "active"
                      :current current
                      :created_at now}))))
-
 (defn- operator-session!
   "Create an operator session pinned to the CURRENT generation and
   append its :session/created root event (the host's job — stop-canary!

@@ -766,7 +766,7 @@
         (.ping ^McpSyncClient client)
         (let [rt (elapsed-ms start (System/currentTimeMillis))]
           {:mcp/ping :ok
-           :mcp/ping-roundtrip-ms (long (max 0 rt))
+           :mcp/ping-roundtrip-ms (long (max 1 rt))
            :mcp/ping-at (now-iso)})
         (catch Throwable ex
           (let [classified (classify-mcp-error ex)]

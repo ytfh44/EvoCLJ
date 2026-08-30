@@ -52,7 +52,10 @@
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
             [evoclj.sci.execute :as execute]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
+            [evoclj.store.candidate-store :as candidate-store]
+            [evoclj.store.existence :as existence]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
@@ -196,14 +199,29 @@
      :issued-at now
      :expires-at (java.util.Date. (+ (.getTime now) 60000))}))
 
+(defn- model-lease
+  "A valid CapabilityLease granting the phenotype :model/call."
+  [phenotype-id]
+  (let [now (java.util.Date.)]
+    {:cap/id (random-uuid)
+     :subject {:phenotype/id phenotype-id}
+     :resource {:kind :model :id "lmstudio/*"}
+     :actions #{:invoke}
+     :constraints {:max-calls 1000}
+     :issued-at now
+     :expires-at (java.util.Date. (+ (.getTime now) 60000))}))
+
 (defn- fresh-db
-  "A migrated database backed by a fresh temp file, seeded with the
-  generation row sessions are pinned to (current = 1). Returns
-  [db-spec db-path]."
-  [genome-id resolution-id]
+  [genome-id resolution-id phenotype-id]
   (let [path (temp-path! "evoclj-bench-" true)
         db (sqlite/spec path)]
     (migrate/migrate! db)
+    (doseq [[artifact-id media-type]
+            [[genome-id "application/octet-stream"]
+             [resolution-id "application/edn"]
+             [phenotype-id "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id generation-id
@@ -236,27 +254,27 @@
                                    {:execution-count executions}))
         _ (registry/register! reg (fixture/non-idempotent-provider))
         usage (atom {})
-        lease (echo-lease phenotype-id)
-        [db db-path] (fresh-db genome-id resolution-id)
+        leases [(echo-lease phenotype-id) (model-lease phenotype-id)]
+        [db db-path] (fresh-db genome-id resolution-id phenotype-id)
         cas-root (temp-path! "evoclj-bench-cas-")
         ph (phenotype/instantiate
             compiled
             {:stores {:sqlite :poison :cas {:root :poison}}
              :providers {:registry reg}
-             :capabilities {:leases [lease] :usage usage}
+             :capabilities {:leases leases :usage usage}
              :program-sources (program-sources loaded compiled)})]
     {:executor {:phenotype ph
                 :stores {:sqlite db :cas (cas/->cas cas-root)}
                 :dispatch (dispatch/make-broker-context
                            {:registry reg
-                            :leases [lease]
+                            :leases leases
                             :usage usage})}
      :executions executions
      :db-path db-path
      :cas-root cas-root
      :compiled compiled
      :phenotype ph
-     :lease lease
+     :leases leases
      :registry reg}))
 
 (defn- create-pinned-session
@@ -337,7 +355,7 @@
                                     :models "models.edn"
                                     :memory "memory.edn"
                                     :evolution "evolution.edn"}
-                          :capabilities/requested #{:model/call}
+                          :capabilities/requested #{:tool/call}
                           :evolution {:max-risk :behavioral
                                       :mutable #{:parameters :prompts
                                                  :skills :programs}}
@@ -420,6 +438,15 @@
         db (sqlite/spec db-path)
         cas-root (temp-path! "bench-eval-cas-")]
     (migrate/migrate! db)
+    (doseq [[artifact-id media-type]
+            [[parent-genome-id "application/octet-stream"]
+             [candidate-genome-id "application/octet-stream"]
+             [evidence-id "application/edn"]
+             [file-hash "application/edn"]
+             [resolution-id "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (doseq [genome-id [parent-genome-id candidate-genome-id]]
+      (artifact/ensure-genome! db genome-id))
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id generation-id
@@ -430,6 +457,10 @@
                      :current 1
                      :created_at "2025-01-01T00:00:00Z"}))
     {:sqlite db :cas (cas/->cas cas-root)}))
+
+(defn- proof
+  [artifact-id]
+  (#'existence/unsafe-verified-digest artifact-id))
 
 (defn- materialized-pending!
   "Materialize a fresh candidate from the fixture parent+mutation and
@@ -455,8 +486,14 @@
             :mutation/id (uuid 1)
             :evidence/id evidence-id
             :risk :behavioral})
-        m1 (candidate/materialize-candidate! store c m)]
-    (candidate/mark-evaluation-pending! store (:candidate/id m1))))
+        handle (candidate-store/make-candidate-store (:sqlite store))
+        m1 (candidate/materialize-candidate!
+            handle
+            (update c :candidate/genome-id proof)
+            (-> m
+                (update :parent/genome-id proof)
+                (update :evidence/id proof)))]
+    (candidate/mark-evaluation-pending! handle (:candidate/id m1))))
 
 (defn- orchestrator-evaluator
   "A minimal valid evaluator value for evaluate-candidate!. The parent

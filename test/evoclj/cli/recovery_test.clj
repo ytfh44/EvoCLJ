@@ -5,6 +5,7 @@
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing]]
             [evoclj.cli.recovery :as rec]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.file Files)
@@ -23,22 +24,28 @@
                                          "evoclj-rec-cas-"
                                          (make-array FileAttribute 0)))
                             :verify false}}}))
-
 (defn- seed-orphan! [db]
-  (sqlite/with-db [conn db]
-    (jdbc/insert! conn :generations
-                  {:id "g1"
-                   :genome_id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                   :resolution_id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                   :parent_id nil :state "active" :current 1
-                   :created_at "2025-01-01T00:00:00Z"})
-    (jdbc/insert! conn :sessions
-                  {:id "00000000-0000-0000-0000-0000000000a1" :generation_id "g1"
-                   :genome_id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                   :resolution_id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                   :phenotype_id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                   :state "running"
-                   :created_at "2025-01-01T00:00:00Z"})))
+  (let [genome "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        resolution "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        phenotype "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]
+    (artifact/ensure-artifact! db genome "application/octet-stream" 0)
+    (artifact/ensure-artifact! db resolution "application/edn" 0)
+    (artifact/ensure-artifact! db phenotype "application/edn" 0)
+    (artifact/ensure-genome! db genome)
+    (sqlite/with-db [conn db]
+      (jdbc/insert! conn :generations
+                    {:id "g1"
+                     :genome_id genome
+                     :resolution_id resolution
+                     :parent_id nil :state "active" :current 1
+                     :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :sessions
+                    {:id "00000000-0000-0000-0000-0000000000a1" :generation_id "g1"
+                     :genome_id genome
+                     :resolution_id resolution
+                     :phenotype_id phenotype
+                     :state "running"
+                     :created_at "2025-01-01T00:00:00Z"}))))
 
 (deftest recovery-scan-empty-store
   (testing "an empty migrated store scans clean"

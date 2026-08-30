@@ -47,6 +47,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.evolution.candidate :as candidate]
             [evoclj.evolution.candidate-states :as cstates]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
@@ -178,7 +179,6 @@
   (reset! temp-paths []))
 
 (use-fixtures :each (fn [f] (f) (cleanup!)))
-
 (defn- fresh-store
   "A migrated temp database seeded with the parent generation row
   (current = 1, Database Invariant 6) plus a temp CAS root. Returns
@@ -189,13 +189,15 @@
         db (sqlite/spec path)
         cas-root (temp-cas-dir)]
     (migrate/migrate! db)
+    ;; Fleet P5/FK: artifacts/genomes must exist before generations/candidates (helper is idempotent)
+    (doseq [[aid media] [[parent-genome-id "application/octet-stream"]
+                         [candidate-genome-id "application/octet-stream"]
+                         [resolution-id "application/edn"]
+                         [evidence-id "application/edn"]]]
+      (artifact/ensure-artifact! db aid media 0))
+    (doseq [gid [parent-genome-id candidate-genome-id]]
+      (artifact/ensure-genome! db gid))
     (sqlite/with-db [conn db]
-      (jdbc/insert! conn :artifacts {:hash parent-genome-id :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :artifacts {:hash candidate-genome-id :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :artifacts {:hash resolution-id :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :artifacts {:hash evidence-id :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :genomes {:id parent-genome-id :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :genomes {:id candidate-genome-id :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :generations
                     {:id generation-id
                      :genome_id parent-genome-id
@@ -355,10 +357,11 @@
               under the other parent (and never touches CURRENT)"
       (let [other-genome (str "sha256:" (apply str (repeat 64 "b")))
             other-generation "generation-2"
-            _ (sqlite/with-db [conn (:db store)]
-                (do
-                  (jdbc/insert! conn :artifacts {:hash other-genome :media_type "application/octet-stream" :size 64 :created_at "2025-01-02T00:00:00Z"})
-                  (jdbc/insert! conn :genomes {:id other-genome :created_at "2025-01-02T00:00:00Z"})
+            _ (do
+                (artifact/ensure-artifact! (:db store) other-genome "application/octet-stream" 0)
+                (artifact/ensure-artifact! (:db store) resolution-id "application/edn" 0)
+                (artifact/ensure-genome! (:db store) other-genome)
+                (sqlite/with-db [conn (:db store)]
                   (jdbc/insert! conn :generations
                                {:id other-generation
                                :genome_id other-genome

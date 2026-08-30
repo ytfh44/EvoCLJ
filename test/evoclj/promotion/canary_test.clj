@@ -18,6 +18,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.genome.hash :as genome-hash]
             [evoclj.promotion.canary :as canary]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite]))
@@ -62,6 +63,10 @@
 (defn- seed-generations!
   "Insert the G42 and G43 generation rows sessions can be pinned to."
   [db]
+  (artifact/ensure-artifact! db genome "application/octet-stream" 0)
+  (artifact/ensure-artifact! db resolution "application/edn" 0)
+  (artifact/ensure-artifact! db phenotype "application/octet-stream" 0)
+  (artifact/ensure-genome! db genome)
   (sqlite/with-db [conn db]
     (doseq [g [g42 g43]]
       (jdbc/insert! conn :generations
@@ -72,7 +77,6 @@
                      :state "active"
                      :current 0
                      :created_at now}))))
-
 (defn- deployment-state
   "The component deployment-state shape; callers merge overrides:
 

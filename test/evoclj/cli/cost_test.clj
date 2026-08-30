@@ -25,32 +25,10 @@
   tool call (no usage), plus a session in another generation that must
   NOT leak into the report."
   [db cas-store gen-id other-gen-id]
-  (sqlite/with-db [conn db]
-    (jdbc/insert! conn :generations
-                  {:id gen-id
-                   :genome_id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                   :resolution_id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                   :parent_id nil :state "active" :current 1
-                   :created_at "2025-01-01T00:00:00Z"})
-    (jdbc/insert! conn :generations
-                  {:id other-gen-id
-                   :genome_id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                   :resolution_id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                   :parent_id nil :state "active" :current 0
-                   :created_at "2025-01-01T00:00:00Z"}))
-  (let [insert-session! (fn [id gen]
-                          (sqlite/with-db [conn db]
-                            (jdbc/insert! conn :sessions
-                                          {:id id :generation_id gen
-                                           :genome_id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                                           :resolution_id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                                           :phenotype_id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                                           :state "completed"
-                                           :created_at "2025-01-02T00:00:00Z"})))]
-    (insert-session! "s1" gen-id)
-    (insert-session! "s2" gen-id)
-    (insert-session! "s3" other-gen-id))
-  (let [model-value {:model/output {:text "hi"}
+  (let [genome-id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        resolution-id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        phenotype-id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        model-value {:model/output {:text "hi"}
                      :usage {:model-input-tokens 100 :model-output-tokens 50}
                      :model-cost-units 0.75}
         model-ref (:artifact/id (cas/put-bytes! cas-store
@@ -63,25 +41,58 @@
                                                           java.nio.charset.StandardCharsets/UTF_8)
                                                {}))]
     (sqlite/with-db [conn db]
-      (jdbc/insert! conn :events
-                    {:id 1 :session_id "s1" :event_seq 1 :generation_id gen-id
-                     :phenotype_id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                     :event_type ":provider/call-completed" :cause_event_id nil
-                     :payload_ref model-ref :payload nil :prev_hash "x" :event_hash "y"
-                     :created_at "2025-01-02T00:00:00Z"})
-      (jdbc/insert! conn :events
-                    {:id 2 :session_id "s2" :event_seq 1 :generation_id gen-id
-                     :phenotype_id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                     :event_type ":provider/call-completed" :cause_event_id nil
-                     :payload_ref tool-ref :payload nil :prev_hash "x" :event_hash "y"
-                     :created_at "2025-01-02T00:00:00Z"})
-      (jdbc/insert! conn :events
-                    {:id 3 :session_id "s3" :event_seq 1 :generation_id other-gen-id
-                     :phenotype_id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                     :event_type ":provider/call-completed" :cause_event_id nil
-                     :payload_ref model-ref :payload nil :prev_hash "x" :event_hash "y"
-                     :created_at "2025-01-02T00:00:00Z"}))
-  db))
+      (doseq [[artifact-id media-type]
+              [[genome-id "application/octet-stream"]
+               [resolution-id "application/edn"]
+               [phenotype-id "application/edn"]
+               [model-ref "application/edn"]
+               [tool-ref "application/edn"]]]
+        (jdbc/insert! conn :artifacts
+                      {:hash artifact-id
+                       :media_type media-type
+                       :size 0
+                       :created_at "2025-01-01T00:00:00Z"}))
+      (jdbc/insert! conn :genomes
+                    {:id genome-id
+                     :created_at "2025-01-01T00:00:00Z"})
+      (doseq [[id current]
+              [[gen-id 1] [other-gen-id 0]]]
+        (jdbc/insert! conn :generations
+                      {:id id
+                       :genome_id genome-id
+                       :resolution_id resolution-id
+                       :parent_id nil
+                       :state "active"
+                       :current current
+                       :created_at "2025-01-01T00:00:00Z"}))
+      (doseq [[id generation]
+              [["s1" gen-id] ["s2" gen-id] ["s3" other-gen-id]]]
+        (jdbc/insert! conn :sessions
+                      {:id id
+                       :generation_id generation
+                       :genome_id genome-id
+                       :resolution_id resolution-id
+                       :phenotype_id phenotype-id
+                       :state "completed"
+                       :created_at "2025-01-02T00:00:00Z"}))
+      (doseq [[id session generation payload-ref]
+              [[1 "s1" gen-id model-ref]
+               [2 "s2" gen-id tool-ref]
+               [3 "s3" other-gen-id model-ref]]]
+        (jdbc/insert! conn :events
+                      {:id id
+                       :session_id session
+                       :event_seq 1
+                       :generation_id generation
+                       :phenotype_id phenotype-id
+                       :event_type ":provider/call-completed"
+                       :cause_event_id nil
+                       :payload_ref payload-ref
+                       :payload nil
+                       :prev_hash "x"
+                       :event_hash "y"
+                       :created_at "2025-01-02T00:00:00Z"})))
+    db))
 
 (deftest cost-report-aggregates-model-usage
   (testing "the report sums the model counters of the generation's own

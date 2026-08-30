@@ -273,7 +273,7 @@
                                      :models "models.edn"
                                      :memory "memory.edn"
                                      :evolution "evolution.edn"}
-                           :capabilities/requested #{:model/call}
+                           :capabilities/requested #{:tool/call}
                            :evolution {:max-risk :behavioral
                                        :mutable #{:parameters :prompts
                                                   :skills :programs}}

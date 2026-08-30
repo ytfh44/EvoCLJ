@@ -44,6 +44,7 @@
             [evoclj.promotion.current :as current]
             [evoclj.promotion.promote :as promote]
             [evoclj.promotion.rollback :as rollback]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
@@ -117,10 +118,11 @@
   Genome must be CAS-resolvable — Step 3 verifies it)."
   [db gen-id genome-id]
   (sqlite/with-db [conn db]
-    ;; P5/F: ensure FK targets for generations (genome + resolution)
-    (try (jdbc/insert! conn :artifacts {:hash genome-id :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
-    (try (jdbc/insert! conn :artifacts {:hash parent-resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
-    (try (jdbc/insert! conn :genomes {:id genome-id :created_at now}) (catch Exception _ nil))
+    ;; P5/F: ensure FK targets for generations (genome + resolution + phenotype artifact, plus genome row)
+    (artifact/ensure-artifact! conn genome-id "application/octet-stream" 0)
+    (artifact/ensure-artifact! conn parent-resolution "application/edn" 0)
+    (artifact/ensure-artifact! conn phenotype "application/octet-stream" 0)
+    (artifact/ensure-genome! conn genome-id)
     (jdbc/insert! conn :generations
                   {:id gen-id
                    :genome_id genome-id
@@ -138,10 +140,10 @@
    (let [mutation-id (random-uuid)
          pg (or parent-genome-id (str "sha256:" (apply str (repeat 64 "e"))))
          eid (str "sha256:" (apply str (repeat 64 "f")))]
-     ;; P5/F: ensure FK artifacts
-     (try (jdbc/insert! conn :artifacts {:hash pg :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
-     (try (jdbc/insert! conn :artifacts {:hash eid :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
-     (try (jdbc/insert! conn :genomes {:id pg :created_at now}) (catch Exception _ nil))
+     ;; P5/F: ensure FK artifacts for mutation parent genome and evidence
+     (artifact/ensure-artifact! conn pg "application/octet-stream" 0)
+     (artifact/ensure-artifact! conn eid "application/edn" 0)
+     (artifact/ensure-genome! conn pg)
      (jdbc/insert! conn :mutations
                    {:id (str mutation-id)
                     :parent_genome_id pg
@@ -152,7 +154,6 @@
                     :expected_effect (pr-str {})
                     :created_at now})
      mutation-id)))
-
 (defn- add-candidate!
   "Insert an EVALUATED (state 'eligible') candidate row for the given
   parent generation; returns the candidate id."
@@ -160,11 +161,11 @@
   (sqlite/with-db [conn db]
     (let [mutation-id (add-mutation! conn parent-genome-id)
           eid (str "sha256:" (apply str (repeat 64 "f")))]
-      ;; P5/F: ensure FK targets
-      (try (jdbc/insert! conn :artifacts {:hash genome-id :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
-      (try (jdbc/insert! conn :artifacts {:hash eid :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
-      (try (jdbc/insert! conn :genomes {:id genome-id :created_at now}) (catch Exception _ nil))
-      (try (jdbc/insert! conn :genomes {:id parent-genome-id :created_at now}) (catch Exception _ nil))
+      ;; P5/F: ensure FK targets for candidate genome/evidence
+      (artifact/ensure-artifact! conn genome-id "application/octet-stream" 0)
+      (artifact/ensure-artifact! conn eid "application/edn" 0)
+      (artifact/ensure-genome! conn genome-id)
+      (artifact/ensure-genome! conn parent-genome-id)
       (jdbc/insert! conn :candidates
                     {:id (str candidate-id)
                      :parent_generation_id parent-generation-id
@@ -264,7 +265,6 @@
                    :total_cost 0.0
                    :outcome "completed"
                    :created_at now})))
-
 (defn- rollback-fixture
   "Build the full stack: G42 is CURRENT (seed, 'active'), a real
   component promotion (promote!) makes G43 CURRENT over G42 ('retired'),
@@ -275,12 +275,15 @@
   (let [db (fresh-db)
         cas-root (temp-cas-root)
         cas (cas/->cas cas-root)
-        _ (sqlite/with-db [conn db] (try (jdbc/insert! conn :artifacts {:hash new-resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil)))
+        _ (artifact/ensure-artifact! db new-resolution "application/edn" 0)
         seed-genome (:artifact/id
                      (cas/put-bytes! cas
                                      (.getBytes "seed genome body"
                                                 StandardCharsets/UTF_8)
                                      {}))
+        _ (let [m (cas/get-meta cas seed-genome)]
+            (artifact/ensure-artifact! db seed-genome (:media-type m) (:size m))
+            (artifact/ensure-genome! db seed-genome))
         _ (seed-generation! db gen42 seed-genome)
         candidate-id (random-uuid)
         evaluation-id (random-uuid)
@@ -289,6 +292,9 @@
                                           (.getBytes "candidate genome body"
                                                      StandardCharsets/UTF_8)
                                           {}))
+        _ (let [m (cas/get-meta cas candidate-genome)]
+            (artifact/ensure-artifact! db candidate-genome (:media-type m) (:size m))
+            (artifact/ensure-genome! db candidate-genome))
         sid1 (operator-session! db gen42 seed-genome)
         _ (add-candidate! db candidate-id gen42 seed-genome candidate-genome)
         _ (add-evaluation! db evaluation-id candidate-id gen42

@@ -85,6 +85,19 @@
   "Generation + session + :session/created root event; returns sid."
   [db]
   (sqlite/with-db [conn db]
+    (doseq [[artifact-id media-type]
+            [[genome "application/octet-stream"]
+             [resolution "application/edn"]
+             [phenotype "application/edn"]]]
+      (jdbc/execute! conn
+                     ["INSERT OR IGNORE INTO artifacts
+                       (hash, media_type, size, created_at)
+                       VALUES (?, ?, ?, ?)"
+                      artifact-id media-type 0 now]))
+    (jdbc/execute! conn
+                   ["INSERT OR IGNORE INTO genomes (id, created_at)
+                     VALUES (?, ?)"
+                    genome now])
     (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
       (jdbc/insert! conn :generations
                     {:id gen :genome_id genome :resolution_id resolution

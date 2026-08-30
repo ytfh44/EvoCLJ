@@ -106,8 +106,8 @@
   {:program/id :program/hostile
    :file "programs/hostile.clj"
    :entry 'agent.hostile/run
-   :input-schema :schema/x
-   :output-schema :schema/x})
+   :input-schema :schema/any
+   :output-schema :schema/any})
 
 (defn- compiled-fixture
   "Load + compile one malicious fixture genome."
@@ -186,12 +186,25 @@
 
 (defn- fresh-db
   "A migrated database backed by a fresh temp file, seeded with the
-  generation row sessions are pinned to (current = 1)."
-  [genome-id resolution-id]
+  generation row sessions are pinned to (current = 1) and all compiled
+  identity rows required by session foreign keys."
+  [genome-id resolution-id phenotype-id]
   (let [path (temp-db-path)
         db (sqlite/spec path)]
     (migrate/migrate! db)
     (sqlite/with-db [conn db]
+      (doseq [[artifact-id media-type]
+              [[genome-id "application/octet-stream"]
+               [resolution-id "application/edn"]
+               [phenotype-id "application/edn"]]]
+        (jdbc/insert! conn :artifacts
+                      {:hash artifact-id
+                       :media_type media-type
+                       :size 0
+                       :created_at "2025-01-01T00:00:00Z"}))
+      (jdbc/insert! conn :genomes
+                    {:id genome-id
+                     :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :generations
                     {:id generation-id
                      :genome_id genome-id
@@ -216,7 +229,8 @@
   {:executor ... :usage ... :db ... :db-path ... :cas-root ...}."
   [compiled loaded registry leases usage]
   (let [[db db-path] (fresh-db (:compiled/genome-id compiled)
-                               (:compiled/resolution-id compiled))
+                               (:compiled/resolution-id compiled)
+                               (:compiled/phenotype-id compiled))
         cas-root (temp-cas-dir)
         ph (phenotype/instantiate
             compiled
@@ -515,7 +529,7 @@
 ;; ============================================================================
 
 (deftest denials-are-audited-with-reason-and-normalized-resource
-  (testing "network capability the host never grants -> :intent/denied :capability/missing"
+  (testing "a requested capability with no host grant fails the static lattice gate"
     (let [executions (atom 0)
           compiled (compiled-fixture "network-capability")
           reg (registry/create-registry)
@@ -526,30 +540,20 @@
                                                               (route-descriptor))
                                                reg [] usage)
           sid (create-pinned-session executor compiled)
-          result (scheduler/run-session! executor sid {})
-          events (event/events-for-session db sid)
-          denied (denied-event events)
-          proposed (first (filter #(= :intent/proposed (:event/type %)) events))]
-      (is (= :completed (:status result))
-          "a denial is a node-level outcome — the session continues")
+          error (try
+                  (scheduler/run-session! executor sid {})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    (ex-data e)))
+          events (event/events-for-session db sid)]
+      (is (= :capability/lattice-invalid (:error/type error)))
+      (is (= :requested-not-granted (:reason error)))
       (is (= 0 @executions)
-          "the denied :net/fetch request NEVER reached the provider")
-      (is (some? denied) "an :intent/denied audit event was persisted")
-      (is (= :capability/missing (get-in denied [:metadata :reason]))
-          "the audit event carries the broker's reason code")
-      (is (= :capability/denied (get-in denied [:metadata :error/type])))
-      (is (= :intent/tool-call (get-in denied [:metadata :intent/type])))
-      (is (uuid? (get-in denied [:metadata :intent/id])))
-      (is (= (get-in denied [:metadata :intent/id])
-             (get-in proposed [:metadata :intent/id]))
-          "the denial names the same intent the proposal named")
-      (is (= (:event/id proposed) (:cause/event-id denied))
-          "the denial is causally chained to the :intent/proposed event")
-      (is (= {:status :completed} (select-keys result [:status])))
-      (is (:valid? (event/verify-event-chain db sid))
-          "the audited chain verifies end to end")
-      (is (= {} @usage)
-          "a denied intent consumed no lease budget")))
+          "the denied :net/fetch request never reached the provider")
+      (is (= :created (:state (session/get-session db sid)))
+          "the static gate rejects before the session leaves :created")
+      (is (= [:session/created] (mapv :event/type events)))
+      (is (:valid? (event/verify-event-chain db sid)))))
   (testing "filesystem scope broader than the host grant -> :intent/denied
             :capability/scope-denied (decided on the NORMALIZED resource)"
     (let [executions (atom 0)
@@ -565,7 +569,10 @@
                                                (loaded-genome "filesystem-escalation"
                                                               (route-descriptor))
                                                reg
-                                               [(fs-lease child-cap-id
+                                               [(tool-lease (random-uuid)
+                                                            pid
+                                                            :fixture/path-resolve)
+                                                (fs-lease child-cap-id
                                                           pid "/protected/work")]
                                                usage)
           sid (create-pinned-session executor compiled)

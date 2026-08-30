@@ -59,7 +59,9 @@
             [evoclj.runtime.episode :as episode]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.event :as event]
             [evoclj.store.recovery :as recovery]
             [evoclj.store.session :as session]
@@ -445,6 +447,13 @@
   [system]
   {:sqlite (db-of system) :cas (cas-of system)})
 
+(defn candidate-store-of
+  "Return the narrow CandidateStore handle for candidate/mutation APIs.
+  Runtime and promotion APIs continue to receive the executor stores map
+  from store-of."
+  [system]
+  (candidate-store/make-candidate-store (db-of system)))
+
 ;; ============================================================================
 ;; the CLI's ONLY raw SQL — read-only SELECTs (no write path exists)
 ;; ============================================================================
@@ -499,6 +508,22 @@
 ;; compiled identity + operator sessions
 ;; ============================================================================
 
+(defn ensure-identity-artifacts!
+  "Ensure the compiled identity references have catalog rows before a
+  session or generation-facing operation uses them. The genome row is
+  expected to point at an already content-addressed bundle; resolution
+  and CodeId are immutable compiled identities with no separate body."
+  [system identity]
+  (let [db (db-of system)]
+    (artifact/ensure-artifact! db (:genome/id identity)
+                                "application/octet-stream" 0)
+    (artifact/ensure-artifact! db (:resolution/id identity)
+                                "application/edn" 0)
+    (artifact/ensure-artifact! db (:phenotype/id identity)
+                                "application/edn" 0)
+    (artifact/ensure-genome! db (:genome/id identity))
+    identity))
+
 (defn generation-identity
   "The compiled identity of `generation-id`'s Genome:
   {:generation/id :genome/id :resolution/id :phenotype/id}, the
@@ -532,6 +557,7 @@
   the session id."
   [opts system generation-id]
   (let [identity (generation-identity opts system generation-id)
+        _ (ensure-identity-artifacts! system identity)
         db (db-of system)
         sid (:session/id
              (session/create-session!
@@ -708,7 +734,12 @@
                           {:generation/id (:generation/id generation)
                            :generation/genome-id (:genome/id generation)
                            :compiled/genome-id (:compiled/genome-id compiled)})))
-      (let [db (db-of system)
+      (let [_ (ensure-identity-artifacts!
+                system
+                {:genome/id (:compiled/genome-id compiled)
+                 :resolution/id (:compiled/resolution-id compiled)
+                 :phenotype/id (:compiled/phenotype-id compiled)})
+            db (db-of system)
             cas-store (cas-of system)
             reg (:provider/registry system)
             usage (atom {})

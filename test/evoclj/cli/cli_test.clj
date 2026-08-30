@@ -37,6 +37,7 @@
             [evoclj.eval.replay :as replay]
             [evoclj.evolution.candidate :as candidate]
             [evoclj.evolution.core :as evolution-core]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.genome.load :as load]
             [evoclj.genome.path :as gpath]
             [evoclj.intent.dispatch :as dispatch]
@@ -50,6 +51,7 @@
             [evoclj.runtime.scheduler :as scheduler]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
+            [evoclj.store.existence :as existence]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite])
@@ -176,6 +178,17 @@
         cas-root (str dir "/cas")
         cas-store (cas/->cas cas-root)]
     (sqlite/with-db [conn db]
+      (doseq [artifact-id [genome-id resolution-id (:compiled/phenotype-id compiled)]]
+        (jdbc/execute!
+         conn
+         ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
+           VALUES (?, 'application/octet-stream', 0, datetime('now'))"
+          artifact-id]))
+      (jdbc/execute!
+       conn
+       ["INSERT OR IGNORE INTO genomes (id, created_at)
+        VALUES (?, datetime('now'))"
+        genome-id])
       (jdbc/insert! conn :generations
                     {:id generation-id
                      :genome_id genome-id
@@ -201,6 +214,17 @@
    (cas/put-bytes! cas-store
                    (.getBytes (genome-index-bytes loaded) StandardCharsets/UTF_8)
                    {})))
+
+(defn- proof [id]
+  (#'existence/unsafe-verified-digest id))
+
+(defn- proof-candidate [candidate]
+  (update candidate :candidate/genome-id proof))
+
+(defn- proof-mutation [mutation]
+  (cond-> mutation
+    (:parent/genome-id mutation) (update :parent/genome-id proof)
+    (:evidence/id mutation) (update :evidence/id proof)))
 
 (defn- read-artifact
   [store artifact-id]
@@ -564,6 +588,18 @@
                                                           :summary {:selected 1}})
                                                  StandardCharsets/UTF_8)
                                       {}))
+            _ (sqlite/with-db [conn (:db ctx)]
+                (doseq [artifact-id [g2-id pack-ref]]
+                  (jdbc/execute!
+                   conn
+                   ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
+                     VALUES (?, 'application/octet-stream', 0, datetime('now'))"
+                    artifact-id]))
+                (jdbc/execute!
+                 conn
+                 ["INSERT OR IGNORE INTO genomes (id, created_at)
+                  VALUES (?, datetime('now'))"
+                  g2-id]))
             mutation {:mutation/id (random-uuid)
                       :parent/genome-id (:genome-id ctx)
                       :hypothesis/id (random-uuid)
@@ -583,11 +619,13 @@
                        :mutation/id (:mutation/id mutation)
                        :evidence/id pack-ref
                        :risk :program})
+            candidate-store-handle (candidate-store/make-candidate-store (:db ctx))
             materialized (candidate/materialize-candidate!
-                          {:sqlite (:db ctx) :cas (:cas-store ctx)}
-                          proposed mutation)
+                          candidate-store-handle
+                          (proof-candidate proposed)
+                          (proof-mutation mutation))
             pending (candidate/mark-evaluation-pending!
-                     {:sqlite (:db ctx) :cas (:cas-store ctx)}
+                     candidate-store-handle
                      (:candidate/id materialized))
             cand-id (:candidate/id pending)
             eval-id (random-uuid)]

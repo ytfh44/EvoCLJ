@@ -36,7 +36,10 @@
             [evoclj.eval.paired :as paired]
             [evoclj.evolution.candidate :as candidate]
             [evoclj.provider.model-registry :as mreg]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
+            [evoclj.store.candidate-store :as candidate-store]
+            [evoclj.store.existence :as existence]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
   (:import (com.sun.net.httpserver HttpServer HttpHandler)
@@ -240,44 +243,25 @@
               (str "side " (:side/id side) " usage attributed to its session")))))))
 
 (deftest eval-fails-closed-without-model-registry
-  (let [{:keys [server base-url requests]} (start-fake-endpoint)
+  (let [{:keys [server requests]} (start-fake-endpoint)
         _ (swap! servers conj server)
         root (llm-genome)
-        ;; NO :model/registry, NO :model/resource — real model execution
-        ;; is simply not wired for this evaluator.
+        ;; No :model/registry means no host grant is available for the
+        ;; manifest's :model/call capability; PLT5 rejects the run at
+        ;; the static Effects ⊆ Requested ⊆ Granted gate.
         ev (evaluator root nil)
-        result (paired/run-paired-selection! ev (request))
-        parent-side (get-in (first (:pairs result)) [:sides :parent])
-        candidate-side (get-in (first (:pairs result)) [:sides :candidate])]
-    (testing "the fake endpoint was NEVER contacted — no provider executes"
+        error (try
+                (paired/run-paired-selection! ev (request))
+                nil
+                (catch clojure.lang.ExceptionInfo e
+                  (ex-data e)))]
+    (testing "the fake endpoint was NEVER contacted"
       (is (zero? (count @requests))
-          "without :model/registry the llm model call fails closed before any HTTP call"))
-    (testing "no canned model text ever reaches the side output"
-      (doseq [side [parent-side candidate-side]]
-        (is (not (str/includes? (pr-str (:side/outputs side)) canned-text)))))
-    (testing "the runner fails closed — no silent fallback"
-      ;; The :intent/model-call is recorded as an :intent/failed event
-      ;; carrying :error/type :provider/not-found and
-      ;; :reason :no-model-registry (nothing executes — zero HTTP calls;
-      ;; there is no silent fixture fallback). The scheduler lets the
-      ;; :emit node complete, so the side is :completed with EMPTY
-      ;; outputs; the meaningful assertions are the zero request count
-      ;; and the absence of any model-derived text.
-      (is (not (seq (:side/outputs parent-side)))
-          "parent side produced no model output")
-      (is (not (seq (:side/outputs candidate-side)))
-          "candidate side produced no model output"))
-    (testing "without model execution the side usage carries NO model counters"
-      ;; :side/usage is still ALWAYS present (stable map) but the model
-      ;; token counters are absent/zero — a fail-closed model dispatch
-      ;; produces no usage and no provider-generated cost.
-      (doseq [side [parent-side candidate-side]]
-        (let [u (:side/usage side)]
-          (is (map? u) (str "side " (:side/id side) " has an always-present :side/usage"))
-          (is (not (contains? u :model-input-tokens))
-              (str "side " (:side/id side) " has no model input tokens"))
-          (is (not (contains? u :model-cost-units))
-              (str "side " (:side/id side) " has no model cost units")))))))
+          "the static capability gate fails before any HTTP call"))
+    (testing "the runner fails closed with the lattice error"
+      (is (= :capability/lattice-invalid (:error/type error)))
+      (is (= :requested-not-granted (:reason error)))
+      (is (= [:model/call] (:missing error))))))
 
 ;; ============================================================================
 ;; Feature C — the G6 :cost section derives from real model usage
@@ -343,6 +327,15 @@
         db (sqlite/spec db-path)
         cas-root (cost-temp-path! "evoclj-cost-cas-")]
     (migrate/migrate! db)
+    (doseq [[artifact-id media-type]
+            [[cost-parent-genome-id "application/octet-stream"]
+             [cost-candidate-genome-id "application/octet-stream"]
+             [cost-resolution-id "application/edn"]
+             [cost-evidence-id "application/edn"]
+             [cost-file-hash "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (doseq [genome-id [cost-parent-genome-id cost-candidate-genome-id]]
+      (artifact/ensure-genome! db genome-id))
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id cost-generation-id
@@ -353,6 +346,10 @@
                      :current 1
                      :created_at "2025-01-01T00:00:00Z"}))
     {:sqlite db :cas (cas/->cas cas-root)}))
+
+(defn- cost-proof
+  [artifact-id]
+  (#'existence/unsafe-verified-digest artifact-id))
 
 (defn- cost-materialized-pending!
   "Materialize a fresh candidate from a fixture parent+mutation and mark
@@ -377,8 +374,14 @@
             :mutation/id (cost-uuid 1)
             :evidence/id cost-evidence-id
             :risk :behavioral})
-        m1 (candidate/materialize-candidate! store c m)]
-    (candidate/mark-evaluation-pending! store (:candidate/id m1))))
+        handle (candidate-store/make-candidate-store (:sqlite store))
+        m1 (candidate/materialize-candidate!
+            handle
+            (update c :candidate/genome-id cost-proof)
+            (-> m
+                (update :parent/genome-id cost-proof)
+                (update :evidence/id cost-proof)))]
+    (candidate/mark-evaluation-pending! handle (:candidate/id m1))))
 
 (defn- cost-replay-case
   "A :fixture replay case over an empty tool trace — the llm topology

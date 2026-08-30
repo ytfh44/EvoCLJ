@@ -17,6 +17,7 @@
             [evoclj.genome.hash :as hash]
             [evoclj.genome.load :as load]
             [evoclj.kernel.system :as kernel]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite]
             [integrant.core :as ig])
@@ -171,6 +172,10 @@
   (let [loaded (load/load-genome (route-a-root))
         genome-id (:genome/id loaded)
         resolution-id (str "sha256:" (apply str (repeat 64 "f")))]
+    (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
+    (artifact/ensure-artifact! db resolution-id "application/edn" 0)
+    (artifact/ensure-artifact! db (evolution-phenotype-id) "application/octet-stream" 0)
+    (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id generation-id

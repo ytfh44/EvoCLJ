@@ -287,6 +287,18 @@
           resolution (str "sha256:" (apply str (repeat 64 "c")))
           phenotype (str "sha256:" (apply str (repeat 64 "b")))
           _ (sqlite/with-db [conn db]
+              (doseq [[artifact-id media-type]
+                      [[genome "application/octet-stream"]
+                       [resolution "application/edn"]
+                       [phenotype "application/edn"]]]
+                (clojure.java.jdbc/insert! conn :artifacts
+                                            {:hash artifact-id
+                                             :media_type media-type
+                                             :size 0
+                                             :created_at "2025-01-01T00:00:00Z"}))
+              (clojure.java.jdbc/insert! conn :genomes
+                                          {:id genome
+                                           :created_at "2025-01-01T00:00:00Z"})
               (when-not (first (clojure.java.jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
                 (clojure.java.jdbc/insert! conn :generations {:id gen :genome_id genome :resolution_id resolution :parent_id nil :state "active" :current 0 :created_at "2025-01-01T00:00:00Z"})))
           sid (:session/id (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen}))

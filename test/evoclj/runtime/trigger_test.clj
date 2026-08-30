@@ -24,6 +24,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.kernel.error :as err]
             [evoclj.runtime.trigger :as trigger]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -135,6 +136,12 @@
   []
   (let [db (sqlite/spec (temp-db-path))]
     (migrate/migrate! db)
+    (doseq [[artifact-id media-type]
+            [[genome "application/octet-stream"]
+             [resolution "application/edn"]
+             [phenotype "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (artifact/ensure-genome! db genome)
     db))
 
 (defn- seed-session!
@@ -142,6 +149,12 @@
   session id (a #uuid)."
   [db]
   (let [sid (random-uuid)]
+    (doseq [[artifact-id media-type]
+            [[genome "application/octet-stream"]
+             [resolution "application/edn"]
+             [phenotype "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (artifact/ensure-genome! db genome)
     (sqlite/with-db [conn db]
       (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
         (jdbc/insert! conn :generations

@@ -59,6 +59,7 @@
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
             [evoclj.sci.execute :as execute]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
@@ -156,16 +157,21 @@
 ;; --- store / executor assembly (the only \"glue\" this test needs) --------
 
 (def ^:private generation-id "generation-1")
-
 (defn- fresh-db
   "A migrated database backed by a fresh temp file, seeded with the
   generation row sessions are pinned to (current = 1: the seed
   generation IS the CURRENT pointer, Database Invariant 6). Returns
   [db-spec db-path]."
-  [genome-id resolution-id]
+  [genome-id resolution-id phenotype-id]
   (let [path (temp-db-path)
         db (sqlite/spec path)]
     (migrate/migrate! db)
+    (doseq [[artifact-id media-type]
+            [[genome-id "application/octet-stream"]
+             [resolution-id "application/edn"]
+             [phenotype-id "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id generation-id
@@ -191,6 +197,18 @@
      :issued-at now
      :expires-at (java.util.Date. (+ (.getTime now) 60000))}))
 
+(defn- model-lease
+  "A valid CapabilityLease granting the phenotype :model/call."
+  [phenotype-id]
+  (let [now (java.util.Date.)]
+    {:cap/id (random-uuid)
+     :subject {:phenotype/id phenotype-id}
+     :resource {:kind :model :id "lmstudio/*"}
+     :actions #{:invoke}
+     :constraints {:max-calls 1000}
+     :issued-at now
+     :expires-at (java.util.Date. (+ (.getTime now) 60000))}))
+
 (defn- build-executor
   "Assemble the component executor map from the REAL seed genome:
 
@@ -199,8 +217,9 @@
      :dispatch <broker context>}
 
   The runtime provider REGISTRY registers both fixture providers
-  (:fixture/echo and :fixture/non-idempotent); the broker carries ONE
-  lease (for :fixture/echo). Returns {:executor ... :executions ...
+  (:fixture/echo and :fixture/non-idempotent); the broker carries
+  leases for :fixture/echo and :model/call (the seed's requested
+  capabilities include both). Returns {:executor ... :executions ...
   :db-path ... :cas-root ...} where :executions counts real provider
   executions and :db-path/:cas-root are the on-disk handles the
   restart step reopens."
@@ -216,28 +235,28 @@
                                    {:execution-count executions}))
         _ (registry/register! reg (fixture/non-idempotent-provider))
         usage (atom {})
-        lease (echo-lease phenotype-id)
-        [db db-path] (fresh-db genome-id resolution-id)
+        leases [(echo-lease phenotype-id) (model-lease phenotype-id)]
+        [db db-path] (fresh-db genome-id resolution-id phenotype-id)
         cas-root (temp-cas-dir)
         ph (phenotype/instantiate
             compiled
             {:stores {:sqlite :poison :cas {:root :poison}}
              :providers {:registry reg}
-             :capabilities {:leases [lease] :usage usage}
+             :capabilities {:leases leases :usage usage}
              :program-sources (program-sources loaded compiled)})]
     {:executor {:phenotype ph
                 :stores {:sqlite db :cas (cas/->cas cas-root)}
                 :dispatch (dispatch/make-broker-context
                            {:registry reg
-                            :leases [lease]
+                            :leases leases
                             :usage usage})}
      :executions executions
      :db-path db-path
      :cas-root cas-root
      :compiled compiled
      :phenotype ph
-     :lease lease}))
-
+     :lease (first leases)
+     :leases leases}))
 (defn- create-pinned-session
   "create-session! pinned to the seed's compiled identity, then append
   the :session/created root event (the host's job — the scheduler
@@ -388,7 +407,7 @@
       (testing "Step 5 — close and REOPEN the store from disk; the episode and
                 trace remain queryable"
         (let [reopened-db (sqlite/spec db-path)
-              _ (is (= {:status :noop :version 6}
+              _ (is (= {:status :noop :version 11}
                        (migrate/migrate! reopened-db)))
               reopened-cas (cas/->cas cas-root)
               reopened-store {:sqlite reopened-db :cas reopened-cas}

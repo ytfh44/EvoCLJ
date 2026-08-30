@@ -77,6 +77,7 @@
             [evoclj.runtime.episode :as episode]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
@@ -212,7 +213,20 @@
         genome-id (:compiled/genome-id compiled)
         resolution-id (:compiled/resolution-id compiled)
         cas-root (str state-dir "/cas")
-        cas-store (cas/->cas cas-root)]
+        cas-store (cas/->cas cas-root)
+        genome-body (.getBytes (genome-index-bytes loaded)
+                               StandardCharsets/UTF_8)
+        stored (:artifact/id (cas/put-bytes! cas-store genome-body {}))]
+    (when-not (= stored genome-id)
+      (throw (ex-info "compiled genome id does not match canonical CAS body"
+                      {:compiled/genome-id genome-id
+                       :stored-artifact-id stored})))
+    (artifact/ensure-artifact! db genome-id "application/octet-stream"
+                                (alength genome-body))
+    (artifact/ensure-artifact! db resolution-id "application/edn" 0)
+    (artifact/ensure-artifact! db (:compiled/phenotype-id compiled)
+                                "application/edn" 0)
+    (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id "generation-1"
@@ -222,9 +236,6 @@
                      :state "active"
                      :current 1
                      :created_at "2025-01-01T00:00:00Z"}))
-    (cas/put-bytes! cas-store
-                    (.getBytes (genome-index-bytes loaded) StandardCharsets/UTF_8)
-                    {})
     (copy-tree! (fixture-path "test" "fixtures" "evolution-e2e" "route-a")
                 (str state-dir "/genomes/" (dash genome-id)))
     {:state-dir state-dir :db db :db-path db-path :cas-root cas-root

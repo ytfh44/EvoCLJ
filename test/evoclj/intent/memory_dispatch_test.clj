@@ -3,24 +3,55 @@
   through the broker pipeline to the :memory/kv provider — with a
   :memory lease they persist; without a lease they are denied before
   the provider runs (execution counter untouched)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.java.jdbc :as jdbc]
+            [clojure.test :refer [deftest is testing]]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.provider.memory :as mem]
             [evoclj.provider.registry :as registry]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)
            (java.util Date UUID)))
 
-(defn- temp-db []
-  (let [p (str (Files/createTempFile "evoclj-mem-dispatch-" ".db" (make-array FileAttribute 0)))
-        db (sqlite/spec p)]
-    (migrate/migrate! db)
-    db))
-
 (defn- phenotype-id []
   "sha256:0000000000000000000000000000000000000000000000000000000000000000")
+
+(defn- temp-db []
+  (let [p (str (Files/createTempFile "evoclj-mem-dispatch-" ".db"
+                                     (make-array FileAttribute 0)))
+        db (sqlite/spec p)
+        genome "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        resolution "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        phenotype (phenotype-id)
+        generation "memory-dispatch-generation"
+        session "00000000-0000-0000-0000-0000000000dd"]
+    (migrate/migrate! db)
+    (doseq [[artifact-id media-type]
+            [[genome "application/octet-stream"]
+             [resolution "application/edn"]
+             [phenotype "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (artifact/ensure-genome! db genome)
+    (sqlite/with-db [conn db]
+      (jdbc/insert! conn :generations
+                    {:id generation
+                     :genome_id genome
+                     :resolution_id resolution
+                     :parent_id nil
+                     :state "active"
+                     :current 0
+                     :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :sessions
+                    {:id session
+                     :generation_id generation
+                     :genome_id genome
+                     :resolution_id resolution
+                     :phenotype_id phenotype
+                     :state "created"
+                     :created_at "2025-01-01T00:00:00Z"}))
+    db))
 
 (defn- lease [phen-id]
   (let [now (Date.)]

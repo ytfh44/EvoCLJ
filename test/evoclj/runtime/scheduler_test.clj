@@ -63,6 +63,7 @@
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
@@ -116,25 +117,17 @@
   (reset! temp-paths []))
 
 (use-fixtures :each (fn [f] (f) (cleanup!)))
-
 (defn- fresh-db
   "A migrated database spec backed by a fresh temp file, seeded with
   the generation row sessions are pinned to."
   []
   (let [db (sqlite/spec (temp-db-path))]
     (migrate/migrate! db)
+    (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
+    (artifact/ensure-artifact! db resolution-id "application/edn" 0)
+    (artifact/ensure-artifact! db phenotype-id "application/edn" 0)
+    (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
-      (doseq [artifact-id [genome-id resolution-id phenotype-id]]
-        (jdbc/execute!
-         conn
-         ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
-           VALUES (?, 'application/octet-stream', 0, datetime('now'))"
-          artifact-id]))
-      (jdbc/execute!
-       conn
-       ["INSERT OR IGNORE INTO genomes (id, created_at)
-        VALUES (?, datetime('now'))"
-        genome-id])
       (jdbc/insert! conn :generations
                     {:id generation-id
                      :genome_id genome-id

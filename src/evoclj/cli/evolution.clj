@@ -320,7 +320,7 @@
   [opts]
   (let [cid (uuid-arg (positional opts 0))
         system (session/build-system opts)
-        c (candidate/find-candidate (session/store-of system) cid)]
+        c (candidate/find-candidate (session/candidate-store-of system) cid)]
     (when-not c
       (throw (err/error :cli/candidate-not-found
                         "no candidate with this id"
@@ -348,7 +348,7 @@
         profile-id (or (some-> (get-in opts [:options :profile]) keyword)
                        :default-v1)
         system (session/build-system opts)
-        store (session/store-of system)
+        store (session/candidate-store-of system)
         c (candidate/find-candidate store cid)]
     (when-not c
       (throw (err/error :cli/candidate-not-found

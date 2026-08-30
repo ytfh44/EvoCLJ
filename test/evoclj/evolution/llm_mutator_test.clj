@@ -36,6 +36,7 @@
             [evoclj.intent.core :as intent]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.provider.registry :as registry]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -181,8 +182,8 @@
       (is (= (get-in m [:ops 0]) (ms/validate-op (get-in m [:ops 0]))))
       ;; the whole (completed) mutation envelope validates against the
       ;; orchestrator's validate-mutation with the parent as context
-      (is (map? (mutation/validate-mutation (completed-shape m)
-                                            (fixture-parent))))
+      (is (mutation/validated-mutation? (mutation/validate-mutation (completed-shape m)
+                                                                    (fixture-parent))))
       ;; the model id, message roles, and options pass through
       (is (= "lmstudio/fake" (:id (first @calls))))
       (is (= :system (-> (first @calls) (get-in [:messages 0 :role]))))
@@ -521,7 +522,6 @@
   (reset! temp-paths []))
 
 (use-fixtures :each (fn [f] (f) (cleanup!)))
-
 (defn- fresh-store
   "A migrated temp database seeded with the parent generation row
   (current = 1, Database Invariant 6) plus a temp CAS root. Returns the
@@ -531,6 +531,9 @@
         db (sqlite/spec path)
         cas-root (temp-cas-dir)]
     (migrate/migrate! db)
+    ;; Fleet P5/FK: artifacts/genomes must exist before generations
+    (artifact/ensure-artifact! db placeholder-hash "application/octet-stream" 0)
+    (artifact/ensure-genome! db placeholder-hash)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id "generation-1"
@@ -583,6 +586,10 @@
   [store evidence-id]
   (let [mid (uuid-of 91)
         cid (uuid-of 92)]
+    ;; Ensure FK targets before candidates/mutations
+    (artifact/ensure-artifact! (:sqlite store) placeholder-hash "application/octet-stream" 0)
+    (artifact/ensure-artifact! (:sqlite store) evidence-id "application/edn" 0)
+    (artifact/ensure-genome! (:sqlite store) placeholder-hash)
     (sqlite/with-db [conn (:sqlite store)]
       (jdbc/insert! conn :mutations
                     {:id (str mid)
@@ -627,6 +634,8 @@
         created-at (str (.plusSeconds (java.time.Instant/parse
                                        "2025-01-01T00:00:00Z")
                                       (* n 60)))]
+    (artifact/ensure-artifact! (:sqlite store) placeholder-hash "application/octet-stream" 0)
+    (artifact/ensure-genome! (:sqlite store) placeholder-hash)
     (sqlite/with-db [conn (:sqlite store)]
       (jdbc/insert! conn :mutations
                     {:id mutation-id

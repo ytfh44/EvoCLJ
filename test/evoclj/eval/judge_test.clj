@@ -37,6 +37,7 @@
             [malli.core :as m]
             [evoclj.store.cas :as cas]
             [evoclj.store.enrichment :as enrichment]
+            [evoclj.store.enrichment-store :as enrichment-store]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.file Files LinkOption Paths FileVisitOption)
@@ -205,17 +206,17 @@
 
 (defn- temp-stores!
   "A migrated sqlite database in a temp file plus a fresh temp CAS
-  root, as the executor :stores map {:sqlite <db> :cas <cas>}. The temp
-  paths are recorded for cleanup."
+  root, as an EnrichmentStore handle. The temp paths are recorded for cleanup."
   []
   (let [db-path (str (Files/createTempFile "evoclj-judge-" ".db"
                                            (make-array FileAttribute 0)))
         cas-path (str (Files/createTempDirectory "evoclj-judge-cas-"
                                                  (make-array FileAttribute 0)))
-        db (sqlite/spec db-path)]
+        db (sqlite/spec db-path)
+        cas-obj (cas/->cas cas-path)]
     (migrate/migrate! db)
     (swap! store-paths conj db-path cas-path)
-    {:sqlite db :cas (cas/->cas cas-path)}))
+    (enrichment-store/make-enrichment-store db cas-obj)))
 
 (defn- dispose-stores!
   "Delete the temp paths created by temp-stores! (idempotent)."

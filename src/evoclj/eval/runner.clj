@@ -61,12 +61,14 @@
             [clojure.java.jdbc :as jdbc]
             [evoclj.compiler.core :as compiler]
             [evoclj.genome.load :as load]
+            [evoclj.genome.path :as genome-path]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.usage :as usage]
             [evoclj.runtime.scheduler :as scheduler]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
@@ -214,6 +216,38 @@
      :constraints {:max-calls 10000}
      :issued-at now
      :expires-at expires}))
+(defn- genome-index-body
+  "Return the canonical Genome index body whose digest is the loaded
+  Genome's :genome/id."
+  [loaded]
+  (apply str
+         (map (fn [[path {:keys [digest]}]]
+                (str path "\u0000" digest "\n"))
+              (sort-by first genome-path/bytewise-compare (:files loaded)))))
+
+(defn- register-compiled-artifacts!
+  "Seed the fresh side store with the compiled identity rows required by
+  the post-009/post-011 foreign keys before creating its session."
+  [stores loaded compiled]
+  (let [db (:sqlite stores)
+        cas-store (:cas stores)
+        genome-id (:compiled/genome-id compiled)
+        genome-body (.getBytes (genome-index-body loaded) StandardCharsets/UTF_8)
+        stored (:artifact/id (cas/put-bytes! cas-store genome-body {}))
+        _ (when-not (= stored genome-id)
+            (throw (err/error :eval/paired-genome-mismatch
+                              "loaded Genome content address differs from compiled identity"
+                              {:compiled/genome-id genome-id
+                               :stored-artifact-id stored})))]
+    (artifact/ensure-artifact! db genome-id "application/octet-stream"
+                                (alength genome-body))
+    (artifact/ensure-artifact! db (:compiled/resolution-id compiled)
+                                "application/edn" 0)
+    (artifact/ensure-artifact! db (:compiled/phenotype-id compiled)
+                                "application/edn" 0)
+    (artifact/ensure-genome! db genome-id)
+    stores))
+
 
 (defn- create-pinned-session!
   "create-session! pinned to the compiled genome's identity, then
@@ -363,8 +397,24 @@
             leases (leases-for tool-ids (:compiled/phenotype-id compiled))
             model-registry (when (contains? evaluator :model/registry)
                              (:model/registry evaluator))
+            ;; PLT5: Effects ⊆ Requested ⊆ Granted. For seed/demo topologies
+            ;; that declare :model/call in Requested but whose static Effects
+            ;; contain no :model/call (no :llm node), a missing model lease
+            ;; would fail the lattice even though no model intent will ever
+            ;; be dispatched. Grant a dummy :model lease to satisfy
+            ;; Requested ⊆ Granted without requiring a real registry.
+            ;; For :llm topologies where Effects contains :model/call, a
+            ;; missing registry must remain fail-closed (eval_llm_e2e contract).
+            requested-caps (:requested-capabilities compiled)
+            topology-effects (:effects compiled)
+            needs-dummy-model-lease? (and (nil? model-registry)
+                                          (contains? requested-caps :model/call)
+                                          (not (contains? topology-effects :model/call)))
             leases (cond-> leases
                      model-registry
+                     (conj (model-lease (:compiled/phenotype-id compiled)
+                                        (:model/resource evaluator)))
+                     needs-dummy-model-lease?
                      (conj (model-lease (:compiled/phenotype-id compiled)
                                         (:model/resource evaluator))))
             broker (dispatch/make-broker-context
@@ -376,6 +426,7 @@
                  :providers {:registry registry}
                  :capabilities {:leases leases :usage usage}
                  :program-sources (program-sources loaded compiled)})
+            _ (register-compiled-artifacts! stores loaded compiled)
             sid (create-pinned-session! stores compiled generation-id)
             run (scheduler/run-session!
                  {:phenotype ph

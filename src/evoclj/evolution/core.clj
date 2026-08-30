@@ -131,11 +131,15 @@
             [evoclj.evolution.mutation :as mutation]
             [evoclj.genome.load :as load]
             [evoclj.genome.patch :as patch]
+            [evoclj.genome.path :as genome-path]
             [evoclj.kernel.error :as err]
+            [evoclj.store.cas :as cas]
+            [evoclj.store.existence :as existence]
             [evoclj.store.sqlite :as sqlite]
             [malli.core :as m]
             [malli.error :as me])
-  (:import (java.nio.file FileVisitOption Files LinkOption Path Paths)
+  (:import (java.nio.charset StandardCharsets)
+           (java.nio.file FileVisitOption Files LinkOption Path Paths)
            (java.util UUID)))
 
 ;; --- the Mutator contract (normative for this task) ---------------------------
@@ -431,6 +435,54 @@
   (.resolve (Path/of (str (:candidates-dir system)) (make-array String 0))
             (str/replace genome-id ":" "-")))
 
+(defn- genome-index-body
+  "The canonical Genome CAS body: path + NUL + digest + LF for every
+  file, ordered by the same bytewise path comparator as tree-digest."
+  [loaded]
+  (apply str
+         (map (fn [[path {:keys [digest]}]]
+                (str path "\u0000" digest "\n"))
+              (sort-by first genome-path/bytewise-compare (:files loaded)))))
+
+(defn- register-artifact!
+  "Register an already content-addressed artifact in the SQLite catalog
+  so the durable FK can prove the same existence as the CAS."
+  [system artifact-id media-type size]
+  (sqlite/exec! (:sqlite (:store system))
+                ["INSERT OR IGNORE INTO artifacts
+                  (hash, media_type, size, created_at)
+                  VALUES (?, ?, ?, datetime('now'))"
+                 artifact-id media-type size])
+  artifact-id)
+
+(defn- genome-proof!
+  "Store a loaded Genome's canonical index body in CAS, register its
+  digest in SQLite, and return a VerifiedDigest proof."
+  [system loaded]
+  (let [cas-store (:cas (:store system))
+        body (.getBytes (genome-index-body loaded) StandardCharsets/UTF_8)
+        stored (:artifact/id (cas/put-bytes! cas-store body {}))
+        expected (:genome/id loaded)]
+    (when-not (= stored expected)
+      (throw (err/error :evolution/genome-proof-invalid
+                        "canonical Genome index body hashed to a different id"
+                        {:expected expected :actual stored})))
+    (register-artifact! system stored "application/octet-stream" (alength body))
+    (sqlite/exec! (:sqlite (:store system))
+                  ["INSERT OR IGNORE INTO genomes (id, created_at)
+                    VALUES (?, datetime('now'))"
+                   stored])
+    (existence/verified-digest cas-store stored)))
+
+(defn- evidence-proof!
+  "Register and verify a frozen evidence pack artifact already written by
+  evidence/build-evidence-pack."
+  [system evidence-id]
+  (let [cas-store (:cas (:store system))
+        body (cas/get-bytes cas-store evidence-id)]
+    (register-artifact! system evidence-id "application/edn" (alength body))
+    (existence/verified-digest cas-store evidence-id)))
+
 (defn- delete-candidate-dir!
   "Best-effort removal of a finalized candidate bundle that failed
   compilation or materialization, so :candidates-dir never holds a
@@ -518,16 +570,24 @@
                             (attach-programs candidate-genome system parent)
                             (:provider-catalog system))]
               (phase! system :persist-candidate)
-              (let [proposed (candidate/create-candidate
+              (let [parent-proof (genome-proof! system parent)
+                    candidate-proof (genome-proof! system candidate-genome)
+                    evidence-proof (evidence-proof! system (:evidence/id mutation))
+                    proposed (candidate/create-candidate
                               {:parent/generation-id generation-id
                                :parent/genome-id (:genome/id parent)
-                               :candidate/genome-id (:compiled/genome-id compiled)
+                               :candidate/genome-id (:genome/id candidate-genome)
                                :mutation/id (:mutation/id mutation)
                                :evidence/id (:evidence/id mutation)
                                :risk (:risk mutation)})
+                    store-mutation (assoc mutation
+                                          :parent/genome-id parent-proof
+                                          :evidence/id evidence-proof)
+                    store-proposed (assoc proposed
+                                          :candidate/genome-id candidate-proof)
                     candidate-store-handle (candidate-store/make-candidate-store (:sqlite (:store system)))
                     materialized (candidate/materialize-candidate!
-                                  candidate-store-handle proposed mutation)
+                                  candidate-store-handle store-proposed store-mutation)
                     pending (if (= :materialized (:state materialized))
                               (candidate/mark-evaluation-pending!
                                candidate-store-handle (:candidate/id materialized))
