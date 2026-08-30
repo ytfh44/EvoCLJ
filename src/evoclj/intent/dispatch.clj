@@ -71,6 +71,7 @@
             [evoclj.capability.core :as capability]
             [evoclj.capability.broker :as broker]
             [evoclj.capability.schema :as capability-schema]
+            [evoclj.intent.pipeline :as pipeline]
             [evoclj.intent.schema :as intent-schema]
             [evoclj.kernel.error :as err]
             [evoclj.provider.model-registry :as model-registry]
@@ -78,12 +79,10 @@
             [evoclj.provider.registry :as registry]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m]))
-
 ;; --- constants and context -------------------------------------------------
 
 (def ^:private default-max-attempts 2)
-(def ^:private transient-error-type :provider/transient-error)
-(def ^:private ambiguous-error-type :provider/call-ambiguous)
+
 
 (defn- validate-lease-collection!
   [leases]
@@ -188,6 +187,7 @@
      :freshness freshness}))
 
 ;; --- freshness / binding helpers ------------------------------------------
+;; Pipeline delegates to binding/capture-tool-binding via evoclj.intent.pipeline
 
 (defn- stale-binding?
   "True when binding is stale for the given freshness policy.
@@ -278,329 +278,43 @@
    :authorization authorization
    :usage usage})
 
-;; --- pipeline steps --------------------------------------------------------
-
-(defn- normalize-request!
-  "Step 3: run provider normalize-request, turning the user-facing
-  request into the CANONICAL resource descriptor authorization is
-  decided on (Global Constraint 9). Returns {:normalized <request>} on
-  success or {:error-result <result>} when the provider rejects the
-  input (:provider/input-invalid) or misbehaves
-  (:provider/execution-failed)."
-  [broker-context provider intent]
-  (try
-    {:normalized (proto/normalize-request provider intent)}
-    (catch clojure.lang.ExceptionInfo e
-      (if (= :provider/input-invalid (:error/type (ex-data e)))
-        {:error-result (result-error intent :provider/input-invalid
-                                     (ex-message e)
-                                     (dissoc (ex-data e) :error/type)
-                                     nil @(:usage broker-context))}
-        {:error-result (result-error intent :provider/execution-failed
-                                     "provider normalize-request failed unexpectedly"
-                                     {:cause (err/error-data e)}
-                                     nil @(:usage broker-context))}))
-    (catch Throwable t
-      {:error-result (result-error intent :provider/execution-failed
-                                   "provider normalize-request failed unexpectedly"
-                                   {:cause (err/error-data t)}
-                                   nil @(:usage broker-context))})))
+;; --- pipeline steps (single impl lives in evoclj.intent.pipeline) --------
+;;
+;; The EffectPipeline combinator owns validate -> lookup -> normalize ->
+;; authorize -> execute (with retry) -> validate-output as ONE function.
+;; This namespace keeps only thin forwarding aliases for the error
+;; classification predicates so INV-05 (single implementation) is
+;; satisfied: no duplicated transient/ambiguous sets.
 
 (defn- transient-error?
-  "True when the thrown value is the provider's declared TRANSIENT
-  failure signal: an ExceptionInfo whose ex-data carries :error/type
-  :provider/transient-error. Only this signal is ever retried, and
-  only for providers declaring :retry {:safe? true}."
+  "Forward to the single pipeline predicate (INV-05)."
   [t]
-  (and (instance? clojure.lang.ExceptionInfo t)
-       (= transient-error-type (:error/type (ex-data t)))))
+  (pipeline/transient-error? t))
 
 (defn- ambiguous-error?
-  "True when the thrown value is the provider's AMBIGUOUS outcome signal:
-   an ExceptionInfo whose ex-data carries :error/type
-   :provider/call-ambiguous. This means the request was sent and the
-   remote effect MAY have committed, but the definitive result never
-   came back (e.g. connection broke after send). Per the Transaction
-   Boundaries protocol an ambiguous outcome is NEVER blindly retried —
-   not even for a provider declaring :retry {:safe? true} — because a
-   re-execution could duplicate a non-idempotent external effect. It
-   fails closed as :effect/ambiguous (manual review / explicit
-   disambiguation required)."
+  "Forward to the single pipeline predicate (INV-05)."
   [t]
-  (and (instance? clojure.lang.ExceptionInfo t)
-       (= ambiguous-error-type (:error/type (ex-data t)))))
+  (pipeline/ambiguous-error? t))
 
-(defn- execute-with-retry!
-  "Step 5: execute the authorized, normalized request once, or retry
-  per policy.
+;; The private normalize / execute / validate helpers are owned by
+;; evoclj.intent.pipeline and are not duplicated here.
 
-  Each attempt consumes one call under the authorizing lease (the
-  usage atom is incremented BEFORE the provider runs — the effect
-  protocol's provider-call-started step). A transient provider error
-  is retried only when the descriptor declares :retry {:safe? true}
-  and attempts remain; otherwise the transient failure is reported as
-  a typed error result. Any non-transient failure is
-  :provider/execution-failed. Returns {:ok <value>} or
-  {:error-type ... :error-message ... :error-data ...}."
-  [broker-context provider descriptor decision normalized]
-  (let [max-attempts (:max-attempts broker-context)
-        safe? (get-in descriptor [:retry :safe?])
-        usage-atom (:usage broker-context)
-        lease-id (:lease-id decision)]
-    (loop [attempt 1]
-      (swap! usage-atom update lease-id (fnil inc 0))
-      (let [outcome (try
-                      {:value (proto/execute-request! provider normalized)}
-                      (catch clojure.lang.ExceptionInfo e
-                        (cond
-                          (ambiguous-error? e) {:ambiguous e}
-                          (transient-error? e) {:transient e}
-                          :else {:failed e}))
-                      (catch Throwable t
-                        {:failed t}))]
-        (cond
-          (contains? outcome :value)
-          {:ok (:value outcome)}
-
-          ;; An ambiguous outcome is NEVER retried, even for a provider
-          ;; declaring :retry {:safe? true}. The effect may already have
-          ;; committed remotely; a blind re-execution would duplicate a
-          ;; non-idempotent action. Fail closed as :effect/ambiguous.
-          (contains? outcome :ambiguous)
-          {:error-type :effect/ambiguous
-           :error-message (ex-message (:ambiguous outcome))
-           :error-data {:cause (err/error-data (:ambiguous outcome))
-                        :attempt attempt}}
-
-          (contains? outcome :transient)
-          (if (and safe? (< attempt max-attempts))
-            (recur (inc attempt))
-            {:error-type transient-error-type
-             :error-message (ex-message (:transient outcome))
-             :error-data {:cause (err/error-data (:transient outcome))
-                          :attempt attempt}})
-
-          :else
-          (let [t (:failed outcome)]
-            {:error-type :provider/execution-failed
-             :error-message (if (instance? clojure.lang.ExceptionInfo t)
-                              (ex-message t)
-                              (str "provider execute-request! threw "
-                                   (.getName (class t))))
-             :error-data {:cause (err/error-data t)
-                          :attempt attempt}}))))))
-
-(defn- validate-output!
-  "Step 6: validate the provider's result value against the
-  descriptor's :output-schema — after the EDN-safe boundary gate
-  (Global Constraint 22). Returns the typed :ok result, or
-  :provider/output-invalid carrying the sanitized output and a
-  serializable Malli explanation (the invalid value is never accepted
-  as model-visible data)."
-  [intent descriptor decision value usage]
-  (if (and (boundary/edn-safe? value)
-           (m/validate (:output-schema descriptor) value))
-    (result-ok intent value decision usage)
-    (result-error intent :provider/output-invalid
-                  "provider output failed output-schema validation"
-                  {:output (err/sanitize value)
-                   :explanation (err/sanitize
-                                 (m/explain (:output-schema descriptor) value))}
-                  decision usage)))
-
-;; --- the dispatcher --------------------------------------------------------
+;; --- the dispatcher (thin wrappers delegating to pipeline) -----------------
 
 (defn- dispatch-model-call!
-  "Dispatch an :intent/model-call through the broker pipeline: resolve
-  the full model id in the kernel-owned model registry, normalize the
-  request to the canonical {:kind :model ...} resource, authorize
-  against the model lease, and execute. Unknown models, unconfigured
-  providers (no API key / unsupported style), and denied requests are
-  typed error results — nothing executes without a matching lease."
+  "Deprecated forwarding wrapper. Delegates to evoclj.intent.pipeline/pipeline.
+  Kept for backward compatibility; new code should call pipeline/pipeline
+  directly."
   [broker-context intent]
-  (let [usage-atom (:usage broker-context)
-        model-id (get-in intent [:payload :model/id])
-        full-id (if (keyword? model-id) (name model-id) model-id)
-        registry (:model-registry broker-context)
-        ;; model-call has no CallBinding; the journal still records the
-        ;; transition (binding-derived fields are nil). `decision` is set
-        ;; once authorize runs; pre-authorization errors leave it nil.
-        emit (fn [result decision]
-               (attach-journal result nil intent decision))]
-    (if-not registry
-      (emit (result-error intent :provider/not-found
-                           "no model registry in the broker context"
-                           {:model/id full-id :reason :no-model-registry}
-                           nil @usage-atom)
-            nil)
-      (let [entry (model-registry/lookup registry full-id)]
-        (cond
-          (nil? entry)
-          (emit (result-error intent :provider/not-found
-                               (str "unknown model " full-id)
-                               {:model/id full-id :reason :unknown-model}
-                               nil @usage-atom)
-                nil)
-
-          (nil? (:provider entry))
-          (emit (result-error intent :provider/not-configured
-                               (str "model " full-id " is not configured: " (:reason entry))
-                               {:model/id full-id :reason (:reason entry)}
-                               nil @usage-atom)
-                nil)
-
-          :else
-          (let [provider (:provider entry)
-                descriptor (proto/describe provider)
-                normalized-step (normalize-request! broker-context provider intent)]
-            (if-let [error-result (:error-result normalized-step)]
-              (emit error-result nil)
-              (let [normalized (:normalized normalized-step)
-                    decision (broker/authorize
-                              {:intent intent
-                               :normalized-request normalized
-                               :leases (:leases broker-context)
-                               :usage @usage-atom
-                               :now ((:now broker-context))})]
-                (if (= :deny (:decision decision))
-                  (emit (result-error intent :capability/denied
-                                       "intent denied by the capability broker"
-                                       {:reason (:reason decision)}
-                                       decision @usage-atom)
-                        decision)
-                  (let [execution (execute-with-retry!
-                                   broker-context provider descriptor
-                                   decision normalized)]
-                    (if-let [value (:ok execution)]
-                      (emit (validate-output! intent descriptor decision
-                                               value @usage-atom)
-                            decision)
-                      (emit (result-error intent (:error-type execution)
-                                          (:error-message execution)
-                                          (:error-data execution)
-                                          decision @usage-atom)
-                            decision))))))))))))
+  (pipeline/pipeline broker-context intent))
 
 (defn- dispatch-registered!
-  "Dispatch an intent whose provider is resolved by the kernel-owned
-  provider registry under `tool-id`, through the full broker pipeline in
-  the NORMATIVE order (validate intent -> lookup provider -> normalize
-  resource -> authorize -> execute once/retry per policy -> validate
-  output). Shared by :intent/tool-call and the :intent/memory-read /
-  :intent/memory-write branches (feature R1).
-
-  Every memory intent resolves the SAME :memory/kv provider; the
-  tool-call branch resolves the :payload :tool/id. When
-  `require-idempotency-key?` is true (tool-call writes) a non-pure,
-  non-model-call effect is refused without a :metadata
-  {:idempotency/key ...}; the memory branch does NOT enforce it: an
-  episodic memory write through the kernel's own memory nodes is
-  bounded by the lease's :max-calls and is upserted (INSERT OR
-  REPLACE) by the provider, and no model-requested external write is
-  involved.
-
-  Step 1 (CallBinding): capture is checked BEFORE normalize
-  and the descriptor snapshot is frozen for the entire effect.
-  D_normalize = D_authorize = D_execute = D_validate is enforced by
-  capturing CallBinding once and reusing the same frozen-descriptor for all later steps; inline
-  refresh inside provider execute-request! is forbidden after
-  call-started.
-
-  Freshness: :required fails closed as :provider/freshness-required when
-  stale; :best-effort proceeds with :binding/stale? true and audit marks
-  stale; :pinned never considers stale.
-
-  ToolSurface entry -> capture-tool-binding -> CallBinding -> normalize -> authorize -> execute -> validate.
-
-  Returns the typed dispatch result (see the namespace docstring)."
-  [broker-context intent tool-id require-idempotency-key?]
-  (let [usage-atom (:usage broker-context)
-        entry (registry/lookup (:registry broker-context) tool-id)
-        ;; Single journaling wrapper for this dispatch path (INV-05 —
-        ;; one implementation). It attaches both the binding audit and
-        ;; the canonical effect journal. `binding` is the frozen
-        ;; CallBinding (nil when no provider was found), `decision` the
-        ;; broker decision (nil for pre-authorization failures).
-        emit (fn [result binding decision]
-               (attach-journal (attach-binding-audit result binding)
-                               binding intent decision))]
-    (if-not entry
-      ;; M19: a tool that was REGISTERED and later REMOVED is a distinct
-      ;; failure class from a tool that never existed. The registry's
-      ;; tombstone set records removals so the dispatcher can report the
-      ;; precise, typed :provider/tool-removed instead of the generic
-      ;; :provider/not-found. This is fail-closed: the result is always a
-      ;; typed error map — never a bare nil, never an uncaught NPE.
-      (if (registry/removed? (:registry broker-context) tool-id)
-        (result-error intent :provider/tool-removed
-                      (str "tool " tool-id " was registered and has been removed")
-                      {:tool/id tool-id}
-                      nil @usage-atom)
-        (result-error intent :provider/not-found
-                      (str "no provider registered for tool " tool-id)
-                      {:tool/id tool-id}
-                      nil @usage-atom))
-      (let [provider (:provider entry)
-            freshness (or (:freshness broker-context) :best-effort)
-            ;; Capture CallBinding: ToolSurface current entry -> capture -> CallBinding
-            binding (binding/capture-tool-binding entry {:freshness freshness})
-            stale? (:binding/stale? binding)]
-        (if (and stale? (= freshness :required))
-          (let [err-result (result-error intent :provider/freshness-required
-                                         "descriptor is stale and freshness :required blocks execution"
-                                         {:tool/id tool-id
-                                          :freshness freshness
-                                          :revision/seq (:revision/seq binding)
-                                          :reason :stale-descriptor}
-                                         nil @usage-atom)]
-            (emit err-result binding nil))
-          (let [frozen-descriptor (:binding/descriptor binding)
-                normalized-step (normalize-request! broker-context provider intent)]
-            (if-let [error-result (:error-result normalized-step)]
-              (emit error-result binding nil)
-              (let [normalized (:normalized normalized-step)
-                    binding* (assoc binding :binding/normalized normalized :contract/normalized normalized)
-                    decision (broker/authorize
-                              {:intent intent
-                               :normalized-request normalized
-                               :leases (:leases broker-context)
-                               :usage @usage-atom
-                               :now ((:now broker-context))})
-                    binding** (assoc binding* :binding/decision decision :contract/decision decision)]
-                (if (= :deny (:decision decision))
-                  (emit
-                   (result-error intent :capability/denied
-                                 "intent denied by the capability broker"
-                                 {:reason (:reason decision)}
-                                 decision @usage-atom)
-                   binding** decision)
-                  (if (and require-idempotency-key?
-                           (not= :pure (:effect frozen-descriptor))
-                           (not= :model-call (:effect frozen-descriptor))
-                           (nil? (get-in intent [:metadata :idempotency/key])))
-                    (emit
-                     (result-error intent :intent/idempotency-key-missing
-                                   "non-pure writes require an idempotency key in :metadata before execution"
-                                   {:tool/id tool-id :effect (:effect frozen-descriptor)}
-                                   decision @usage-atom)
-                     binding** decision)
-                    (let [execution (execute-with-retry!
-                                     broker-context provider frozen-descriptor
-                                     decision normalized)]
-                      (if-let [value (:ok execution)]
-                        (let [tool-error? (binding/tool-error? value)
-                              enriched-value (enrich-value-audit value binding**)]
-                          (if tool-error?
-                            (emit (result-ok intent enriched-value decision @usage-atom) binding** decision)
-                            (let [ok-result (validate-output! intent frozen-descriptor decision
-                                                               enriched-value @usage-atom)]
-                              (emit ok-result binding** decision))))
-                        (emit
-                         (result-error intent (:error-type execution)
-                                       (:error-message execution)
-                                       (:error-data execution)
-                                       decision @usage-atom)
-                         binding** decision)))))))))))))
+  "Deprecated forwarding wrapper. Delegates to evoclj.intent.pipeline/pipeline.
+  Kept for backward compatibility; the tool-id and idempotency flag are
+  derived from the intent inside the pipeline, so the extra args are
+  accepted but ignored beyond the delegation."
+  [broker-context intent _tool-id _require-idempotency-key?]
+  (pipeline/pipeline broker-context intent))
 
 (defn- requested-effect-denial
   "Return a typed denial when a runtime intent asks for an effect that

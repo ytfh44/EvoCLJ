@@ -20,7 +20,8 @@
 
    Phase 6 (observability): managed records carry transport metadata
    and monotonic call/latency counters; ping! validates liveness."
-  (:require [evoclj.kernel.error :as err]
+  (:require [evoclj.intent.pipeline :as pipeline]
+            [evoclj.kernel.error :as err]
             [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.transport :as transport])
   (:import [io.modelcontextprotocol.client McpClient McpSyncClient]
@@ -549,19 +550,11 @@
 (def ^:private protocol-classes
   "Java exception classes that mean a malformed JSON payload on the wire."
   #{"com.fasterxml.jackson.core.JsonParseException" "com.fasterxml.jackson.databind.JsonMappingException"})
-
-(def ^:private transient-error-types
-  "Error types that represent a retryable, connection-level failure. A timeout,
-   transport break, or protocol break on a shared pooled connection should be
-   healed (mark-broken / reopen) rather than treated as a terminal business
-   error."
-  #{:mcp/timeout :mcp/transport-error :mcp/protocol-error})
-
 (defn transient-error-type?
-  "True when `error-type` is a retryable connection-level (transient) MCP
-   failure family."
+  "True when error-type is a retryable connection-level (transient) MCP
+  failure family. Delegates to the single pipeline predicate (INV-05)."
   [error-type]
-  (contains? transient-error-types error-type))
+  (pipeline/transient-error-type? error-type))
 
 (defn- json-rpc-code->type
   "Map a JSON-RPC error `code` to a typed MCP error category. Unknown codes
