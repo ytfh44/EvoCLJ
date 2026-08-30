@@ -563,6 +563,7 @@
                                          promotion-system {:store store
                                                            :resolution/id (compiled-resolution-id
                                                                            candidate-root)
+                                                           :candidate/root candidate-root
                                                            :event/session-id op-session}
                                          result (promote/promote!
                                                  promotion-system
@@ -651,6 +652,7 @@
                             opts (:candidate/genome-id first-cand))]
         {:store store
          :resolution/id (compiled-resolution-id candidate-root)
+         :candidate/root candidate-root
          :event/session-id op-session}))))
 
 (defn loop!

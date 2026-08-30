@@ -133,15 +133,17 @@
   (:store/cas-missing, :store/cas-corrupt) from the Invariant 7 check."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
+            [clojure.string :as str]
             [malli.core :as m]
             [malli.error :as me]
             [evoclj.genome.hash :as hash]
+            [evoclj.genome.load :as load]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
             [evoclj.promotion.current :as current]
             [evoclj.promotion.state :as state]
-             [evoclj.promotion.activation :as activation]
-             [evoclj.security.sci-recheck :as recheck]
+            [evoclj.promotion.activation :as activation]
+            [evoclj.security.sci-recheck :as recheck]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.sqlite :as sqlite])
@@ -166,7 +168,9 @@
   activation must verify the candidate Genome's integrity (Database
   Invariant 7); :resolution/id is the compiled ResolutionId of the
   candidate Genome (compilation is the host's job); :event/session-id
-  anchors the :promotion/* event; :failpoint is the optional test
+  anchors the :promotion/* event; optional :candidate/root supplies the
+  verified bundle so the SCI recheck scans real program sources rather
+  than the canonical Genome index body; :failpoint is the optional test
   seam."
   [:map {:closed true}
    [:store [:map {:closed true}
@@ -174,6 +178,7 @@
             [:cas any?]]]
    [:resolution/id [:fn types/resolution-id?]]
    [:event/session-id [:fn types/session-id?]]
+   [:candidate/root {:optional true} string?]
    [:activation-handle {:optional true} [:fn activation/activation-handle?]]
    [:failpoint {:optional true} fn?]])
 
@@ -443,18 +448,61 @@
                          :evaluation/candidate-id (:candidate_id row)})))
     row))
 
+(defn- executable-program-source
+  "Read one Clojure source file without evaluation and omit its ns
+  declaration. The compiler already validates the namespace/import
+  policy; the promotion red-light gate should inspect executable forms,
+  not benign namespace symbols such as `agent.route`."
+  [source]
+  (binding [*read-eval* false]
+    (with-open [reader (clojure.lang.LineNumberingPushbackReader.
+                        (java.io.StringReader. source))]
+      (loop [forms []]
+        (let [form (read {:eof ::eof} reader)]
+          (if (= ::eof form)
+            (str/join "\n" (map pr-str forms))
+            (recur (if (and (seq? form) (= 'ns (first form)))
+                     forms
+                     (conj forms form)))))))))
+
+(defn- program-sources-from-bundle
+  "Load the candidate bundle at activation time, verify that its
+  content-addressed Genome id matches the candidate row, and return the
+  actual Clojure program sources for the SCI red-light gate."
+  [candidate-root genome-id]
+  (let [loaded (load/load-genome candidate-root)]
+    (when-not (= genome-id (:genome/id loaded))
+      (throw (err/error :promotion/genome-mismatch
+                        "candidate bundle does not match its Genome id"
+                        {:candidate/root candidate-root
+                         :candidate/genome-id genome-id
+                         :loaded/genome-id (:genome/id loaded)})))
+    (->> (:files loaded)
+         (filter (fn [[path _]]
+                   (str/ends-with? path ".clj")))
+         (sort-by first)
+         (mapv (fn [[_ {:keys [bytes]}]]
+                 (executable-program-source
+                  (String. ^bytes (if (bytes? bytes)
+                                    bytes
+                                    (byte-array bytes))
+                           StandardCharsets/UTF_8)))))))
+
 (defn- verify-genome-integrity!
   "Database Invariant 7: the new generation's Genome must exist in the
-  CAS and pass an integrity check at activation time. Reads the
-  candidate Genome body through a VERIFYING CAS (re-hash on read), so
-  a missing body (:store/cas-missing) or corrupted body
-  (:store/cas-corrupt) fails loudly before any write."
-  [cas-config genome-id]
+  CAS and pass an integrity check at activation time. The canonical
+  Genome index remains the CAS identity proof; when `candidate-root` is
+  supplied, the bundle is loaded and its actual program source files
+  are passed to the SCI recheck gate."
+  [cas-config genome-id candidate-root]
   (let [root (if (map? cas-config) (:root cas-config) cas-config)
         bytes (cas/get-bytes (cas/->cas root {:verify true}) genome-id)]
-    ;; the verified body IS the candidate's evolvable SCI program source;
-    ;; return it so the promote flow can run the SCI sandbox recheck gate
-    (String. ^bytes bytes StandardCharsets/UTF_8)))
+    (if candidate-root
+      (program-sources-from-bundle candidate-root genome-id)
+      ;; Backward-compatible standalone promotion contract: callers that
+      ;; provision a source body directly under the Genome id keep the
+      ;; existing source-string behavior.
+      (String. ^bytes bytes StandardCharsets/UTF_8))))
 
 (defn- read-event-anchor!
   "Validate the :promotion/* event anchor INSIDE the transaction (so a
@@ -667,12 +715,14 @@
                           :eligibility eligibility
                           :to-generation new-gen}
                   promotion-id (str (UUID/randomUUID))]
-              ;; Database Invariant 7: the Genome exists and
-              ;; re-hashes before activation; its verified
-              ;; body IS the candidate's evolvable SCI program
-              ;; source, which we run through the SCI sandbox
-              ;; static recheck gate BEFORE any write (fail-closed).
-              (let [source (verify-genome-integrity! cas-config (:genome_id candidate))
+              ;; Database Invariant 7: the Genome identity is verified
+              ;; against CAS; when the host supplies the candidate bundle,
+              ;; the SCI gate scans its actual program source files rather
+              ;; than the canonical Genome index.
+              (let [source (verify-genome-integrity!
+                            cas-config
+                            (:genome_id candidate)
+                            (:candidate/root system))
                     gate (sci-sandbox-gate source)]
                 (when-not (:passed? gate)
                   (throw (err/error :promotion/sci-sandbox-failed

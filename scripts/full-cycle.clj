@@ -575,6 +575,7 @@
         _ (store-candidate-genome-body! opts system (:candidate/genome-id c))
         promotion-system {:store store
                           :resolution/id (compiled-resolution-id candidate-root)
+                          :candidate/root candidate-root
                           :event/session-id op-session}
         result (promote/promote! promotion-system
                                  {:candidate-id cid
