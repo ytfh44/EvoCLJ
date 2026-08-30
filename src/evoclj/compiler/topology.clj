@@ -130,21 +130,103 @@
                          :registered (vec (sort (keys (schema/schema-registry))))})))
     (try (m/schema s) (catch Exception _ (throw (err/error :topology/invalid "resolved schema is not a valid Malli schema" {:reason :invalid-schema :field field :node-id node-id :schema kw :value (err/sanitize s)})))) s))
 
+(defn- schema-form
+  "Return the normalized Malli form for a registered schema value, or nil
+  when the value cannot be interpreted as a Malli schema."
+  [schema-value]
+  (try
+    (m/form (m/schema schema-value))
+    (catch Exception _ nil)))
+
+(defn- map-entry-info
+  "Decode one Malli map entry into [key {:optional? bool :schema form}]."
+  [entry]
+  (let [[key & tail] entry
+        properties (when (map? (first tail)) (first tail))
+        schema-value (if properties (second tail) (first tail))]
+    [key {:optional? (true? (:optional properties))
+          :schema (schema-form schema-value)}]))
+
+(defn- map-form-parts
+  "Return [properties entries] for a normalized Malli :map form."
+  [form]
+  (let [properties (if (map? (second form)) (second form) {})
+        entries (if (map? (second form)) (nnext form) (next form))]
+    [properties entries]))
+
+(declare subtype-form?)
+
+(defn- map-subtype?
+  "Check structural subtyping for Malli map forms. An open output map is
+  not a subtype of a closed input map because it may carry unknown keys;
+  required input entries must be required and compatible in the output."
+  [output-form input-form]
+  (let [[output-properties output-entries] (map-form-parts output-form)
+        [input-properties input-entries] (map-form-parts input-form)
+        output-entries (into {} (map map-entry-info) output-entries)
+        input-entries (into {} (map map-entry-info) input-entries)
+        output-closed? (true? (:closed output-properties))
+        input-closed? (true? (:closed input-properties))
+        input-compatible?
+        (every?
+         (fn [[key {:keys [optional? schema]}]]
+           (if-let [{output-optional? :optional?
+                     output-schema :schema} (get output-entries key)]
+             (and (or optional? (not output-optional?))
+                  (subtype-form? output-schema schema))
+             optional?))
+         input-entries)
+        no-unknown-keys?
+        (or (not input-closed?)
+            (and output-closed?
+                 (every? #(contains? input-entries (key %)) output-entries)))]
+    (and input-compatible? no-unknown-keys?)))
+
+(defn- subtype-form?
+  "A conservative structural Malli subtype relation for the closed registry.
+  Equality and :any are handled for every schema; common collection forms
+  are checked recursively, and unsupported forms fail closed."
+  [output-form input-form]
+  (cond
+    (nil? output-form) false
+    (nil? input-form) false
+    (= input-form :any) true
+    (= input-form [:any]) true
+    (= output-form input-form) true
+    (and (vector? input-form) (= :or (first input-form)))
+    (some #(subtype-form? output-form %) (next input-form))
+    (and (vector? output-form) (= :or (first output-form)))
+    (every? #(subtype-form? % input-form) (next output-form))
+    (and (vector? output-form) (vector? input-form))
+    (case [(first output-form) (first input-form)]
+      [:map :map] (map-subtype? output-form input-form)
+      [:vector :vector] (subtype-form? (second output-form) (second input-form))
+      [:set :set] (subtype-form? (second output-form) (second input-form))
+      [:maybe :maybe] (subtype-form? (second output-form) (second input-form))
+      [:maybe :or] (subtype-form? output-form input-form)
+      [:or :or] (every? #(some (fn [candidate]
+                                  (subtype-form? candidate (second input-form)))
+                                (next input-form))
+                        (next output-form))
+      [:or :any] true
+      [:enum :enum] (every? (set (next input-form)) (next output-form))
+      [:= :=] (= (second output-form) (second input-form))
+      [:= :enum] (contains? (set (next input-form)) (second output-form))
+      [:and :and] (every? (fn [candidate]
+                             (some #(subtype-form? candidate %)
+                                   (next input-form)))
+                           (next output-form))
+      false)
+    (and (= output-form :int) (= input-form :double)) false
+    :else false))
+
 (defn- subtype?
-  "Check output(A) <: input(B) via malli.
-  For the closed primitive registry, subtype is equality or top (:any).
-  Uses malli.core/m-schema to normalize forms, so :any as top and identical
-  EDN forms are subtypes."
+  "Check output(A) <: input(B) via Malli forms. The relation is
+  structural for the registered primitive and collection schemas: equality,
+  :any as top, and recursive map/vector/set/union checks."
   [output-schema input-schema]
-  (let [out (try (m/schema output-schema) (catch Exception _ nil))
-        in  (try (m/schema input-schema) (catch Exception _ nil))]
-    (if (and out in)
-      (let [out-form (m/form out)
-            in-form  (m/form in)]
-        (or (= out-form in-form)
-            (= in-form :any)
-            (= in-form [:any])))
-      false)))
+  (subtype-form? (schema-form output-schema)
+                 (schema-form input-schema)))
 
 (defn- check-typing!
   "Enforce compositional edge typing: for every :next and :body edge, check output(from) <: input(to) via malli.

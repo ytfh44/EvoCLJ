@@ -60,9 +60,11 @@
   :boolean)
 
 (def json-schema
-  "Malli schema for :schema/json — generic JSON value (closed false map)."
-  [:map {:closed false}
-   [:data {:optional true} :any]])
+  "Malli schema for :schema/json — a JSON-shaped value: null, booleans,
+  integers, doubles, strings, arrays, or string-keyed objects. Nested
+  values are intentionally open because this registry schema describes the
+  wire envelope, while provider-specific payloads own deeper validation."
+  [:or :nil :boolean :int :double :string [:vector :any] [:map {:closed false}]])
 
 (def ^:private registry
   "Closed registry: keyword -> Malli schema value.

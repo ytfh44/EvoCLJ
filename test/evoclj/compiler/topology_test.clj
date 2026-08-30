@@ -329,3 +329,18 @@
     (is (= :unknown-schema (:reason (ex-data e))))
     (is (= :schema/unicorn (:schema (ex-data e))))
     (is (= :input-schema (:field (ex-data e))))))
+
+(deftest structural-subtyping-allows-narrower-map-output
+  (testing "a route-input map is a subtype of the open generic JSON map"
+    (let [compiled (topology/compile-topology
+                    {:graph/id :graph/typed
+                     :entry :node/source
+                     :nodes {:node/source {:node/type :emit
+                                           :output-schema :schema/route-input
+                                           :next :node/sink}
+                             :node/sink {:node/type :emit
+                                         :input-schema :schema/json}}})]
+      (is (= :schema/route-input
+             (get-in compiled [:nodes :node/source :output-schema])))
+      (is (= :schema/json
+             (get-in compiled [:nodes :node/sink :input-schema]))))))
