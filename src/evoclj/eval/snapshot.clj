@@ -92,10 +92,9 @@
   [sources]
   (make-snapshot sources))
 
-(defn phenotype-id
-  "Phenotype identity derived from abi, genome-id and resolution-id
-  only. Environment snapshot intentionally excluded - changing the
-  environment does not change the agent compile identity."
+(defn code-id
+  "Code identity derived from abi, genome-id and resolution-id only.
+  Environment snapshot and runtime leases are intentionally excluded."
   [abi genome-id resolution-id]
   (when-not (map? abi)
     (throw (ex-info "abi must be map" {:abi abi})))
@@ -104,3 +103,26 @@
   (when-not (re-matches #"^sha256:[0-9a-f]{64}$" resolution-id)
     (throw (ex-info "resolution-id must be sha256" {:resolution-id resolution-id})))
   (hash/text-digest (str (pr-str (into (sorted-map) abi)) genome-id resolution-id)))
+
+(defn phenotype-id
+  "Legacy alias for code-id (pure code identity)."
+  [abi genome-id resolution-id]
+  (code-id abi genome-id resolution-id))
+
+(defn- canonical-edn-value
+  [v]
+  (cond
+    (map? v) (into (sorted-map) (map (fn [[k val]] [k (canonical-edn-value val)])) v)
+    (vector? v) (mapv canonical-edn-value v)
+    (set? v) (vec (sort-by pr-str (map canonical-edn-value v)))
+    (seq? v) (mapv canonical-edn-value v)
+    :else v))
+
+(defn deployment-id
+  "Deployment identity binding code-id, leases, and durable bindings:
+  DeploymentId = SHA256(code-id || canonical(leases) || canonical(bindings))."
+  [code-id-str leases bindings]
+  (hash/text-digest
+   (str (or code-id-str "")
+        (pr-str (canonical-edn-value (vec (sort-by pr-str (or leases [])))))
+        (pr-str (canonical-edn-value (vec (sort-by pr-str (or bindings []))))))))
