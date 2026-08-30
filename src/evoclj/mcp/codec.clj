@@ -20,12 +20,18 @@
   data (Global Constraint 22). :any is ONLY ever returned by
   json-schema->malli when a schema is genuinely empty or absent; every
   consumer is expected to treat :any as a fail-closed signal, never as a
-  silently-accepted wildcard (GC-14 / INV-09)."
+  silently-accepted wildcard (GC-14 / INV-09).
+
+  D1 (Tool value object): the REAL-schema predicate defined here is the
+  single source of truth for Tool schema validation. evoclj.tool.specs
+  delegates its :input-schema / :output-schema REAL checks to
+  real-schema? / require-real-schema! here (INV-05), and stable-descriptor
+  in evoclj.mcp.source delegates final descriptor validation to
+  evoclj.tool.specs/validate-descriptor, preserving a single chain."
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.json-schema :as json-schema])
   (:import [com.fasterxml.jackson.databind ObjectMapper]))
-
 ;; forward declaration: the converter recursion (object->malli -> json-schema->malli)
 ;; is defined just below.
 (declare json-schema->malli)

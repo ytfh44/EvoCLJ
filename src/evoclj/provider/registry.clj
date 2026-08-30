@@ -43,81 +43,31 @@
   partial map with a dangling id left in."
   (:require [evoclj.kernel.error :as err]
             [evoclj.provider.protocol :as proto]
+            [evoclj.tool.specs :as tool.specs]
             [malli.core :as m]))
 
 ;; --- forward declarations --------------------------------------------------
 
 (declare lookup)
 
-;; --- the normative descriptor contract -------------------------------------
+;; --- the normative descriptor contract (single source of truth: evoclj.tool.specs) ---
 
 (def ToolDescriptorSchema
-  "The v0 tool descriptor contract (normative, component): a closed
-  map of the five required fields plus optional :retry and :version
-  blocks. The top level is closed — no field may be missing, renamed,
-  or extended beyond these, except for optional MCP extension fields
-  consumed by the MCP provider bridge and generic binding. Lifecycle
-  MCP fields (generation, last-refreshed, captured-at) are allowed here
-  for validation but generic dispatch no longer depends on them;
-  they are treated as MCP-specific provenance in binding."
-  [:map {:closed true}
-   [:tool/id keyword?]
-   [:effect keyword?]
-   [:input-schema any?]
-   [:output-schema any?]
-   [:required-action keyword?]
-   [:retry {:optional true} [:map {:closed true} [:safe? boolean?]]]
-   [:version {:optional true} number?]
-   [:mcp/connection-id {:optional true} keyword?]
-   [:mcp/server-id {:optional true} string?]
-   [:mcp/last-refreshed {:optional true} any?]
-   [:mcp/generation {:optional true} int?]
-   [:mcp/captured-at {:optional true} any?]
-   [:provider/input-schema {:optional true} any?]
-   [:provider/output-schema {:optional true} any?]
-   [:mcp/input-schema {:optional true} any?]
-   [:mcp/output-schema {:optional true} any?]
-   [:mcp/input-schema-json {:optional true} any?]
-   [:mcp/output-schema-json {:optional true} any?]
-   [:mcp/schema-source {:optional true} [:enum :malli :json-schema-fallback]]
-   [:mcp/name {:optional true} string?]
-   [:mcp/title {:optional true} string?]
-   [:mcp/description {:optional true} string?]
-   [:mcp/status {:optional true} keyword?]
-   [:mcp/removed-at {:optional true} int?]
-   [:mcp/retry-safe? {:optional true} boolean?]
-   [:mcp/output-schema-kind {:optional true} keyword?]])
-
-(defn- ensure-schema-value!
-  "Throw :provider/descriptor-invalid when s is not a valid Malli
-  schema value (e.g. 42, [:map [:text]], or an unregistered keyword),
-  carrying the offending field name."
-  [label s]
-  (try
-    (m/schema s)
-    (catch clojure.lang.ExceptionInfo _
-      (throw (err/error :provider/descriptor-invalid
-                        (str label " is not a valid Malli schema value")
-                        {:reason :invalid-schema :field label
-                         :value (err/sanitize s)})))))
+  "Deprecated alias - use evoclj.tool.specs/ToolDescriptorSchema. Kept for
+  backward compatibility; this var forwards to the single source of truth
+  (D1, INV-05) and must not be redefined."
+  tool.specs/ToolDescriptorSchema)
 
 (defn validate-descriptor
   "Validate x as a v0 tool descriptor (normative shape, component).
 
-  Returns x unchanged when it is well-formed; validation never
-  coerces or rewrites values. Otherwise throws
-  :provider/descriptor-invalid carrying a fully serializable Malli
-  explanation (safe for pr-str / clojure.edn read-string
-  round-tripping)."
+  Delegates to evoclj.tool.specs/validate-descriptor (single
+  implementation, INV-05). Returns x unchanged when well-formed;
+  otherwise throws :provider/descriptor-invalid with a sanitized
+  explanation. Kept as the public entry point for callers that
+  require evoclj.provider.registry/validate-descriptor."
   [x]
-  (when-not (m/validate ToolDescriptorSchema x)
-    (throw (err/error :provider/descriptor-invalid
-                      "provider descriptor failed schema validation"
-                      {:value (err/sanitize x)
-                       :explanation (err/sanitize (m/explain ToolDescriptorSchema x))})))
-  (ensure-schema-value! :input-schema (:input-schema x))
-  (ensure-schema-value! :output-schema (:output-schema x))
-  x)
+  (tool.specs/validate-descriptor x))
 
 ;; --- the registry ----------------------------------------------------------
 

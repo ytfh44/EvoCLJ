@@ -27,6 +27,7 @@
             [evoclj.mcp.adapter :as adapter]
             [evoclj.provider.protocol :as proto]
             [evoclj.sci.boundary :as boundary]
+            [evoclj.tool.specs :as tool.specs]
             [malli.core :as m]))
 
 ;; ---------------------------------------------------------------------------
@@ -120,7 +121,12 @@
    JSON schema cannot be expressed as a Malli primitive, the converter
    preserves it as a native-validated schema (never `:any`). When no
    schema is declared at all, this throws :mcp/schema-required so the
-   discovery path cannot register a schema-less (wildcard) tool."
+   discovery path cannot register a schema-less (wildcard) tool.
+
+   D1: final descriptor shape delegates to evoclj.tool.specs/validate-descriptor
+   (single source of truth for Tool). The REAL-schema gate inside that
+   validator delegates to evoclj.mcp.codec/real-schema? (INV-05, no
+   duplication), satisfying GC-22 (EDN-safe validation)."
   [mcp-tool opts]
   (let [mcp-name (:mcp/name mcp-tool)
          server-id (:mcp/server-id opts)
@@ -133,7 +139,11 @@
         input-json (:mcp/input-schema mcp-tool)
         output-json (:mcp/output-schema mcp-tool)
         ;; Real schema declared? (non-nil, non-empty map). Missing/empty is
-        ;; a fail-closed condition, not a `:any` default.
+        ;; a fail-closed condition, not a `:any` default. This presence
+        ;; check is the stable-descriptor fast path; the full REAL-schema
+        ;; check below delegates to tool.specs/validate-descriptor which
+        ;; itself delegates to codec/real-schema? (single implementation,
+        ;; no behavior change).
         input-present? (and (map? input-json) (seq input-json))
         output-present? (and (map? output-json) (seq output-json))
         _ (when-not input-present?
@@ -150,8 +160,8 @@
         ;; REAL schema here because the JSON is present; it never yields :any
         ;; for a non-empty schema.
         input-malli (codec/json-schema->malli input-json)
-        output-malli (codec/json-schema->malli output-json)]
-    (cond-> {:tool/id tool-id
+        output-malli (codec/json-schema->malli output-json)
+        descriptor (cond-> {:tool/id tool-id
              :effect :remote
              :input-schema input-malli
              :output-schema output-malli
@@ -166,7 +176,17 @@
       (:mcp/server-id opts) (assoc :mcp/server-id (:mcp/server-id opts))
       (:connection/id opts) (assoc :mcp/connection-id (:connection/id opts))
       (contains? mcp-tool :mcp/output-schema-kind) (assoc :mcp/output-schema-kind (:mcp/output-schema-kind mcp-tool))
-      (contains? mcp-tool :mcp/param-projections) (assoc :mcp/param-projections (:mcp/param-projections mcp-tool)))))
+      (contains? mcp-tool :mcp/param-projections) (assoc :mcp/param-projections (:mcp/param-projections mcp-tool)))]
+    ;; D1 single source of truth: validate final descriptor via tool.specs.
+    ;; This delegates REAL-schema checks to codec/real-schema? (INV-05) and
+    ;; ensures :tool/id composite vector is validated in one place. The
+    ;; exception type from validate-descriptor is :provider/descriptor-invalid;
+    ;; for MCP callers we preserve the earlier :mcp/schema-required throws
+    ;; above for missing-schema cases, so no new behavior is introduced
+    ;; for that path - this final gate only catches any remaining shape
+    ;; drift (e.g. an :any slipping through json-schema->malli).
+    (tool.specs/validate-descriptor descriptor)
+    descriptor))
 
 (defn- payload->sorted
   "Return a stable payload map with :tools sorted by tool-id string for

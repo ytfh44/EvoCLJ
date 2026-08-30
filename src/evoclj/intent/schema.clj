@@ -30,6 +30,7 @@
   read-string round-tripping)."
   (:require [evoclj.kernel.error :as err]
             [evoclj.sci.boundary :as boundary]
+            [evoclj.tool.specs :as tool.specs]
             [malli.core :as m]))
 
 ;; --- identifiers ------------------------------------------------------------
@@ -83,11 +84,14 @@
    [:tools {:optional true} [:vector :map]]])
 
 (def PayloadToolCallSchema
-  "A tool-call payload: the tool referenced by keyword and its argument
-  map (the M3 fixture shape {:tool/id :fixture/echo :args {...}}). Open
-  to further keys."
+  "A tool-call payload: the tool referenced by its identifier and its
+  argument map (the M3 fixture shape {:tool/id :fixture/echo :args {...}}
+  or the MCP composite shape {:tool/id [\"server-a\" \"read_file\"] :args {...}}).
+  :tool/id delegates to evoclj.tool.specs/ToolIdSchema (keyword or
+  [string string] tuple, D1) so there is exactly one identifier contract.
+  Open to further keys."
   [:map {:closed false}
-   [:tool/id keyword?]
+   [:tool/id tool.specs/ToolIdSchema]
    [:args :map]])
 
 (def PayloadMemoryReadSchema
