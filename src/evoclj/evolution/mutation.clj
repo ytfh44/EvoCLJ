@@ -147,20 +147,21 @@
     (and (instance? VerifiedDigest x)
          (identical? (.-secret ^VerifiedDigest x) verified-secret))))
 
-(deftype ValidatedMutation [raw_mutation canonical_ops asset_refs verified_digests ^:private secret]
+(deftype ValidatedMutation [parent_genome_id raw_mutation canonical_ops asset_refs verified_digests ^:private secret]
   clojure.lang.ILookup
   (valAt [this k] (.valAt this k nil))
   (valAt [this k notFound]
     (case k
+      :parent-genome-id parent_genome_id
       :raw-mutation raw_mutation
       :canonical-ops canonical_ops
       :asset-refs asset_refs
       :verified-digests verified_digests
       notFound))
   clojure.lang.Counted
-  (count [this] 4)
+  (count [this] 5)
   Object
-  (toString [this] (str "ValidatedMutation[" (:mutation/id raw_mutation) "]")))
+  (toString [this] (str "ValidatedMutation[" parent_genome_id "->" (:mutation/id raw_mutation) "]")))
 (alter-meta! #'->ValidatedMutation assoc :private true)
 
 (let [validated-secret (Object.)]
@@ -171,8 +172,14 @@
          (identical? (.-secret ^ValidatedMutation x) validated-secret)))
 
   (defn- make-validated-mutation
-    [raw canonical refs digests]
-    (ValidatedMutation. raw canonical refs digests validated-secret))
+    [parent-id raw canonical refs digests]
+    (ValidatedMutation. parent-id raw canonical refs digests validated-secret))
+
+  (defn validated-parent-genome-id
+    "Extract parent-genome-id from a ValidatedMutation<G>."
+    [vm]
+    (when (validated-mutation? vm)
+      (.-parent_genome_id ^ValidatedMutation vm)))
 
   (defn validated->raw
     [vm]
@@ -358,7 +365,7 @@
                              (:ops mutation) canonicals)
          asset-refs (mapv (fn [canonical] (->mutable-asset-ref parent-id canonical))
                           canonicals)]
-     (make-validated-mutation mutation canonical-ops asset-refs verified-digests))))
+     (make-validated-mutation parent-id mutation canonical-ops asset-refs verified-digests))))
 
 
 (def default-op-distribution

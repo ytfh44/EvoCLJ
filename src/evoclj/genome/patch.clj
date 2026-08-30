@@ -232,16 +232,36 @@
 ;; --- public entry point ----------------------------------------------------
 
 (defn- revalidate-canonical-ops!
-  "Defense in depth: re-validate the canonical ops of a ValidatedMutation
-  against the current parent manifest, even though validate-mutation already
-  checked. This ensures a ValidatedMutation forged via stolen secret or
-  created against a different manifest cannot bypass protected-path or
-  mutable-class gates when applied to this parent."
+  "Defense in depth (PLT7 parent-indexed mutation):
+  Re-validate the ValidatedMutation<G> against the target parent Genome:
+  1. Parent identity must match (:parent-genome-id in VM and AssetRefs == parent :genome/id).
+  2. Re-validate canonical ops against target parent manifest (protected-path & mutable-class).
+  3. Re-verify relative paths resolve inside parent :genome/root."
   [parent validated]
-  (let [manifest (or (:manifest parent) (when (map? parent) parent))
+  (let [target-genome-id (:genome/id parent)
+        vm-parent-id (mutation/validated-parent-genome-id validated)
+        asset-refs (mutation/validated-refs validated)
+        manifest (or (:manifest parent) (when (map? parent) parent))
+        base (some-> parent :genome/root)
         ops (mutation/validated-ops validated)]
+    (when (and target-genome-id vm-parent-id (not= target-genome-id vm-parent-id))
+      (throw (err/error :patch/parent-mismatch
+                        "ValidatedMutation parent genome id does not match target parent"
+                        {:expected-parent target-genome-id
+                         :mutation-parent vm-parent-id})))
+    (doseq [ref asset-refs]
+      (when (and target-genome-id (:parent-genome-id ref) (not= target-genome-id (:parent-genome-id ref)))
+        (throw (err/error :patch/parent-mismatch
+                          "MutableAssetRef parent genome id does not match target parent"
+                          {:expected-parent target-genome-id
+                           :ref-parent (:parent-genome-id ref)}))))
     (doseq [op ops]
       (let [canonical (:file op)]
+        (when base
+          (when-not (path/allowed-genome-path? base canonical)
+            (throw (err/error :mutation/path-invalid
+                              "mutation :file must resolve inside target parent genome root"
+                              {:path canonical}))))
         (when-let [reason (mutation/protected-path-reason manifest canonical)]
           (throw (err/error :mutation/protected-path
                             "mutation targets a kernel-protected Genome path (re-validated at patch)"
@@ -255,15 +275,10 @@
                                 {:path canonical :class cls :declared (vec (sort declared))})))))))))
 
 (defn- ensure-validated!
-  "Ensure `mutation` is a sealed ValidatedMutation. S4: patch ONLY
-  accepts the validated right (MutableAssetRef + VerifiedDigest) produced
-  by `validate-mutation`. RawMutation maps (file String) are REJECTED
-  without re-validation — caller must validate first (definition >
-  validation). The sealed ValidatedMutation is checked via closure + private
-  field (identical? on closed-over secret), not a retrievable var. As
-  defense in depth, the canonical ops are re-validated against the current
-  parent manifest for protected-path and mutable-class, so a forged
-  ValidatedMutation (even with stolen secret) cannot bypass those gates."
+  "Ensure `mutation` is a sealed ValidatedMutation<G>. S4/PLT7: patch ONLY
+  accepts the parent-indexed validated right (MutableAssetRef + VerifiedDigest)
+  produced by `validate-mutation`. RawMutation maps (file String) and mutations
+  validated against a different parent are REJECTED."
   [mutation parent]
   (if (mutation/validated-mutation? mutation)
     (do (revalidate-canonical-ops! parent mutation)

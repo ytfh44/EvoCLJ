@@ -505,42 +505,42 @@
       (phase! system :validate-risk-budget)
       ;; schema + path + protected-path + mutable-class gates, then the
       ;; hard budget gates (component) — everything before any staging
-      (mutation/validate-mutation mutation parent)
-      (budget/check-budget mutation budget-profile)
-      (emit-event! system (mutation-proposed-event mutation))
+      (let [validated-mutation (mutation/validate-mutation mutation parent)]
+        (budget/check-budget mutation budget-profile)
+        (emit-event! system (mutation-proposed-event mutation))
 
-      (phase! system :apply-patch)
-      (let [candidate-genome (patch/apply-mutation parent (mutation/validate-mutation mutation parent)
-                                                   (:candidates-dir system))]
-        (try
-          (phase! system :compile-candidate)
-          (let [compiled (compiler/compile-genome
-                          (attach-programs candidate-genome system parent)
-                          (:provider-catalog system))]
-            (phase! system :persist-candidate)
-            (let [proposed (candidate/create-candidate
-                            {:parent/generation-id generation-id
-                             :parent/genome-id (:genome/id parent)
-                             :candidate/genome-id (:compiled/genome-id compiled)
-                             :mutation/id (:mutation/id mutation)
-                             :evidence/id (:evidence/id mutation)
-                             :risk (:risk mutation)})
-                  candidate-store-handle (candidate-store/make-candidate-store (:sqlite (:store system)))
-                  materialized (candidate/materialize-candidate!
-                                candidate-store-handle proposed mutation)
-                  pending (if (= :materialized (:state materialized))
-                            (candidate/mark-evaluation-pending!
-                             candidate-store-handle (:candidate/id materialized))
-                            ;; dedupe: an earlier cycle already moved
-                            ;; this candidate to :evaluation-pending
-                            materialized)]
-              (emit-event! system (candidate-materialized-event pending))
-              {:candidate pending}))
-          (catch Throwable t
-            (delete-candidate-dir! system (:genome/id candidate-genome))
-            (emit-event! system (candidate-invalid-event mutation
-                                                         :compile-failed t))
-            nil)))
+        (phase! system :apply-patch)
+        (let [candidate-genome (patch/apply-mutation parent validated-mutation
+                                                     (:candidates-dir system))]
+          (try
+            (phase! system :compile-candidate)
+            (let [compiled (compiler/compile-genome
+                            (attach-programs candidate-genome system parent)
+                            (:provider-catalog system))]
+              (phase! system :persist-candidate)
+              (let [proposed (candidate/create-candidate
+                              {:parent/generation-id generation-id
+                               :parent/genome-id (:genome/id parent)
+                               :candidate/genome-id (:compiled/genome-id compiled)
+                               :mutation/id (:mutation/id mutation)
+                               :evidence/id (:evidence/id mutation)
+                               :risk (:risk mutation)})
+                    candidate-store-handle (candidate-store/make-candidate-store (:sqlite (:store system)))
+                    materialized (candidate/materialize-candidate!
+                                  candidate-store-handle proposed mutation)
+                    pending (if (= :materialized (:state materialized))
+                              (candidate/mark-evaluation-pending!
+                               candidate-store-handle (:candidate/id materialized))
+                              ;; dedupe: an earlier cycle already moved
+                              ;; this candidate to :evaluation-pending
+                              materialized)]
+                (emit-event! system (candidate-materialized-event pending))
+                {:candidate pending}))
+            (catch Throwable t
+              (delete-candidate-dir! system (:genome/id candidate-genome))
+              (emit-event! system (candidate-invalid-event mutation
+                                                           :compile-failed t))
+              nil))))
       (catch Throwable t
         (emit-event! system (candidate-invalid-event mutation
                                                      (failure-reason t) t))
