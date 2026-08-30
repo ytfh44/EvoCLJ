@@ -2,7 +2,7 @@
   "component tests for explicit bounded loop semantics.
 
   A :loop node {:node/type :loop :body :node/body :until :program/done?
-  :max-iterations 8 :next :node/finish} iterates its :body until the
+  :max-iterations 8 :exit :node/finish} iterates its :body until the
   :until program (invoked inside the phenotype's isolated SCI runtime)
   returns a boolean done? flag, hard-capped at :max-iterations:
 
@@ -10,7 +10,7 @@
     :loop-state map (keyed by the loop node id) — the counter travels
     in the scheduler's per-session runtime-state, NEVER in a SCI
     global var (Global Constraint 23);
-  - when the predicate is satisfied the loop exits to :next;
+  - when the predicate is satisfied the loop exits to :exit;
   - when the counter reaches :max-iterations the handler returns a
     :failed transition typed :loop/max-iterations-exceeded, which the
     component scheduler routes to the :budget-exhausted session state
@@ -33,10 +33,10 @@
     :max-iterations with the typed budget outcome (:budget-exhausted
     session state and a :session/budget-exhausted event recording the
     {:max-iterations N} limit).
-  - Step 3: the compiler still rejects ordinary :next graph cycles
-    outside explicit :loop nodes, the normative :loop graph passes
-    topology validation, and a malformed :loop node is rejected at
-    compile time.
+  - Step 3: the compiler rejects ordinary :next graph cycles and
+    exit-edge bypasses outside explicit Loop Regions, the normative
+    Loop graph passes topology validation, and malformed Loop nodes are
+    rejected at compile time.
   - Step 4: loop state is session-local data — two sessions on ONE
     executor (ONE shared phenotype / SCI runtime) each run exactly
     three iterations and never see each other's counters, and no SCI
@@ -125,6 +125,17 @@
   (let [db (sqlite/spec (temp-db-path))]
     (migrate/migrate! db)
     (sqlite/with-db [conn db]
+      (doseq [artifact-id [genome-id resolution-id phenotype-id]]
+        (jdbc/execute!
+         conn
+         ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
+           VALUES (?, 'application/octet-stream', 0, datetime('now'))"
+          artifact-id]))
+      (jdbc/execute!
+       conn
+       ["INSERT OR IGNORE INTO genomes (id, created_at)
+        VALUES (?, datetime('now'))"
+        genome-id])
       (jdbc/insert! conn :generations
                     {:id generation-id
                      :genome_id genome-id
@@ -139,9 +150,9 @@
 
 (defn- loop-topology
   "The component fixture graph: :loop -> :step (body, :next back to the
-  :loop) -> :finish. The :body edge is the sanctioned iteration edge;
-  the body's :next back to the :loop is the only edge that closes the
-  iteration, and it passes through the explicit :loop node."
+  :loop) -> :finish. The :body edge is the sanctioned Region edge;
+  :exit is the only normal successor of the loop and never participates
+  in the iteration cycle."
   [{:keys [until max-iterations]}]
   {:graph/id :graph/loop
    :entry :node/loop
@@ -150,7 +161,7 @@
                 :body :node/step
                 :until until
                 :max-iterations max-iterations
-                :next :node/finish}
+                :exit :node/finish}
     :node/step {:node/type :sci
                 :program :program/step
                 :next :node/loop}
@@ -284,7 +295,7 @@
    :body :node/step
    :until :program/early-done?
    :max-iterations 3
-   :next :node/finish})
+   :exit :node/finish})
 
 (defn- until-runtime
   "A runtime map with :program/early-done? loaded (satisfied at
@@ -387,7 +398,7 @@
                     :nodes {:node/loop {:node/type :loop
                                         :until :program/done?
                                         :max-iterations 8
-                                        :next :node/finish}
+                                        :exit :node/finish}
                             :node/finish {:node/type :emit}}}
                    :missing-required-key]
                   [{:graph/id :graph/main
@@ -396,7 +407,7 @@
                                         :body :node/step
                                         :until :program/done?
                                         :max-iterations 0
-                                        :next :node/finish}
+                                        :exit :node/finish}
                             :node/finish {:node/type :emit}}}
                    :invalid-max-iterations]
                   [{:graph/id :graph/main
@@ -405,7 +416,7 @@
                                         :body :node/ghost
                                         :until :program/done?
                                         :max-iterations 8
-                                        :next :node/finish}
+                                        :exit :node/finish}
                             :node/finish {:node/type :emit}}}
                    :dangling-body]]]
       (let [[bad reason] pair

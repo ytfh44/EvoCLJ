@@ -2,7 +2,7 @@
   "The :loop node handler (component).
 
   A :loop node {:node/type :loop :body :node/body :until :program/done?
-  :max-iterations 8 :next :node/finish} iterates its :body until the
+  :max-iterations 8 :exit :node/finish} iterates its :body until the
   :until program (a SCI program invoked inside the phenotype's isolated
   SCI runtime — the same evoclj.sci.execute/invoke! boundary the :sci
   node uses, Global Constraint 7) returns a boolean done? flag, hard
@@ -24,7 +24,7 @@
     {:iteration <int>    ; the current iteration count (0-based)
      :payload <EDN>}     ; the loop's current input payload
 
-  and it must return a BOOLEAN: true = done (exit to :next), false =
+  and it must return a BOOLEAN: true = done (exit to :exit), false =
   iterate :body once more. A non-boolean result is a malformed loop
   predicate (:failed :node/invalid :reason :invalid-until-result) —
   evolvable output is runtime data, so the handler converts it into a
@@ -35,10 +35,9 @@
   regular node stepped by the scheduler, so any intents it emits still
   cross the kernel-owned Intent/Capability Broker (Global Constraint
   8). The body's :next points back at the :loop node — the sanctioned
-  iteration edge (evoclj.compiler.topology validates the :body target
-  and still rejects raw cycles that contain no :loop node). Each time
-  the scheduler observes a :loop node choosing its :body, it
-  increments that loop node's counter in runtime-state's :loop-state,
+  Region return edge. The Loop's :exit is never part of that cycle.
+  Each time the scheduler observes a :loop node choosing its :body,
+  it increments that loop node's counter in runtime-state's :loop-state,
   so the next visit of the same :loop node reads the new count.
 
   THE :max-iterations CAP (the typed budget outcome — documented in
@@ -114,7 +113,7 @@
   The node must carry :body (a keyword — the node id iterated), :until
   (a keyword — the compiled program id of the done? predicate loaded in
   runtime-state's :sci-runtime), a positive integer :max-iterations,
-  and :next (the node id the loop exits to once done).
+  and :exit (the node id the Loop Region exits to once done).
 
   Each visit invokes the :until program with {:iteration <count>
   :payload <input payload>}, where the count is read from
@@ -122,7 +121,7 @@
   threads it, never a SCI global var). Returns
 
     - :continue with :next [:node/body]  ; predicate false, iterate
-    - :continue with :next [<:next>]     ; predicate true, exit
+    - :continue with :next [<:exit>]     ; predicate true, exit
     - :failed  :loop/max-iterations-exceeded  ; count hit the cap
     - :failed  <program error>           ; the :until program errored
     - :failed  :node/invalid             ; a non-boolean until result
@@ -178,7 +177,7 @@
                    {:transition/status :continue
                     :outputs outputs
                     :intents []
-                    :next [(:next node)]})
+                    :next [(:exit node)]})
 
                   :else
                   (node/validate-transition!

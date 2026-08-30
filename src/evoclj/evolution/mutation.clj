@@ -383,20 +383,21 @@
                     (assoc data :reason reason))))
 
 (defn- next-and-body
-  "The node ids `node` reaches directly: its :next successor plus its
-  :body (the :loop body node id). :until is a program id, not a node
-  id, and never participates in the graph closure."
+  "The node ids `node` reaches directly: a sequential :next successor,
+  a Loop's :exit successor, and a Loop's :body region root. :until is a
+  program id, not a node id, and never participates in graph closure."
   [node]
   (cond-> []
     (:next node) (conj (:next node))
+    (:exit node) (conj (:exit node))
     (:body node) (conj (:body node))))
 
 (defn- subtree-ids
   "The ids of every node in `topology` reachable from `root` following
-  :next and :body edges — the node's downstream subtree (a :loop
-  node's :body closes back to the loop, so the traversal is guarded by
-  a seen-set and terminates). `root` must be a declared node; the
-  callers validate both parents through compile-topology first."
+  sequential :next plus Loop :body/:exit edges — the node's downstream
+  Region closure. A Loop body can close back to the loop, so traversal is
+  guarded by a seen-set and terminates. `root` must be declared; callers
+  validate both parents through compile-topology first."
   [topology root]
   (loop [todo [root]
          seen #{}]
@@ -408,16 +409,16 @@
       seen)))
 
 (defn- resolve-retained-edges
-  "Re-resolve the retained parent-A nodes after the splice: any :next
-  or :body that pointed into parent A's removed subtree is re-pointed
-  at `cut` — the root of the grafted subtree, always present in the
-  child — so no dangling edge survives. Nodes without the key are
-  untouched (nil is never a set member)."
+  "Re-resolve retained parent-A nodes after the splice: any :next, :exit,
+  or :body edge that pointed into parent A's removed subtree is re-pointed
+  at `cut`, the graft root always present in the child. Nodes without the
+  key are untouched (nil is never a set member)."
   [retained a-subtree cut]
   (into {}
         (map (fn [[id node]]
                [id (cond-> node
                      (contains? a-subtree (:next node)) (assoc :next cut)
+                     (contains? a-subtree (:exit node)) (assoc :exit cut)
                      (contains? a-subtree (:body node)) (assoc :body cut))]))
         retained))
 
@@ -426,17 +427,17 @@
   (component).
 
   Semantics: split parent A's topology at `cut` (a declared node id),
-  remove A's subtree at `cut` (everything reachable from `cut` via
-  :next/:body edges), and graft parent B's subtree at `cut` in its
-  place. Dependencies are re-resolved deterministically:
+  remove A's Region closure at `cut` (everything reachable from `cut` via
+  sequential :next and Loop :body/:exit edges), and graft parent B's
+  Region closure at `cut` in its place. Dependencies are re-resolved
+  deterministically:
 
-  - retained A nodes whose :next/:body pointed into A's removed
-    subtree are re-pointed at `cut` (the graft root, always present);
-  - B's subtree is taken wholesale (by closure every edge inside B's
-    subtree stays inside it);
-  - the entry is kept unless it was inside A's removed subtree, in
-    which case it becomes `cut` (in a valid topology the entry can
-    only be downstream of `cut` when it IS `cut`).
+  - retained A nodes whose :next/:exit/:body pointed into A's removed
+    closure are re-pointed at `cut` (the graft root, always present);
+  - B's Region closure is taken wholesale (edges inside it stay inside);
+  - the entry is kept unless it was inside A's removed closure, in which
+    case it becomes `cut` (in a valid topology the entry can only be
+    downstream of `cut` when it is `cut`).
 
   The child MUST satisfy compiler topology validity: it is gated
   through evoclj.compiler.topology/compile-topology and, on failure,
