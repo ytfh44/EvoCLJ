@@ -23,8 +23,12 @@
   deleted after every test, as are the temp CAS roots."
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.evolution.candidate :as candidate]
+            [evoclj.store.artifact :as artifact]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
+            [evoclj.store.existence :as existence]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.recovery :as recovery]
             [evoclj.store.session :as session]
@@ -108,6 +112,11 @@
   db). `current` defaults to 1 so the CURRENT pointer is valid."
   ([db genome-id] (seed-generation! db genome-id 1))
   ([db genome-id current]
+   ;; Fleet P5/F FK (009/011): generations FK to genomes -> artifacts and resolution -> artifacts
+   (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
+   (artifact/ensure-artifact! db resolution "application/edn" 0)
+   (artifact/ensure-artifact! db phenotype "application/edn" 0)
+   (artifact/ensure-genome! db genome-id)
    (sqlite/with-db [conn db]
      (jdbc/insert! conn :generations
                    {:id gen
@@ -144,6 +153,9 @@
 (defn- insert-mutation!
   "Insert a mutations row the candidate fixture references."
   [db mutation-id genome-id]
+  (artifact/ensure-artifact! db evidence-id "application/edn" 0)
+  (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
+  (artifact/ensure-genome! db genome-id)
   (sqlite/exec! db
                 ["INSERT INTO mutations
                     (id, parent_genome_id, hypothesis_id, evidence_id,
@@ -152,19 +164,46 @@
                  mutation-id genome-id (str (random-uuid)) evidence-id
                  "parameter" "[]" "{}" now]))
 
+(defn- ->proof [id] (#'evoclj.store.existence/unsafe-verified-digest id))
+(defn- proof-candidate [c]
+  (if (and (map? c) (:candidate/genome-id c))
+    (update c :candidate/genome-id ->proof)
+    c))
+(defn- proof-mutation [m]
+  (if (map? m)
+    (cond-> m
+      (:parent/genome-id m) (update :parent/genome-id ->proof)
+      (:evidence/id m) (update :evidence/id ->proof))
+    m))
 (defn- insert-candidate!
   "Insert a candidates row in the given state. The composite FK
   (parent_generation_id, parent_genome_id) must match the seeded
-  generation, and mutation_id must exist."
+  generation, and mutation_id must exist. Uses CandidateStore +
+  VerifiedDigest to satisfy FK (009) and handle opacity."
   [db candidate-id mutation-id genome-id cand-genome state]
-  (sqlite/exec! db
-                ["INSERT INTO candidates
-                    (id, parent_generation_id, parent_genome_id, genome_id,
-                     mutation_id, evidence_id, risk, state, created_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                 candidate-id gen genome-id cand-genome mutation-id
-                 evidence-id "parameter" state now]))
-
+  (artifact/ensure-artifact! db cand-genome "application/octet-stream" 0)
+  (artifact/ensure-genome! db cand-genome)
+  (artifact/ensure-artifact! db evidence-id "application/edn" 0)
+  (let [store (candidate-store/make-candidate-store db)
+        cand (candidate/create-candidate
+              {:parent/generation-id gen
+               :parent/genome-id genome-id
+               :candidate/genome-id cand-genome
+               :mutation/id (java.util.UUID/fromString mutation-id)
+               :evidence/id evidence-id
+               :risk :parameter})
+        ;; ensure the candidate id matches the requested one (create-candidate generates random)
+        cand (assoc cand :candidate/id (java.util.UUID/fromString candidate-id))
+        mutation {:mutation/id (java.util.UUID/fromString mutation-id)
+                  :parent/genome-id genome-id
+                  :hypothesis/id (java.util.UUID/randomUUID)
+                  :evidence/id evidence-id
+                  :risk :parameter
+                  :ops []
+                  :expected-effect {}}]
+    (candidate/materialize-candidate! store (proof-candidate cand) (proof-mutation mutation))
+    (when (not= state "materialized")
+      (sqlite/exec! db ["UPDATE candidates SET state = ? WHERE id = ?" state candidate-id]))))
 (defn- body-file
   "The CAS body File for an artifact id."
   [^Path root id]

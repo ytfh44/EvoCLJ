@@ -17,6 +17,7 @@
             [evoclj.environment.surface :as surf]
             [evoclj.mount.backend :as mount-backend]
             [evoclj.mount.filesystem :as mount-fs]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.binding :as store-binding]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -79,14 +80,21 @@
 (def ^:private genome (str "sha256:" (apply str (repeat 64 "a"))))
 (def ^:private resolution (str "sha256:" (apply str (repeat 64 "c"))))
 (def ^:private phenotype (str "sha256:" (apply str (repeat 64 "b"))))
-
 (defn- seed-gen! [db]
+  (artifact/ensure-artifact! db genome "application/octet-stream" 0)
+  (artifact/ensure-artifact! db resolution "application/edn" 0)
+  (artifact/ensure-artifact! db phenotype "application/edn" 0)
+  (artifact/ensure-genome! db genome)
   (sqlite/with-db [conn db]
     (when-not (first (clojure.java.jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
       (clojure.java.jdbc/insert! conn :generations
                                   {:id gen :genome_id genome :resolution_id resolution :parent_id nil :state "active" :current 0 :created_at now}))))
 
 (defn- seed-session! [db]
+  (artifact/ensure-artifact! db genome "application/octet-stream" 0)
+  (artifact/ensure-artifact! db resolution "application/edn" 0)
+  (artifact/ensure-artifact! db phenotype "application/edn" 0)
+  (artifact/ensure-genome! db genome)
   (seed-gen! db)
   (let [s (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen})
         sid (:session/id s)

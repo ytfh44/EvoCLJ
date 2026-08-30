@@ -87,6 +87,7 @@
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
             [evoclj.sci.execute :as execute]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
@@ -343,7 +344,6 @@
 ;; ============================================================================
 ;; host glue: stores, executors, sessions
 ;; ============================================================================
-
 (defn- fresh-store
   "A migrated temp database seeded with G1's generation row
   (current = 1, Database Invariant 6) plus a temp CAS root. Returns
@@ -353,21 +353,29 @@
         db (sqlite/spec db-path)
         cas-root (temp-dir "evoclj-e2e-evolution-cas-")
         cas-store (cas/->cas cas-root)
-        g1 (loaded-route-a)]
+        g1 (loaded-route-a)
+        compiled (:compiled (compile-bundle (route-a-root)))]
     (migrate/migrate! db)
-    (sqlite/with-db [conn db]
-      (jdbc/insert! conn :generations
-                    {:id generation-id
-                     :genome_id (:genome/id g1)
-                     :resolution_id (str "sha256:" (apply str (repeat 64 "f")))
-                     :parent_id nil
-                     :state "active"
-                     :current 1
-                     :created_at "2025-01-01T00:00:00Z"}))
+    ;; ensure artifacts for generation BEFORE insert - use compiled identities (real FK targets)
+    (let [genome-id (:genome/id g1)
+          resolution-id (:compiled/resolution-id compiled)
+          phenotype-id (:compiled/phenotype-id compiled)]
+      (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
+      (artifact/ensure-artifact! db resolution-id "application/edn" 0)
+      (artifact/ensure-artifact! db phenotype-id "application/octet-stream" 0)
+      (artifact/ensure-genome! db genome-id)
+      (sqlite/with-db [conn db]
+        (jdbc/insert! conn :generations
+                      {:id generation-id
+                       :genome_id genome-id
+                       :resolution_id resolution-id
+                       :parent_id nil
+                       :state "active"
+                       :current 1
+                       :created_at "2025-01-01T00:00:00Z"})))
     {:store {:sqlite db :cas cas-store}
      :db-path db-path
      :cas-root cas-root}))
-
 (defn- genome-index-bytes
   "The canonical index bytes whose SHA-256 is the genome's content
   address — the exact serialization of evoclj.genome.hash/tree-digest
@@ -435,6 +443,11 @@
   append the :session/created root event (the host's job). Returns the
   session id."
   [db compiled gen]
+  ;; ensure FK targets for session (011) - idempotent, handles recompiled identities
+  (artifact/ensure-artifact! db (:compiled/genome-id compiled) "application/octet-stream" 0)
+  (artifact/ensure-artifact! db (:compiled/resolution-id compiled) "application/edn" 0)
+  (artifact/ensure-artifact! db (:compiled/phenotype-id compiled) "application/octet-stream" 0)
+  (artifact/ensure-genome! db (:compiled/genome-id compiled))
   (let [sid (:session/id
              (session/create-session!
               db
@@ -451,7 +464,6 @@
                           :payload-ref nil
                           :metadata {}})
     sid))
-
 (defn- run-episode!
   "Run one G1 session through the scheduler and materialize its
   Episode. Returns {:result ... :session/id ... :episode ...}."
@@ -970,7 +982,7 @@
                   (testing "STEP 5 — close and REOPEN the store from disk;
                             lineage/current checks re-run cleanly"
                     (let [reopened-db (sqlite/spec (:db-path fx))
-                          _ (is (= {:status :noop :version 6}
+                          _ (is (= {:status :noop :version 11}
                                    (migrate/migrate! reopened-db)))
                           reopened-store {:sqlite reopened-db
                                           :cas (cas/->cas (:cas-root fx))}]

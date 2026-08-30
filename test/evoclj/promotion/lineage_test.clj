@@ -43,6 +43,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.promotion.current :as current]
             [evoclj.promotion.lineage :as lineage]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -209,6 +210,16 @@
         m2 (random-uuid) m3 (random-uuid) m4 (random-uuid)
         e2 (random-uuid) e3 (random-uuid) e4 (random-uuid)
         p2 (random-uuid) p3 (random-uuid) p4 (random-uuid)]
+    ;; ensure artifact/genome rows for generations BEFORE insert (FK 009/011)
+    (doseq [g [genome-1 genome-2 genome-3 genome-4]]
+      (let [m (cas/get-meta cas g)]
+        (artifact/ensure-artifact! db g (:media-type m) (:size m))
+        (artifact/ensure-genome! db g)))
+    (doseq [r [res-1 res-3 res-4]]
+      (artifact/ensure-artifact! db r "application/edn" 0))
+    (doseq [eid [evidence-2 evidence-3 evidence-4 paired-2]]
+      (let [m (cas/get-meta cas eid)]
+        (artifact/ensure-artifact! db eid (:media-type m) (:size m))))
     (sqlite/with-db [conn db]
       ;; generations: parents before children (FK); final state AFTER
       ;; the rollback
@@ -221,7 +232,6 @@
       (jdbc/insert! conn :generations
                     {:id "generation-4" :genome_id genome-4 :resolution_id res-4
                      :parent_id "generation-3" :state "rolled-back" :current 0 :created_at t4})
-      ;; mutations
       (insert-mutation! conn m2 genome-1 evidence-2 "parameter"
                         [{:op :set-parameter :path ["router" "tool-a" "weight"]
                           :value 0.1}]

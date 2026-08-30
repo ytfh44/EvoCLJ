@@ -24,15 +24,19 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.cli.evolution :as evolution]
             [evoclj.cli.main :as main]
-            [evoclj.genome.load :as load]
-            [evoclj.store.migrate :as migrate]
             [evoclj.config :as config]
-             [evoclj.evolution.scheduler :as scheduler]
-             [evoclj.store.sqlite :as sqlite])
+            [evoclj.evolution.candidate :as candidate]
+            [evoclj.evolution.scheduler :as scheduler]
+            [evoclj.genome.load :as load]
+            [evoclj.store.artifact :as artifact]
+            [evoclj.store.candidate-store :as candidate-store]
+            [evoclj.store.migrate :as migrate]
+            [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file FileVisitOption Files LinkOption OpenOption Paths)
            (java.nio.file.attribute FileAttribute)
-           (java.util UUID)))
+           (java.time Instant)
+           (java.util Date UUID)))
 
 ;; --- temp-dir plumbing (mirrors cli_test) -----------------------------------
 
@@ -238,34 +242,53 @@
                       (make-array java.nio.file.CopyOption 0))
         cand-row-id (str (UUID/randomUUID))
         mutation-id (str (UUID/randomUUID))
-        evidence-id (str "sha256:" (apply str (repeat 64 "d")))]
+        evidence-id (str "sha256:" (apply str (repeat 64 "d")))
+        resolution-id (str "sha256:" (apply str (repeat 64 "c")))
+        hypothesis-id (str (UUID/randomUUID))
+        ;; FK existence: generations/candidates reference artifacts/genomes.
+        ;; Fake hashes use size 0 artifacts (no CAS body); ensure before inserts.
+        _ (doseq [[artifact-id media-type]
+                  [[parent-id "application/octet-stream"]
+                   [candidate-id "application/octet-stream"]
+                   [resolution-id "application/edn"]
+                   [evidence-id "application/edn"]]]
+            (artifact/ensure-artifact! db artifact-id media-type 0))
+        _ (doseq [genome-id [parent-id candidate-id]]
+            (artifact/ensure-genome! db genome-id))]
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id "generation-1"
                      :genome_id parent-id
-                     :resolution_id (str "sha256:" (apply str (repeat 64 "c")))
+                     :resolution_id resolution-id
                      :parent_id nil :state "active" :current 1
-                     :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :mutations
-                    {:id mutation-id
-                     :parent_genome_id parent-id
-                     :hypothesis_id (str (UUID/randomUUID))
-                     :evidence_id evidence-id
-                     :risk "behavioral"
-                     :ops (pr-str [{:op :set-edn :file "skills/debugging.edn"
-                                    :path [:workflow :before-edit] :value [:x]}])
-                     :expected_effect (pr-str {:primary-metric :task/success
-                                               :direction :increase})
-                     :created_at "2025-01-02T00:00:00Z"})
-      (jdbc/insert! conn :candidates
-                    {:id cand-row-id
-                     :parent_generation_id "generation-1"
-                     :parent_genome_id parent-id
-                     :genome_id candidate-id
-                     :mutation_id mutation-id
-                     :evidence_id evidence-id
-                     :risk "behavioral" :state "materialized"
-                     :created_at "2025-01-02T00:00:00Z"}))
+                     :created_at "2025-01-01T00:00:00Z"}))
+    ;; Candidate materialization must go through CandidateStore + VerifiedDigest
+    ;; (Fleet P5/F). Use the private unsafe constructor via #' to make the
+    ;; opt-out explicit (definition > validation).
+    (let [store (candidate-store/make-candidate-store db)
+          ->proof (fn [id] (#'evoclj.store.existence/unsafe-verified-digest id))
+          proof-candidate (fn [c] (update c :candidate/genome-id ->proof))
+          proof-mutation (fn [m] (cond-> m
+                                   (:parent/genome-id m) (update :parent/genome-id ->proof)
+                                   (:evidence/id m) (update :evidence/id ->proof)))
+          mutation {:mutation/id (UUID/fromString mutation-id)
+                    :parent/genome-id parent-id
+                    :hypothesis/id (UUID/fromString hypothesis-id)
+                    :evidence/id evidence-id
+                    :risk :behavioral
+                    :ops [{:op :set-edn :file "skills/debugging.edn"
+                           :path [:workflow :before-edit] :value [:x]}]
+                    :expected-effect {:primary-metric :task/success :direction :increase}}
+          candidate {:candidate/id (UUID/fromString cand-row-id)
+                     :parent/generation-id "generation-1"
+                     :parent/genome-id parent-id
+                     :candidate/genome-id candidate-id
+                     :mutation/id (UUID/fromString mutation-id)
+                     :evidence/id evidence-id
+                     :risk :behavioral
+                     :state :proposed
+                     :created-at (Date/from (Instant/parse "2025-01-02T00:00:00Z"))}]
+      (candidate/materialize-candidate! store (proof-candidate candidate) (proof-mutation mutation)))
     {:state-dir dir :db db :candidate-id cand-row-id
      :parent-id parent-id :candidate-genome-id candidate-id}))
 

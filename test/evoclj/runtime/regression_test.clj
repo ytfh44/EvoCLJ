@@ -40,8 +40,10 @@
             [evoclj.eval.dataset :as dataset]
             [evoclj.runtime.regression :as reg]
             [evoclj.runtime.trigger :as trigger]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.enrichment :as enrich]
+            [evoclj.store.enrichment-store :as enrichment-store]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -109,6 +111,12 @@
   []
   (let [db (sqlite/spec (temp-db-path))]
     (migrate/migrate! db)
+    (doseq [[artifact-id media-type]
+            [[genome "application/octet-stream"]
+             [resolution "application/edn"]
+             [phenotype "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (artifact/ensure-genome! db genome)
     db))
 
 (defn- seed-session!
@@ -116,6 +124,12 @@
   session id (a #uuid)."
   [db]
   (let [sid (random-uuid)]
+    (doseq [[artifact-id media-type]
+            [[genome "application/octet-stream"]
+             [resolution "application/edn"]
+             [phenotype "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (artifact/ensure-genome! db genome)
     (sqlite/with-db [conn db]
       (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
         (jdbc/insert! conn :generations
@@ -376,6 +390,14 @@
                                       (.getBytes "candidate genome body"
                                                  StandardCharsets/UTF_8)
                                       {}))]
+    (doseq [[artifact-id media-type]
+            [[parent-genome "application/octet-stream"]
+             [child-genome "application/octet-stream"]
+             [rollback-resolution "application/edn"]
+             [phenotype "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (doseq [gid [parent-genome child-genome]]
+      (artifact/ensure-genome! db gid))
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id parent-generation
@@ -588,13 +610,12 @@
     d))
 
 (defn- evolution-store
-  "A migrated sqlite db + fresh CAS root as the executor :stores map
-  {:sqlite ... :cas ...} — what the provenance enrichment (C2b)
-  needs."
+  "A migrated sqlite db + fresh CAS root wrapped in the opaque
+  EnrichmentStore handle required by the provenance API."
   []
   (let [db (fresh-db)
         cas-root (temp-cas-root)]
-    {:sqlite db :cas (cas/->cas cas-root)}))
+    (enrichment-store/make-enrichment-store db (cas/->cas cas-root))))
 
 (defn- input-sample
   "One paired-utility sample carrying the input it evaluated (the

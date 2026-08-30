@@ -4,6 +4,7 @@
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing]]
             [evoclj.cli.eval-inspect :as ei]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.file Files)
@@ -18,7 +19,21 @@
 
 (defn- seed-eval! [db]
   (let [eval-id "00000000-0000-0000-0000-0000000000ee"
-        cand-id "00000000-0000-0000-0000-0000000000cf"]
+        cand-id "00000000-0000-0000-0000-0000000000cf"
+        parent-genome-id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        candidate-genome-id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        resolution-id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        evidence-id "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"]
+    ;; FK existence: generations/candidates reference artifacts/genomes.
+    ;; Fake hashes use size 0 artifacts (no CAS body); ensure before inserts.
+    (doseq [[artifact-id media-type]
+            [[parent-genome-id "application/octet-stream"]
+             [candidate-genome-id "application/octet-stream"]
+             [resolution-id "application/edn"]
+             [evidence-id "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (doseq [genome-id [parent-genome-id candidate-genome-id]]
+      (artifact/ensure-genome! db genome-id))
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id "gen-1"

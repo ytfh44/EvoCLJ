@@ -90,7 +90,7 @@
                                         "evoclj promote <candidate-id> --evaluation <id>"))
         system (session/build-system opts)
         store (session/store-of system)
-        c (candidate/find-candidate store cand-id)]
+        c (candidate/find-candidate (session/candidate-store-of system) cand-id)]
     (when-not c
       (throw (err/error :cli/candidate-not-found
                         "no candidate with this id"
@@ -101,6 +101,7 @@
                                                         (:candidate/genome-id c))
           promotion-system {:store store
                             :resolution/id (compiled-resolution-id candidate-root)
+                            :candidate/root candidate-root
                             :event/session-id op-session}
           result (promote/promote! promotion-system
                                    {:candidate-id cand-id

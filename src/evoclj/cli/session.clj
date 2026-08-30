@@ -53,14 +53,18 @@
             [evoclj.kernel.system :as kernel]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.genome.load :as load]
+            [evoclj.genome.path :as genome-path]
             [evoclj.provider.mcp-bridge :as mcp-bridge]
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.episode :as episode]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.event :as event]
+            [evoclj.store.existence :as existence]
             [evoclj.store.recovery :as recovery]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite]
@@ -445,6 +449,13 @@
   [system]
   {:sqlite (db-of system) :cas (cas-of system)})
 
+(defn candidate-store-of
+  "Return the narrow CandidateStore handle for candidate/mutation APIs.
+  Runtime and promotion APIs continue to receive the executor stores map
+  from store-of."
+  [system]
+  (candidate-store/make-candidate-store (db-of system)))
+
 ;; ============================================================================
 ;; the CLI's ONLY raw SQL — read-only SELECTs (no write path exists)
 ;; ============================================================================
@@ -499,6 +510,45 @@
 ;; compiled identity + operator sessions
 ;; ============================================================================
 
+(defn- genome-index-body
+  "Return the canonical Genome index bytes for one loaded bundle."
+  [loaded]
+  (apply str
+         (map (fn [[path {:keys [digest]}]]
+                (str path "\u0000" digest "\n"))
+              (sort-by first genome-path/bytewise-compare (:files loaded)))))
+
+(defn ensure-identity-artifacts!
+  "Register compiled identity rows only after the Genome's canonical
+  index body has been stored and verified in CAS. When `loaded` is
+  supplied, it is the filesystem bundle just loaded by the caller and
+  becomes the source of that canonical body; without it, an existing CAS
+  proof is required and no placeholder Genome row is fabricated."
+  ([system identity]
+   (ensure-identity-artifacts! system identity nil))
+  ([system identity loaded]
+   (let [db (db-of system)
+         genome-id (:genome/id identity)]
+     (if loaded
+       (let [body (.getBytes (genome-index-body loaded)
+                             StandardCharsets/UTF_8)
+             stored (:artifact/id (cas/put-bytes! (cas-of system) body {}))]
+         (when-not (= stored genome-id)
+           (throw (err/error :cli/genome-mismatch
+                             "loaded Genome body does not match its identity"
+                             {:genome/id genome-id
+                              :stored-artifact-id stored})))
+         (artifact/ensure-artifact! db genome-id
+                                     "application/octet-stream"
+                                     (alength body))
+         (artifact/ensure-genome! db genome-id))
+       (existence/verified-digest (cas-of system) genome-id))
+     (artifact/ensure-artifact! db (:resolution/id identity)
+                                 "application/edn" 0)
+     (artifact/ensure-artifact! db (:phenotype/id identity)
+                                 "application/edn" 0)
+     identity)))
+
 (defn generation-identity
   "The compiled identity of `generation-id`'s Genome:
   {:generation/id :genome/id :resolution/id :phenotype/id}, the
@@ -519,10 +569,13 @@
                           {:generation/id generation-id
                            :generation/genome-id (:genome_id row)
                            :compiled/genome-id (:compiled/genome-id compiled)})))
-      {:generation/id generation-id
-       :genome/id (:compiled/genome-id compiled)
-       :resolution/id (:compiled/resolution-id compiled)
-       :phenotype/id (:compiled/phenotype-id compiled)})))
+      (let [identity {:generation/id generation-id
+                      :genome/id (:compiled/genome-id compiled)
+                      :resolution/id (:compiled/resolution-id compiled)
+                      :phenotype/id (:compiled/phenotype-id compiled)}]
+        (ensure-identity-artifacts! system identity loaded)
+        identity)))
+)
 
 (defn operator-session!
   "Create the operator session anchoring promotion/rollback events:
@@ -708,7 +761,13 @@
                           {:generation/id (:generation/id generation)
                            :generation/genome-id (:genome/id generation)
                            :compiled/genome-id (:compiled/genome-id compiled)})))
-      (let [db (db-of system)
+      (let [_ (ensure-identity-artifacts!
+                system
+                {:genome/id (:compiled/genome-id compiled)
+                 :resolution/id (:compiled/resolution-id compiled)
+                 :phenotype/id (:compiled/phenotype-id compiled)}
+                loaded)
+            db (db-of system)
             cas-store (cas-of system)
             reg (:provider/registry system)
             usage (atom {})

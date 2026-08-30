@@ -16,6 +16,7 @@
             [evoclj.genome.types :as types]
             [evoclj.kernel.system :as sys]
             [evoclj.provider.registry :as registry]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite]
@@ -124,8 +125,10 @@
 (defn- seed-generation!
   "Insert the generation row sessions are pinned to (current = 1: the
   seed generation IS the CURRENT pointer, Database Invariant 6),
-  mirroring the component e2e fixture. Returns the generation id."
+  mirroring the component e2e fixture."
   [db]
+  (artifact/ensure-artifact! db sha256-id "application/octet-stream" 0)
+  (artifact/ensure-genome! db sha256-id)
   (sqlite/exec! db ["INSERT INTO generations
                       (id, genome_id, resolution_id, parent_id, state, current, created_at)
                     VALUES ('generation-1', ?, ?, NULL, 'active', 1,

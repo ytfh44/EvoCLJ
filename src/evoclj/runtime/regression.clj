@@ -67,6 +67,7 @@
             [evoclj.promotion.rollback :as rollback]
             [evoclj.runtime.trigger :as trigger]
             [evoclj.store.enrichment :as enrich]
+            [evoclj.store.enrichment-store :as enrichment-store]
             [evoclj.store.event :as event]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
@@ -495,6 +496,19 @@
   [cases body]
   (let [target (body-ref body)]
     (first (filter #(= target (body-ref (:body %))) cases))))
+(defn- enrichment-store-of
+  "Normalize an executor store map at the boundary to the opaque
+  EnrichmentStore handle. The business API never passes raw maps to the
+  enrichment namespace."
+  [store]
+  (if (instance? evoclj.store.enrichment_store.EnrichmentStore store)
+    store
+    (if (and (map? store)
+             (contains? store :sqlite)
+             (contains? store :cas))
+      (enrichment-store/make-enrichment-store (:sqlite store) (:cas store))
+      store)))
+
 
 (defn- attach-case-provenance!
   "Attach the versioned enrichment record linking the evolved case to
@@ -505,7 +519,7 @@
   cause). The derived-metadata layer never mutates the case body
   (Global Constraint 21 — the row stores refs, never the body)."
   [store case evidence-ref]
-  (enrich/put-enrichment! store
+  (enrich/put-enrichment! (enrichment-store-of store)
                           {:entity/kind :case
                            :entity/id (str (:case/id case))
                            :kind case-origin-kind

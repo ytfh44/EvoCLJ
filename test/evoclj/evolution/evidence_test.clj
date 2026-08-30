@@ -43,6 +43,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.evolution.evidence :as evidence]
             [evoclj.evolution.evidence-schema :as es]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -96,7 +97,6 @@
   (reset! temp-paths []))
 
 (use-fixtures :each (fn [f] (f) (cleanup!)))
-
 (defn- fresh-store
   "A migrated sqlite db (path spec) plus a temp CAS root, seeded with
   the generation rows sessions pin to. Returns the executor-style
@@ -104,6 +104,11 @@
   []
   (let [db (sqlite/spec (temp-db-path))]
     (migrate/migrate! db)
+    ;; Fleet P5/FK: artifacts/genomes must exist before generations
+    (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
+    (artifact/ensure-artifact! db resolution-id "application/octet-stream" 0)
+    (artifact/ensure-artifact! db phenotype-id "application/octet-stream" 0)
+    (artifact/ensure-genome! db genome-id)
     (doseq [g [generation-id other-generation-id]]
       (sqlite/with-db [conn db]
         (jdbc/insert! conn :generations

@@ -9,6 +9,7 @@
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.evolution.candidate :as candidate]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.current-store :as current-store]
             [evoclj.store.migrate :as migrate]
@@ -56,19 +57,20 @@
     m))
 (defn- materialize-with-proof! [store candidate mutation]
   (candidate/materialize-candidate! store (proof-candidate candidate) (proof-mutation mutation)))
-
 (defn- fresh-db []
   (let [path (temp-db-path)
         db (sqlite/spec path)]
     (migrate/migrate! db)
+    ;; Fleet P5/FK: ensure FK targets via idempotent helper (INSERT OR IGNORE)
+    (doseq [[aid media] [[parent-genome-id "application/octet-stream"]
+                         [candidate-genome-id "application/octet-stream"]
+                         [resolution-id "application/edn"]
+                         [evidence-id "application/edn"]
+                         [file-hash "application/edn"]]]
+      (artifact/ensure-artifact! db aid media 0))
+    (doseq [gid [parent-genome-id candidate-genome-id]]
+      (artifact/ensure-genome! db gid))
     (sqlite/with-db [conn db]
-      (jdbc/insert! conn :artifacts {:hash parent-genome-id :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :artifacts {:hash candidate-genome-id :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :artifacts {:hash resolution-id :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :artifacts {:hash evidence-id :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :artifacts {:hash file-hash :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :genomes {:id parent-genome-id :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :genomes {:id candidate-genome-id :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :generations
                     {:id generation-id
                      :genome_id parent-genome-id

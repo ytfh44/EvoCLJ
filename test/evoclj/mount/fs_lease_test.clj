@@ -30,6 +30,7 @@
             [evoclj.store.binding :as binding]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite])
@@ -103,6 +104,11 @@
 (def ^:private resolution (str "sha256:" (apply str (repeat 64 "8"))))
 
 (defn- seed-generation! [db]
+  (artifact/ensure-artifact! db genome "application/octet-stream" 0)
+  (artifact/ensure-artifact! db resolution "application/edn" 0)
+  (artifact/ensure-artifact! db pid1 "application/octet-stream" 0)
+  (artifact/ensure-artifact! db pid2 "application/octet-stream" 0)
+  (artifact/ensure-genome! db genome)
   (sqlite/with-db [conn db]
     (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
       (jdbc/insert! conn :generations {:id gen :genome_id genome :resolution_id resolution :parent_id nil :state "active" :current 0 :created_at "2025-01-01T00:00:00Z"}))))

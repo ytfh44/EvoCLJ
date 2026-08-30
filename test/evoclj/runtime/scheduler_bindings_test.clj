@@ -34,6 +34,7 @@
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
             [evoclj.sci.boundary :as boundary]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.binding :as binding-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -89,6 +90,12 @@
   []
   (let [db (sqlite/spec (temp-db-path))]
     (migrate/migrate! db)
+    (doseq [[artifact-id media-type]
+            [[genome-id "application/octet-stream"]
+             [resolution-id "application/edn"]
+             [phenotype-id "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id generation-id

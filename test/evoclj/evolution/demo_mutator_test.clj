@@ -39,6 +39,7 @@
             [evoclj.genome.patch :as patch]
             [evoclj.promotion.current :as current]
             [evoclj.helpers :as h]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -298,6 +299,9 @@
         resolution-id (:compiled/resolution-id compiled)
         cas-root (str dir "/cas")
         cas-store (cas/->cas cas-root)]
+    (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
+    (artifact/ensure-artifact! db resolution-id "application/edn" 0)
+    (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id generation-id

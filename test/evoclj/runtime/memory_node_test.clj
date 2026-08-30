@@ -14,6 +14,7 @@
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
@@ -59,7 +60,7 @@
            :abi {:kernel 1 :genome 1 :intent 1 :tool 1}\n
            :modules {:topology \"topology.edn\" :models \"models.edn\"\n
                      :memory \"memory.edn\" :evolution \"evolution.edn\"}\n
-           :capabilities/requested #{:memory/call}\n
+           :capabilities/requested #{:memory/write :memory/read}\n
            :evolution {:max-risk :behavioral :mutable #{:parameters}}\n
            :metadata {:name \"memory-fixture\"}}")
     (spit (str dir "/topology.edn")
@@ -86,6 +87,13 @@
           _ (track! db-path)
           db (sqlite/spec db-path)
           _ (migrate/migrate! db)
+          _ (do
+              (doseq [[artifact-id media-type]
+                      [[genome-id "application/octet-stream"]
+                       [resolution-id "application/edn"]
+                       [phenotype-id "application/edn"]]]
+                (artifact/ensure-artifact! db artifact-id media-type 0))
+              (artifact/ensure-genome! db genome-id))
           _ (sqlite/with-db [conn db]
               (jdbc/insert! conn :generations
                             {:id generation-id

@@ -51,6 +51,8 @@
             [evoclj.evolution.diagnose :as diagnose]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.load :as load]
+            [evoclj.store.artifact :as artifact]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -292,6 +294,13 @@
         db (sqlite/spec path)
         cas-root (temp-cas-dir)]
     (migrate/migrate! db)
+    (let [genome-id (:genome/id (seed-loaded-genome))]
+      (doseq [[artifact-id media-type]
+              [[genome-id "application/octet-stream"]
+               [fixture-resolution-id "application/edn"]
+               [fixture-phenotype-id "application/edn"]]]
+        (artifact/ensure-artifact! db artifact-id media-type 0))
+      (artifact/ensure-genome! db genome-id))
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id generation-id
@@ -441,7 +450,10 @@
         (is (not= (:genome/id (seed-loaded-genome)) (:candidate/genome-id c))
             "the candidate G2 differs from the parent G1")
         (is (= (:candidate/id c)
-               (:candidate/id (candidate/find-candidate store (:candidate/id c))))
+               (:candidate/id
+                (candidate/find-candidate
+                 (candidate-store/make-candidate-store (:sqlite store))
+                 (:candidate/id c))))
             "the persisted row resolves by id")))
     (testing "the frozen evidence and the diagnosis are durable artifacts"
       (let [frozen (first (filter #(= :evolution/evidence-frozen (:event/type %)) @events))

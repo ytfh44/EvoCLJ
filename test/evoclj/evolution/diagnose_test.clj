@@ -57,6 +57,7 @@
             [evoclj.evolution.diagnose :as diag]
             [evoclj.evolution.diagnosis-schema :as ds]
             [evoclj.evolution.evidence :as evidence]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -114,7 +115,6 @@
   (reset! temp-paths []))
 
 (use-fixtures :each (fn [f] (f) (cleanup!)))
-
 (defn- fresh-store
   "A migrated sqlite db (path spec) plus a temp CAS root, seeded with
   the generation row sessions pin to. Returns the executor-style store
@@ -122,6 +122,11 @@
   []
   (let [db (sqlite/spec (temp-db-path))]
     (migrate/migrate! db)
+    ;; Fleet P5/FK: artifacts/genomes must exist before generations insert
+    (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
+    (artifact/ensure-artifact! db resolution-id "application/octet-stream" 0)
+    (artifact/ensure-artifact! db phenotype-id "application/octet-stream" 0)
+    (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id generation-id

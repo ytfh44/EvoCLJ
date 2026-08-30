@@ -42,6 +42,7 @@
 (def ^:private max-depth 20)
 (def ^:private max-regex-count 10)
 (def ^:private max-time-ms 200)
+(def ^:private max-value-chars 4000000)
 
 (defn- node-count [x]
   (cond (map? x) (inc (reduce + 0 (map (fn [[_ v]] (node-count v)) x)))
@@ -77,6 +78,11 @@
         ;; result with the validator call (no second pass).
         schema-json (json/generate-string schema)
         value-json (json/generate-string value)]
+    (when (> (count value-json) max-value-chars)
+      (throw (ex-info "validation time budget exceeded"
+                      {:max-ms max-time-ms
+                       :value-chars (count value-json)
+                       :reason :value-size})))
     (when (> (regex-count schema-json) max-regex-count)
       (throw (ex-info "regex budget exceeded" {:max max-regex-count})))
     (when (> (node-count schema) max-nodes)

@@ -159,6 +159,18 @@
         cas-root (str dir "/cas")
         cas-store (cas/->cas cas-root)]
     (sqlite/with-db [conn db]
+      (doseq [[artifact-id media-type]
+              [[genome-id "application/octet-stream"]
+               [resolution-id "application/edn"]
+               [(:compiled/phenotype-id compiled) "application/edn"]]]
+        (jdbc/insert! conn :artifacts
+                      {:hash artifact-id
+                       :media_type media-type
+                       :size 0
+                       :created_at "2025-01-01T00:00:00Z"}))
+      (jdbc/insert! conn :genomes
+                    {:id genome-id
+                     :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :generations
                     {:id generation-id
                      :genome_id genome-id

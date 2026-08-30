@@ -102,8 +102,11 @@
             [evoclj.provider.protocol :as proto]
             [evoclj.promotion.promote :as promote]
             [evoclj.promotion.rollback :as rollback]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.event :as event]
+            [evoclj.store.existence :as existence]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite])
@@ -216,6 +219,19 @@
     (cas/put-bytes! cas (.getBytes seed-genome-body StandardCharsets/UTF_8)
                     {})
     (sqlite/with-db [conn db]
+      (doseq [[artifact-id media-type]
+              [[parent-genome-id "application/octet-stream"]
+               [resolution-id "application/edn"]
+               [phenotype-id "application/edn"]
+               [evidence-id "application/edn"]]]
+        (jdbc/insert! conn :artifacts
+                      {:hash artifact-id
+                       :media_type media-type
+                       :size 0
+                       :created_at "2025-01-01T00:00:00Z"}))
+      (jdbc/insert! conn :genomes
+                    {:id parent-genome-id
+                     :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :generations
                     {:id seed-generation-id
                      :genome_id parent-genome-id
@@ -309,6 +325,12 @@
                               StandardCharsets/UTF_8)
                    {})))
 
+(defn- proof
+  "Create the explicit test-only proof required by the CandidateStore
+  boundary. The fixture registers the matching artifact row below."
+  [artifact-id]
+  (#'existence/unsafe-verified-digest artifact-id))
+
 (defn- materialize-and-pend!
   "Materialize a fresh sibling candidate from `parent-generation-id` /
   `parent-genome-id` (defaults: the seed pair) via the REAL component
@@ -316,13 +338,23 @@
   Candidate record."
   ([store n] (materialize-and-pend! store seed-generation-id parent-genome-id n))
   ([store parent-generation-id parent-genome-id n]
-   (let [m (mutation* parent-genome-id n)
+   (let [candidate-genome-id (store-candidate-body! (:cas store) n)
+         _ (artifact/ensure-artifact! (:sqlite store) candidate-genome-id
+                                      "application/octet-stream" 0)
+         _ (artifact/ensure-genome! (:sqlite store) candidate-genome-id)
+         m (mutation* parent-genome-id n)
          c (candidate/create-candidate (candidate-request
                                         parent-generation-id parent-genome-id
-                                        (store-candidate-body! (:cas store) n)
+                                        candidate-genome-id
                                         (:mutation/id m)))
-         m1 (candidate/materialize-candidate! store c m)]
-     (candidate/mark-evaluation-pending! store (:candidate/id m1)))))
+         handle (candidate-store/make-candidate-store (:sqlite store))
+         m1 (candidate/materialize-candidate!
+             handle
+             (update c :candidate/genome-id proof)
+             (-> m
+                 (update :parent/genome-id proof)
+                 (update :evidence/id proof)))]
+     (candidate/mark-evaluation-pending! handle (:candidate/id m1)))))
 
 (defn- finalize-eligible!
   "Finalize one candidate's evaluation (the eval/core persist-finalized!

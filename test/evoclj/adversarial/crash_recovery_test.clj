@@ -59,6 +59,7 @@
             [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.evolution.candidate :as candidate]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.load :as load]
             [evoclj.genome.path :as gpath]
@@ -69,6 +70,7 @@
             [evoclj.promotion.promote :as promote]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
+            [evoclj.store.existence :as existence]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.recovery :as recovery]
             [evoclj.store.session :as session]
@@ -146,12 +148,36 @@
   [cas-root s]
   (:artifact/id (put! cas-root s)))
 
+(defn- proof [id]
+  (#'existence/unsafe-verified-digest id))
+
+(defn- proof-candidate [candidate]
+  (update candidate :candidate/genome-id proof))
+
+(defn- proof-mutation [mutation]
+  (cond-> mutation
+    (:parent/genome-id mutation) (update :parent/genome-id proof)
+    (:evidence/id mutation) (update :evidence/id proof)
+    (:payload-ref mutation) (update :payload-ref proof)
+    (:candidate/payload-ref mutation) (update :candidate/payload-ref proof)))
+
 (defn- seed-generation!
   "Insert the CURRENT (current = 1) seed generation row pinned to
   `genome-id` (which MUST be a real CAS artifact so recovery's
   Invariant-7 current-generation check passes)."
   [db genome-id]
   (sqlite/with-db [conn db]
+    (doseq [artifact-id [genome-id parent-resolution phenotype]]
+      (jdbc/execute!
+       conn
+       ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
+         VALUES (?, 'application/octet-stream', 0, datetime('now'))"
+        artifact-id]))
+    (jdbc/execute!
+     conn
+     ["INSERT OR IGNORE INTO genomes (id, created_at)
+      VALUES (?, datetime('now'))"
+      genome-id])
     (jdbc/insert! conn :generations
                   {:id seed-gen
                    :genome_id genome-id
@@ -530,7 +556,20 @@
         g1-id (put-genome! root "parent genome body")
         _ (seed-generation! db g1-id)
         stores {:sqlite db :cas cas}
-        cand-genome (str "sha256:" (apply str (repeat 64 "9")))
+        candidate-store-handle (candidate-store/make-candidate-store db)
+        cand-genome (put-genome! root "candidate genome body")
+        _ (sqlite/with-db [conn db]
+            (doseq [artifact-id [cand-genome evidence-id]]
+              (jdbc/execute!
+               conn
+               ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
+                 VALUES (?, 'application/octet-stream', 0, datetime('now'))"
+                artifact-id]))
+            (jdbc/execute!
+             conn
+             ["INSERT OR IGNORE INTO genomes (id, created_at)
+               VALUES (?, datetime('now'))"
+              cand-genome]))
         mutation (mutation-ir g1-id)
         candidate-rec (candidate/create-candidate
                        {:parent/generation-id seed-gen
@@ -546,7 +585,7 @@
     (testing "EXPECTED RECOVERABLE STATE: no valid Candidate exists — no
               candidates row at all"
       (is (empty? (sqlite/query db ["SELECT * FROM candidates"])))
-      (is (nil? (candidate/find-candidate stores (:candidate/id candidate-rec))))
+      (is (nil? (candidate/find-candidate candidate-store-handle (:candidate/id candidate-rec))))
       (is (empty? (:stale-candidates (recovery/scan-recovery-state db root)))
           "the recovery scan reports no candidate — the orphan staging is
           never mistaken for a valid Candidate"))
@@ -558,7 +597,10 @@
     (testing "recovery: re-running the REAL materialization succeeds and
               yields the SAME deterministic candidate content (Global
               Constraint 6)"
-      (let [c (candidate/materialize-candidate! stores candidate-rec mutation)]
+      (let [c (candidate/materialize-candidate!
+               candidate-store-handle
+               (proof-candidate candidate-rec)
+               (proof-mutation mutation))]
         (is (= :materialized (:state c)))
         (is (= cand-genome (:candidate/genome-id c)))
         (is (= 1 (count (sqlite/query db ["SELECT * FROM candidates"]))))
@@ -579,7 +621,20 @@
         g1-id (put-genome! root "parent genome body")
         _ (seed-generation! db g1-id)
         stores {:sqlite db :cas cas}
-        cand-genome (str "sha256:" (apply str (repeat 64 "7")))
+        candidate-store-handle (candidate-store/make-candidate-store db)
+        cand-genome (put-genome! root "candidate genome body")
+        _ (sqlite/with-db [conn db]
+            (doseq [artifact-id [cand-genome evidence-id]]
+              (jdbc/execute!
+               conn
+               ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
+                 VALUES (?, 'application/octet-stream', 0, datetime('now'))"
+                artifact-id]))
+            (jdbc/execute!
+             conn
+             ["INSERT OR IGNORE INTO genomes (id, created_at)
+               VALUES (?, datetime('now'))"
+              cand-genome]))
         mutation (mutation-ir g1-id)
         candidate-rec (candidate/create-candidate
                        {:parent/generation-id seed-gen
@@ -588,8 +643,11 @@
                         :mutation/id (:mutation/id mutation)
                         :evidence/id evidence-id
                         :risk :parameter})
-        c (candidate/materialize-candidate! stores candidate-rec mutation)
-        _ (candidate/mark-evaluation-pending! stores (:candidate/id c))
+        c (candidate/materialize-candidate!
+           candidate-store-handle
+           (proof-candidate candidate-rec)
+           (proof-mutation mutation))
+        _ (candidate/mark-evaluation-pending! candidate-store-handle (:candidate/id c))
         ;; all gate/case artifacts are durable BEFORE the finalization
         ;; transaction (the Evaluation finalization transaction protocol)
         gate-artifact (put! root (pr-str {:gate/id :G0-parse :status :pass
@@ -605,8 +663,9 @@
     (testing "EXPECTED RECOVERABLE STATE: no finalized Evaluation exists and
               the candidate never reached :evaluated"
       (is (empty? (sqlite/query db ["SELECT * FROM eval_runs"])))
-      (is (= :evaluation-pending (:state (candidate/find-candidate stores
-                                                                   (:candidate/id c))))))
+      (is (= :evaluation-pending (:state (candidate/find-candidate
+                                           candidate-store-handle
+                                           (:candidate/id c))))))
     (testing "recovery reports the half-evaluated candidate as stale —
               never eligible, never promotable; it is residue, not corruption"
       (let [r (recovery/scan-recovery-state db root)]
@@ -638,11 +697,11 @@
 (defn- add-mutation-row!
   "Insert the mutation row a candidate's mutation_id FK needs; returns
   the mutation id."
-  [conn]
+  [conn parent-genome-id]
   (let [mutation-id (random-uuid)]
     (jdbc/insert! conn :mutations
                   {:id (str mutation-id)
-                   :parent_genome_id (str "sha256:" (apply str (repeat 64 "a")))
+                   :parent_genome_id parent-genome-id
                    :hypothesis_id (str (random-uuid))
                    :evidence_id evidence-id
                    :risk "parameter"
@@ -670,7 +729,19 @@
         cand-genome-id (put-genome! root "candidate genome body")
         sid (operator-session! db seed-genome-id)]
     (sqlite/with-db [conn db]
-      (let [mutation-id (add-mutation-row! conn)]
+      (doseq [artifact-id [cand-genome-id evidence-id new-resolution]]
+        (jdbc/execute!
+         conn
+         ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
+          VALUES (?, 'application/octet-stream', 0, datetime('now'))"
+          artifact-id]))
+      (jdbc/execute!
+       conn
+       ["INSERT OR IGNORE INTO genomes (id, created_at)
+        VALUES (?, datetime('now'))"
+        cand-genome-id]))
+    (sqlite/with-db [conn db]
+      (let [mutation-id (add-mutation-row! conn seed-genome-id)]
         (jdbc/insert! conn :candidates
                       {:id (str candidate-id)
                        :parent_generation_id seed-gen

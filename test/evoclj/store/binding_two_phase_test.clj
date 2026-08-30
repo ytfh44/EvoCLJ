@@ -40,6 +40,7 @@
             [evoclj.environment.bundle :as bundle]
             [evoclj.environment.revision :as rev]
             [evoclj.mount.backend :as mount-backend]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.binding :as binding]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -93,12 +94,15 @@
 (def ^:private genome (str "sha256:" (apply str (repeat 64 "a"))))
 (def ^:private resolution (str "sha256:" (apply str (repeat 64 "c"))))
 (def ^:private phenotype (str "sha256:" (apply str (repeat 64 "b"))))
-
 (defn- seed-session!
   "Generation + session + :session/created root event; returns sid."
   [db]
-  (sqlite/with-db [conn db]
-    (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
+  (when-not (first (sqlite/query db ["SELECT id FROM generations WHERE id = ?" gen]))
+    (artifact/ensure-artifact! db genome "application/octet-stream" 0)
+    (artifact/ensure-artifact! db resolution "application/edn" 0)
+    (artifact/ensure-artifact! db phenotype "application/edn" 0)
+    (artifact/ensure-genome! db genome)
+    (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id gen :genome_id genome :resolution_id resolution
                      :parent_id nil :state "active" :current 0 :created_at now})))

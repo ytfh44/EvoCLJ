@@ -31,6 +31,7 @@
             [evoclj.mcp.manager :as manager]
             [evoclj.mcp.source :as mcp-source]
             [evoclj.store.event :as event]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite]
             [evoclj.support.concurrency :as conc]))
@@ -54,6 +55,10 @@
   (let [path (temp-db-path)
         db (sqlite/spec path)]
     (migrate/migrate! db)
+    (artifact/ensure-artifact! db genome "application/octet-stream" 0)
+    (artifact/ensure-artifact! db resolution "application/edn" 0)
+    (artifact/ensure-artifact! db phenotype "application/octet-stream" 0)
+    (artifact/ensure-genome! db genome)
     (let [sid (random-uuid)]
       (sqlite/with-db [conn db]
         (jdbc/insert! conn :generations

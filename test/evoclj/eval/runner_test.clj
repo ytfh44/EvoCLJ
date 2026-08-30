@@ -34,7 +34,10 @@
             [evoclj.eval.static :as static]
             [evoclj.evolution.candidate :as candidate]
             [evoclj.provider.protocol :as proto]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
+            [evoclj.store.candidate-store :as candidate-store]
+            [evoclj.store.existence :as existence]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
@@ -168,6 +171,15 @@
         db (sqlite/spec db-path)
         cas-root (temp-path! "evoclj-batch-cas-")]
     (migrate/migrate! db)
+    (doseq [[artifact-id media-type]
+            [[parent-genome-id "application/octet-stream"]
+             [candidate-genome-id "application/octet-stream"]
+             [evidence-id "application/edn"]
+             [file-hash "application/edn"]
+             [resolution-id "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (doseq [genome-id [parent-genome-id candidate-genome-id]]
+      (artifact/ensure-genome! db genome-id))
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id generation-id
@@ -179,6 +191,10 @@
                      :created_at "2025-01-01T00:00:00Z"}))
     {:sqlite db :cas (cas/->cas cas-root)}))
 
+(defn- proof
+  [artifact-id]
+  (#'existence/unsafe-verified-digest artifact-id))
+
 (defn- materialized-pending!
   "Materialize a FRESH candidate from the fixture parent+mutation and
   transition it to :evaluation-pending. Returns the pending Candidate
@@ -189,11 +205,18 @@
   ([store] (materialized-pending! store 1))
   ([store n]
    (let [evidence (str "sha256:" (format "%064x" n))
+         _ (artifact/ensure-artifact! (:sqlite store) evidence "application/edn" 0)
          m (mutation* {:mutation/id (uuid n) :evidence/id evidence})
          c (candidate/create-candidate
             (candidate-request {:mutation/id (uuid n) :evidence/id evidence}))
-         m1 (candidate/materialize-candidate! store c m)]
-     (candidate/mark-evaluation-pending! store (:candidate/id m1)))))
+         handle (candidate-store/make-candidate-store (:sqlite store))
+         m1 (candidate/materialize-candidate!
+             handle
+             (update c :candidate/genome-id proof)
+             (-> m
+                 (update :parent/genome-id proof)
+                 (update :evidence/id proof)))]
+     (candidate/mark-evaluation-pending! handle (:candidate/id m1)))))
 
 ;; --- genome bundles (component paired-fixture style) --------------------------
 
@@ -226,7 +249,7 @@
                                      :models "models.edn"
                                      :memory "memory.edn"
                                      :evolution "evolution.edn"}
-                           :capabilities/requested #{:model/call}
+                           :capabilities/requested #{:tool/call}
                            :evolution {:max-risk :behavioral
                                        :mutable #{:parameters :prompts
                                                   :skills :programs}}
@@ -547,11 +570,18 @@
                            {:task-runner runner-fn})))))
     (testing "a candidate not :evaluation-pending fails closed"
       (let [evidence (str "sha256:" (format "%064x" 2))
+            _ (artifact/ensure-artifact! (:sqlite store) evidence "application/edn" 0)
             m (mutation* {:mutation/id (uuid 2) :evidence/id evidence})
             c (candidate/create-candidate
                (candidate-request {:mutation/id (uuid 2)
                                    :evidence/id evidence}))
-            materialized (candidate/materialize-candidate! store c m)]
+            handle (candidate-store/make-candidate-store (:sqlite store))
+            materialized (candidate/materialize-candidate!
+                          handle
+                          (update c :candidate/genome-id proof)
+                          (-> m
+                              (update :parent/genome-id proof)
+                              (update :evidence/id proof)))]
         (is (= :eval/candidate-state-invalid
                (error-type #(eval-core/evaluate-batch!
                              ev [(:candidate/id materialized)] :test/v1
@@ -607,7 +637,7 @@
                (mapv :status (:gates (by-id (:candidate/id pass-1))))))
         (is (false? (:eligible? (:eligibility (by-id (:candidate/id fail-g2))))))
         (is (= [:pass :pass :fail :not-run :not-run :not-run :not-run]
-               (mapv :status (:gates (by-id (:candidate/id fail-g2))))))))
+               (mapv :status (:gates (by-id (:candidate/id fail-g2)))))))
     (testing "no cross-candidate corruption: each eval persists against its OWN row"
       (doseq [e (:batch/completed result)]
         (let [ev-id (:evaluation/id (:task/result e))
@@ -615,7 +645,10 @@
           (is (= cid (:candidate/id (eval-core/find-evaluation ev ev-id))))
           (is (= 1 (count (eval-core/find-evaluations-by-candidate ev cid)))
               "exactly one eval_runs row per candidate")
-          (is (= :evaluated (:state (candidate/find-candidate store cid)))))))
+          (is (= :evaluated (:state (candidate/find-candidate
+                                      (candidate-store/make-candidate-store
+                                       (:sqlite store))
+                                      cid))))))))
     (testing "passing candidates carry a durable paired-results eval ref"
       (doseq [cid [(:candidate/id pass-1) (:candidate/id pass-2)]]
         (let [eval-rec (:task/result
@@ -628,4 +661,7 @@
         (is (= (:candidate/id unres) (:task/id f)))
         (is (= :eval/genome-unresolved (:error/type f)))
         (is (= :evaluation-pending
-               (:state (candidate/find-candidate store (:candidate/id unres)))))))))
+               (:state (candidate/find-candidate
+                        (candidate-store/make-candidate-store (:sqlite store))
+                        (:candidate/id unres)))))))
+))

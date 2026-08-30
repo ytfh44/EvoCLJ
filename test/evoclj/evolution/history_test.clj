@@ -43,7 +43,10 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.evolution.candidate :as candidate]
             [evoclj.evolution.history :as history]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
+            [evoclj.store.candidate-store :as candidate-store]
+            [evoclj.store.existence :as existence]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.file FileVisitOption Files LinkOption Paths)
@@ -187,6 +190,15 @@
         db (sqlite/spec path)
         cas-root (temp-cas-dir)]
     (migrate/migrate! db)
+    (doseq [[artifact-id media-type]
+            [[parent-genome-id "application/octet-stream"]
+             [candidate-genome-id "application/octet-stream"]
+             [evidence-id "application/edn"]
+             [file-hash "application/edn"]
+             [resolution-id "application/edn"]]]
+      (artifact/ensure-artifact! db artifact-id media-type 0))
+    (artifact/ensure-genome! db parent-genome-id)
+    (artifact/ensure-genome! db candidate-genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id generation-id
@@ -198,6 +210,10 @@
                      :created_at "2025-01-01T00:00:00Z"}))
     {:sqlite db :cas (cas/->cas cas-root)}))
 
+(defn- proof
+  [artifact-id]
+  (#'existence/unsafe-verified-digest artifact-id))
+
 (defn- materialize!
   "Materialize a candidate for `m` (default fixture mutation) and
   return the candidate record. The candidate request inherits the
@@ -206,15 +222,19 @@
   overrides the request's :parent/generation-id (default
   generation-id) so the composite lineage FK stays consistent."
   [store & [m parent-generation]]
-  (let [m (or m (mutation*))]
+  (let [m (or m (mutation*))
+        c (candidate/create-candidate
+           (candidate-request {:mutation/id (:mutation/id m)
+                               :parent/genome-id (:parent/genome-id m)
+                               :parent/generation-id (or parent-generation
+                                                         generation-id)}))
+        handle (candidate-store/make-candidate-store (:sqlite store))]
     (candidate/materialize-candidate!
-     store
-     (candidate/create-candidate
-      (candidate-request {:mutation/id (:mutation/id m)
-                          :parent/genome-id (:parent/genome-id m)
-                          :parent/generation-id (or parent-generation
-                                                    generation-id)}))
-     m)))
+     handle
+     (update c :candidate/genome-id proof)
+     (-> m
+         (update :parent/genome-id proof)
+         (update :evidence/id proof)))))
 
 (defn- insert-eval-run!
   "Insert an eval_runs row (M8 fixture): the evaluator result for one
@@ -505,6 +525,9 @@
   (let [store (fresh-store)
         other-genome (str "sha256:" (apply str (repeat 64 "b")))
         other-generation "generation-2"
+        _ (artifact/ensure-artifact! (:sqlite store) other-genome
+                                     "application/octet-stream" 0)
+        _ (artifact/ensure-genome! (:sqlite store) other-genome)
         _ (sqlite/with-db [conn (:sqlite store)]
             (jdbc/insert! conn :generations
                           {:id other-generation
