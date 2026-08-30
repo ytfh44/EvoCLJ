@@ -68,6 +68,7 @@
     ToolSurface current entry -> capture-tool-binding -> CallBinding -> normalize -> authorize -> execute -> validate.
   Cross-persistence/audit writes only pure data {:binding/id ... :tool/id ... :revision/id ... :revision/seq ...}."
   (:require [evoclj.binding.call :as binding]
+            [evoclj.capability.core :as capability]
             [evoclj.capability.broker :as broker]
             [evoclj.capability.schema :as capability-schema]
             [evoclj.intent.schema :as intent-schema]
@@ -115,14 +116,20 @@
                   dispatch, including the first (default 2 = one
                   retry). Retries happen only for providers declaring
                   :retry {:safe? true}.
-  - :freshness    descriptor freshness policy :required | :best-effort | :pinned
+  - :requested-capabilities optional Requested capability categories
+                  carried by the compiled Genome.
+  - :effects       optional static Effects carried by the compiled topology.
+                  When either is supplied, both must be supplied and satisfy
+                  Effects ⊆ Requested; Granted is derived from :leases.
+  - :freshness     descriptor freshness policy :required | :best-effort | :pinned
                   (default :best-effort). :required fails closed when the
                   binding is stale, :best-effort proceeds with stale? true in
                   binding audit, :pinned never refreshes.
 
   Returns a closed map. Malformed input throws
   :broker/context-invalid."
-  [{:keys [registry leases usage now max-attempts model-registry freshness]}]
+  [{:keys [registry leases usage now max-attempts model-registry
+           requested-capabilities effects freshness]}]
   (when-not (instance? clojure.lang.Atom registry)
     (throw (err/error :broker/context-invalid
                       "broker context requires a provider registry atom"
@@ -155,12 +162,29 @@
       (throw (err/error :broker/context-invalid
                         "max-attempts must be a positive integer"
                         {:value (err/sanitize max-attempts)})))
+    (when (not= (some? effects) (some? requested-capabilities))
+      (throw (err/error :broker/context-invalid
+                        "effects and requested-capabilities must be supplied together"
+                        {:reason :capability-lattice-incomplete})))
+    (when (and effects requested-capabilities)
+      (try
+        (capability/validate-effect-lattice!
+         effects
+         requested-capabilities
+         (capability/granted-effects leases))
+        (catch clojure.lang.ExceptionInfo e
+          (throw (err/error :broker/context-invalid
+                            "broker context carries an invalid capability lattice"
+                            {:reason :capability-lattice-invalid
+                             :cause (err/error-data e)})))))
     {:registry registry
      :leases leases
      :usage usage
      :now now
      :max-attempts max-attempts
      :model-registry model-registry
+     :requested-capabilities requested-capabilities
+     :effects effects
      :freshness freshness}))
 
 ;; --- freshness / binding helpers ------------------------------------------
@@ -578,6 +602,21 @@
                                        decision @usage-atom)
                          binding** decision)))))))))))))
 
+(defn- requested-effect-denial
+  "Return a typed denial when a runtime intent asks for an effect that
+  is not in the compiled Genome's Requested set. Exact lease coverage is
+  still checked by the broker after this lattice gate."
+  [broker-context intent]
+  (let [requested (:requested-capabilities broker-context)
+        effect (capability/intent-effect intent)]
+    (when (and requested effect (not (contains? requested effect)))
+      (result-error intent :capability/denied
+                    "intent effect was not declared in Requested"
+                    {:reason :capability/not-requested
+                     :effect effect
+                     :requested requested}
+                    nil @(:usage broker-context)))))
+
 (defn dispatch!
   "Execute intent through the broker pipeline in the NORMATIVE order
   (component Step 5): validate intent -> lookup provider -> normalize
@@ -594,16 +633,18 @@
   :intent/unsupported-dispatch)."
   [broker-context intent]
   (intent-schema/validate-intent intent)
-  (case (:intent/type intent)
-    :intent/tool-call
-    (dispatch-registered! broker-context intent
-                          (get-in intent [:payload :tool/id]) true)
-    :intent/memory-read
-    (dispatch-registered! broker-context intent :memory/kv false)
-    :intent/memory-write
-    (dispatch-registered! broker-context intent :memory/kv false)
-    :intent/model-call (dispatch-model-call! broker-context intent)
-    (result-error intent :intent/unsupported-dispatch
-                  "the v0 dispatcher executes :intent/tool-call, :intent/memory-read, :intent/memory-write, and :intent/model-call intents only"
-                  {:intent/type (:intent/type intent)}
-                  nil @(:usage broker-context))))
+  (if-let [denial (requested-effect-denial broker-context intent)]
+    denial
+    (case (:intent/type intent)
+      :intent/tool-call
+      (dispatch-registered! broker-context intent
+                            (get-in intent [:payload :tool/id]) true)
+      :intent/memory-read
+      (dispatch-registered! broker-context intent :memory/kv false)
+      :intent/memory-write
+      (dispatch-registered! broker-context intent :memory/kv false)
+      :intent/model-call (dispatch-model-call! broker-context intent)
+      (result-error intent :intent/unsupported-dispatch
+                    "the v0 dispatcher executes :intent/tool-call, :intent/memory-read, :intent/memory-write, and :intent/model-call intents only"
+                    {:intent/type (:intent/type intent)}
+                    nil @(:usage broker-context)))))

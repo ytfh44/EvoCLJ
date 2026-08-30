@@ -61,7 +61,8 @@
   compile time because Definition > validation: only executable types
   are representable via compile; the :reason is
   :unsupported-node-type and :node/type carries the offending type)."
-  (:require [evoclj.kernel.error :as err]
+  (:require [evoclj.capability.core :as capability]
+            [evoclj.kernel.error :as err]
             [evoclj.store.schema :as schema]
             [malli.core :as m]))
 
@@ -628,16 +629,16 @@
 
   `topology` is the topology.edn value: {:graph/id <keyword> :entry
   <node-id> :nodes {node-id {:node/type <v0 type> ...}} :limits
-  {:max-steps <pos-int>}}. :nodes may also be a vector of [node-id node]
-  pairs, which is how duplicate ids can be expressed in pure EDN; they
-  are rejected with :reason :duplicate-node-id.
+  {:max-steps <pos-int>}}. Sequential nodes use :next; Loop nodes use
+  :body, :exit, :until, and :max-iterations. :nodes may also be a
+  vector of [node-id node] pairs, which is how duplicate ids can be
+  expressed in pure EDN; they are rejected with :reason
+  :duplicate-node-id.
 
   `executable-types` is the runtime feature set — the set of node types
-  the target runtime can execute (handler exists). Definition >
-  validation: only executable types are representable via compile. By
-  default it is executable-node-types, so a topology containing :route
-  (syntax-only, no handler) fails with :topology/unsupported-node-type
-  unless the caller provides an expanded set that includes :route.
+  the target runtime can execute (handler exists). `capability-context`
+  is optional {:requested <set> :granted <set>} and enables the full
+  Effects ⊆ Requested ⊆ Granted check at compile time.
 
   Compositional typing (PLT4): each node declares optional :input-schema
   and :output-schema keywords (resolved via the closed schema registry,
@@ -649,32 +650,42 @@
   Returns a pure data map {:graph/id ... :entry ... :nodes {node-id
   {:node/id ... :node/type ... :input-schema ... :output-schema ... :schema/input ...}}
   :regions {loop-id {:region/type :loop :body ... :exit ... :until ... :max ...}}
-  :adjacency {node-id [normal-successors]} :limits {...}} with every
-  map sorted, so identical logical topologies compile to equal values with
-  identical serialization regardless of EDN key order (Step 4).
+  :effects #{...} :adjacency {node-id [normal-successors]} :limits {...}}
+  with every map sorted and deterministic.
 
   Throws ExceptionInfo with a stable :error/type: :topology/invalid
-  (malformed shapes; the :reason distinguishes :invalid-topology,
+  (malformed shapes; :reason distinguishes :invalid-topology,
   :invalid-graph-id, :invalid-entry, :invalid-limits, :invalid-nodes,
   :invalid-node-entry, :invalid-node-id, :invalid-node,
   :unknown-node-type, :invalid-attribute, :missing-required-key,
   :dangling-next, :dangling-body, :invalid-max-iterations,
-  :missing-entry, :duplicate-node-id, :unknown-schema), :topology/cycle (a raw cycle
-  with no :loop node; :nodes holds the sorted cycle ids), :topology/type-mismatch
-  (edge output not subtype of input, :reason :type-mismatch, :from :to, :output-type :input-type),
-  or :topology/unsupported-node-type (a syntactically known type with no
+  :loop-next-forbidden, :invalid-loop-region, :missing-entry,
+  :duplicate-node-id, :unknown-schema, :invalid-capability-context),
+  :topology/cycle (a normal control-flow cycle with sorted :nodes),
+  :topology/type-mismatch (edge output not subtype of input, with
+  :reason :type-mismatch, :from, :to, and :edge), or
+  :topology/unsupported-node-type (a syntactically known type with no
   runtime handler; :reason :unsupported-node-type, :node/type carries
   the offending type; :route is the canonical example)."
-  ([topology] (compile-topology topology executable-node-types))
+  ([topology] (compile-topology topology executable-node-types nil))
   ([topology executable-types]
+   (compile-topology topology executable-types nil))
+  ([topology executable-types capability-context]
    (when-not (set? executable-types)
      (throw (err/error :topology/invalid
                        "executable-types must be a set of keywords"
-                       {:reason :invalid-executable-types :value (err/sanitize executable-types)})))
+                       {:reason :invalid-executable-types
+                        :value (err/sanitize executable-types)})))
    (when-not (every? keyword? executable-types)
      (throw (err/error :topology/invalid
                        "executable-types must be a set of keywords"
-                       {:reason :invalid-executable-types :value (err/sanitize executable-types)})))
+                       {:reason :invalid-executable-types
+                        :value (err/sanitize executable-types)})))
+   (when (and capability-context (not (map? capability-context)))
+     (throw (err/error :topology/invalid
+                       "capability-context must be a map or nil"
+                       {:reason :invalid-capability-context
+                        :value (err/sanitize capability-context)})))
    (validate-shape! topology)
    (let [entries (node-entries (:nodes topology))
          node-map (normalize-nodes entries)
@@ -683,17 +694,26 @@
      (check-entry! entry node-ids)
      (doseq [[id node] entries]
        (validate-node! id node executable-types))
-    (check-nexts! entries node-ids)
-    (check-loop-regions! node-map)
-    (check-cycles! entries node-map)
-    ;; PLT4: inject typing (defaults to :schema/any) and enforce edge typing.
-    (let [typed-map (inject-typing! node-map)
-          regions (build-regions typed-map)]
-      (check-typing! typed-map)
-      (into (sorted-map-by canonical-compare)
-            {:graph/id (:graph/id topology)
-             :entry entry
-             :nodes typed-map
-             :regions regions
-             :adjacency (build-adjacency typed-map)
-             :limits (or (:limits topology) {})})))))
+     (check-nexts! entries node-ids)
+     (check-loop-regions! node-map)
+     (check-cycles! entries node-map)
+     (let [typed-map (inject-typing! node-map)
+           regions (build-regions typed-map)
+           effects (capability/topology-effects {:nodes typed-map})
+           compiled (into (sorted-map-by canonical-compare)
+                          {:graph/id (:graph/id topology)
+                           :entry entry
+                           :nodes typed-map
+                           :regions regions
+                           :effects effects
+                           :adjacency (build-adjacency typed-map)
+                           :limits (or (:limits topology) {})})]
+       (check-typing! typed-map)
+       (when capability-context
+         (capability/validate-effect-lattice!
+          effects
+          (or (:requested capability-context)
+              (:requested-capabilities capability-context))
+          (or (:granted capability-context)
+              (:granted-effects capability-context))))
+       compiled))))

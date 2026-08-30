@@ -129,7 +129,8 @@
    bindings query degrades with a COUNTED typed event
    (:scheduler/bindings-degraded, sanitized error data) instead of the
    former silent swallow."
-  (:require [evoclj.genome.types :as types]
+  (:require [evoclj.capability.core :as capability]
+            [evoclj.genome.types :as types]
             [evoclj.intent.core :as intent]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
@@ -631,6 +632,30 @@
      :output-ref out-ref
      :error/artifact-ref nil
      :episode/id nil}))
+(defn- validate-effect-lattice!
+  "Enforce PLT5 before a session leaves :created. Static Effects come
+  from the compiled topology; Requested comes from the compiled genome
+  manifest; Granted comes from the kernel-owned broker lease snapshot.
+  Direct scheduler fixtures without a manifest retain the topology's
+  Effects as their explicit Requested set."
+  [executor topology]
+  (let [compiled (get-in executor [:phenotype :compiled])
+        effects (or (:effects compiled)
+                    (:effects topology)
+                    (capability/topology-effects topology))
+        declared? (or (contains? compiled :requested-capabilities)
+                      (contains? (:manifest compiled)
+                                 :capabilities/requested))
+        requested (if declared?
+                    (or (:requested-capabilities compiled)
+                        (get-in compiled
+                                [:manifest :capabilities/requested]))
+                    effects)
+        granted (capability/granted-effects
+                 (get-in executor [:dispatch :leases]))]
+    (if declared?
+      (capability/validate-effect-lattice! effects requested granted)
+      (capability/validate-effect-lattice! effects requested))))
 
 ;; --- the scheduler ----------------------------------------------------------
 
@@ -701,16 +726,32 @@
                            :session/phenotype-id (:phenotype/id pin)
                            :executor/phenotype-id (:phenotype/id (:phenotype executor))}))))
     (let [topology (get-in executor [:phenotype :compiled :topology])
+          compiled (:compiled (:phenotype executor))
+          declared-requested (cond
+                               (contains? compiled :requested-capabilities)
+                               (:requested-capabilities compiled)
+                               (contains? (:manifest compiled)
+                                          :capabilities/requested)
+                               (get-in compiled
+                                       [:manifest :capabilities/requested]))
           entry (:entry topology)
           limits (or (:limits topology) {})
           max-steps (:max-steps limits)
-          root (first (event/events-for-session db (:session/id pin)))]
+          root (first (event/events-for-session db (:session/id pin)))
+          lattice (validate-effect-lattice! executor topology)
+          dispatch-context (cond-> (assoc (:dispatch executor)
+                                          :effects (:effects lattice))
+                             (some? declared-requested)
+                             (assoc :requested-capabilities
+                                    (:requested lattice)))
+          executor (assoc executor :dispatch dispatch-context)]
       (when-not (= :session/created (:event/type root))
         (throw (err/error :scheduler/session-invalid
                           "session causal chain must open with a :session/created root event"
                           {:reason :missing-root-event
                            :session/id (:session/id pin)
                            :first-event (:event/type root)})))
+
       ;; the store's state machine has no :created → :running edge;
       ;; the :resolving hop is the normative path (component)
       ;; WO-B1 production wiring: restore the session's durable bindings
