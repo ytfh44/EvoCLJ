@@ -196,7 +196,8 @@
    :compiled/resolution-id resolution-id
    :compiled/phenotype-id phenotype-id
    :abi {}
-   :manifest {}
+   :manifest {:capabilities/requested #{:tool/call}}
+   :requested-capabilities #{:tool/call}
    :topology (topology/compile-topology fixture-topology)
    :programs (into (sorted-map)
                    {:program/done? {:program/id :program/done? :entry 'agent.done/done?}

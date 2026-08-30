@@ -219,6 +219,7 @@
   :module-file-missing, :module-parse-error, :invalid-program-registry,
   :duplicate-program-id) or :compiler/program-unresolved."
   [loaded-genome provider-catalog]
+  (validate-loaded-genome! loaded-genome)
   (let [manifest (:manifest loaded-genome)
         abi (:abi manifest)
         requested-capabilities (:capabilities/requested manifest)

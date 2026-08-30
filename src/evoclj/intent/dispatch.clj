@@ -610,12 +610,14 @@
   (let [requested (:requested-capabilities broker-context)
         effect (capability/intent-effect intent)]
     (when (and requested effect (not (contains? requested effect)))
-      (result-error intent :capability/denied
-                    "intent effect was not declared in Requested"
-                    {:reason :capability/not-requested
-                     :effect effect
-                     :requested requested}
-                    nil @(:usage broker-context)))))
+      (attach-journal
+       (result-error intent :capability/denied
+                     "intent effect was not declared in Requested"
+                     {:reason :capability/not-requested
+                      :effect effect
+                      :requested requested}
+                     nil @(:usage broker-context))
+       nil intent nil))))
 
 (defn dispatch!
   "Execute intent through the broker pipeline in the NORMATIVE order

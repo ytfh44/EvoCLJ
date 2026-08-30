@@ -147,6 +147,7 @@ h)
 
       (= :memory kind)
       (cond-> #{}
+        (contains? actions :invoke) (conj :memory/read :memory/write)
         (contains? actions :read) (conj :memory/read)
         (contains? actions :write) (conj :memory/write))
 

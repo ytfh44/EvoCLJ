@@ -739,11 +739,9 @@
           max-steps (:max-steps limits)
           root (first (event/events-for-session db (:session/id pin)))
           lattice (validate-effect-lattice! executor topology)
-          dispatch-context (cond-> (assoc (:dispatch executor)
-                                          :effects (:effects lattice))
-                             (some? declared-requested)
-                             (assoc :requested-capabilities
-                                    (:requested lattice)))
+          dispatch-context (assoc (:dispatch executor)
+                                  :effects (:effects lattice)
+                                  :requested-capabilities (:requested lattice))
           executor (assoc executor :dispatch dispatch-context)]
       (when-not (= :session/created (:event/type root))
         (throw (err/error :scheduler/session-invalid
