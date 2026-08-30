@@ -4,13 +4,24 @@
   instantiate turns a CompiledGenome (evoclj.compiler.core) plus a
   runtime-deps map into a live Phenotype:
 
-    (instantiate compiled-genome runtime-deps)
-    ;; => {:phenotype/id ...
-    ;;     :compiled compiled-genome
-    ;;     :sci-runtime ...
-    ;;     :providers ...
-    ;;     :capabilities ...
-    ;;     :stores ...}
+  Identity split (PLT6):
+
+    code-id = SHA256(kernel-abi || genome-id || resolution-id)
+    deployment-id = SHA256(code-id || canonical(leases) || canonical(bindings))
+
+  CodeId identifies pure compiled code (shared by all deployments of the
+  same Genome and Resolution). DeploymentId binds CodeId to concrete
+  runtime leases and durable bindings.
+
+  (instantiate compiled-genome runtime-deps)
+  ;; => {:phenotype/id ...
+  ;;     :code/id ...
+  ;;     :deployment/id ...
+  ;;     :compiled compiled-genome
+  ;;     :sci-runtime ...
+  ;;     :providers ...
+  ;;     :capabilities ...
+  ;;     :stores ...}
 
   THE PHENOTYPE OWNS ONE THING: its isolated SCI runtime. instantiate
   builds a fresh closed SCI context (evoclj.sci.context/make-context)
@@ -64,23 +75,12 @@
   lease — the only mutable state construction creates is the Phenotype's
   own SCI runtime. halt! therefore releases nothing external: it marks
   the Phenotype halted and is idempotent; host-owned stores, providers,
-  and capabilities are never touched by either function.
-
-  Error contract (Global Constraint 22 — plain serializable data):
-  :runtime/invalid-compiled for a malformed CompiledGenome (the
-  :reason distinguishes :not-a-map, :phenotype-id-invalid,
-  :programs-invalid); :runtime/deps-invalid for a malformed
-  runtime-deps map (:reason distinguishes :invalid-shape,
-  :providers-missing, :registry-not-atom, :capabilities-missing,
-  :usage-missing, :usage-not-atom, :invalid-lease, :stores-invalid,
-  :program-sources-missing; an invalid lease carries its serializable
-  :cause under :cause); :runtime/source-missing for a compiled program
-  whose source is absent or not a string in :program-sources."
+  and capabilities are never touched by either function."
   (:require [evoclj.capability.schema :as capability-schema]
+            [evoclj.compiler.core :as compiler-core]
             [evoclj.kernel.error :as err]
             [evoclj.sci.context :as context]
             [evoclj.sci.execute :as execute]))
-
 ;; --- shape validation -------------------------------------------------------
 
 (def ^:private phenotype-id-pattern #"^sha256:[0-9a-f]{64}$")
@@ -235,14 +235,17 @@
   Returns:
 
     {:phenotype/id <:compiled/phenotype-id>
+     :code/id (or (:compiled/code-id compiled-genome) (:compiled/phenotype-id compiled-genome))
+     :deployment/id <derived DeploymentId from code-id, leases, bindings>
      :compiled <the SAME immutable CompiledGenome value>
      :sci-runtime <fresh isolated runtime map>
      :providers <host registry map, by reference>
      :capabilities <host leases + usage map, by reference>
      :stores <declared stores, by reference>}
 
-  Two Phenotypes from one Genome therefore share the immutable compiled
-  data while owning independent SCI mutable contexts (Global
+  Two Phenotypes from one Genome share the immutable compiled
+  code data while owning independent SCI contexts and distinct
+  DeploymentIds when configured with different leases or bindings.
   Constraints 3, 22, 23).
 
   Throws ExceptionInfo with a stable :error/type:
@@ -251,8 +254,15 @@
   [compiled-genome runtime-deps]
   (validate-compiled! compiled-genome)
   (validate-deps! runtime-deps)
-  (let [programs (:programs compiled-genome)]
-    {:phenotype/id (:compiled/phenotype-id compiled-genome)
+  (let [programs (:programs compiled-genome)
+        cid (or (:compiled/code-id compiled-genome)
+                (:compiled/phenotype-id compiled-genome))
+        leases (or (get-in runtime-deps [:capabilities :leases]) [])
+        bindings (or (get-in runtime-deps [:bindings]) [])
+        did (compiler-core/deployment-id cid leases bindings)]
+    {:phenotype/id cid
+     :code/id cid
+     :deployment/id did
      :compiled compiled-genome
      :sci-runtime (load-programs! programs (:program-sources runtime-deps))
      :providers (:providers runtime-deps)

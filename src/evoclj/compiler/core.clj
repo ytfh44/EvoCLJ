@@ -22,19 +22,16 @@
   descriptor, or compilation fails closed with
   :compiler/program-unresolved.
 
-  Phenotype identity (normative):
+  Identity split (PLT6):
 
-    phenotype-id = SHA256(kernel-abi || genome-id || resolution-id)
-
-  kernel-abi is the manifest's :abi map serialized in the same
-  canonical deterministic EDN form used elsewhere (sorted keys, pr-str;
-  Global Constraint 6); genome-id and resolution-id are the canonical
-  \"sha256:<64 hex>\" strings. The digest uses the same UTF-8 /
-  CRLF-normalized text hashing as evoclj.genome.hash and yields the
-  same \"sha256:<64 hex>\" format. Changing only the Resolution
-  therefore changes the Phenotype ID but never the Genome ID (Global
-  Constraints 1, 2, 6).
-
+    code-id = SHA256(kernel-abi || genome-id || resolution-id)
+    deployment-id = SHA256(code-id || canonical(leases) || canonical(bindings))
+  CodeId (formerly PhenotypeId) identifies pure compiled code: identical ABI,
+  Genome, and Resolution always yield identical CodeId. DeploymentId binds
+  CodeId to a concrete deployment's host leases and durable bindings.
+  Phenotype identity retains CodeId for pure compiled code identity, while
+  CompiledGenome and live Phenotypes also carry :compiled/code-id and
+  deployment derivation helpers (Definition > validation).
   The CompiledGenome is pure, fully serializable EDN data (Global
   Constraint 22): program descriptors carry :source/digest references
   and never the source bytes, and no :files payload or byte array
@@ -157,20 +154,42 @@
 
 ;; --- Phenotype identity ----------------------------------------------------
 
-(defn- canonical-edn-string
-  "Canonical deterministic EDN serialization for the kernel ABI map:
-  sorted keys, pr-str — the same deterministic EDN normalization
-  conventions as evoclj.compiler.resolution."
-  [abi]
-  (pr-str (into (sorted-map) abi)))
+(defn- canonical-edn-value
+  "Recursively normalize values so maps are sorted and collections order is
+  deterministic."
+  [v]
+  (cond
+    (map? v) (into (sorted-map) (map (fn [[k val]] [k (canonical-edn-value val)])) v)
+    (vector? v) (mapv canonical-edn-value v)
+    (set? v) (vec (sort-by pr-str (map canonical-edn-value v)))
+    (seq? v) (mapv canonical-edn-value v)
+    :else v))
 
-(defn- phenotype-id
-  "The normative Phenotype ID: sha256:<64 hex> over the canonical
-  serialization of kernel-abi || genome-id || resolution-id, hashed with
-  the same UTF-8 / CRLF-normalized text digest used everywhere else
-  (evoclj.genome.hash/text-digest)."
+(defn- canonical-edn-string
+  "Canonical deterministic EDN serialization: sorted keys, deterministic
+  collection forms, pr-str."
+  [v]
+  (pr-str (canonical-edn-value v)))
+
+(defn- code-id
+  "The canonical CodeId: sha256:<64 hex> over the canonical serialization
+  of kernel-abi || genome-id || resolution-id (pure code identity)."
   [abi genome-id resolution-id]
   (hash/text-digest (str (canonical-edn-string abi) genome-id resolution-id)))
+
+(defn- phenotype-id
+  "Legacy alias for CodeId (normative pure code identity)."
+  [abi genome-id resolution-id]
+  (code-id abi genome-id resolution-id))
+
+(defn deployment-id
+  "Derive the deployment identity from code-id, leases, and durable bindings:
+  DeploymentId = SHA256(code-id || canonical(leases) || canonical(bindings))."
+  [code-id-str leases bindings]
+  (hash/text-digest
+   (str (or code-id-str "")
+        (canonical-edn-string (vec (sort-by pr-str (or leases []))))
+        (canonical-edn-string (vec (sort-by pr-str (or bindings [])))))))
 
 ;; --- public entry point ----------------------------------------------------
 
@@ -199,15 +218,13 @@
 
   Returns a pure data map with exactly the normative CompiledGenome key
   set (Detailed Public Data Contracts): :compiled/genome-id,
-  :compiled/resolution-id, :compiled/phenotype-id, :abi, :manifest,
-  :topology, :effects, :programs (sorted :program/id => ProgramDescriptor),
-  :requested-capabilities, and :resolution. :compiled/phenotype-id is
-  sha256:<64 hex> over the canonical serialization of the manifest's
-  :abi map concatenated with the Genome ID and the Resolution ID, so
-  changing only the Resolution changes the Phenotype ID but never the
-  Genome ID (Global Constraints 1, 2, 6). The result round-trips
-  through pr-str / clojure.edn read-string and contains no raw source
-  bytes, byte arrays, or :files payloads (Global Constraint 22).
+  :compiled/resolution-id, :compiled/code-id, :compiled/phenotype-id,
+  :abi, :manifest, :topology, :effects,
+  :programs (sorted :program/id => ProgramDescriptor),
+  :requested-capabilities, and :resolution. :compiled/code-id (and
+  :compiled/phenotype-id) is sha256:<64 hex> over ABI || genome-id || resolution-id.
+  The result round-trips through pr-str / clojure.edn read-string
+  and contains no raw source bytes or byte arrays (Global Constraint 22).
 
   Throws ExceptionInfo with a stable :error/type. Errors from the
   focused modules pass through unchanged (:genome/schema-invalid,
@@ -234,11 +251,13 @@
         programs (compile-programs loaded-genome)
         _ (check-topology-programs! compiled-topology programs)
         genome-id (:genome/id loaded-genome)
-        resolution-id (:resolution/id resolution-map)]
+        resolution-id (:resolution/id resolution-map)
+        cid (code-id abi genome-id resolution-id)]
     (into (sorted-map)
           {:compiled/genome-id genome-id
            :compiled/resolution-id resolution-id
-           :compiled/phenotype-id (phenotype-id abi genome-id resolution-id)
+           :compiled/code-id cid
+           :compiled/phenotype-id cid
            :abi abi
            :manifest manifest
            :topology compiled-topology

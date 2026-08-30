@@ -41,9 +41,9 @@
 (def ^:private contract-keys
   "The normative CompiledGenome key set (Detailed Public Data
   Contracts)."
-  #{:compiled/genome-id :compiled/resolution-id :compiled/phenotype-id
-    :abi :manifest :topology :effects :programs :requested-capabilities
-    :resolution})
+  #{:compiled/genome-id :compiled/resolution-id :compiled/code-id
+    :compiled/phenotype-id :abi :manifest :topology :effects
+    :programs :requested-capabilities :resolution})
 
 (defn- fixture-root
   "The bundle directory for a named fixture under test/fixtures/genomes."
