@@ -195,4 +195,37 @@
   (let [ss-store (normalize-store store)]
     (some-> (ss/find-session ss-store session-id)
             validate-session)))
+
+;; ---------------------------------------------------------------------------
+;; Session helpers for subagent child execution (S3)
+;; ---------------------------------------------------------------------------
+
+(defn get-session!
+  "Fetch session or throw :store/session-not-found when missing.
+  Used by subagent run path to distinguish :subagent/not-found from
+  generic nil."
+  [store session-id]
+  (or (get-session store session-id)
+      (throw (ex-info (str "session not found: " (str session-id))
+                      {:error/type :store/session-not-found
+                       :session/id (try (types/session-id session-id)
+                                        (catch Exception _ session-id))}))))
+
+(defn session-exists?
+  "True when a session with `session-id` exists."
+  [store session-id]
+  (boolean (get-session store session-id)))
+
+(defn child-session?
+  "True when `session-id` is a child subagent session (has a parent link).
+  Requires the subagent link table; returns false when the table is absent
+  or the link is not found. Lazy-requires subagent to avoid circular deps."
+  [store session-id]
+  (try
+    (let [subagent-ns (try (requiring-resolve 'evoclj.runtime.subagent/get-parent-session-id)
+                           (catch Exception _ nil))]
+      (if subagent-ns
+        (boolean (@subagent-ns store session-id))
+        false))
+    (catch Exception _ false)))
   

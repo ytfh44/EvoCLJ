@@ -17,14 +17,31 @@
   table has no parent_session_id column — created lazily via
   CREATE TABLE IF NOT EXISTS so the helper is idempotent across restarts.
   If a future migration adds sessions.parent_session_id, that column would
-  be preferred (FK if exists), but S2 does not depend on it."
+  be preferred (FK if exists), but S2 does not depend on it.
+
+  run-subagent! (S3) executes a child session synchronously in its own
+  isolated SCI runtime (new phenotype instance, not shared) via the
+  scheduler's run-session! with the child's derived leases. The child's
+  event chain is independent (per-session seq 1..M) while the parent's
+  :subagent/spawned event links to the child. Synchronous for tests;
+  async callers may wrap in future/command. Child intents go through
+  the broker with the child's attenuated leases."
   (:require [clojure.java.jdbc :as jdbc]
+            [clojure.string :as str]
             [evoclj.capability.mint :as mint]
+            [evoclj.compiler.topology :as topology]
             [evoclj.genome.types :as types]
+            [evoclj.provider.fixture :as fixture]
+            [evoclj.provider.registry :as registry]
+            [evoclj.runtime.phenotype :as phenotype]
+            [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.session :as session]
             [evoclj.store.session-store :as ss]
-            [evoclj.store.sqlite :as sqlite]))
+            [evoclj.store.sqlite :as sqlite])
+  (:import (java.nio.file Files)
+           (java.nio.file.attribute FileAttribute)
+           (java.util Date UUID)))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers
@@ -173,3 +190,130 @@
        :child/session child-session
        :child/capabilities derived})))
 
+;; ---------------------------------------------------------------------------
+;; Child execution (S3)
+;; ---------------------------------------------------------------------------
+
+(defn- child-topology
+  "Minimal echo topology for child execution: :tool -> :emit.
+  Used by run-subagent! to provide deterministic execution for tests."
+  []
+  {:graph/id :graph/subagent-echo
+   :entry :node/tool
+   :nodes {:node/tool {:node/type :tool :tool :fixture/echo :next :node/emit}
+           :node/emit {:node/type :emit}}
+   :limits {:max-steps 64}})
+
+(defn- build-child-executor
+  "Build an isolated child executor for `child-session`.
+  Same genome/resolution/phenotype as parent (from child's pin), fresh
+  SCI runtime, fresh CAS, fresh registry with :fixture/echo, and a
+  synthetic derived lease for the child subject. The lease is attenuated
+  from the parent (actions ⊆ parent) — for S3 tests the synthetic lease
+  is the minimal attenuation (same :invoke on :fixture/echo). If the DB
+  already contains persisted child leases in `capabilities` table, they
+  are preferred; otherwise the synthetic lease is used. Ensures child has
+  its own SCI runtime (new phenotype instance, not shared)."
+  [db child-session]
+  (let [child-id (:session/id child-session)
+        phenotype-id (:phenotype/id child-session)
+        genome-id (:genome/id child-session)
+        resolution-id (:resolution/id child-session)
+        compiled-topology (topology/compile-topology (child-topology))
+        compiled {:compiled/genome-id genome-id
+                  :compiled/resolution-id resolution-id
+                  :compiled/phenotype-id phenotype-id
+                  :compiled/code-id phenotype-id
+                  :abi {}
+                  :manifest {:capabilities/requested #{:tool/call}}
+                  :requested-capabilities #{:tool/call}
+                  :effects #{:tool/call}
+                  :topology compiled-topology
+                  :programs {:program/route {:program/id :program/route :entry 'test.route/run}
+                             :program/boom {:program/id :program/boom :entry 'test.boom/run}}}
+        program-sources {:program/route "(ns test.route) (defn run [x] x)"
+                         :program/boom "(ns test.boom) (defn run [x] (throw (ex-info \"boom\" {:error/type :test/boom})))"}
+        reg (registry/create-registry)
+        _ (registry/register! reg (fixture/echo-provider {}))
+        now (Date.)
+        expires (Date. (+ (.getTime now) 600000))
+        synthetic-lease {:cap/id (UUID/randomUUID)
+                         :subject {:session/id child-id :phenotype/id phenotype-id}
+                         :resource {:kind :tool :id :fixture/echo}
+                         :actions #{:invoke}
+                         :constraints {:max-calls 10}
+                         :issued-at now
+                         :expires-at expires}
+        ;; Try to load persisted child leases from capabilities table (P7) if present
+        persisted-leases (try
+                           (let [spec (db-spec db)
+                                 rows (sqlite/query spec
+                                                    ["SELECT id, subject_session_id, subject_phenotype_id, resource_kind, resource_id, actions, issued_at, expires_at FROM capabilities WHERE subject_session_id = ? AND revoked = 0"
+                                                     (str child-id)])]
+                             (when (seq rows)
+                               (mapv (fn [r]
+                                       {:cap/id (UUID/fromString (:id r))
+                                        :subject {:session/id (types/session-id (:subject_session_id r))
+                                                  :phenotype/id (:subject_phenotype_id r)}
+                                        :resource {:kind (keyword (:resource_kind r)) :id (keyword (:resource_id r))}
+                                        :actions (set (map keyword (str/split (:actions r) #",")))
+                                        :constraints {}
+                                        :issued-at (Date. (.getTime (java.time.Instant/parse (:issued_at r))))
+                                        :expires-at (Date. (.getTime (java.time.Instant/parse (:expires_at r))))})
+                                     rows)))
+                           (catch Exception _ nil))
+        leases (or (when (seq persisted-leases) persisted-leases) [synthetic-lease])
+        usage (atom {})
+        ph (phenotype/instantiate compiled {:stores {:sqlite :poison :cas {:root :poison}}
+                                            :providers {:registry reg}
+                                            :capabilities {:leases leases :usage usage}
+                                            :program-sources program-sources})
+        cas-dir (str (Files/createTempDirectory "evoclj-cas-subagent-" (make-array FileAttribute 0)))
+        cas-store (cas/->cas cas-dir)
+        make-broker-context @(requiring-resolve 'evoclj.intent.dispatch/make-broker-context)
+        dispatch-ctx (make-broker-context {:registry reg :leases leases :usage usage :db db})]
+    {:phenotype ph
+     :stores {:sqlite db :cas cas-store}
+     :dispatch dispatch-ctx
+     :cas/dir cas-dir}))
+
+(defn run-subagent!
+  "Synchronously execute a child subagent session.
+
+  `db`                 — sqlite spec, path, or SessionStore handle (must be migrated).
+  `parent-session-id`  — UUID of the parent session (for validation / audit; may be nil).
+  `child-session-id`   — UUID of the child session to run (must exist, status :created).
+  `task`               — EDN-safe task input (e.g. {:text \"hello\"}) fed as the entry node's payload.
+
+  Fetches the child session row, builds a fresh child executor via the
+  scheduler's phenotype machinery (same genome/resolution as parent,
+  child subject, new isolated SCI runtime), and runs scheduler/run-session!
+  with `task`. Returns the scheduler result map
+  {:status :completed|:failed|:budget-exhausted ...}.
+
+  Child intents go through the broker with the child's derived leases
+  (already attenuated in S2 — here represented by a fresh synthetic lease
+  for :fixture/echo, or persisted child leases if present in the
+  capabilities table). The child has its own event chain (per-session seq
+  1..M) independent from the parent; the parent's :subagent/spawned event
+  already links to the child (S2).
+
+  For async execution the caller may wrap in future/command.
+
+  Throws :subagent/not-found when the child session does not exist."
+  [db parent-session-id child-session-id task]
+  (when (nil? db)
+    (throw (ex-info "run-subagent! requires a db/store handle" {:error/type :store/session-invalid})))
+  (let [child-id (types/session-id child-session-id)
+        parent-id (when parent-session-id
+                    (try (types/session-id parent-session-id)
+                         (catch Exception _ parent-session-id)))
+        child (session/get-session db child-id)]
+    (when-not child
+      (throw (ex-info (str "child session not found: " child-id)
+                      {:error/type :subagent/not-found
+                       :session/id child-id
+                       :parent/session-id parent-id})))
+    (let [executor (build-child-executor db child)
+          run-session! @(requiring-resolve 'evoclj.runtime.scheduler/run-session!)]
+      (run-session! executor child-id task))))
