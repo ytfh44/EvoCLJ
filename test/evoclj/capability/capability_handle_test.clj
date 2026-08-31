@@ -28,7 +28,7 @@
           (is (= :capability/handle-invalid (:error/type (ex-data e))))))))
   (testing "make-capability-handle produces a sealed handle that passes predicate"
     (let [h (cap/make-capability-handle {:handle-id (java.util.UUID/randomUUID)
-                                         :subject {:phenotype/id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+                                         :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
                                          :resource {:kind :tool :id :fixture/echo}
                                          :action :invoke
                                          :lease-id (java.util.UUID/randomUUID)})]

@@ -406,7 +406,7 @@
         expires (java.util.Date. (+ (.getTime now) 60000))]
     (mapv (fn [tool-id]
             {:cap/id (random-uuid)
-             :subject {:phenotype/id phenotype-id}
+             :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-id}
              :resource {:kind :tool :id tool-id}
              :actions #{:invoke}
              :constraints {:max-calls 10000}

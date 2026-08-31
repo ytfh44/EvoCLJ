@@ -48,7 +48,7 @@
    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"])
 
 (def ^:private subject-pool
-  (mapv (fn [id] {:phenotype/id id}) phenotype-pool))
+  (mapv (fn [id] {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id id}) phenotype-pool))
 
 (def ^:private resource-pool
   [{:kind :tool :id :fixture/echo}

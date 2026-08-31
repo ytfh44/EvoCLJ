@@ -121,7 +121,7 @@
   []
   (let [now (java.util.Date.)]
     {:cap/id (random-uuid)
-     :subject {:phenotype/id phenotype-id}
+     :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-id}
      :resource {:kind :tool :id :fixture/echo}
      :actions #{:invoke}
      :constraints {:max-calls 1000}

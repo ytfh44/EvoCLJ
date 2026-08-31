@@ -276,7 +276,7 @@
   [cap-id subject-pid tool-id]
   (let [now (java.util.Date.)]
     {:cap/id cap-id
-     :subject {:phenotype/id subject-pid}
+     :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id subject-pid}
      :resource {:kind :tool :id tool-id}
      :actions #{:invoke}
      :constraints {:max-calls 10}
@@ -290,7 +290,7 @@
   [cap-id subject-pid path]
   (let [now (java.util.Date.)]
     {:cap/id cap-id
-     :subject {:phenotype/id subject-pid}
+     :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id subject-pid}
      :resource {:kind :filesystem :path path}
      :actions #{:invoke}
      :constraints {:max-calls 10}

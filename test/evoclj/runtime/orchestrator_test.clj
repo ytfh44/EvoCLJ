@@ -58,7 +58,7 @@
           chain-nodes {:n0 {:node/type :tool :tool :fixture/echo :next :n1}
                        :n1 {:node/type :tool :tool :fixture/echo :next :n2}
                        :n2 {:node/type :emit}}
-          executor {:phenotype {:phenotype/id phenotype-id
+          executor {:phenotype {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-id
                                 :compiled {:compiled/genome-id genome-id :compiled/resolution-id resolution-id :compiled/phenotype-id phenotype-id
                                            :topology {:entry :n0 :nodes chain-nodes :limits {:max-steps 1}}}}
                     :stores {:sqlite db :cas cas-root}
@@ -75,7 +75,7 @@
   (testing "model requesting an unknown tool fails the session"
     (let [db (fresh-db) cas-root (fresh-cas)
           model-call-count (atom 0) tool-call-count (atom 0)
-          executor {:phenotype {:phenotype/id phenotype-id
+          executor {:phenotype {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-id
                                 :compiled {:compiled/genome-id genome-id :compiled/resolution-id resolution-id :compiled/phenotype-id phenotype-id
                                            :topology {:entry :llm :nodes {:llm {:node/type :llm :model/id "fake/model" :tools [{:tool/id :echo-tool :name "echo_tool"}] :next :done} :done {:node/type :emit}} :limits {:max-steps 64}}}}
                     :stores {:sqlite db :cas cas-root}
@@ -97,7 +97,7 @@
   (testing "payload :options :max-tool-rounds 2 limits the tool loop to 2 rounds"
     (let [db (fresh-db) cas-root (fresh-cas)
           model-calls (atom 0) tool-calls (atom 0)
-          executor {:phenotype {:phenotype/id phenotype-id
+          executor {:phenotype {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-id
                                 :compiled {:compiled/genome-id genome-id :compiled/resolution-id resolution-id :compiled/phenotype-id phenotype-id
                                            :topology {:entry :llm :nodes {:llm {:node/type :llm :model/id "fake/model"}} :limits {:max-steps 64}}}}
                     :stores {:sqlite db :cas cas-root}

@@ -151,7 +151,7 @@
 (defn- fs-subject
   "The requesting :subject for a filesystem lease (B4 forces it at access time)."
   []
-  {:phenotype/id phenotype})
+  {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype})
 
 (defn- lease-for
   "Build a valid v0 CapabilityLease granting `actions` on `mount-id` for the

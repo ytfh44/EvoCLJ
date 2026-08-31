@@ -68,7 +68,7 @@
   assoc-style overrides."
   [& kvs]
   (let [base {:cap/id echo-cap-id
-              :subject {:phenotype/id phenotype-p1}
+              :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}
               :resource {:kind :tool :id :fixture/echo}
               :actions #{:invoke}
               :constraints {:max-calls 10}
@@ -176,7 +176,7 @@
   (testing "a wrong-subject lease also denies without executing"
     (let [counter (atom 0)
           ctx (broker-context [(fixture/echo-provider {:execution-count counter})]
-                              [(lease :subject {:phenotype/id phenotype-p2})])]
+                              [(lease :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p2})])]
       (let [r (dispatch/dispatch! ctx echo-intent)]
         (is (= :error (:result/status r)))
         (is (= :capability/subject-mismatch (get-in r [:authorization :reason])))
@@ -196,7 +196,7 @@
 (defn- non-idempotent-lease
   []
   {:cap/id non-idempotent-cap-id
-   :subject {:phenotype/id phenotype-p1}
+   :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}
    :resource {:kind :tool :id :fixture/non-idempotent}
    :actions #{:invoke}
    :constraints {:max-calls 10}
@@ -264,7 +264,7 @@
 (defn- broken-lease
   []
   {:cap/id broken-cap-id
-   :subject {:phenotype/id phenotype-p1}
+   :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}
    :resource {:kind :tool :id :fixture/broken-echo}
    :actions #{:invoke}
    :constraints {:max-calls 10}
@@ -297,7 +297,7 @@
 (defn- write-lease
   []
   {:cap/id write-cap-id
-   :subject {:phenotype/id phenotype-p1}
+   :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}
    :resource {:kind :tool :id :fixture/write}
    :actions #{:invoke}
    :constraints {:max-calls 10}

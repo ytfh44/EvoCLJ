@@ -20,7 +20,7 @@
 (def ^:private expires (java.util.Date. 4102444800000))
 
 (defn- lease [tool-id]
-  {:cap/id (random-uuid) :subject {:phenotype/id phenotype}
+  {:cap/id (random-uuid) :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype}
    :resource {:kind :tool :id tool-id}
    :actions #{:invoke} :constraints {:max-calls 100}
    :issued-at issued :expires-at expires})
@@ -107,7 +107,7 @@
                 {:tool/id :fs/read :resource {:kind :filesystem/path :path p} :args {:path p}}))
             (execute-request! [_ req] {:content (str "content:" (:path (:resource req)))}))
           _ (registry/register! reg fs-provider)
-          tool-lease {:cap/id (random-uuid) :subject {:phenotype/id phenotype}
+          tool-lease {:cap/id (random-uuid) :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype}
                       :resource {:kind :tool :id :fs/read}
                       :actions #{:invoke} :constraints {:max-calls 10}
                       :issued-at issued :expires-at expires}
@@ -115,7 +115,7 @@
           intent-read (intent/tool-call sid phenotype :node/tool 3 {:tool/id :fs/read :args {:path "/workspace/secret/foo.md"}} budget)
           res-denied (dispatch/dispatch! ctx-tool-only intent-read)]
       (is (= :capability/denied (:error/type res-denied)) "tool lease alone not enough for path")
-      (let [path-lease {:cap/id (random-uuid) :subject {:phenotype/id phenotype}
+      (let [path-lease {:cap/id (random-uuid) :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype}
                         :resource {:kind :filesystem/path :path "/workspace"}
                         :actions #{:invoke} :constraints {:max-calls 10}
                         :issued-at issued :expires-at expires}

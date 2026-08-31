@@ -409,7 +409,7 @@
         _ (registry/register! reg provider)
         now-ms (.getTime (java.util.Date.))
         lease {:cap/id (random-uuid)
-               :subject {:phenotype/id phenotype}
+               :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype}
                :resource {:kind :tool :id :fixture/non-idempotent}
                :actions #{:invoke}
                :constraints {:max-calls 10000}

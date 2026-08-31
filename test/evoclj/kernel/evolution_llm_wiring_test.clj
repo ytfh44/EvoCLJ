@@ -55,7 +55,7 @@
   []
   (let [now (Date.)]
     {:cap/id (UUID/randomUUID)
-     :subject {:phenotype/id (evolution-phenotype-id)}
+     :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id (evolution-phenotype-id)}
      :resource {:kind :model :id "lmstudio/*"}
      :actions #{:invoke}
      :constraints {:max-calls 100}

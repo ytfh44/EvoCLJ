@@ -5,7 +5,7 @@
   runtime-deps — the map of stores/providers/capabilities/program
   sources the HOST injects — into a live Phenotype:
 
-    {:phenotype/id ...
+    {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id ...
      :compiled <CompiledGenome>   ; the SAME immutable value, shared
      :sci-runtime ...             ; a FRESH isolated SCI runtime
      :providers ...               ; host's registry, by reference
@@ -99,7 +99,7 @@
   [phenotype-id]
   (let [now (java.util.Date.)]
     {:cap/id (random-uuid)
-     :subject {:phenotype/id phenotype-id}
+     :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-id}
      :resource {:kind :tool :id :fixture/echo}
      :actions #{:invoke}
      :constraints {:max-calls 10}

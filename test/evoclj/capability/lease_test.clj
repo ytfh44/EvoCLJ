@@ -92,7 +92,7 @@
   (testing "a subject with a malformed or missing phenotype/session id is rejected, never matched"
     (is-schema-invalid #(lease/subject-matches? (lease) {}))
     (is-schema-invalid #(lease/subject-matches? (lease) {:session/id session-a :phenotype/id "not-a-hash"}))
-    (is-schema-invalid #(lease/subject-matches? (lease) {:phenotype/id phenotype-p1}))
+    (is-schema-invalid #(lease/subject-matches? (lease) {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}))
     (is-schema-invalid #(lease/subject-matches? (lease) {:session/id session-a}))))
 
 ;; ============================================================================
@@ -209,7 +209,7 @@
     (is-schema-invalid #(schema/validate-lease (assoc (lease) :resource "echo")))
     (is-schema-invalid #(schema/validate-lease (assoc (lease) :subject {})))
     (is-schema-invalid #(schema/validate-lease
-                         (assoc (lease) :subject {:phenotype/id "not-a-hash"})))
+                         (assoc (lease) :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id "not-a-hash"})))
     (is-schema-invalid #(schema/validate-lease (assoc (lease) :issued-at 1700000000000)))
     (is-schema-invalid #(schema/validate-lease (assoc (lease) :expires-at nil))))
   (testing "a grant must span a positive window"
@@ -229,7 +229,7 @@
   (testing "a malformed lease is rejected, never silently matched"
     (is-schema-invalid #(lease/valid-at? (dissoc (lease) :expires-at) issued-at))
     (is-schema-invalid #(lease/subject-matches? (dissoc (lease) :subject)
-                                               {:phenotype/id phenotype-p1}))
+                                               {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}))
     (is-schema-invalid #(lease/resource-covers? (dissoc (lease) :actions)
                                                 {:kind :tool :id :fixture/echo}
                                                 :invoke)))
