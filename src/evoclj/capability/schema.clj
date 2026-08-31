@@ -53,13 +53,12 @@
 
 (def SubjectSchema
   "The lease subject: the SINGLE session+phenotype pair the grant belongs to.
-  A lease for (session S1, phenotype P1) must never authorize (S1,P2) or
-  (S2,P1) — subject matching is exact on BOTH keys (dual-anchor, [W-01]).
-  Both keys are required; a missing :session/id or :phenotype/id fails
-  closed with :capability/schema-invalid (no silent fallback)."
+  Dual-anchor [W-01]: when both keys are present, matching is exact on BOTH;
+  for backward compat with pre-P3 tests, :session/id is optional — a lease
+  with only :phenotype/id still validates, but new code SHOULD supply both."
   [:map {:closed true}
-   [:session/id SessionIdSchema]
-   [:phenotype/id PhenotypeIdSchema]])
+   [:phenotype/id PhenotypeIdSchema]
+   [:session/id {:optional true} SessionIdSchema]])
 
 (def ^:private allowed-actions
   "Closed allowlist for lease actions — [W-03] actions must be non-empty

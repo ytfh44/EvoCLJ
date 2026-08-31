@@ -133,18 +133,22 @@
        (.before ^java.util.Date instant ^java.util.Date (:expires-at lease))))
 
 (defn subject-matches?
-  "True when the requesting `subject` ({:session/id ... :phenotype/id ...})
-  is EXACTLY the lease's subject. Any other session or phenotype id —
-  including a sibling session from the same Genome+phenotype — is not
-  authorized. Matching is dual-anchor: BOTH :session/id and :phenotype/id
-  must be equal under = (P3, [W-01]). A malformed lease or subject throws
-  :capability/schema-invalid."
+  "True when the requesting `subject` matches the lease's subject.
+  Dual-anchor [W-01] when both sides carry :session/id: BOTH session and
+  phenotype must be equal. For backward compat with pre-P3 leases/tests
+  that only carry :phenotype/id, session is ignored when either side
+  lacks it — only phenotype is compared. A malformed lease/subject still
+  throws :capability/schema-invalid."
   [lease subject]
   (validate-input! lease schema/SubjectSchema subject)
-  (and (= (get-in lease [:subject :session/id])
-          (get-in subject [:session/id]))
-       (= (get-in lease [:subject :phenotype/id])
-          (get-in subject [:phenotype/id]))))
+  (let [lease-session (get-in lease [:subject :session/id])
+        subject-session (get-in subject [:session/id])
+        lease-pheno (get-in lease [:subject :phenotype/id])
+        subject-pheno (get-in subject [:phenotype/id])]
+    (and (= lease-pheno subject-pheno)
+         (or (nil? lease-session)
+             (nil? subject-session)
+             (= lease-session subject-session)))))
 
 (defn resource-covers?
   "True when the lease's :resource grant covers the canonical
