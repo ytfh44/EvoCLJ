@@ -335,6 +335,89 @@
                      nil @(:usage broker-context))
        nil intent nil))))
 
+(defn- dispatch-agent-spawn-tool!
+  "Handle :intent/tool-call where :tool/id is :agent/spawn (S6 broker tool).
+  Extracts :task from :args and spawns via subagent/spawn-subagent! using
+  the intent's :session/id as parent. Depth/budget caps are enforced by
+  spawn-subagent! itself."
+  [broker-context intent]
+  (let [db (:db broker-context)]
+    (if-not db
+      (result-error intent :intent/dispatch-invalid
+                    "agent/spawn tool requires :db in broker context"
+                    {:tool/id :agent/spawn}
+                    nil @(:usage broker-context))
+      (try
+        (let [args (get-in intent [:payload :args])
+              parent-id (:session/id intent)
+              task (:task args)
+              child-spec (merge {:task task} (dissoc args :task))
+              res (subagent/spawn-subagent! db parent-id child-spec (:leases broker-context))
+              child-id (:child/session-id res)]
+          (attach-journal
+           (result-ok intent {:child/session-id child-id
+                              :child/capabilities (:child/capabilities res)}
+                      nil @(:usage broker-context))
+           nil intent nil))
+        (catch clojure.lang.ExceptionInfo e
+          (let [edata (ex-data e)]
+            (attach-journal
+             (result-error intent (or (:error/type edata) :intent/dispatch-failed)
+                           (.getMessage e)
+                           edata
+                           nil @(:usage broker-context))
+             nil intent nil)))
+        (catch Exception e
+          (attach-journal
+           (result-error intent :intent/dispatch-failed
+                         (.getMessage e)
+                         {:cause (.getMessage e)}
+                         nil @(:usage broker-context))
+           nil intent nil))))))
+
+(defn- dispatch-agent-status-tool!
+  "Handle :intent/tool-call where :tool/id is :agent/status."
+  [broker-context intent]
+  (let [db (:db broker-context)]
+    (if-not db
+      (result-error intent :intent/dispatch-invalid
+                    "agent/status tool requires :db in broker context"
+                    {:tool/id :agent/status}
+                    nil @(:usage broker-context))
+      (try
+        (let [args (get-in intent [:payload :args])
+              sid-str (:session-id args)
+              sid (try (evoclj.genome.types/session-id sid-str) (catch Exception _ sid-str))
+              sess (try (evoclj.store.session/get-session db sid) (catch Exception _ nil))]
+          (if-not sess
+            (attach-journal
+             (result-ok intent {:found false :reason :session-not-found :session/id sid}
+                        nil @(:usage broker-context))
+             nil intent nil)
+            (attach-journal
+             (result-ok intent {:found true
+                                :session/id (:session/id sess)
+                                :state (:state sess)
+                                :depth (try (subagent/subagent-depth db sid) (catch Exception _ nil))
+                                :children (try (subagent/child-session-ids db sid) (catch Exception _ []))}
+                        nil @(:usage broker-context))
+             nil intent nil)))
+        (catch clojure.lang.ExceptionInfo e
+          (let [edata (ex-data e)]
+            (attach-journal
+             (result-error intent (or (:error/type edata) :intent/dispatch-failed)
+                           (.getMessage e)
+                           edata
+                           nil @(:usage broker-context))
+             nil intent nil)))
+        (catch Exception e
+          (attach-journal
+           (result-error intent :intent/dispatch-failed
+                         (.getMessage e)
+                         {:cause (.getMessage e)}
+                         nil @(:usage broker-context))
+           nil intent nil))))))
+
 (defn dispatch!
   "Execute intent through the broker pipeline in the NORMATIVE order
   (component Step 5): validate intent -> lookup provider -> normalize
@@ -355,8 +438,11 @@
     denial
     (case (:intent/type intent)
       :intent/tool-call
-      (dispatch-registered! broker-context intent
-                            (get-in intent [:payload :tool/id]) true)
+      (let [tool-id (get-in intent [:payload :tool/id])]
+        (cond
+          (= :agent/spawn tool-id) (dispatch-agent-spawn-tool! broker-context intent)
+          (= :agent/status tool-id) (dispatch-agent-status-tool! broker-context intent)
+          :else (dispatch-registered! broker-context intent tool-id true)))
       :intent/memory-read
       (dispatch-registered! broker-context intent :memory/kv false)
       :intent/memory-write

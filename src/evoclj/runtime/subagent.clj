@@ -26,19 +26,23 @@
   :subagent/spawned event links to the child. Synchronous for tests;
   async callers may wrap in future/command. Child intents go through
   the broker with the child's attenuated leases."
-  (:require [clojure.java.jdbc :as jdbc]
-            [clojure.string :as str]
-            [evoclj.capability.mint :as mint]
-            [evoclj.compiler.topology :as topology]
-            [evoclj.genome.types :as types]
-            [evoclj.provider.fixture :as fixture]
-            [evoclj.provider.registry :as registry]
-            [evoclj.runtime.phenotype :as phenotype]
-            [evoclj.store.cas :as cas]
-            [evoclj.store.event :as event]
-            [evoclj.store.session :as session]
-            [evoclj.store.session-store :as ss]
-            [evoclj.store.sqlite :as sqlite])
+   (:require [clojure.java.jdbc :as jdbc]
+             [clojure.string :as str]
+             [evoclj.capability.mint :as mint]
+             [evoclj.compiler.topology :as topology]
+             [evoclj.genome.types :as types]
+             [evoclj.kernel.error :as err]
+             [evoclj.provider.fixture :as fixture]
+             [evoclj.provider.protocol :as proto]
+             [evoclj.provider.registry :as registry]
+             [evoclj.runtime.phenotype :as phenotype]
+             [evoclj.store.cas :as cas]
+             [evoclj.store.event :as event]
+             [evoclj.store.session :as session]
+             [evoclj.store.session-store :as ss]
+             [evoclj.store.sqlite :as sqlite]
+             [evoclj.tool.specs :as tool.specs]
+             [malli.core :as m])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)
            (java.util Date UUID)))
@@ -93,6 +97,48 @@
                            ["SELECT child_session_id FROM subagent_links WHERE parent_session_id = ? ORDER BY created_at"
                             (str (types/session-id parent-session-id))])]
     (mapv #(types/session-id (:child_session_id %)) rows)))
+(def ^:const max-subagent-depth
+  "Maximum nesting depth for subagent chains (S6). Parent depth +1 must be <= this."
+  5)
+
+(def ^:const max-spawns-per-parent
+  "Budget cap: maximum direct children per parent (maps to :tool/budget {:max-calls 10})."
+  10)
+
+(defn subagent-depth
+  "Depth of session `sid` in the subagent tree. Root (no parent) has depth 0,
+  its child has depth 1, etc. Walks subagent_links via get-parent-session-id."
+  [db sid]
+  (loop [cur sid depth 0 seen #{}]
+    (if (contains? seen cur)
+      depth
+      (let [parent (try (get-parent-session-id db cur) (catch Exception _ nil))]
+        (if parent
+          (recur parent (inc depth) (conj seen cur))
+          depth)))))
+
+(defn- check-depth-and-budget!
+  "Enforce S6 depth and budget caps before spawning a child of `parent-id`.
+  Throws :subagent/depth-exceeded when parent depth +1 > max-subagent-depth,
+  and :subagent/budget-exceeded when parent already has max-spawns-per-parent children."
+  [db parent-id]
+  (let [parent-depth (subagent-depth db parent-id)
+        child-depth (inc parent-depth)]
+    (when (> child-depth max-subagent-depth)
+      (throw (err/error :subagent/depth-exceeded
+                        (str "subagent depth cap exceeded: parent depth " parent-depth " +1 > " max-subagent-depth)
+                        {:parent/session-id parent-id
+                         :parent/depth parent-depth
+                         :child/depth child-depth
+                         :max-depth max-subagent-depth})))
+    (let [children (child-session-ids db parent-id)]
+      (when (>= (count children) max-spawns-per-parent)
+        (throw (err/error :subagent/budget-exceeded
+                          (str "subagent budget cap exceeded: parent already has " (count children) " children, max " max-spawns-per-parent)
+                          {:parent/session-id parent-id
+                           :child/count (count children)
+                           :max-calls max-spawns-per-parent})))))
+  nil)
 ;; ---------------------------------------------------------------------------
 ;; S4 — global lease registry and session->leases index (cascade revoke)
 ;; ---------------------------------------------------------------------------
@@ -171,6 +217,8 @@
     (ensure-subagent-link-table! db)
     (let [child-spec (or child-spec {})
           parent-leases (or parent-leases [])
+          ;; S6 — enforce depth/budget caps before creating the child
+          _ (check-depth-and-budget! db parent-id)
           ;; Create child session pinned to parent's identity
           child-request {:genome/id (:genome/id parent)
                          :resolution/id (:resolution/id parent)
@@ -701,3 +749,195 @@
                                 :metadata {:child/session-id child-id
                                            :result/status :failed
                                            :error error}}))))))
+
+;; ---------------------------------------------------------------------------
+;; S6 — broker tool surface :agent/spawn + :agent/status (activate_skill façade)
+;; ---------------------------------------------------------------------------
+
+(def AgentSpawnArgsSchema
+  "Malli input schema for :agent/spawn (model-facing). :task is required,
+  :capabilities is an optional vector of capability hint strings."
+  [:map {:closed true}
+   [:task string?]
+   [:capabilities {:optional true} [:vector string?]]])
+
+(def AgentSpawnOutputSchema
+  "Malli output schema for :agent/spawn."
+  [:map {:closed false}
+   [:child/session-id uuid?]
+   [:child/capabilities {:optional true} [:vector :map]]])
+
+(def AgentStatusArgsSchema
+  "Malli input schema for :agent/status."
+  [:map {:closed true}
+   [:session-id string?]])
+
+(def AgentStatusOutputSchema
+  "Malli output schema for :agent/status — at minimum the session id and state."
+  [:map {:closed false}
+   [:session/id {:optional true} uuid?]
+   [:state {:optional true} keyword?]])
+
+(def agent-spawn-tool-descriptor
+  "The v0 tool descriptor of :agent/spawn. :effect :pure — spawn is persisted
+  as a session row + causal event before returning; depth/budget caps are fail-closed."
+  {:tool/id :agent/spawn
+   :tool/description "Spawn a subagent session"
+   :tool/parameters {:type "object"
+                     :properties {:task {:type "string"
+                                        :description "Task text for the child subagent"}
+                                 :capabilities {:type "array"
+                                                :description "Optional capability hints"
+                                                :items {:type "string"}}}
+                     :required ["task"]}
+   :tool/budget {:max-calls 10}
+   :effect :pure
+   :input-schema AgentSpawnArgsSchema
+   :output-schema AgentSpawnOutputSchema
+   :required-action :invoke
+   :lease/resource {:kind :tool :id :agent/spawn}
+   :tool/audience #{:model}})
+
+(def agent-status-tool-descriptor
+  "The v0 tool descriptor of :agent/status."
+  {:tool/id :agent/status
+   :tool/description "Query subagent status"
+   :tool/parameters {:type "object"
+                     :properties {:session-id {:type "string"
+                                              :description "Child session id (uuid string)"}}
+                     :required ["session-id"]}
+   :effect :pure
+   :input-schema AgentStatusArgsSchema
+   :output-schema AgentStatusOutputSchema
+   :required-action :invoke
+   :lease/resource {:kind :tool :id :agent/status}
+   :tool/audience #{:model}})
+
+;; Reference the single source in tool.specs so S6 does not duplicate
+;; the canonical C-Tool definitions (tool.specs is the single source of truth).
+;; These defs simply alias tool.specs for callers that prefer the subagent namespace.
+(def canonical-agent-spawn-tool tool.specs/agent-spawn-tool)
+(def canonical-agent-status-tool tool.specs/agent-status-tool)
+
+(def agent-spawn-tool-catalog-entry
+  "Wire declaration of :agent/spawn for the model and the tool loop
+  ({:name :description :parameters :tool} — :tool maps wire name back to
+  EvoCLJ tool id the scheduler executes through the broker)."
+  {:name "agent_spawn"
+   :description "Spawn a subagent session"
+   :parameters {:type "object"
+                :properties {:task {:type "string"
+                                   :description "Task text for the child subagent"}
+                            :capabilities {:type "array"
+                                           :description "Optional capability hints"
+                                           :items {:type "string"}}}
+                :required ["task"]}
+   :tool :agent/spawn})
+
+(def agent-status-tool-catalog-entry
+  "Wire declaration of :agent/status."
+  {:name "agent_status"
+   :description "Query subagent status"
+   :parameters {:type "object"
+                :properties {:session-id {:type "string"
+                                         :description "Child session id (uuid string)"}}
+                :required ["session-id"]}
+   :tool :agent/status})
+
+(def subagent-tool-catalog
+  "The tool catalog the scheduler's tool loop consumes for subagents:
+  the two S6 wire tools, in the wire form ({:name :description :parameters :tool})."
+  [agent-spawn-tool-catalog-entry agent-status-tool-catalog-entry])
+
+;; --- providers (broker-executable) ----------------------------------------
+
+(defn- tool-args
+  "Extract :args map from a tool-call intent payload. Shared helper mirrors
+  evolution_tools/tool-args — same contract, same error type."
+  [intent]
+  (let [payload (:payload intent)]
+    (when-not (and (map? payload) (contains? payload :args))
+      (throw (err/error :provider/input-invalid
+                        "tool-call payload must carry an :args map"
+                        {:value (err/sanitize payload)})))
+    (:args payload)))
+
+(defn- validate-args!
+  "Validate args against descriptor's :input-schema (EDN-safe + malli)."
+  [descriptor args]
+  (when-not (m/validate (:input-schema descriptor) args)
+    (throw (err/error :provider/input-invalid
+                      "tool input failed input-schema validation"
+                      {:tool/id (:tool/id descriptor)
+                       :value (err/sanitize args)
+                       :explanation (err/sanitize (m/explain (:input-schema descriptor) args))}))))
+
+(defn agent-spawn-provider
+  "Build the kernel-owned :agent/spawn provider (component).
+
+  `db`        — sqlite spec / path / SessionStore handle (must be migrated).
+  `parent-session-id` — the parent session id that spawns are attributed to
+  (captured closed over). For tool-loop usage the provider is closed over
+  the executor's session/pin and reads :session/id from the intent when
+  available; the closed-over parent is the fallback.
+
+  normalize-request validates args against AgentSpawnArgsSchema and returns
+  the canonical resource {:kind :tool :id :agent/spawn}.
+  execute-request! calls spawn-subagent! with the task and returns
+  {:child/session-id <uuid>} (EDN-safe). Depth/budget caps are enforced by
+  spawn-subagent! itself."
+  ([db] (agent-spawn-provider db nil))
+  ([db parent-session-id]
+   (reify proto/Provider
+     (describe [_] agent-spawn-tool-descriptor)
+     (normalize-request [_ intent]
+       (let [args (tool-args intent)
+             _ (validate-args! agent-spawn-tool-descriptor args)]
+         {:tool/id :agent/spawn
+          :resource {:kind :tool :id :agent/spawn}
+          :args args
+          :parent/session-id (or (:session/id intent) parent-session-id)}))
+     (execute-request! [_ authorized-request]
+       (let [args (:args authorized-request)
+             parent-id (or (:parent/session-id authorized-request)
+                           (:parent/session-id args)
+                           parent-session-id
+                           (throw (err/error :provider/request-invalid
+                                             "agent/spawn requires parent session id (intent :session/id or closed-over parent)"
+                                             {:value (err/sanitize authorized-request)})))
+             task (:task args)
+             ;; child-spec carries the task text; extra keys are passed through for audit
+             child-spec (merge {:task task} (dissoc args :task))
+             ;; The leases for attenuation come from the provider's closed-over db state:
+             ;; if no explicit parent-leases are available, pass [] — spawn still creates
+             ;; the session + parent link + event, just with no derived leases.
+             res (spawn-subagent! db parent-id child-spec [])]
+         {:child/session-id (:child/session-id res)
+          :child/capabilities (:child/capabilities res)})))))
+
+(defn agent-status-provider
+  "Build the kernel-owned :agent/status provider (component).
+
+  `db` — sqlite handle. normalize validates args, execute returns the
+  session map's public fields + child/depth info when available."
+  [db]
+  (reify proto/Provider
+    (describe [_] agent-status-tool-descriptor)
+    (normalize-request [_ intent]
+      (let [args (tool-args intent)
+            _ (validate-args! agent-status-tool-descriptor args)]
+        {:tool/id :agent/status
+         :resource {:kind :tool :id :agent/status}
+         :args args}))
+    (execute-request! [_ authorized-request]
+      (let [sid-str (get-in authorized-request [:args :session-id])
+            sid (try (types/session-id sid-str) (catch Exception _ sid-str))
+            sess (try (session/get-session db sid) (catch Exception _ nil))]
+        (if-not sess
+          {:found false :reason :session-not-found :session/id sid}
+          {:found true
+           :session/id (:session/id sess)
+           :state (:state sess)
+           :phenotype/id (:phenotype/id sess)
+           :depth (try (subagent-depth db sid) (catch Exception _ nil))
+           :children (try (child-session-ids db sid) (catch Exception _ []))})))))

@@ -133,6 +133,9 @@
    [:lease/resource {:optional true} [:map [:kind keyword?] [:id any?]]]
    [:retry {:optional true} [:map {:closed true} [:safe? boolean?]]]
    [:version {:optional true} number?]
+   [:tool/description {:optional true} string?]
+   [:tool/parameters {:optional true} any?]
+   [:tool/budget {:optional true} [:map {:closed false} [:max-calls {:optional true} pos-int?]]]
    [:mcp/connection-id {:optional true} keyword?]
    [:mcp/server-id {:optional true} string?]
    [:mcp/last-refreshed {:optional true} any?]
@@ -277,9 +280,89 @@
                 :required ["code"]}
    :tool code-execution-tool-id})
 
-(defn code-execution-wire-tool?
-  "True when m is the code_execution wire declaration."
+ (defn code-execution-wire-tool?
+   "True when m is the code_execution wire declaration."
+   [m]
+   (and (map? m)
+        (= "code_execution" (:name m))
+        (= code-execution-tool-id (:tool m))))
+
+;; ---------------------------------------------------------------------------
+;; Agent tool surface (S6) — broker-executable :agent/spawn + :agent/status
+;; ---------------------------------------------------------------------------
+
+(def agent-spawn-tool-id
+  "Broker tool id for spawning a subagent session."
+  :agent/spawn)
+
+(def agent-status-tool-id
+  "Broker tool id for querying subagent status."
+  :agent/status)
+
+(def agent-spawn-tool
+  "Canonical C-Tool / provider descriptor for :agent/spawn.
+
+  INPUT is the tool's model-facing args: {:task string :capabilities [any]}.
+  :required-action is :invoke (capability-gated via broker). :effect is :pure
+  for idempotency semantics — spawn is persisted via session create + event,
+  and depth/budget caps are enforced fail-closed.
+  :tool/budget {:max-calls 10} mirrors the assignment surface."
+  {:tool/id agent-spawn-tool-id
+   :tool/description "Spawn a subagent session"
+   :tool/parameters {:type "object"
+                     :properties {:task {:type "string"
+                                        :description "The task text for the child session"}
+                                 :capabilities {:type "array"
+                                                :description "Requested capability hints (optional)"
+                                                :items {:type "string"}}}
+                     :required ["task"]}
+   :tool/budget {:max-calls 10}
+   :effect :pure
+   :input-schema [:map {:closed true}
+                  [:task string?]
+                  [:capabilities {:optional true} [:vector any?]]]
+   :output-schema [:map {:closed false}
+                   [:child/session-id uuid?]
+                   [:child/capabilities {:optional true} [:vector :map]]]
+   :required-action :invoke
+   :lease/resource {:kind :tool :id agent-spawn-tool-id}
+   :tool/audience #{:model}})
+
+(def agent-status-tool
+  "Canonical C-Tool / provider descriptor for :agent/status."
+  {:tool/id agent-status-tool-id
+   :tool/description "Query subagent status"
+   :tool/parameters {:type "object"
+                     :properties {:session-id {:type "string"
+                                              :description "Child session id (uuid string)"}}
+                     :required ["session-id"]}
+   :effect :pure
+   :input-schema [:map {:closed true}
+                  [:session-id string?]]
+   :output-schema [:map {:closed false}
+                   [:session/id {:optional true} uuid?]
+                   [:state {:optional true} keyword?]]
+   :required-action :invoke
+   :lease/resource {:kind :tool :id agent-status-tool-id}
+   :tool/audience #{:model}})
+
+(def agent-spawn-wire-tool
+  "Wire declaration for :agent/spawn (OpenAI function-tool shape + :tool id)."
+  {:name "agent_spawn"
+   :description "Spawn a subagent session"
+   :parameters (:tool/parameters agent-spawn-tool)
+   :tool agent-spawn-tool-id})
+
+(def agent-status-wire-tool
+  "Wire declaration for :agent/status."
+  {:name "agent_status"
+   :description "Query subagent status"
+   :parameters (:tool/parameters agent-status-tool)
+   :tool agent-status-tool-id})
+
+(defn agent-tool?
+  "True when m is one of the :agent/spawn or :agent/status wire declarations."
   [m]
   (and (map? m)
-       (= "code_execution" (:name m))
-       (= code-execution-tool-id (:tool m))))
+       (or (= agent-spawn-tool-id (:tool m))
+           (= agent-status-tool-id (:tool m)))))
