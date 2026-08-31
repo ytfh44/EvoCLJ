@@ -51,10 +51,13 @@
 ;; --- intent type and budget -------------------------------------------------
 
 (def IntentTypeSchema
-  "The six v0 intent types. An intent of any other :intent/type is
-  rejected at the boundary."
+  "The v0 intent types extended with subagent lifecycle intents.
+  The original six v0 types plus :intent/subagent-spawn,
+  :intent/subagent-result, and :intent/subagent-cancel. An intent of any
+  other :intent/type is rejected at the boundary."
   [:enum :intent/model-call :intent/tool-call :intent/memory-read
-   :intent/memory-write :intent/finish :intent/fail])
+   :intent/memory-write :intent/finish :intent/fail
+   :intent/subagent-spawn :intent/subagent-result :intent/subagent-cancel])
 
 (def ^:private NonNegIntSchema
   "A non-negative integer (budgets, limits)."
@@ -108,7 +111,6 @@
   [:map {:closed false}
    [:memory/key keyword?]
    [:memory/content any?]])
-
 (def PayloadFinishSchema
   "A finish payload carrying the task result value."
   [:map {:closed false}
@@ -120,6 +122,46 @@
   [:map {:closed false}
    [:message string?]
    [:value {:optional true} any?]])
+
+(def ^:private cas-ref-re #"^sha256:[0-9a-f]{64}$")
+
+(defn cas-ref?
+  "True when x is a canonical CAS reference: a \"sha256:<64 hex>\" string,
+  the same content-addressed form used for Phenotype/Artifact IDs."
+  [x]
+  (and (string? x) (boolean (re-matches cas-ref-re x))))
+
+(def CasRefSchema
+  "A canonical content-addressed CAS reference string (sha256:...)."
+  [:fn cas-ref?])
+
+(def PayloadSubagentSpawnSchema
+  "A subagent-spawn payload: the parent session id, an open child spec
+  map (e.g. {:genome/id string? :task any?}), and a vector of
+  CapabilityLease maps (may be empty). All keys use malli
+  string/uuid/keyword/vector/map checks only (GC-22: EDN-safe, no raw
+  objects). The map is open to further keys."
+  [:map {:closed false}
+   [:parent/session-id uuid?]
+   [:child/spec [:map {:closed false}]]
+   [:child/capabilities [:vector [:map {:closed false}]]]])
+
+(def PayloadSubagentResultSchema
+  "A subagent-result payload: parent and child session ids plus a
+  result CAS reference (sha256:...). The map is open to further keys.
+  GC-22: EDN-safe malli checks only."
+  [:map {:closed false}
+   [:parent/session-id uuid?]
+   [:child/session-id uuid?]
+   [:result/cas-ref CasRefSchema]])
+
+(def PayloadSubagentCancelSchema
+  "A subagent-cancel payload: the target session id and a cancel reason
+  drawn from #{:user-request :parent-cancel :timeout}. The map is open
+  to further keys. GC-22: EDN-safe malli checks only."
+  [:map {:closed false}
+   [:target/session-id uuid?]
+   [:reason [:enum :user-request :parent-cancel :timeout]]])
 
 ;; --- the full intent schema -------------------------------------------------
 
@@ -157,6 +199,15 @@
 (def FailIntentSchema
   (intent-map-schema :intent/fail PayloadFailSchema))
 
+(def SubagentSpawnIntentSchema
+  (intent-map-schema :intent/subagent-spawn PayloadSubagentSpawnSchema))
+
+(def SubagentResultIntentSchema
+  (intent-map-schema :intent/subagent-result PayloadSubagentResultSchema))
+
+(def SubagentCancelIntentSchema
+  (intent-map-schema :intent/subagent-cancel PayloadSubagentCancelSchema))
+
 (def IntentSchema
   "The v0 Intent ABI: a :multi schema dispatching on :intent/type, so an
   unknown intent type is rejected and each type's payload is validated
@@ -169,7 +220,10 @@
    [:intent/memory-read MemoryReadIntentSchema]
    [:intent/memory-write MemoryWriteIntentSchema]
    [:intent/finish FinishIntentSchema]
-   [:intent/fail FailIntentSchema]])
+   [:intent/fail FailIntentSchema]
+   [:intent/subagent-spawn SubagentSpawnIntentSchema]
+   [:intent/subagent-result SubagentResultIntentSchema]
+   [:intent/subagent-cancel SubagentCancelIntentSchema]])
 
 ;; --- validation entry point ------------------------------------------------
 
