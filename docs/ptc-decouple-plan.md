@@ -132,8 +132,18 @@ Any contract change must be backward compatible or be switched atomically in P6.
 
 | Phase | Commit | Tests | Regression | Notes |
 |-------|--------|-------|------------|-------|
-| P0 | _pending_ | `evoclj.ptc.baseline-test` 3 groups green | `src/` zero change | Frozen by this doc |
-
+| P0 | 215b932e | `evoclj.ptc.baseline-test` 3 groups green | `src/` zero change | Frozen by this doc |
+| P1 | 9caf75a9 | `evoclj.ptc` Tool value object (D1) | baseline green | Tool VO unified |
+| P2 | fb08255b | `evoclj.sci.computation` Computation VO (C4/D4) | baseline green | Computation VO |
+| P3 | 9bc18ef1 | `evoclj.runtime.tool-surface` (C3) | baseline green | ToolSurface VO |
+| P4 | 6849863d | `evoclj.provider.request` ModelRequest (D2) | baseline green | ModelRequest |
+| P5 | 6849863d/e5f92b5d | Orchestrator protocol (C1) + EffectPipeline (C2/C5/D3) | baseline green | Orchestrator/Pipeline |
+| P6 | 3a871f27 | CodeModeOrchestrator slit fail-safe off | codemode green | Slit off |
+| P7 | 7a2a4159 | Slit abstraction inject Computation | codemode green | Slit correct |
+| P8 | c5ed8828 | sandbox tool_fn injection (limits lattice) | true-loop green | toolFns injection |
+| P9 | b5a55324 | declare code_execution tool | true-loop green | tool declared |
+| P10 | 7b931597 | wire CodeMode true loop | 4 tests green | true loop |
+| P11 | _this_ | `evoclj.ptc.e2e-test` 16 tests / 58 assertions + `evoclj.adversarial.ptc-adv-test` 11 tests / 57 assertions — total ptc+adv 42/188 green | `src/` zero change (tests+docs only, deterministic, serial exclusive) | PTC e2e + adversarial final: sequential two tools via code, branching if, try/catch fail-closed (try not in allow), limits 32 ok/33 fail + 8192 bytes, 1 vs 4 roundtrips equivalence same output, materialize-edn rejects Java object via tool; GC-07 System/exit rejected, GC-08 provider not in toolFns not available, GC-09 visible vs authorized denied, GC-22 lazy/Java boundary, interrupt uncatchable, GC-20 attribution present |
 ## 7. Risks and Mitigations
 
 - **Cache pollution:** Concurrent writes to `.cpcache` cause flaky compilation — Mitigation: serial + exclusive + single-namespace `clojure -M:test` per P.
