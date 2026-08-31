@@ -398,6 +398,70 @@
                           {:id id-str :state actual :expected #{:queued :running}}))))))
 
 ;; ---------------------------------------------------------------------------
+;; A4 — timeout / cancel transitions + deadline helper (Wolfram [W-20..W-24])
+;; ---------------------------------------------------------------------------
+
+(defn- inst->ms
+  "Return epoch-millis for an inst (Date, Instant, or ISO-8601 string). Nil -> nil."
+  [inst]
+  (cond
+    (nil? inst) nil
+    (instance? Date inst) (.getTime ^Date inst)
+    (instance? Instant inst) (.toEpochMilli ^Instant inst)
+    (string? inst) (.toEpochMilli (Instant/parse ^String inst))
+    (inst? inst) (.getTime ^Date (java.util.Date/from (.toInstant ^Instant (Instant/parse (str inst)))))
+    :else (throw (err/error :store/command-invalid "deadline/now must be an inst" {:value inst}))))
+
+(defn deadline-passed?
+  "True when `command` has a :cmd/deadline strictly before `now`.
+  Both `command` deadline and `now` are insts (Date/Instant/ISO string).
+  Returns true when deadline < now, false otherwise (including no deadline).
+  Used by explicit timeout callers to decide whether timeout is warranted;
+  timeout is explicit (not auto) per A4 spec."
+  [command now]
+  (if-let [dl (:cmd/deadline command)]
+    (let [dl-ms (inst->ms dl)
+          now-ms (inst->ms now)]
+      (boolean (and dl-ms now-ms (< dl-ms now-ms))))
+    false))
+
+(defn timeout-command!
+  "Transition command `id` from :running -> :timed-out.
+  Atomic UPDATE with state guard; fail-closed when not in :running.
+  Returns the updated :cmd/* map on success, or throws
+  :store/invalid-transition when the row is not in :running (including
+  not-found and terminal states, and :queued per SM queued->{running,failed,cancelled})."
+  [db id]
+  (let [id-str (str id)
+        res (sqlite/exec! db ["UPDATE commands SET state = ? WHERE id = ? AND state = ?"
+                              "timed_out" id-str "running"])
+        cnt (first res)]
+    (if (and cnt (pos? cnt))
+      (fetch-command db id-str)
+      (let [existing (fetch-command db id-str)
+            actual (:cmd/state existing)]
+        (throw (err/error :store/invalid-transition
+                          (str "cannot timeout command " id-str " from state " (or actual :not-found))
+                          {:id id-str :state actual :expected :running}))))))
+
+(defn cancel-command!
+  "Transition command `id` from :queued or :running -> :cancelled.
+  Atomic UPDATE with state guard; throws :store/invalid-transition when
+  not in :queued or :running (including terminals and not-found)."
+  [db id]
+  (let [id-str (str id)
+        res (sqlite/exec! db ["UPDATE commands SET state = ? WHERE id = ? AND (state = ? OR state = ?)"
+                              "cancelled" id-str "queued" "running"])
+        cnt (first res)]
+    (if (and cnt (pos? cnt))
+      (fetch-command db id-str)
+      (let [existing (fetch-command db id-str)
+            actual (:cmd/state existing)]
+        (throw (err/error :store/invalid-transition
+                          (str "cannot cancel command " id-str " from state " (or actual :not-found))
+                          {:id id-str :state actual :expected #{:queued :running}}))))))
+
+;; ---------------------------------------------------------------------------
 ;; Outbox transaction — command + :command/submitted event atomically
 ;; ---------------------------------------------------------------------------
 
