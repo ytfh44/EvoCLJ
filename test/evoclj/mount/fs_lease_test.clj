@@ -66,6 +66,8 @@
 
 (def ^:private pid1 (str "sha256:" (apply str (repeat 64 "a"))))
 (def ^:private pid2 (str "sha256:" (apply str (repeat 64 "b"))))
+(def ^:private sid1 #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+(def ^:private sid2 #uuid "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 (def ^:private now (java.util.Date.))
 (def ^:private later (java.util.Date. (+ (.getTime now) 86400000))) ; far future, avoids timing flake
 (def ^:private past (java.util.Date. (- (.getTime now) 60000))) ; after a much-earlier issued-at
@@ -146,14 +148,14 @@
   (testing "issue-fs-lease produces a schema-valid CapabilityLease and records it"
     (let [reg (fs/create-lease-registry)
           workspace (workspace-mount)
-          lease (fs/issue-fs-lease reg {:subject {:phenotype/id pid1}
+          lease (fs/issue-fs-lease reg {:subject {:session/id sid1 :phenotype/id pid1}
                                         :mount-id (:mount-id workspace)
                                         :path ""
                                         :actions #{:read :list :stat}
                                         :issued-at now
                                         :expires-at later})]
       (is (uuid? (:cap/id lease)))
-      (is (= {:phenotype/id pid1} (:subject lease)))
+      (is (= {:session/id sid1 :phenotype/id pid1} (:subject lease)))
       (is (= {:kind :filesystem/path :mount/id (:mount-id workspace) :path ""} (:resource lease)))
       (is (= #{:read :list :stat} (:actions lease)))
       (is (inst? (:issued-at lease)))
@@ -164,14 +166,14 @@
     (let [reg (fs/create-lease-registry)
           workspace (workspace-mount)
           provider (fs/make-provider (:registry workspace))
-          lease (fs/issue-fs-lease reg {:subject {:phenotype/id pid1}
+          lease (fs/issue-fs-lease reg {:subject {:session/id sid1 :phenotype/id pid1}
                                         :mount-id (:mount-id workspace)
                                         :path ""
                                         :actions #{:read :list :stat}
                                         :issued-at now
                                         :expires-at later})]
       (let [ba (fs/provider-read provider (:mount-id workspace) "references/guide.md"
-                                 {:leases [lease] :subject {:phenotype/id pid1} :now now :registry reg})]
+                                 {:leases [lease] :subject {:session/id sid1 :phenotype/id pid1} :now now :registry reg})]
         (is (bytes? ba))
         (is (str/includes? (String. ^bytes ba StandardCharsets/UTF_8) "guide content"))))))
 
@@ -188,14 +190,14 @@
           issued (java.util.Date. 1700000000000)
           expires (java.util.Date. 1700003600000)
           after-expiry (java.util.Date. 1700003600001)
-          lease (fs/issue-fs-lease reg {:subject {:phenotype/id pid1}
+          lease (fs/issue-fs-lease reg {:subject {:session/id sid1 :phenotype/id pid1}
                                         :mount-id (:mount-id workspace)
                                         :path ""
                                         :actions #{:read :list :stat}
                                         :issued-at issued
                                         :expires-at expires})]
       (is (throws-type? #(fs/provider-read provider (:mount-id workspace) "references/guide.md"
-                                           {:leases [lease] :subject {:phenotype/id pid1} :now after-expiry :registry reg})
+                                           {:leases [lease] :subject {:session/id sid1 :phenotype/id pid1} :now after-expiry :registry reg})
                         :capability/expired)))))
 
 ;; ============================================================================
@@ -207,14 +209,14 @@
     (let [reg (fs/create-lease-registry)
           workspace (workspace-mount)
           provider (fs/make-provider (:registry workspace))
-          lease (fs/issue-fs-lease reg {:subject {:phenotype/id pid1}
+          lease (fs/issue-fs-lease reg {:subject {:session/id sid1 :phenotype/id pid1}
                                         :mount-id (:mount-id workspace)
                                         :path ""
                                         :actions #{:read :list :stat}
                                         :issued-at now
                                         :expires-at later})]
       (is (throws-type? #(fs/provider-read provider (:mount-id workspace) "references/guide.md"
-                                           {:leases [lease] :subject {:phenotype/id pid2} :now now :registry reg})
+                                           {:leases [lease] :subject {:session/id sid1 :phenotype/id pid2} :now now :registry reg})
                         :capability/subject-mismatch)))))
 
 ;; ============================================================================
@@ -225,7 +227,7 @@
   (testing "verify-fs-lease! rejects a revoked lease (:capability/revoked)"
     (let [reg (fs/create-lease-registry)
           workspace (workspace-mount)
-          lease (fs/issue-fs-lease reg {:subject {:phenotype/id pid1}
+          lease (fs/issue-fs-lease reg {:subject {:session/id sid1 :phenotype/id pid1}
                                         :mount-id (:mount-id workspace)
                                         :path ""
                                         :actions #{:read :list :stat}
@@ -233,15 +235,15 @@
                                         :expires-at later})]
       (fs/revoke-lease! reg (:cap/id lease))
       (is (fs/lease-revoked? reg (:cap/id lease)))
-      (is (throws-type? #(fs/verify-fs-lease! lease {:now now :subject {:phenotype/id pid1} :registry reg})
+      (is (throws-type? #(fs/verify-fs-lease! lease {:now now :subject {:session/id sid1 :phenotype/id pid1} :registry reg})
                         :capability/revoked))))
   (testing "a lease NOT recorded by the issuer is rejected fail-closed (:capability/revoked)"
     (let [reg (fs/create-lease-registry)
           workspace (workspace-mount)
-          lease {:cap/id (UUID/randomUUID) :subject {:phenotype/id pid1}
+          lease {:cap/id (UUID/randomUUID) :subject {:session/id sid1 :phenotype/id pid1}
                  :resource {:kind :filesystem/path :mount/id (:mount-id workspace) :path ""}
                  :actions #{:read} :constraints {} :issued-at now :expires-at later}]
-      (is (throws-type? #(fs/verify-fs-lease! lease {:now now :subject {:phenotype/id pid1} :registry reg})
+      (is (throws-type? #(fs/verify-fs-lease! lease {:now now :subject {:session/id sid1 :phenotype/id pid1} :registry reg})
                         :capability/revoked)))))
 
 ;; ============================================================================
@@ -253,7 +255,7 @@
     (let [workspace (workspace-mount)
           provider (fs/make-provider (:registry workspace))]
       (is (throws-type? #(fs/provider-read provider (:mount-id workspace) "references/guide.md"
-                                           {:leases [] :subject {:phenotype/id pid1} :now now})
+                                           {:leases [] :subject {:session/id sid1 :phenotype/id pid1} :now now})
                         :capability/denied)))))
 
 ;; ============================================================================
@@ -272,7 +274,7 @@
           _ (put-bundle! reg b1)
           _ (put-bundle! reg b2)
           fs-lease (fs/issue-fs-lease (fs/create-lease-registry)
-                                      {:subject {:phenotype/id pid1}
+                                      {:subject {:session/id sid :phenotype/id pid1}
                                        :mount-id [:skill "debugging"] :path ""
                                        :actions #{:read :list :stat}
                                        :issued-at now :expires-at later})]
@@ -291,7 +293,7 @@
           _ (put-bundle! reg b1)
           _ (put-bundle! reg b2)
           expired (fs/issue-fs-lease (fs/create-lease-registry)
-                                     {:subject {:phenotype/id pid1}
+                                     {:subject {:session/id sid :phenotype/id pid1}
                                       :mount-id [:skill "debugging"] :path ""
                                       :actions #{:read :list :stat}
                                       :issued-at (java.util.Date. 1700000000000)
@@ -315,7 +317,7 @@
           b1 (make-skill-bundle [:skill "debugging"] "content A")
           _ (put-bundle! reg b1)
           lease-reg (fs/create-lease-registry)
-          fs-lease (fs/issue-fs-lease lease-reg {:subject {:phenotype/id pid1}
+          fs-lease (fs/issue-fs-lease lease-reg {:subject {:session/id sid :phenotype/id pid1}
                                                  :mount-id [:skill "debugging"] :path ""
                                                  :actions #{:read :list :stat}
                                                  :issued-at now :expires-at later})]
@@ -334,7 +336,7 @@
           b1 (make-skill-bundle [:skill "debugging"] "content A")
           _ (put-bundle! reg b1)
           lease-reg (fs/create-lease-registry)
-          fs-lease (fs/issue-fs-lease lease-reg {:subject {:phenotype/id pid1}
+          fs-lease (fs/issue-fs-lease lease-reg {:subject {:session/id sid :phenotype/id pid1}
                                                  :mount-id [:skill "debugging"] :path ""
                                                  :actions #{:read :list :stat}
                                                  :issued-at now :expires-at later})]
@@ -355,7 +357,7 @@
     (let [reg (fs/create-lease-registry)
           workspace (workspace-mount)
           ids (doall (pmap (fn [_]
-                             (let [l (fs/issue-fs-lease reg {:subject {:phenotype/id pid1}
+                             (let [l (fs/issue-fs-lease reg {:subject {:session/id sid1 :phenotype/id pid1}
                                                            :mount-id (:mount-id workspace)
                                                            :path ""
                                                            :actions #{:read :list :stat}
@@ -371,7 +373,7 @@
     (let [reg (fs/create-lease-registry)
           workspace (workspace-mount)
           provider (fs/make-provider (:registry workspace))
-          lease (fs/issue-fs-lease reg {:subject {:phenotype/id pid1}
+          lease (fs/issue-fs-lease reg {:subject {:session/id sid1 :phenotype/id pid1}
                                         :mount-id (:mount-id workspace)
                                         :path ""
                                         :actions #{:read :list :stat}
@@ -380,7 +382,7 @@
           reads (doall (pmap (fn [_]
                                (try
                                  (fs/provider-read provider (:mount-id workspace) "references/guide.md"
-                                                   {:leases [lease] :subject {:phenotype/id pid1} :now now :registry reg})
+                                                   {:leases [lease] :subject {:session/id sid1 :phenotype/id pid1} :now now :registry reg})
                                  ::ok
                                  (catch Throwable _ ::fail)))
                              (range 50)))]
@@ -401,14 +403,14 @@
           _ (backend/register-mount! mount-reg (backend/make-host-mount [:workspace "ws"] (.toString dir-a)))
           _ (backend/register-mount! mount-reg (backend/make-host-mount [:workspace "other"] (.toString dir-b)))
           provider (fs/make-provider mount-reg)
-          lease (fs/issue-fs-lease reg {:subject {:phenotype/id pid1}
+          lease (fs/issue-fs-lease reg {:subject {:session/id sid1 :phenotype/id pid1}
                                         :mount-id [:workspace "ws"]
                                         :path ""
                                         :actions #{:read :list :stat}
                                         :issued-at now
                                         :expires-at later})]
       (is (throws-type? #(fs/provider-read provider [:workspace "other"] "references/guide.md"
-                                           {:leases [lease] :subject {:phenotype/id pid1} :now now :registry reg})
+                                           {:leases [lease] :subject {:session/id sid1 :phenotype/id pid1} :now now :registry reg})
                         :capability/denied)
           "a lease scoped to mount A never reaches mount B"))))
 
@@ -420,7 +422,7 @@
   (let [issued (java.util.Date. (- (.getTime now) 120000))
         expires (java.util.Date. (- (.getTime now) 60000))]
     (fs/issue-fs-lease reg
-                       {:subject {:phenotype/id pid1}
+                       {:subject {:session/id sid1 :phenotype/id pid1}
                         :mount-id [:workspace "ws"]
                         :path ""
                         :actions #{:read :list :stat}
@@ -433,19 +435,19 @@
           workspace (workspace-mount)
           provider (fs/make-provider (:registry workspace))
           expired (renew-test-lease reg)]
-      (is (throws-type? #(fs/verify-fs-lease! expired {:now now :subject {:phenotype/id pid1} :registry reg})
+      (is (throws-type? #(fs/verify-fs-lease! expired {:now now :subject {:session/id sid1 :phenotype/id pid1} :registry reg})
                         :capability/expired))
-      (let [renewed (fs/issue-fs-lease reg {:subject {:phenotype/id pid1}
+      (let [renewed (fs/issue-fs-lease reg {:subject {:session/id sid1 :phenotype/id pid1}
                                             :mount-id (:mount-id workspace)
                                             :path ""
                                             :actions #{:read :list :stat}
                                             :issued-at now
                                             :expires-at later})]
-        (is (some? (fs/verify-fs-lease! renewed {:now now :subject {:phenotype/id pid1} :registry reg}))))))
+        (is (some? (fs/verify-fs-lease! renewed {:now now :subject {:session/id sid1 :phenotype/id pid1} :registry reg}))))))
   (testing "a bare { :mount/id :path :actions } map is NOT a grant and is rejected (:capability/schema-invalid)"
     (let [workspace (workspace-mount)
           provider (fs/make-provider (:registry workspace))
           bare {:mount/id (:mount-id workspace) :path "" :actions #{:read :list :stat}}]
       (is (throws-type? #(fs/provider-read provider (:mount-id workspace) "references/guide.md"
-                                           {:leases [bare] :subject {:phenotype/id pid1} :now now})
+                                           {:leases [bare] :subject {:session/id sid1 :phenotype/id pid1} :now now})
                         :capability/schema-invalid)))))

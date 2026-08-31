@@ -637,17 +637,17 @@
 ;; `run` — execute one session pinned to a generation
 ;; ============================================================================
 (defn- tool-lease
-  "One per-session CapabilityLease granting this phenotype's exact id
+  "One per-session CapabilityLease granting this session+phenotype's exact id
   the tool's :invoke action for the next minute (the CLI grants
   leases ONLY for the tools the operator names with --tool; a visible
   tool never grants resource authority — Global Constraint 9).
   Delegates to evoclj.capability.mint/mint-lease! (P2 single issuance
-  surface)."
-  [phenotype-id tool-id]
+  surface). Subject is dual-anchor {:session/id :phenotype/id} (P3)."
+  [session-id phenotype-id tool-id]
   (let [now (Date.)]
     (cap-mint/mint-lease! nil
                           {:cap-id (UUID/randomUUID)
-                           :subject {:phenotype/id phenotype-id}
+                           :subject {:session/id session-id :phenotype/id phenotype-id}
                            :resource {:kind :tool :id tool-id}
                            :actions #{:invoke}
                            :constraints {:max-calls 10000}
@@ -655,18 +655,19 @@
                            :expires-at (Date. (+ (.getTime now) 60000))})))
 
 (defn- model-lease
-  "One per-session CapabilityLease granting this phenotype's exact id
+  "One per-session CapabilityLease granting this session+phenotype's exact id
   the :invoke action on ONE model resource for the next minute (the
   CLI grants leases ONLY for the models the operator names with
   --model, by their full models.dev id, e.g.
   deepseek/deepseek-v4-flash; a visible model never grants resource
   authority — Global Constraint 9). Delegates to
-  evoclj.capability.mint/mint-lease! (P2 single issuance surface)."
-  [phenotype-id model-id]
+  evoclj.capability.mint/mint-lease! (P2 single issuance surface).
+  Subject is dual-anchor {:session/id :phenotype/id} (P3)."
+  [session-id phenotype-id model-id]
   (let [now (Date.)]
     (cap-mint/mint-lease! nil
                           {:cap-id (UUID/randomUUID)
-                           :subject {:phenotype/id phenotype-id}
+                           :subject {:session/id session-id :phenotype/id phenotype-id}
                            :resource {:kind :model :id model-id}
                            :actions #{:invoke}
                            :constraints {:max-calls 10000}
@@ -777,8 +778,15 @@
             reg (:provider/registry system)
             usage (atom {})
             phenotype-id (:compiled/phenotype-id compiled)
-            leases (concat (mapv #(tool-lease phenotype-id %) tools)
-                             (mapv #(model-lease phenotype-id %) models))
+            sid (:session/id
+                 (session/create-session!
+                  db
+                  {:genome/id (:compiled/genome-id compiled)
+                   :resolution/id (:compiled/resolution-id compiled)
+                   :phenotype/id phenotype-id
+                   :generation/id (:generation/id generation)}))
+            leases (concat (mapv #(tool-lease sid phenotype-id %) tools)
+                             (mapv #(model-lease sid phenotype-id %) models))
             leases (vec leases)
             model-reg (:model/registry system)
             ph (phenotype/instantiate
@@ -791,14 +799,7 @@
                       :stores {:sqlite db :cas cas-store}
                       :dispatch (dispatch/make-broker-context
                                  {:registry reg :leases leases :usage usage
-                                  :model-registry model-reg})}
-            sid (:session/id
-                 (session/create-session!
-                  db
-                  {:genome/id (:compiled/genome-id compiled)
-                   :resolution/id (:compiled/resolution-id compiled)
-                   :phenotype/id phenotype-id
-                   :generation/id (:generation/id generation)}))]
+                                  :model-registry model-reg})}]
         (event/append-event! db
                              {:session/id sid
                               :generation/id (:generation/id generation)

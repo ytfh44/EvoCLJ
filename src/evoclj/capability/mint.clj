@@ -23,8 +23,7 @@
              when no recording is needed. When supplied the sealed lease is
              stored with :revoked? false so verify/revoke paths work.
 
-  opts — map with keys:
-    :subject     { :phenotype/id \"sha256:...\" } — required
+    :subject     { :session/id <uuid> :phenotype/id \"sha256:...\" } — required, dual-anchor
     :resource    { :kind ... } — required (open, provider-defined)
     :actions     set of keywords — required, non-empty ⊆ allowlist
     :constraints map — optional, default {}

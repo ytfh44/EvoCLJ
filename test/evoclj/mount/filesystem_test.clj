@@ -38,7 +38,7 @@
           _ (backend/register-mount! reg ws-mount)
           _ (backend/register-mount! reg skill-mount)
           provider (fs/make-provider reg)
-          subject {:phenotype/id p1}
+          subject {:session/id #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" :phenotype/id p1}
           ws-lease {:cap/id (random-uuid) :subject subject :resource {:kind :filesystem/path :mount/id [:workspace "ws"] :path ""} :actions #{:read :list :stat :write :create :delete} :issued-at now :expires-at (Date. (+ (.getTime now) 100000)) :constraints {}}
           skill-lease {:cap/id (random-uuid) :subject subject :resource {:kind :filesystem/path :mount/id [:skill "demo" (:tree/id snap-res)] :path ""} :actions #{:read :list :stat} :issued-at now :expires-at (Date. (+ (.getTime now) 100000)) :constraints {}}]
       ;; skill read via provider
@@ -83,7 +83,7 @@
         reg (backend/create-registry)
         _ (backend/register-mount! reg skill-mount)
         provider (fs/make-provider reg)
-        subject {:phenotype/id p1}
+        subject {:session/id #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" :phenotype/id p1}
         lease {:cap/id (random-uuid) :subject subject :resource {:kind :filesystem/path :mount/id mount-id :path ""} :actions #{:read :list :stat} :issued-at now :expires-at (Date. (+ (.getTime now) 100000)) :constraints {}}]
     {:provider provider :mount-id mount-id :lease lease :subject subject}))
 

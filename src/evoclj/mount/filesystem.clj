@@ -103,8 +103,8 @@
   nil)
 
 (defn- phenotype-id-valid?
-  "True when subject is a { :phenotype/id <sha256> } map conforming to the
-  capability SubjectSchema (exact phenotype id)."
+  "True when subject is a { :session/id <uuid|string> :phenotype/id <sha256> } map
+  conforming to the capability SubjectSchema (exact session+phenotype dual-anchor, P3)."
   [subject]
   (boolean (m/validate cap-schema/SubjectSchema subject)))
 
@@ -114,9 +114,10 @@
   resource {:mount/id mount-id :path path}, spanning a positive window.
 
   Inputs (all required unless noted):
-    :subject     { :phenotype/id \"sha256:...\" } — the SINGLE phenotype the
-                 grant belongs to (exact match; a sibling phenotype from the
-                 same Genome is a different subject and never matches).
+    :subject     { :session/id <uuid|string> :phenotype/id \"sha256:...\" } — the
+                 SINGLE session+phenotype pair the grant belongs to (exact
+                 dual-anchor; a sibling session with the same phenotype is
+                 a different subject and never matches, P3).
     :mount-id    canonical vector mount id ([:skill \"x\" \"sha256:...\"] or
                  [:workspace \"id\"]).
     :path        mount-relative path the grant covers (\"\" = whole mount).
@@ -142,7 +143,7 @@
   (let [cap-id (or (get opts (keyword "cap/id")) (:cap-id opts))]
     (when-not (phenotype-id-valid? subject)
       (throw (err/error :capability/schema-invalid
-                        "fs lease subject must be a single authorized phenotype ({:phenotype/id sha256})"
+                        "fs lease subject must be a dual-anchor session+phenotype ({:session/id uuid :phenotype/id sha256})"
                         {:subject (err/sanitize subject)})))
     (when-not (backend/mount-id? mount-id)
       (throw (err/error :capability/schema-invalid

@@ -410,13 +410,15 @@
   honored. When no `:fs-lease` is supplied this is a no-op (the engine
   grants no filesystem access without a lease). Reuses
   evoclj.mount.filesystem/verify-fs-lease! (single implementation, INV-05).
-  Returns the lease when present."
+  Returns the lease when present. P3 dual-anchor: the verification subject
+  is {:session/id :phenotype/id}, so sibling sessions never match."
   [db session-id fs-lease opts]
   (when fs-lease
     (let [{:keys [phenotype_id]} (fetch-session db session-id)]
       (mount-fs/verify-fs-lease! fs-lease
                                  {:subject (if phenotype_id
-                                             {:phenotype/id phenotype_id}
+                                             {:session/id (types/session-id session-id)
+                                              :phenotype/id phenotype_id}
                                              (get-in fs-lease [:subject]))
                                   :now (:now opts)
                                   :registry (:fs-lease-registry opts)})))
