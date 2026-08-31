@@ -33,6 +33,7 @@
   provider-read (no independent I/O stack)."
   (:require [clojure.string :as str]
             [evoclj.capability.lease :as lease]
+            [evoclj.capability.mint :as cap-mint]
             [evoclj.capability.schema :as cap-schema]
             [evoclj.mount.backend :as backend]
             [evoclj.kernel.error :as err]
@@ -124,56 +125,51 @@
     :expires-at  #inst (default +1h) — EXCLUSIVE window end; must be after
                  :issued-at (a zero/negative window is a host bug, rejected).
     :constraints optional map (default {} — no call limit).
-    :cap/id      optional #uuid (default fresh).
+    :cap-id      optional #uuid (default fresh, alias cap/id also accepted).
 
   When `lease-registry` is supplied the lease is recorded (verifiable and
-  revocable). Returns the lease map. Throws typed errors:
+  revocable). Returns the sealed lease. Throws typed errors:
     :capability/schema-invalid  — malformed subject/mount/path/actions/window
     :filesystem/path-outside-mount — path escapes the mount.
 
   The issuer is the wired production path for granting filesystem access —
   simplified bare { :mount/id :path :actions } maps are NOT grants and are
-  rejected by the access path (B4: subject/expiry are forced)."
+  rejected by the access path (B4: subject/expiry are forced). Delegates
+  to evoclj.capability.mint/mint-lease! (P2 single issuance surface)."
   [lease-registry
    {:keys [subject mount-id path actions issued-at expires-at constraints]
-    cap-id :cap/id
     :as opts}]
-  (when-not (phenotype-id-valid? subject)
-    (throw (err/error :capability/schema-invalid
-                      "fs lease subject must be a single authorized phenotype ({:phenotype/id sha256})"
-                      {:subject (err/sanitize subject)})))
-  (when-not (backend/mount-id? mount-id)
-    (throw (err/error :capability/schema-invalid
-                      "fs lease requires a canonical vector :mount/id"
-                      {:mount/id mount-id})))
-  (let [canonical (backend/canonicalize-mount-path (or path ""))]
-    (when-not (and (set? actions) (seq actions)
-                   (every? backend/valid-capabilities actions))
+  (let [cap-id (or (get opts (keyword "cap/id")) (:cap-id opts))]
+    (when-not (phenotype-id-valid? subject)
       (throw (err/error :capability/schema-invalid
-                        "fs lease requires a non-empty subset of valid filesystem actions"
-                        {:actions (err/sanitize actions) :valid (vec backend/valid-capabilities)})))
-    (let [issued (or issued-at (Date.))
-          expires (or expires-at (Date. (+ (.getTime ^Date issued) 3600000)))]
-      (when-not (inst? issued)
+                        "fs lease subject must be a single authorized phenotype ({:phenotype/id sha256})"
+                        {:subject (err/sanitize subject)})))
+    (when-not (backend/mount-id? mount-id)
+      (throw (err/error :capability/schema-invalid
+                        "fs lease requires a canonical vector :mount/id"
+                        {:mount/id mount-id})))
+    (let [canonical (backend/canonicalize-mount-path (or path ""))]
+      (when-not (and (set? actions) (seq actions)
+                     (every? backend/valid-capabilities actions))
         (throw (err/error :capability/schema-invalid
-                          "fs lease :issued-at must be an #inst" {:issued-at issued})))
-      (when-not (inst? expires)
-        (throw (err/error :capability/schema-invalid
-                          "fs lease :expires-at must be an #inst" {:expires-at expires})))
-      (when-not (.before ^Date issued ^Date expires)
-        (throw (err/error :capability/schema-invalid
-                          "fs lease must span a positive window (:expires-at after :issued-at)"
-                          {:issued-at issued :expires-at expires})))
-      (let [lease {:cap/id (or cap-id (UUID/randomUUID))
-                   :subject subject
-                   :resource {:kind :filesystem/path :mount/id mount-id :path canonical}
-                   :actions (set actions)
-                   :constraints (or constraints {})
-                   :issued-at issued
-                   :expires-at expires}]
-        (when lease-registry
-          (register-lease! lease-registry lease))
-        lease))))
+                          "fs lease requires a non-empty subset of valid filesystem actions"
+                          {:actions (err/sanitize actions) :valid (vec backend/valid-capabilities)})))
+      (let [issued (or issued-at (Date.))
+            expires (or expires-at (Date. (+ (.getTime ^Date issued) 3600000)))]
+        (when-not (inst? issued)
+          (throw (err/error :capability/schema-invalid
+                            "fs lease :issued-at must be an #inst" {:issued-at issued})))
+        (when-not (inst? expires)
+          (throw (err/error :capability/schema-invalid
+                            "fs lease :expires-at must be an #inst" {:expires-at expires})))
+        (cap-mint/mint-lease! lease-registry
+                              {:cap-id (or cap-id (UUID/randomUUID))
+                               :subject subject
+                               :resource {:kind :filesystem/path :mount/id mount-id :path canonical}
+                               :actions (set actions)
+                               :constraints (or constraints {})
+                               :issued-at issued
+                               :expires-at expires})))))
 
 (defn verify-fs-lease!
   "Re-verify a filesystem lease FAIL-CLOSED (B4 reload!/restore!

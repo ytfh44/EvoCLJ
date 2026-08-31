@@ -44,6 +44,7 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [evoclj.capability.mint :as cap-mint]
             [evoclj.compiler.core :as compiler]
             [evoclj.config :as config]
             [evoclj.eval.profile :as profile]
@@ -635,21 +636,23 @@
 ;; ============================================================================
 ;; `run` — execute one session pinned to a generation
 ;; ============================================================================
-
 (defn- tool-lease
   "One per-session CapabilityLease granting this phenotype's exact id
   the tool's :invoke action for the next minute (the CLI grants
   leases ONLY for the tools the operator names with --tool; a visible
-  tool never grants resource authority — Global Constraint 9)."
+  tool never grants resource authority — Global Constraint 9).
+  Delegates to evoclj.capability.mint/mint-lease! (P2 single issuance
+  surface)."
   [phenotype-id tool-id]
   (let [now (Date.)]
-    {:cap/id (UUID/randomUUID)
-     :subject {:phenotype/id phenotype-id}
-     :resource {:kind :tool :id tool-id}
-     :actions #{:invoke}
-     :constraints {:max-calls 10000}
-     :issued-at now
-     :expires-at (Date. (+ (.getTime now) 60000))}))
+    (cap-mint/mint-lease! nil
+                          {:cap-id (UUID/randomUUID)
+                           :subject {:phenotype/id phenotype-id}
+                           :resource {:kind :tool :id tool-id}
+                           :actions #{:invoke}
+                           :constraints {:max-calls 10000}
+                           :issued-at now
+                           :expires-at (Date. (+ (.getTime now) 60000))})))
 
 (defn- model-lease
   "One per-session CapabilityLease granting this phenotype's exact id
@@ -657,16 +660,18 @@
   CLI grants leases ONLY for the models the operator names with
   --model, by their full models.dev id, e.g.
   deepseek/deepseek-v4-flash; a visible model never grants resource
-  authority — Global Constraint 9)."
+  authority — Global Constraint 9). Delegates to
+  evoclj.capability.mint/mint-lease! (P2 single issuance surface)."
   [phenotype-id model-id]
   (let [now (Date.)]
-    {:cap/id (UUID/randomUUID)
-     :subject {:phenotype/id phenotype-id}
-     :resource {:kind :model :id model-id}
-     :actions #{:invoke}
-     :constraints {:max-calls 10000}
-     :issued-at now
-     :expires-at (Date. (+ (.getTime now) 60000))}))
+    (cap-mint/mint-lease! nil
+                          {:cap-id (UUID/randomUUID)
+                           :subject {:phenotype/id phenotype-id}
+                           :resource {:kind :model :id model-id}
+                           :actions #{:invoke}
+                           :constraints {:max-calls 10000}
+                           :issued-at now
+                           :expires-at (Date. (+ (.getTime now) 60000))})))
 
 (defn- program-sources
   "Decode every compiled program's source text from the immutable
