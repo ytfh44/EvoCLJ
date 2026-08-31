@@ -136,9 +136,8 @@
   "True when the requesting `subject` matches the lease's subject.
   Dual-anchor [W-01] when both sides carry :session/id: BOTH session and
   phenotype must be equal. For backward compat with pre-P3 leases/tests
-  that only carry :phenotype/id, session is ignored when either side
-  lacks it — only phenotype is compared. A malformed lease/subject still
-  throws :capability/schema-invalid."
+  that only carry :phenotype/id (no session), session is ignored when
+  either side lacks it — only phenotype is compared."
   [lease subject]
   (validate-input! lease schema/SubjectSchema subject)
   (let [lease-session (get-in lease [:subject :session/id])

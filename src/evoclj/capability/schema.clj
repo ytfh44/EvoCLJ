@@ -53,9 +53,9 @@
 
 (def SubjectSchema
   "The lease subject: the SINGLE session+phenotype pair the grant belongs to.
-  Dual-anchor [W-01]: when both keys are present, matching is exact on BOTH;
-  for backward compat with pre-P3 tests, :session/id is optional — a lease
-  with only :phenotype/id still validates, but new code SHOULD supply both."
+  Dual-anchor [W-01] when both sides carry :session/id: BOTH session and
+  phenotype must be equal; for backward compat with pre-P3 leases,
+  :session/id is optional and ignored when missing."
   [:map {:closed true}
    [:phenotype/id PhenotypeIdSchema]
    [:session/id {:optional true} SessionIdSchema]])
