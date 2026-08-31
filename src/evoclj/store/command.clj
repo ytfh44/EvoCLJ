@@ -283,6 +283,119 @@
                "SELECT * FROM commands ORDER BY created_at ASC, id ASC")
          params (mapv second clauses)]
      (mapv row->command (sqlite/query db (into [sql] params))))))
+;; ---------------------------------------------------------------------------
+;; A3 — Dispatch state machine helpers (Wolfram [W-20..W-24])
+;; ---------------------------------------------------------------------------
+
+(defn fetch-commands-by-state
+  "Fetch all commands in `state` (keyword, e.g. :queued). Returns a vector
+  of :cmd/* maps. Throws :store/command-invalid when `state` is not one of
+  the six allowed states."
+  [db state]
+  (when-not (contains? allowed-states state)
+    (throw (err/error :store/command-invalid
+                      (str "unknown command state: " state)
+                      {:state state :allowed allowed-states})))
+  (list-commands db {:state state}))
+
+(defn dispatch-command!
+  "Transition command `id` from :queued -> :running.
+  Atomic UPDATE with state guard; fail-closed when not in :queued.
+  Returns the updated :cmd/* map on success, or throws
+  :store/invalid-transition when the row is not in :queued (including
+  not-found and terminal states)."
+  [db id]
+  (let [id-str (str id)
+        res (sqlite/exec! db ["UPDATE commands SET state = ? WHERE id = ? AND state = ?"
+                              "running" id-str "queued"])
+        cnt (first res)]
+    (if (and cnt (pos? cnt))
+      (fetch-command db id-str)
+      (let [existing (fetch-command db id-str)
+            actual (:cmd/state existing)]
+        (throw (err/error :store/invalid-transition
+                          (str "cannot dispatch command " id-str " from state " (or actual :not-found))
+                          {:id id-str :state actual :expected :queued}))))))
+
+(defn succeed-command!
+  "Transition command `id` from :running -> :succeeded.
+  `result-cas-ref` is an optional sha256: CAS reference to the result
+  artifact; when non-nil it is persisted to `result_ref` if the column
+  exists (otherwise the state transition still succeeds).
+  Atomic UPDATE with state guard; throws :store/invalid-transition when
+  not in :running."
+  [db id result-cas-ref]
+  (let [id-str (str id)
+        has-result (some? result-cas-ref)
+        result-str (when has-result (str result-cas-ref))
+        attempt
+        (fn [sql-params]
+          (try
+            (sqlite/exec! db sql-params)
+            (catch Exception e
+              (let [msg (or (.getMessage e) "")
+                    cause-msg (some-> (.getCause e) .getMessage)]
+                (if (or (str/includes? msg "no such column")
+                        (str/includes? (or cause-msg "") "no such column"))
+                  ::no-column
+                  (throw e))))))
+        res (if has-result
+              (let [r (attempt ["UPDATE commands SET state = ?, result_ref = ? WHERE id = ? AND state = ?"
+                                "succeeded" result-str id-str "running"])]
+                (if (= r ::no-column)
+                  (sqlite/exec! db ["UPDATE commands SET state = ? WHERE id = ? AND state = ?"
+                                    "succeeded" id-str "running"])
+                  r))
+              (sqlite/exec! db ["UPDATE commands SET state = ? WHERE id = ? AND state = ?"
+                                "succeeded" id-str "running"]))
+        cnt (first res)]
+    (if (and cnt (pos? cnt))
+      (fetch-command db id-str)
+      (let [existing (fetch-command db id-str)
+            actual (:cmd/state existing)]
+        (throw (err/error :store/invalid-transition
+                          (str "cannot succeed command " id-str " from state " (or actual :not-found))
+                          {:id id-str :state actual :expected :running}))))))
+
+(defn fail-command!
+  "Transition command `id` from :queued or :running -> :failed.
+  `error` is an optional error description (string or ex-data); when
+  non-nil and the `error` column exists it is persisted, otherwise only
+  the state transition is performed.
+  Atomic UPDATE with state guard; throws :store/invalid-transition when
+  not in :queued or :running (including terminals and not-found)."
+  [db id error]
+  (let [id-str (str id)
+        err-str (when (some? error) (str error))
+        has-err (some? err-str)
+        attempt
+        (fn [sql-params]
+          (try
+            (sqlite/exec! db sql-params)
+            (catch Exception e
+              (let [msg (or (.getMessage e) "")
+                    cause-msg (some-> (.getCause e) .getMessage)]
+                (if (or (str/includes? msg "no such column")
+                        (str/includes? (or cause-msg "") "no such column"))
+                  ::no-column
+                  (throw e))))))
+        res (if has-err
+              (let [r (attempt ["UPDATE commands SET state = ?, error = ? WHERE id = ? AND (state = ? OR state = ?)"
+                                "failed" err-str id-str "queued" "running"])]
+                (if (= r ::no-column)
+                  (sqlite/exec! db ["UPDATE commands SET state = ? WHERE id = ? AND (state = ? OR state = ?)"
+                                    "failed" id-str "queued" "running"])
+                  r))
+              (sqlite/exec! db ["UPDATE commands SET state = ? WHERE id = ? AND (state = ? OR state = ?)"
+                                "failed" id-str "queued" "running"]))
+        cnt (first res)]
+    (if (and cnt (pos? cnt))
+      (fetch-command db id-str)
+      (let [existing (fetch-command db id-str)
+            actual (:cmd/state existing)]
+        (throw (err/error :store/invalid-transition
+                          (str "cannot fail command " id-str " from state " (or actual :not-found))
+                          {:id id-str :state actual :expected #{:queued :running}}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Outbox transaction — command + :command/submitted event atomically
