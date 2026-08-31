@@ -13,13 +13,15 @@
 (def ^:private phenotype-p1
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
+(def ^:private session-a #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
 (def ^:private issued-at (Date. 1700000000000))
 (def ^:private expires-at (Date. 1700003600000))
 
 (defn- base-opts
   []
   {:cap-id #uuid "11111111-1111-4111-8111-111111111111"
-   :subject {:phenotype/id phenotype-p1}
+   :subject {:session/id session-a :phenotype/id phenotype-p1}
    :resource {:kind :tool :id :fixture/echo}
    :actions #{:invoke}
    :constraints {}
@@ -34,7 +36,7 @@
       (is (schema/lease? lease) "must be sealed")
       (is (identical? lease (schema/validate-lease lease)) "sealed lease validates")
       (is (= #uuid "11111111-1111-4111-8111-111111111111" (:cap/id lease)))
-      (is (= {:phenotype/id phenotype-p1} (:subject lease)))
+      (is (= {:session/id session-a :phenotype/id phenotype-p1} (:subject lease)))
       (is (= {:kind :tool :id :fixture/echo} (:resource lease)))
       (is (= #{:invoke} (:actions lease))))))
 

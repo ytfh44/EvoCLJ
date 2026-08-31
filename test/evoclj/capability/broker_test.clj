@@ -77,7 +77,7 @@
   assoc-style overrides."
   [& kvs]
   (let [base {:cap/id echo-cap-id
-              :subject {:phenotype/id phenotype-p1}
+              :subject {:session/id session-id :phenotype/id phenotype-p1}
               :resource {:kind :tool :id :fixture/echo}
               :actions #{:invoke}
               :constraints {:max-calls 10}
@@ -110,7 +110,7 @@
   with assoc-style overrides."
   [& kvs]
   (let [base {:cap/id model-cap-id
-              :subject {:phenotype/id phenotype-p1}
+              :subject {:session/id session-id :phenotype/id phenotype-p1}
               :resource {:kind :model :id model-a-id}
               :actions #{:invoke}
               :constraints {:max-calls 10}
@@ -161,7 +161,7 @@
       (is (= d (edn/read-string (pr-str d))))))
   (testing "when several leases exist, the covering one allows and is reported"
     (let [other (lease :cap/id #uuid "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-                       :subject {:phenotype/id phenotype-p2})
+                       :subject {:session/id session-id :phenotype/id phenotype-p2})
           d (decision [(lease) other])]
       (is (allow-decision? d))
       (is (= echo-cap-id (:lease-id d)))))
@@ -211,7 +211,7 @@
     (is (= :capability/expired (:reason (decision [(lease)] {} after-expiry)))))
   (testing "a lease for another phenotype denies with :capability/subject-mismatch"
     (is (= :capability/subject-mismatch
-           (:reason (decision [(lease :subject {:phenotype/id phenotype-p2})])))))
+           (:reason (decision [(lease :subject {:session/id session-id :phenotype/id phenotype-p2})])))))
   (testing "a grant that does not include the requested action denies with :capability/action-denied"
     (is (= :capability/action-denied
            (:reason (decision [(lease :actions #{:read})]))))
@@ -237,7 +237,7 @@
 
 (deftest filesystem-scope-is-decided-on-canonical-paths
   (let [fs-lease {:cap/id #uuid "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
-                  :subject {:phenotype/id phenotype-p1}
+                  :subject {:session/id session-id :phenotype/id phenotype-p1}
                   :resource {:kind :filesystem :path "/protected/work"}
                   :actions #{:invoke}
                   :constraints {:max-calls 10}
@@ -282,7 +282,7 @@
     (let [p1 (lease :cap/id #uuid "11111111-1111-4111-8111-111111111111"
                     :resource {:kind :tool :id :fixture/other})
           p2 (lease :cap/id #uuid "22222222-2222-4222-8222-222222222222"
-                    :subject {:phenotype/id phenotype-p2})]
+                    :subject {:session/id session-id :phenotype/id phenotype-p2})]
       (is (= (decision [p1 p2] {}) (decision [p2 p1] {})))
       (is (not (allow-decision? (decision [p1 p2] {}))))))
   (testing "deny decisions round-trip through EDN"
@@ -340,7 +340,7 @@
         deny-pool [(lease :cap/id #uuid "33333333-3333-4333-8333-333333333333"
                           :resource {:kind :tool :id :fixture/other})
                    (lease :cap/id #uuid "44444444-4444-4444-8444-444444444444"
-                          :subject {:phenotype/id phenotype-p2})
+                          :subject {:session/id session-id :phenotype/id phenotype-p2})
                    (lease :cap/id #uuid "55555555-5555-4555-8555-555555555555"
                           :actions #{:read})
                    (lease :cap/id #uuid "66666666-6666-4666-8666-666666666666"

@@ -41,18 +41,20 @@
 (def ^:private phenotype-p2
   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 
+(def ^:private session-a #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+(def ^:private session-b #uuid "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+
 (def ^:private issued-at (java.util.Date. 1700000000000))
 (def ^:private expires-at (java.util.Date. 1700003600000)) ; issued-at + 1h
 
 (def ^:private base-lease
   {:cap/id #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-   :subject {:phenotype/id phenotype-p1}
+   :subject {:session/id session-a :phenotype/id phenotype-p1}
    :resource {:kind :tool :id :fixture/echo}
    :actions #{:invoke}
    :constraints {:max-calls 10}
    :issued-at issued-at
    :expires-at expires-at})
-
 (defn- lease
   "A valid lease map, optionally with assoc-style overrides."
   [& kvs]
@@ -81,13 +83,17 @@
 ;; ============================================================================
 
 (deftest exact-subject-matching
-  (testing "the lease's own phenotype is authorized"
-    (is (lease/subject-matches? (lease) {:phenotype/id phenotype-p1})))
-  (testing "a lease for P1 never authorizes P2, even a same-Genome sibling"
-    (is (not (lease/subject-matches? (lease) {:phenotype/id phenotype-p2}))))
-  (testing "a subject with a malformed or missing phenotype id is rejected, never matched"
+  (testing "the lease's own session+phenotype is authorized (dual-anchor)"
+    (is (lease/subject-matches? (lease) {:session/id session-a :phenotype/id phenotype-p1})))
+  (testing "a lease for (session-a,P1) never authorizes same phenotype but sibling session"
+    (is (not (lease/subject-matches? (lease) {:session/id session-b :phenotype/id phenotype-p1}))))
+  (testing "a lease for P1 never authorizes P2, even same session"
+    (is (not (lease/subject-matches? (lease) {:session/id session-a :phenotype/id phenotype-p2}))))
+  (testing "a subject with a malformed or missing phenotype/session id is rejected, never matched"
     (is-schema-invalid #(lease/subject-matches? (lease) {}))
-    (is-schema-invalid #(lease/subject-matches? (lease) {:phenotype/id "not-a-hash"}))))
+    (is-schema-invalid #(lease/subject-matches? (lease) {:session/id session-a :phenotype/id "not-a-hash"}))
+    (is-schema-invalid #(lease/subject-matches? (lease) {:phenotype/id phenotype-p1}))
+    (is-schema-invalid #(lease/subject-matches? (lease) {:session/id session-a}))))
 
 ;; ============================================================================
 ;; Step 2 — expiry boundaries and action mismatch

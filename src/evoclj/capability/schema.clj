@@ -7,13 +7,12 @@
   is normative:
 
     {:cap/id #uuid \"...\"
-     :subject {:phenotype/id \"sha256:...\"}
+     :subject {:session/id #uuid \"...\" :phenotype/id \"sha256:...\"}
      :resource {:kind :tool :id :fixture/echo}
      :actions #{:invoke}
      :constraints {:max-calls 10}
      :issued-at #inst \"...\"
      :expires-at #inst \"...\"}
-
   Global Constraint 8 makes every external effect cross the
   kernel-owned Intent/Capability Broker, so a lease exists only as a
   kernel-issued value; Global Constraint 9 says a visible action/tool
@@ -47,12 +46,19 @@
   every boundary."
   intent-schema/PhenotypeIdSchema)
 
+(def SessionIdSchema
+  "A session identifier — UUID or non-empty string form.
+  P3 dual-anchor: every CapabilityLease subject MUST carry a session."
+  [:or uuid? [:string {:min 1}]])
+
 (def SubjectSchema
-  "The lease subject: the SINGLE phenotype the grant belongs to. A
-  lease for P1 must never authorize P2, even when both share the same
-  Genome — the subject carries only the phenotype id, and matching is
-  exact."
+  "The lease subject: the SINGLE session+phenotype pair the grant belongs to.
+  A lease for (session S1, phenotype P1) must never authorize (S1,P2) or
+  (S2,P1) — subject matching is exact on BOTH keys (dual-anchor, [W-01]).
+  Both keys are required; a missing :session/id or :phenotype/id fails
+  closed with :capability/schema-invalid (no silent fallback)."
   [:map {:closed true}
+   [:session/id SessionIdSchema]
    [:phenotype/id PhenotypeIdSchema]])
 
 (def ^:private allowed-actions

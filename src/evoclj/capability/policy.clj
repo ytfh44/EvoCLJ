@@ -73,14 +73,15 @@
 ;; --- request derivation ----------------------------------------------------
 
 (defn intent-subject
-  "The requesting subject of `intent`: the one-key map
-  {:phenotype/id ...} carrying exactly the intent's own attribution
-  (Global Constraint 20). A lease grants ONE phenotype; authorization
-  compares these ids exactly, so a sibling phenotype from the same
-  Genome is a different subject and must not match (Global Constraint
-  9)."
+  "The requesting subject of `intent`: the two-key map
+  {:session/id ... :phenotype/id ...} carrying exactly the intent's own
+  attribution (Global Constraint 20). A lease grants ONE session+phenotype
+  pair; authorization compares BOTH ids exactly (dual-anchor, P3,
+  [W-01]), so a sibling session from the same Genome+phenotype is a
+  different subject and must not match (Global Constraint 9)."
   [intent]
-  {:phenotype/id (:phenotype/id intent)})
+  {:session/id (:session/id intent)
+   :phenotype/id (:phenotype/id intent)})
 
 (def ^:private v0-actions
   "The v0 action requested by each intent type. :intent/tool-call

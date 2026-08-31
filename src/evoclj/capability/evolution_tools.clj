@@ -327,23 +327,29 @@
   itself holds no broker — Global Constraint 8)."
   [evidence-tool-catalog-entry history-tool-catalog-entry])
 ;; --- the subject-bound lease --------------------------------------------------
-
 (defn evolution-tool-lease
-  "Mint one v0 CapabilityLease (component) binding ONE phenotype id to
-  ONE evolution retrieval tool (:evolution/evidence or
+  "Mint one v0 CapabilityLease (component) binding ONE session+phenotype pair
+  to ONE evolution retrieval tool (:evolution/evidence or
   :evolution/history) with :actions #{:invoke} — the grant the broker
-  authorizes a tool-call against. Subject matching is EXACT, so a
-  sibling phenotype from the same Genome is a different subject and
-  never matches (Global Constraint 9).
+  authorizes a tool-call against. Subject matching is dual-anchor
+  (P3, [W-01]): BOTH :session/id and :phenotype/id must match exactly,
+  so a sibling session from the same Genome+phenotype is a different
+  subject and never matches (Global Constraint 9).
 
+  Required: phenotype-id (sha256 string), tool-id (keyword).
   Optional opts: :cap-id (default a fresh uuid), :issued-at (default
-  now), :expires-at (default one hour after :issued-at — a bounded
-  grant), :constraints (default {} — no call limit), :registry
-  (optional LeaseRegistry atom to record the lease for revocation).
+  now), :expires-at (default one hour after :issued-at), :constraints
+  (default {}), :registry (optional LeaseRegistry atom), :session/id
+  (required for dual-anchor — the owning session's UUID/string).
   Delegates to evoclj.capability.mint/mint-lease! (P2 single issuance
-  surface)."
+  surface). Throws :capability/schema-invalid when :session/id is missing."
   [phenotype-id tool-id & [opts]]
   (let [registry (:registry opts)
+        session-id (or (:session/id opts) (:session-id opts))
+        _ (when-not session-id
+            (throw (err/error :capability/schema-invalid
+                              "evolution-tool-lease requires :session/id in opts (P3 dual-anchor)"
+                              {:phenotype/id phenotype-id :tool/id tool-id})))
         cap-id-val (or (get opts (keyword "cap/id")) (:cap-id opts) (UUID/randomUUID))
         issued (or (:issued-at opts) (Date.))
         expires (or (:expires-at opts)
@@ -351,7 +357,7 @@
                                       (Duration/ofHours 1))))]
     (cap-mint/mint-lease! registry
                           {:cap-id cap-id-val
-                           :subject {:phenotype/id phenotype-id}
+                           :subject {:session/id session-id :phenotype/id phenotype-id}
                            :resource {:kind :tool :id tool-id}
                            :actions #{:invoke}
                            :constraints (or (:constraints opts) {})

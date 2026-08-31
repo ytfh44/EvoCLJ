@@ -133,14 +133,18 @@
        (.before ^java.util.Date instant ^java.util.Date (:expires-at lease))))
 
 (defn subject-matches?
-  "True when the requesting `subject` ({:phenotype/id ...}) is EXACTLY
-  the lease's subject. Any other phenotype id — including a sibling
-  from the same Genome — is not authorized. A malformed lease or
-  subject throws :capability/schema-invalid."
+  "True when the requesting `subject` ({:session/id ... :phenotype/id ...})
+  is EXACTLY the lease's subject. Any other session or phenotype id —
+  including a sibling session from the same Genome+phenotype — is not
+  authorized. Matching is dual-anchor: BOTH :session/id and :phenotype/id
+  must be equal under = (P3, [W-01]). A malformed lease or subject throws
+  :capability/schema-invalid."
   [lease subject]
   (validate-input! lease schema/SubjectSchema subject)
-  (= (get-in lease [:subject :phenotype/id])
-     (get-in subject [:phenotype/id])))
+  (and (= (get-in lease [:subject :session/id])
+          (get-in subject [:session/id]))
+       (= (get-in lease [:subject :phenotype/id])
+          (get-in subject [:phenotype/id]))))
 
 (defn resource-covers?
   "True when the lease's :resource grant covers the canonical
@@ -181,3 +185,37 @@
                                    (mount-path-inside? (:path granted) (:path normalized-resource)))
                               (path-inside? (:path granted) (:path normalized-resource)))
            false))))
+
+;; ---------------------------------------------------------------------------
+;; Generic LeaseRegistry helpers (P5) — unified for ANY kind
+;; Delegates to capability/mint (single definition). Kept here as well so
+;; callers can require either mint or lease. Idempotent revoke, fail-closed.
+;; ---------------------------------------------------------------------------
+
+(defn create-lease-registry
+  "Create a fresh LeaseRegistry atom (delegates to capability/mint)."
+  []
+  (atom {}))
+
+(defn get-lease
+  "Look up a recorded lease by :cap/id, or nil (delegates to mint)."
+  [registry cap-id]
+  (get-in @registry [cap-id :lease]))
+
+(defn lease-revoked?
+  "True when the lease with :cap/id is recorded as revoked."
+  [registry cap-id]
+  (boolean (get-in @registry [cap-id :revoked?])))
+
+(defn revoked?
+  "Alias of lease-revoked? for ANY kind."
+  [registry cap-id]
+  (lease-revoked? registry cap-id))
+
+(defn revoke-lease!
+  "Revoke the recorded lease with :cap/id, idempotent."
+  [registry cap-id]
+  (swap! registry update cap-id (fn [rec]
+                                  (cond-> (or rec {:lease nil :revoked? true})
+                                    true (assoc :revoked? true))))
+  nil)

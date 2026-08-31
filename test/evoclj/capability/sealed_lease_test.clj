@@ -11,6 +11,8 @@
 (def ^:private phenotype-p1
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
+(def ^:private session-a #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
 (def ^:private issued-at (java.util.Date. 1700000000000))
 (def ^:private expires-at (java.util.Date. 1700003600000))
 
@@ -18,7 +20,7 @@
   "Canonical well-formed lease map for P1 tests."
   []
   {:cap/id #uuid "11111111-1111-4111-8111-111111111111"
-   :subject {:phenotype/id phenotype-p1}
+   :subject {:session/id session-a :phenotype/id phenotype-p1}
    :resource {:kind :tool :id :fixture/echo}
    :actions #{:invoke}
    :constraints {:max-calls 10}
