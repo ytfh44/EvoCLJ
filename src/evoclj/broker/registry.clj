@@ -15,7 +15,8 @@
   containing an arbitrary keyword not in the set is rejected at construction
   with :registry/invalid-kind, and authorize denies unknown kinds with
   :capability/unknown-resource-kind (fail-closed, never implicit allow)."
-  (:require [evoclj.kernel.error :as err]))
+  (:require [clojure.set :as set]
+            [evoclj.kernel.error :as err]))
 
 ;; ----------------------------------------------------------------------
 ;; Closed allowlist — single source (definition > validation)
@@ -28,9 +29,27 @@
   membership; an unlisted kind is not a registry entry."
   #{:tool :model :memory :filesystem :filesystem/path})
 
+(def allowed-actions-by-kind
+  "Per-kind allowed action sets (P6 de-folding). :tool is no longer
+  collapsed to #{:invoke} — callers may request :read/:write/:invoke
+  and leases are checked against that exact action. :filesystem and
+  :filesystem/path expose the filesystem action vocabulary. :model and
+  :memory remain :invoke-only. The union is the global allowlist."
+  {:tool #{:invoke :read :write}
+   :model #{:invoke}
+   :memory #{:invoke}
+   :filesystem #{:read :list :stat :write :create :delete :invoke}
+   :filesystem/path #{:read :list :stat :write :create :delete}})
+(def ^:private global-allowed-actions
+  "Union of all per-kind allowed actions."
+  (apply set/union (vals allowed-actions-by-kind)))
+
 (def ^:private default-entries
   "Built-in entries for the closed allowlist. Each key is in
-  allowed-resource-kinds; each value is a vector of authorization targets."
+  allowed-resource-kinds; each value is a vector of authorization targets.
+  P6: :tool now honors distinct actions (:invoke/:read/:write) from the
+  request's :action; :filesystem/:filesystem/path honor the filesystem
+  verbs; :model remains :invoke-only."
   {:tool [{:source :request :action-from :request}]
    :model [{:source :request :action-from :request}]
    :memory [{:source :request :action-from :request}]

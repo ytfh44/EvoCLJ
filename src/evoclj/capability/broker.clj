@@ -64,7 +64,8 @@
   :capability/schema-invalid (or :intent/schema-invalid for a malformed
   intent), because garbage never authorizes and never hides a caller
   bug."
-  (:require [evoclj.broker.registry :as reg]
+  (:require [clojure.set :as set]
+            [evoclj.broker.registry :as reg]
             [evoclj.capability.policy :as policy]
             [evoclj.intent.schema :as intent-schema]
             [evoclj.kernel.error :as err]))
@@ -96,12 +97,21 @@
   resource's classification (first-class ResourceAction of the tuple,
   INV-07) and falls back to the intent action when the resource carries
   none; :intent always uses the intent action (the tool is invoked
-  regardless of the resource operation)."
+  regardless of the resource operation). P6: :tool honors distinct
+  :invoke/:read/:write from the request's :action (resource or top-level);
+  :filesystem honors :read/:write etc; :model is always :invoke."
   [target normalized-request intent]
-  (case (:action-from target)
-    :request (or (:action (:resource normalized-request))
-                 (policy/intent-action intent))
-    :intent (policy/intent-action intent)))
+  (let [kind (:kind (:resource normalized-request))]
+    (case (:action-from target)
+      :request (let [req-action (or (:action (:resource normalized-request))
+                                   (:action normalized-request))
+                     fallback (policy/intent-action intent)]
+                 (cond
+                   (= :model kind) :invoke
+                   req-action req-action
+                   fallback fallback
+                   :else nil))
+      :intent (policy/intent-action intent))))
 
 (defn authorize
   "The pure broker authorization decision for one request (normative,
@@ -151,14 +161,20 @@
         (if-let [t (first remaining)]
           (let [res (resolve-target-resource t normalized-request)
                 act (resolve-target-action t normalized-request intent)
+                ;; P6: fail-closed for unknown / non-allowlisted actions
+                unknown-action? (or (nil? act)
+                                   (not (keyword? act))
+                                   (not (contains? (apply set/union (vals reg/allowed-actions-by-kind)) act)))
                 all-leases (or leases [])
                 ;; partition leases into non-revoked and revoked for this registry
                 non-revoked (if lease-reg (remove revoked? all-leases) all-leases)
-                d (policy/decide non-revoked subject res act now (or usage {}))
+                d (if unknown-action?
+                    {:decision :deny :reason :capability/unknown-action}
+                    (policy/decide non-revoked subject res act now (or usage {})))
                 d (if (= :deny (:decision d))
                     ;; no non-revoked lease allowed; check if a revoked one would have allowed
                     (let [revoked-leases (if lease-reg (filter revoked? all-leases) [])
-                          rd (when (seq revoked-leases)
+                          rd (when (and (seq revoked-leases) (not unknown-action?))
                                (policy/decide revoked-leases subject res act now (or usage {})))]
                       (if (and rd (= :allow (:decision rd)))
                         {:decision :deny :reason :capability/revoked}
