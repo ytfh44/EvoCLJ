@@ -224,3 +224,25 @@
   (schema/validate-lease lease)
   (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false})
   lease)
+
+(defn revoke-leases!
+  "Revoke each lease in `leases` (a collection of CapabilityLease) in
+  `registry` via `revoke-lease!`. Idempotent; nil `leases` or empty
+  collection is a no-op. Returns nil. S4 cascade helper."
+  [registry leases]
+  (when (and registry (seq leases))
+    (doseq [l leases]
+      (when-let [cap-id (:cap/id l)]
+        (revoke-lease! registry cap-id))))
+  nil)
+
+(defn leases-for-session
+  "Return all leases in `registry` whose subject's :session/id equals
+  `session-id` (UUID or string-coerced via str). Returns vector of
+  CapabilityLease values (possibly empty). Pure read of the atom."
+  [registry session-id]
+  (let [sid (str session-id)]
+    (->> @registry
+         vals
+         (keep :lease)
+         (filterv (fn [l] (= sid (str (get-in l [:subject :session/id]))))))))
