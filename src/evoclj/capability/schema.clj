@@ -55,6 +55,12 @@
   [:map {:closed true}
    [:phenotype/id PhenotypeIdSchema]])
 
+(def ^:private allowed-actions
+  "Closed allowlist for lease actions — [W-03] actions must be non-empty
+  and subset of this set. Unknown actions are rejected at the schema
+  boundary (fail-closed)."
+  #{:invoke :read :list :stat :write :create :delete})
+
 (def ^:private positive-window?
   "A grant must span a positive window: :expires-at strictly after
   :issued-at. A zero- or negative-window lease could never be valid and
@@ -68,30 +74,98 @@
 (def CapabilityLeaseSchema
   "The v0 CapabilityLease contract: a closed map of the seven normative
   fields. The top level is closed — no field may be missing, renamed,
-  or extended. :actions is a set of keywords; :resource and
-  :constraints are open maps whose shapes are provider-defined. The
-  grant must span a positive window (:expires-at after :issued-at)."
+  or extended. :actions is a set of keywords constrained to the closed
+  allowlist #{:invoke :read :list :stat :write :create :delete} and
+  must be non-empty; :resource and :constraints are open maps whose
+  shapes are provider-defined. The grant must span a positive window
+  (:expires-at after :issued-at)."
   [:and
    [:map {:closed true}
     [:cap/id uuid?]
     [:subject SubjectSchema]
     [:resource [:map {:closed false}]]
-    [:actions [:set keyword?]]
+    [:actions [:and
+               [:set [:enum :invoke :read :list :stat :write :create :delete]]
+               [:fn seq]]]
     [:constraints [:map {:closed false}]]
     [:issued-at inst?]
     [:expires-at inst?]]
    [:fn positive-window?]])
+
+;; --- sealed CapabilityLease (P1) -------------------------------------------
+;; Mirrors broker/registry S5/S6 sealing: file-private secret + deftype,
+;; assoc/without sealed, predicate via identical? secret, projection to
+;; EDN map for event log (GC-20).
+
+(def ^:private lease-secret (Object.))
+
+(deftype CapabilityLease [capId subject resource actions constraints issued expires ^:private secret]
+  clojure.lang.ILookup
+  (valAt [this k] (.valAt this k nil))
+  (valAt [this k notFound]
+    (case k
+      :cap/id capId
+      :subject subject
+      :resource resource
+      :actions actions
+      :constraints constraints
+      :issued-at issued
+      :expires-at expires
+      notFound))
+  clojure.lang.Counted
+  (count [this] 7)
+  clojure.lang.IPersistentMap
+  (assoc [this k v] (throw (UnsupportedOperationException. "CapabilityLease is sealed; use make-lease")))
+  (without [this k] (throw (UnsupportedOperationException. "CapabilityLease is sealed")))
+  clojure.lang.Seqable
+  (seq [this] (seq {:cap/id capId
+                    :subject subject
+                    :resource resource
+                    :actions actions
+                    :constraints constraints
+                    :issued-at issued
+                    :expires-at expires}))
+  Object
+  (toString [this] (str "CapabilityLease[" capId "]")))
+(alter-meta! #'->CapabilityLease assoc :private true)
+
+(defn lease?
+  "True when x is a sealed CapabilityLease produced via make-lease.
+  Arbitrary maps or records are never leases — sealing is via file-private
+  secret checked with identical?."
+  [x]
+  (and (instance? CapabilityLease x)
+       (identical? (.-secret ^CapabilityLease x) lease-secret)))
+
+(defn lease->map
+  "Project a sealed CapabilityLease to its EDN map for the event log
+  (GC-20). Returns nil when x is not a sealed lease. The map is plain
+  EDN and round-trips through pr-str / edn/read-string."
+  [lease]
+  (when (lease? lease)
+    {:cap/id (.-capId ^CapabilityLease lease)
+     :subject (.-subject ^CapabilityLease lease)
+     :resource (.-resource ^CapabilityLease lease)
+     :actions (.-actions ^CapabilityLease lease)
+     :constraints (.-constraints ^CapabilityLease lease)
+     :issued-at (.-issued ^CapabilityLease lease)
+     :expires-at (.-expires ^CapabilityLease lease)}))
+
 
 ;; --- validation entry point ------------------------------------------------
 
 (defn validate-lease
   "Validate x as a v0 CapabilityLease.
 
-  First the EDN-safe boundary gate (Global Constraint 22): x must be
-  plain, fully realized EDN data — raw Java objects, lazy sequences,
-  records, and functions are rejected with :capability/not-edn-safe
-  before any schema checking. Then x is validated against
-  CapabilityLeaseSchema.
+  Accepts both a plain EDN map and a sealed CapabilityLease instance
+  (INV-05: single implementation). For a sealed instance, projects via
+  lease->map then validates the map; for a map, validates directly.
+
+  First the EDN-safe boundary gate (Global Constraint 22): the map
+  must be plain, fully realized EDN data — raw Java objects, lazy
+  sequences, records, and functions are rejected with
+  :capability/not-edn-safe before any schema checking. Then the map is
+  validated against CapabilityLeaseSchema.
 
   Returns x unchanged when it is a structurally valid lease; validation
   never coerces or rewrites values. Otherwise throws an ExceptionInfo
@@ -99,13 +173,40 @@
   sanitized input under :value and a fully serializable Malli
   explanation under :explanation."
   [x]
-  (when-not (boundary/edn-safe? x)
-    (throw (err/error :capability/not-edn-safe
-                      "capability lease must be plain EDN-safe data (Global Constraint 22)"
-                      {:value (err/sanitize x)})))
-  (if (m/validate CapabilityLeaseSchema x)
-    x
-    (throw (err/error :capability/schema-invalid
-                      "capability lease failed schema validation"
-                      {:value (err/sanitize x)
-                       :explanation (err/sanitize (m/explain CapabilityLeaseSchema x))}))))
+  (let [m (if (lease? x) (lease->map x) x)]
+    (when-not (boundary/edn-safe? m)
+      (throw (err/error :capability/not-edn-safe
+                        "capability lease must be plain EDN-safe data (Global Constraint 22)"
+                        {:value (err/sanitize m)})))
+    (if (m/validate CapabilityLeaseSchema m)
+      x
+      (throw (err/error :capability/schema-invalid
+                        "capability lease failed schema validation"
+                        {:value (err/sanitize m)
+                         :explanation (err/sanitize (m/explain CapabilityLeaseSchema m))})))))
+
+(defn make-lease
+  "Sealed factory for CapabilityLease. Validates m via CapabilityLeaseSchema
+  and asserts issued < expires (positive window); on failure throws
+  :capability/schema-invalid (never :capability/not-edn-safe for window
+  or allowlist violations). Returns a sealed CapabilityLease instance
+  on success — construct-time validated."
+  [m]
+  (let [validated (validate-lease m)]
+    ;; validate-lease already enforces positive-window? via schema and
+    ;; rejects non-EDN; extra assert keeps window failure typed as
+    ;; :capability/schema-invalid even if schema were relaxed.
+    (when-not (.before ^java.util.Date (:issued-at validated)
+                       ^java.util.Date (:expires-at validated))
+      (throw (err/error :capability/schema-invalid
+                        "capability lease must span positive window: :expires-at after :issued-at"
+                        {:value (err/sanitize m)
+                         :explanation (err/sanitize (m/explain CapabilityLeaseSchema m))})))
+    (CapabilityLease. (:cap/id validated)
+                      (:subject validated)
+                      (:resource validated)
+                      (:actions validated)
+                      (:constraints validated)
+                      (:issued-at validated)
+                      (:expires-at validated)
+                      lease-secret)))
