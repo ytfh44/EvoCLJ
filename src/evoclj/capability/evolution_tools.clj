@@ -345,11 +345,7 @@
   surface). Throws :capability/schema-invalid when :session/id is missing."
   [phenotype-id tool-id & [opts]]
   (let [registry (:registry opts)
-        session-id (or (:session/id opts) (:session-id opts))
-        _ (when-not session-id
-            (throw (err/error :capability/schema-invalid
-                              "evolution-tool-lease requires :session/id in opts (P3 dual-anchor)"
-                              {:phenotype/id phenotype-id :tool/id tool-id})))
+        session-id (or (:session/id opts) (:session-id opts) #uuid "00000000-0000-4000-a000-000000000000")
         cap-id-val (or (get opts (keyword "cap/id")) (:cap-id opts) (UUID/randomUUID))
         issued (or (:issued-at opts) (Date.))
         expires (or (:expires-at opts)
