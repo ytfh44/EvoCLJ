@@ -586,3 +586,118 @@
             (append-cancel-events! db p tid (or reason :parent-cancel))))
         ;; also ensure root's parent gets :subagent/cancelled if root is itself a child
         {:cancelled targets :already-cancelled? false :root/session-id root-id}))))
+;; ---------------------------------------------------------------------------
+;; S5 — result delivery to parent chain
+;; ---------------------------------------------------------------------------
+
+(defn- sha256-cas-ref?
+  [s]
+  (and (string? s) (boolean (re-matches #"^sha256:[0-9a-f]{64}$" s))))
+
+(defn deliver-result!
+  "Deliver a successful child subagent result to its parent's causal chain.
+
+  `db`                — sqlite spec, path, or SessionStore handle (must be migrated).
+  `parent-session-id` — UUID of the parent session (must exist).
+  `child-session-id`  — UUID of the child session (must be :completed).
+  `cas-ref`           — sha256:<64 hex> CAS reference for the child's result artifact.
+
+  Validates that the child session exists and is :completed and that cas-ref
+  is a sha256 string, then appends a :subagent/result event to the parent's
+  chain (cause = parent's latest event id) with metadata
+  {:child/session-id child-id :result/cas-ref cas-ref :result/status :succeeded}.
+
+  Typed errors: :store/session-invalid when db nil, :store/session-not-found
+  when parent missing, :subagent/not-found when child missing,
+  :subagent/not-completed when child is not :completed, :store/cas-invalid
+  when cas-ref is not sha256:<64 hex>."
+  [db parent-session-id child-session-id cas-ref]
+  (when (nil? db)
+    (throw (ex-info "deliver-result! requires a db/store handle" {:error/type :store/session-invalid})))
+  (let [parent-id (types/session-id parent-session-id)
+        child-id (types/session-id child-session-id)]
+    (when-not (sha256-cas-ref? cas-ref)
+      (throw (ex-info (str "invalid cas-ref: " cas-ref)
+                      {:error/type :store/cas-invalid
+                       :cas-ref cas-ref})))
+    (let [child (session/get-session db child-id)]
+      (when-not child
+        (throw (ex-info (str "child session not found: " child-id)
+                        {:error/type :subagent/not-found
+                         :session/id child-id})))
+      (when-not (= :completed (:state child))
+        (throw (ex-info (str "child not completed: " child-id " state=" (:state child))
+                        {:error/type :subagent/not-completed
+                         :session/id child-id
+                         :state (:state child)})))
+      (let [parent (session/get-session db parent-id)]
+        (when-not parent
+          (throw (ex-info (str "parent session not found: " parent-id)
+                          {:error/type :store/session-not-found
+                           :session/id parent-id})))
+        ;; optional parent-child link verification (best-effort, no hard fail if table absent)
+        ;; but do not block delivery when link missing due to legacy data
+        (let [parent-events (event/events-for-session db parent-id)
+              _ (when (empty? parent-events)
+                  (throw (ex-info "parent session has no events"
+                                  {:error/type :store/event-invalid
+                                   :session/id parent-id})))
+              cause-id (:event/id (last parent-events))]
+          (event/append-event! db
+                               {:session/id parent-id
+                                :generation/id (:generation/id parent)
+                                :phenotype/id (:phenotype/id parent)
+                                :event/type :subagent/result
+                                :cause/event-id cause-id
+                                :payload-ref nil
+                                :metadata {:child/session-id child-id
+                                           :result/cas-ref cas-ref
+                                           :result/status :succeeded}}))))))
+
+(defn deliver-failure!
+  "Deliver a failed child subagent result to its parent's causal chain.
+
+  `db`                — sqlite spec, path, or SessionStore handle.
+  `parent-session-id` — UUID of the parent session (must exist).
+  `child-session-id`  — UUID of the child session (must be :failed).
+  `error`             — EDN-safe error data (e.g. {:error/type :foo :error/message \"boom\"}).
+
+  Validates child is :failed, then appends :subagent/result with
+  {:child/session-id child-id :result/status :failed :error error} to the parent.
+  Typed errors mirror deliver-result! but with :subagent/not-failed when child not failed."
+  [db parent-session-id child-session-id error]
+  (when (nil? db)
+    (throw (ex-info "deliver-failure! requires a db/store handle" {:error/type :store/session-invalid})))
+  (let [parent-id (types/session-id parent-session-id)
+        child-id (types/session-id child-session-id)]
+    (let [child (session/get-session db child-id)]
+      (when-not child
+        (throw (ex-info (str "child session not found: " child-id)
+                        {:error/type :subagent/not-found
+                         :session/id child-id})))
+      (when-not (= :failed (:state child))
+        (throw (ex-info (str "child not failed: " child-id " state=" (:state child))
+                        {:error/type :subagent/not-failed
+                         :session/id child-id
+                         :state (:state child)})))
+      (let [parent (session/get-session db parent-id)]
+        (when-not parent
+          (throw (ex-info (str "parent session not found: " parent-id)
+                          {:error/type :store/session-not-found
+                           :session/id parent-id})))
+        (let [parent-events (event/events-for-session db parent-id)
+              _ (when (empty? parent-events)
+                  (throw (ex-info "parent session has no events"
+                                  {:error/type :store/event-invalid
+                                   :session/id parent-id})))
+              cause-id (:event/id (last parent-events))]
+          (event/append-event! db
+                               {:session/id parent-id
+                                :generation/id (:generation/id parent)
+                                :phenotype/id (:phenotype/id parent)
+                                :event/type :subagent/result
+                                :cause/event-id cause-id
+                                :payload-ref nil
+                                :metadata {:child/session-id child-id
+                                           :result/status :failed
+                                           :error error}}))))))

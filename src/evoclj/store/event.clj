@@ -76,6 +76,13 @@
   one."
   #{:session/created})
 
+(def subagent-result-event-type
+  "S5: the event type appended to a parent session when a child subagent
+  delivers its result. Carries {:child/session-id uuid :result/cas-ref sha256 :result/status :succeeded}
+  for success or {:child/session-id uuid :result/status :failed :error {...}} for failure.
+  Non-root: MUST carry a :cause/event-id referencing an earlier event in the same (parent) session."
+  :subagent/result)
+
 (defn- root-event? [type]
   (contains? root-event-types type))
 
