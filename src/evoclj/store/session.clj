@@ -37,13 +37,15 @@
   Fleet P5/F: genome/phenotype/resolution existence is enforced via
   VerifiedDigest and FK at rest (011)."
   (:require [clojure.edn :as edn]
+            [clojure.java.jdbc :as jdbc]
             [malli.core :as m]
             [malli.error :as me]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
             [evoclj.store.session-states :as sstates]
             [evoclj.store.session-store :as ss]
-            [evoclj.store.existence :as existence])
+            [evoclj.store.existence :as existence]
+            [evoclj.store.sqlite :as sqlite])
   (:import (java.util Date UUID)))
 
 ;; --- state machine (canonical — delegates to session-states) ---------------
@@ -195,4 +197,102 @@
   (let [ss-store (normalize-store store)]
     (some-> (ss/find-session ss-store session-id)
             validate-session)))
+
+;; ---------------------------------------------------------------------------
+;; Session helpers for subagent child execution (S3)
+;; ---------------------------------------------------------------------------
+
+(defn get-session!
+  "Fetch session or throw :store/session-not-found when missing.
+  Used by subagent run path to distinguish :subagent/not-found from
+  generic nil."
+  [store session-id]
+  (or (get-session store session-id)
+      (throw (ex-info (str "session not found: " (str session-id))
+                      {:error/type :store/session-not-found
+                       :session/id (try (types/session-id session-id)
+                                        (catch Exception _ session-id))}))))
+
+(defn session-exists?
+  "True when a session with `session-id` exists."
+  [store session-id]
+  (boolean (get-session store session-id)))
+
+(defn child-session?
+  "True when `session-id` is a child subagent session (has a parent link).
+  Requires the subagent link table; returns false when the table is absent
+  or the link is not found. Lazy-requires subagent to avoid circular deps."
+  [store session-id]
+  (try
+    (let [subagent-ns (try (requiring-resolve 'evoclj.runtime.subagent/get-parent-session-id)
+                           (catch Exception _ nil))]
+      (if subagent-ns
+        (boolean (@subagent-ns store session-id))
+        false))
+    (catch Exception _ false)))
+
+;; ---------------------------------------------------------------------------
+;; Subagent graph helpers (S4)
+;; ---------------------------------------------------------------------------
+
+(defn- ensure-subagent-link-table*
+  [db]
+  (let [spec (if (instance? evoclj.store.session_store.SessionStore db)
+               (.-db ^evoclj.store.session_store.SessionStore db)
+               (if (string? db) db db))]
+    (try
+      (evoclj.store.sqlite/with-db [conn spec]
+        (clojure.java.jdbc/execute! conn
+                       ["CREATE TABLE IF NOT EXISTS subagent_links (child_session_id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, created_at TEXT NOT NULL)"])
+        (clojure.java.jdbc/execute! conn
+                       ["CREATE INDEX IF NOT EXISTS subagent_links_parent_idx ON subagent_links(parent_session_id)"]))
+      (catch Exception _))))
+
+(defn list-descendants
+  [db root-id]
+  (ensure-subagent-link-table* db)
+  (let [root-uuid (try (evoclj.genome.types/session-id root-id) (catch Exception _ root-id))
+        spec (if (instance? evoclj.store.session_store.SessionStore db)
+               (.-db ^evoclj.store.session_store.SessionStore db)
+               db)]
+    (loop [queue [root-uuid] visited #{} result []]
+      (if (empty? queue)
+        result
+        (let [cur (first queue)
+              rest-q (vec (rest queue))]
+          (if (contains? visited cur)
+            (recur rest-q visited result)
+            (let [visited2 (conj visited cur)
+                  children (try
+                             (mapv #(evoclj.genome.types/session-id (:child_session_id %))
+                                   (evoclj.store.sqlite/query spec ["SELECT child_session_id FROM subagent_links WHERE parent_session_id = ? ORDER BY created_at" (str cur)]))
+                             (catch Exception _ []))
+                  new-result (into result children)
+                  new-queue (into rest-q children)]
+              (recur new-queue visited2 new-result))))))))
+
+(defn try-cancel-session!
+  [db session-id]
+  (let [sid (try (evoclj.genome.types/session-id session-id) (catch Exception _ session-id))
+        sess (get-session db sid)]
+    (when sess
+      (let [cur (:state sess)]
+        (cond
+          (= cur :cancelled) sess
+          (contains? terminal-states cur) sess
+          :else
+          (let [spec (if (instance? evoclj.store.session_store.SessionStore db)
+                       (.-db ^evoclj.store.session_store.SessionStore db)
+                       db)
+                ts (.format java.time.format.DateTimeFormatter/ISO_INSTANT (java.time.Instant/now))
+                updated (try
+                           (evoclj.store.sqlite/with-db [conn spec]
+                             (let [cnt (first (clojure.java.jdbc/execute! conn ["UPDATE sessions SET state = 'cancelled', updated_at = ? WHERE id = ? AND state NOT IN ('completed','failed','cancelled','budget-exhausted')" ts (str sid)]))]
+                               (= 1 cnt)))
+                           (catch Exception _ false))]
+            (if updated
+              (get-session db sid)
+              (if (valid-transition? cur :cancelled)
+                (try (transition-session! db sid cur :cancelled nil) (catch Exception _ (get-session db sid)))
+                (get-session db sid)))))))))
   

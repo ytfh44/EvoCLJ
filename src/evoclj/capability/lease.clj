@@ -219,3 +219,22 @@
                                   (cond-> (or rec {:lease nil :revoked? true})
                                     true (assoc :revoked? true))))
   nil)
+
+(defn revoke-leases!
+  "Revoke each lease in `leases` via `revoke-lease!`. Idempotent. S4 helper
+  mirroring capability/mint. Delegates to revoke-lease! for each cap-id."
+  [registry leases]
+  (when (and registry (seq leases))
+    (doseq [l leases]
+      (when-let [cap-id (:cap/id l)]
+        (revoke-lease! registry cap-id))))
+  nil)
+
+(defn leases-for-session
+  "Return leases in `registry` for `session-id` (str-coerced compare)."
+  [registry session-id]
+  (let [sid (str session-id)]
+    (->> @registry
+         vals
+         (keep :lease)
+         (filterv (fn [l] (= sid (str (get-in l [:subject :session/id]))))))))

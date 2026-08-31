@@ -321,3 +321,43 @@
                 (update report :recovered-queued conj (:cmd/id cmd))))
             {:orphaned-commands orphans :recovered-queued [] :recovered-running []}
             orphans)))
+
+;; ---------------------------------------------------------------------------
+;; Subagent recovery (DAG S5) — orphaned children where parent is completed
+;; ---------------------------------------------------------------------------
+
+(defn find-orphaned-subagents
+  "Find orphaned subagent children where the parent session is completed
+  but the child session is still in a non-terminal running state.
+
+  Crash residue: the parent terminated (state :completed or any terminal
+  state with a :session/completed event) while a spawned child is still
+  :running / :waiting / :created / :resolving. This helper reports them
+  via subagent_links where child state is non-terminal and parent state
+  is terminal (:completed, :failed, :cancelled, :budget-exhausted).
+
+  Minimal S5 implementation: reports subagent_links rows where child state
+  is :running and parent state is :completed (the canonical orphan case
+  from the spec). Extended to any terminal parent + non-terminal child for
+  robustness. Returns vector of {:parent/session-id uuid :child/session-id uuid
+  :parent/state kw :child/state kw}."
+  [db]
+  (let [spec (if (string? db) db db)
+        _ (try
+            (sqlite/with-db [conn spec]
+              (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS subagent_links (child_session_id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, created_at TEXT NOT NULL)"]))
+            (catch Exception _))]
+    (try
+      (let [rows (sqlite/query spec
+                               ["SELECT sl.child_session_id AS child_session_id, sl.parent_session_id AS parent_session_id, ps.state AS parent_state, cs.state AS child_state FROM subagent_links sl JOIN sessions ps ON ps.id = sl.parent_session_id JOIN sessions cs ON cs.id = sl.child_session_id"])]
+        (into [] (keep (fn [row]
+                         (let [pstate (:parent_state row)
+                               cstate (:child_state row)
+                               terminal? #{"completed" "failed" "cancelled" "budget-exhausted"}
+                               non-terminal? #{"created" "resolving" "running" "waiting"}]
+                           (when (and (contains? terminal? pstate) (contains? non-terminal? cstate))
+                             {:parent/session-id (UUID/fromString (:parent_session_id row))
+                              :child/session-id (UUID/fromString (:child_session_id row))
+                              :parent/state (keyword pstate)
+                              :child/state (keyword cstate)}))) rows)))
+      (catch Exception _ []))))
