@@ -118,14 +118,19 @@
   resource carries none. Pure: no I/O, no state change, no provider
   invocation - the effectful dispatcher arrives in component
 
-  Optional input: :registry overrides the built-in sealed registry
+  Optional inputs: :registry overrides the built-in sealed registry
   (must be a ResourceKindRegistry from evoclj.broker.registry; an
   arbitrary map is rejected with :registry/invalid-kind).
+  :lease-registry (P5) is an optional atomLeaseRegistry (as created by
+  capability/mint create-lease-registry, same shape as mount/filesystem)
+  that records revocation; when supplied a revoked lease yields
+  :capability/revoked fail-closed for ANY kind (tool/model/memory/filesystem).
+  Also accepted as :leases-registry / :revocation-registry for compat.
 
   See the namespace docstring for the input contract and the stable
   deny reason codes; an unregistered resource kind is denied with
   :capability/unknown-resource-kind (fail closed)."
-  [{:keys [intent normalized-request leases usage now registry]}]
+  [{:keys [intent normalized-request leases usage now registry lease-registry leases-registry revocation-registry]}]
   (intent-schema/validate-intent intent)
   (when-not (and (map? normalized-request)
                  (map? (:resource normalized-request)))
@@ -133,20 +138,32 @@
                       "normalized request must carry a :resource map"
                       {:value (err/sanitize normalized-request)})))
   (reg/assert-registry! registry)
-  (let [subject (policy/intent-subject intent)
+  (let [lease-reg (or lease-registry leases-registry revocation-registry)
+        revoked? (fn [lease] (when lease-reg (boolean (get-in @lease-reg [(:cap/id lease) :revoked?]))))
+        subject (policy/intent-subject intent)
         reg-sealed (or registry default-resource-kind-registry)
         kind (:kind (:resource normalized-request))
         targets (reg/registry-get reg-sealed kind)]
     (if (nil? targets)
-      ;; unregistered resource kind -> fail closed (no implicit default)
       {:decision :deny :reason :capability/unknown-resource-kind}
       (loop [remaining targets
              best nil]
         (if-let [t (first remaining)]
           (let [res (resolve-target-resource t normalized-request)
                 act (resolve-target-action t normalized-request intent)
-                d (policy/decide (or leases [])
-                                 subject res act now (or usage {}))]
+                all-leases (or leases [])
+                ;; partition leases into non-revoked and revoked for this registry
+                non-revoked (if lease-reg (remove revoked? all-leases) all-leases)
+                d (policy/decide non-revoked subject res act now (or usage {}))
+                d (if (= :deny (:decision d))
+                    ;; no non-revoked lease allowed; check if a revoked one would have allowed
+                    (let [revoked-leases (if lease-reg (filter revoked? all-leases) [])
+                          rd (when (seq revoked-leases)
+                               (policy/decide revoked-leases subject res act now (or usage {})))]
+                      (if (and rd (= :allow (:decision rd)))
+                        {:decision :deny :reason :capability/revoked}
+                        d))
+                    d)]
             (if (= :deny (:decision d))
               d
               (recur (rest remaining) (or best d))))

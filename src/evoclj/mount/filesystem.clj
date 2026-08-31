@@ -70,37 +70,32 @@
 
 (defn create-lease-registry
   "A verifiable lease ledger: an atom mapping :cap/id ->
-  {:lease <lease> :revoked? <boolean>}."
+  {:lease <lease> :revoked? <boolean>}. Delegates to capability/mint (P5 unified)."
   []
-  (atom {}))
+  (cap-mint/create-lease-registry))
 
 (defn register-lease!
   "Validate `lease` as a proper filesystem CapabilityLease and record it in
   `lease-registry`, making it verifiable. Returns the lease. Throws typed
-  :capability/schema-invalid on a malformed lease."
+  :capability/schema-invalid on a malformed lease. Delegates to capability/mint."
   [lease-registry lease]
-  (cap-schema/validate-lease lease)
-  (swap! lease-registry assoc (:cap/id lease) {:lease lease :revoked? false})
-  lease)
+  (cap-mint/register-lease! lease-registry lease))
 
 (defn get-lease
-  "Look up a recorded lease by :cap/id, or nil when not recorded."
+  "Look up a recorded lease by :cap/id, or nil when not recorded. Delegates to capability/mint."
   [lease-registry cap-id]
-  (get-in @lease-registry [cap-id :lease]))
+  (cap-mint/get-lease lease-registry cap-id))
 
 (defn lease-revoked?
-  "True when the lease with :cap/id is recorded as revoked."
+  "True when the lease with :cap/id is recorded as revoked. Delegates to capability/mint."
   [lease-registry cap-id]
-  (boolean (get-in @lease-registry [cap-id :revoked?])))
+  (cap-mint/lease-revoked? lease-registry cap-id))
 
 (defn revoke-lease!
   "Revoke the recorded lease with :cap/id (fail-closed: a revoked lease is
-  rejected by verify-fs-lease!/lease-grants?). Idempotent. Returns nil."
+  rejected by verify-fs-lease!/lease-grants?). Idempotent. Returns nil. Delegates to capability/mint."
   [lease-registry cap-id]
-  (swap! lease-registry update cap-id (fn [rec]
-                                        (cond-> (or rec {:lease nil :revoked? true})
-                                          true (assoc :revoked? true))))
-  nil)
+  (cap-mint/revoke-lease! lease-registry cap-id))
 
 (defn- phenotype-id-valid?
   "True when subject is a { :session/id <uuid|string> :phenotype/id <sha256> } map

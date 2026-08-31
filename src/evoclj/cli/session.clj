@@ -642,17 +642,21 @@
   leases ONLY for the tools the operator names with --tool; a visible
   tool never grants resource authority — Global Constraint 9).
   Delegates to evoclj.capability.mint/mint-lease! (P2 single issuance
-  surface). Subject is dual-anchor {:session/id :phenotype/id} (P3)."
-  [session-id phenotype-id tool-id]
-  (let [now (Date.)]
-    (cap-mint/mint-lease! nil
-                          {:cap-id (UUID/randomUUID)
-                           :subject {:session/id session-id :phenotype/id phenotype-id}
-                           :resource {:kind :tool :id tool-id}
-                           :actions #{:invoke}
-                           :constraints {:max-calls 10000}
-                           :issued-at now
-                           :expires-at (Date. (+ (.getTime now) 60000))})))
+  surface). Subject is dual-anchor {:session/id :phenotype/id} (P3).
+  When `lease-registry` is supplied the lease is recorded so it can be
+  revoked (P5); when nil the lease is minted without recording (backcompat)."
+  ([session-id phenotype-id tool-id]
+   (tool-lease session-id phenotype-id tool-id nil))
+  ([session-id phenotype-id tool-id lease-registry]
+   (let [now (Date.)]
+     (cap-mint/mint-lease! lease-registry
+                           {:cap-id (UUID/randomUUID)
+                            :subject {:session/id session-id :phenotype/id phenotype-id}
+                            :resource {:kind :tool :id tool-id}
+                            :actions #{:invoke}
+                            :constraints {:max-calls 10000}
+                            :issued-at now
+                            :expires-at (Date. (+ (.getTime now) 60000))}))))
 
 (defn- model-lease
   "One per-session CapabilityLease granting this session+phenotype's exact id
@@ -662,17 +666,21 @@
   deepseek/deepseek-v4-flash; a visible model never grants resource
   authority — Global Constraint 9). Delegates to
   evoclj.capability.mint/mint-lease! (P2 single issuance surface).
-  Subject is dual-anchor {:session/id :phenotype/id} (P3)."
-  [session-id phenotype-id model-id]
-  (let [now (Date.)]
-    (cap-mint/mint-lease! nil
-                          {:cap-id (UUID/randomUUID)
-                           :subject {:session/id session-id :phenotype/id phenotype-id}
-                           :resource {:kind :model :id model-id}
-                           :actions #{:invoke}
-                           :constraints {:max-calls 10000}
-                           :issued-at now
-                           :expires-at (Date. (+ (.getTime now) 60000))})))
+  Subject is dual-anchor {:session/id :phenotype/id} (P3).
+  When `lease-registry` is supplied the lease is recorded so it can be
+  revoked (P5)."
+  ([session-id phenotype-id model-id]
+   (model-lease session-id phenotype-id model-id nil))
+  ([session-id phenotype-id model-id lease-registry]
+   (let [now (Date.)]
+     (cap-mint/mint-lease! lease-registry
+                           {:cap-id (UUID/randomUUID)
+                            :subject {:session/id session-id :phenotype/id phenotype-id}
+                            :resource {:kind :model :id model-id}
+                            :actions #{:invoke}
+                            :constraints {:max-calls 10000}
+                            :issued-at now
+                            :expires-at (Date. (+ (.getTime now) 60000))})))
 
 (defn- program-sources
   "Decode every compiled program's source text from the immutable
@@ -785,8 +793,9 @@
                    :resolution/id (:compiled/resolution-id compiled)
                    :phenotype/id phenotype-id
                    :generation/id (:generation/id generation)}))
-            leases (concat (mapv #(tool-lease sid phenotype-id %) tools)
-                             (mapv #(model-lease sid phenotype-id %) models))
+            lease-registry (cap-mint/create-lease-registry)
+            leases (concat (mapv #(tool-lease sid phenotype-id % lease-registry) tools)
+                             (mapv #(model-lease sid phenotype-id % lease-registry) models))
             leases (vec leases)
             model-reg (:model/registry system)
             ph (phenotype/instantiate
@@ -799,7 +808,7 @@
                       :stores {:sqlite db :cas cas-store}
                       :dispatch (dispatch/make-broker-context
                                  {:registry reg :leases leases :usage usage
-                                  :model-registry model-reg})}]
+                                  :model-registry model-reg :lease-registry lease-registry})}]
         (event/append-event! db
                              {:session/id sid
                               :generation/id (:generation/id generation)

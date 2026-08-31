@@ -185,3 +185,37 @@
                                    (mount-path-inside? (:path granted) (:path normalized-resource)))
                               (path-inside? (:path granted) (:path normalized-resource)))
            false))))
+
+;; ---------------------------------------------------------------------------
+;; Generic LeaseRegistry helpers (P5) — unified for ANY kind
+;; Delegates to capability/mint (single definition). Kept here as well so
+;; callers can require either mint or lease. Idempotent revoke, fail-closed.
+;; ---------------------------------------------------------------------------
+
+(defn create-lease-registry
+  "Create a fresh LeaseRegistry atom (delegates to capability/mint)."
+  []
+  (atom {}))
+
+(defn get-lease
+  "Look up a recorded lease by :cap/id, or nil (delegates to mint)."
+  [registry cap-id]
+  (get-in @registry [cap-id :lease]))
+
+(defn lease-revoked?
+  "True when the lease with :cap/id is recorded as revoked."
+  [registry cap-id]
+  (boolean (get-in @registry [cap-id :revoked?])))
+
+(defn revoked?
+  "Alias of lease-revoked? for ANY kind."
+  [registry cap-id]
+  (lease-revoked? registry cap-id))
+
+(defn revoke-lease!
+  "Revoke the recorded lease with :cap/id, idempotent."
+  [registry cap-id]
+  (swap! registry update cap-id (fn [rec]
+                                  (cond-> (or rec {:lease nil :revoked? true})
+                                    true (assoc :revoked? true))))
+  nil)

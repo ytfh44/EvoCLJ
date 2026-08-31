@@ -67,3 +67,51 @@
       (when registry
         (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false}))
       lease)))
+
+;; ---------------------------------------------------------------------------
+;; Generic LeaseRegistry helpers (P5) — unified shape for ANY kind
+;; (tool/model/memory/filesystem). This is the single definition; mount/filesystem
+;; delegates to it. The registry is an atom mapping :cap/id -> {:lease <sealed>
+;; :revoked? <bool>}. Revoke is idempotent and fail-closed: a revoked lease
+;; is rejected wherever it is verified (broker/policy + filesystem verify).
+;; ---------------------------------------------------------------------------
+
+(defn create-lease-registry
+  "A verifiable lease ledger: an atom mapping :cap/id -> {:lease <sealed> :revoked? <bool>}."
+  []
+  (atom {}))
+
+(defn get-lease
+  "Look up a recorded lease by :cap/id, or nil when not recorded."
+  [registry cap-id]
+  (get-in @registry [cap-id :lease]))
+
+(defn lease-revoked?
+  "True when the lease with :cap/id is recorded as revoked."
+  [registry cap-id]
+  (boolean (get-in @registry [cap-id :revoked?])))
+
+(defn revoked?
+  "Alias of lease-revoked? — generic predicate for ANY kind."
+  [registry cap-id]
+  (lease-revoked? registry cap-id))
+
+(defn revoke-lease!
+  "Revoke the recorded lease with :cap/id (fail-closed: a revoked lease is
+  rejected by broker/policy and verify paths). Idempotent. Returns nil.
+  When the cap-id was never recorded, a tombstone {:lease nil :revoked? true}
+  is stored so future verification is fail-closed."
+  [registry cap-id]
+  (swap! registry update cap-id (fn [rec]
+                                  (cond-> (or rec {:lease nil :revoked? true})
+                                    true (assoc :revoked? true))))
+  nil)
+
+(defn register-lease!
+  "Validate `lease` as a proper CapabilityLease and record it in `registry`,
+  making it verifiable. Returns the lease. Throws :capability/schema-invalid
+  on a malformed lease."
+  [registry lease]
+  (schema/validate-lease lease)
+  (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false})
+  lease)
