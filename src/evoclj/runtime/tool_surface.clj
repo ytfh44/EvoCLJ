@@ -10,9 +10,38 @@
   is visible in round N+1.
 
   Fail-closed: without a CAS resolver, an unresolvable placeholder throws
-  :assembler/placeholder-unresolved instead of emitting a degraded segment."
+  :assembler/placeholder-unresolved instead of emitting a degraded segment.
+
+  P9 CodeMode declaration: when :ptc is enabled and the surface has tools,
+  the code_execution wire tool (single source in evoclj.tool.specs) is
+  included in :surface/tools for model visibility. Otherwise not declared
+  (fail-safe). No execution is performed here."
   (:require [evoclj.context.materializer :as mat]
-            [evoclj.kernel.error :as err]))
+            [evoclj.kernel.error :as err]
+            [evoclj.tool.specs :as tool-specs]))
+
+(defn- ptc-enabled?
+  "Interpret opts as a PTC enabled flag. Accepts:
+   - boolean true/false
+   - map {:enabled? bool} or {:ptc/enabled? bool}
+   - map {:ptc {:enabled? bool}}
+   Otherwise false (fail-safe)."
+  [opts]
+  (cond
+    (boolean? opts) opts
+    (map? opts) (boolean (or (:enabled? opts)
+                             (:ptc/enabled? opts)
+                             (get-in opts [:ptc :enabled?])))
+    :else false))
+
+(defn- maybe-include-code-execution
+  "If ptc-enabled? and tools is a non-empty sequential collection,
+  ensure the code_execution wire tool is included. Idempotent."
+  [tools ptc-enabled?]
+  (if (and ptc-enabled? (sequential? tools) (seq tools)
+           (not (some #(= "code_execution" (:name %)) tools)))
+    (conj (vec tools) tool-specs/code-execution-wire-tool)
+    tools))
 
 (defn pin
   "Capture a ToolSurface from a catalog snapshot.
@@ -20,28 +49,38 @@
   surface: catalog snapshot — a vector of tool descriptors or a map of
   source-id to revision-id. The snapshot is taken once and reused.
 
+  opts (optional, P9): controls CodeMode declaration. When :ptc is
+  enabled and surface has tools, code_execution is included in
+  :surface/tools for model visibility; otherwise not declared (fail-safe).
+  opts may be a boolean, {:enabled? bool}, {:ptc/enabled? bool}, or
+  {:ptc {:enabled? bool}}.
+
   Returns ToolSurface {:surface/tools [...] :surface/pinned-at <ms> :surface/binding {...}}.
   :surface/binding is {:binding/id uuid :revision-ids surface :captured-at ms} for
   backward compatibility with assembler and scheduler call sites."
-  [surface]
-  (let [now (System/currentTimeMillis)
-        bid (random-uuid)
-        binding {:binding/id bid
-                 :revision-ids surface
-                 :captured-at now}
-        tools (cond
-                (nil? surface) []
-                (map? surface) surface
-                (sequential? surface) (vec surface)
-                :else surface)]
-    {:surface/tools tools
-     :surface/pinned-at now
-     :surface/binding binding}))
+  ([surface]
+   (pin surface nil))
+  ([surface opts]
+   (let [now (System/currentTimeMillis)
+         bid (random-uuid)
+         binding {:binding/id bid
+                  :revision-ids surface
+                  :captured-at now}
+         enabled? (ptc-enabled? opts)
+         tools (cond
+                 (nil? surface) []
+                 (map? surface) surface
+                 (sequential? surface) (vec surface)
+                 :else surface)
+         tools (maybe-include-code-execution tools enabled?)]
+     {:surface/tools tools
+      :surface/pinned-at now
+      :surface/binding binding})))
 
 (defn pin-catalog
   "Alias for pin — kept for assembler compatibility."
-  [catalog]
-  (pin catalog))
+  ([catalog] (pin catalog))
+  ([catalog opts] (pin catalog opts)))
 
 (defn surface-binding
   "Extract the pinned binding from a ToolSurface."

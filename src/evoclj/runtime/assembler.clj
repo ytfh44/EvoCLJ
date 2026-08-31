@@ -8,12 +8,44 @@
   tool-loop; context is rebuilt each round so activate_skill becomes
   visible immediately. Pin and refresh operations delegate to
   evoclj.runtime.tool-surface (C3) to keep this namespace a pure
-  function without duplicated pin/refresh logic."
+  function without duplicated pin/refresh logic.
+
+  P9 CodeMode declaration: when ToolSurface indicates CodeMode enabled
+  (opts carries :ptc {:enabled? true} or equivalent), the assembler
+  emits the code_execution function tool alongside existing tools for
+  model visibility. The wire declaration is the single source in
+  evoclj.tool.specs/code-execution-wire-tool (INV-05, no duplication).
+  Fail-safe: without the flag the tool is not declared."
   (:require [evoclj.context.materializer :as mat]
             [evoclj.context.prompt-trust :as trust]
             [evoclj.environment.revision :as rev]
             [evoclj.kernel.error :as err]
-            [evoclj.runtime.tool-surface :as tool-surface]))
+            [evoclj.runtime.tool-surface :as tool-surface]
+            [evoclj.tool.specs :as tool-specs]))
+
+(defn- ptc-enabled?
+  "Interpret opts as a PTC enabled flag. Accepts:
+   - boolean true/false
+   - map {:enabled? bool} or {:ptc/enabled? bool}
+   - map {:ptc {:enabled? bool}}
+   Otherwise false (fail-safe)."
+  [opts]
+  (cond
+    (boolean? opts) opts
+    (map? opts) (boolean (or (:enabled? opts)
+                             (:ptc/enabled? opts)
+                             (:ptc-enabled? opts)
+                             (get-in opts [:ptc :enabled?])))
+    :else false))
+
+(defn- maybe-include-code-execution
+  "If ptc-enabled? and tools is a non-empty sequential collection,
+  ensure the code_execution wire tool is included. Idempotent."
+  [tools ptc-enabled?]
+  (if (and ptc-enabled? (sequential? tools) (seq tools)
+           (not (some #(= "code_execution" (:name %)) tools)))
+    (conj (vec tools) tool-specs/code-execution-wire-tool)
+    tools))
 
 (defn base->prepared
   "Assemble PreparedModelCall.
@@ -23,7 +55,12 @@
   catalog: map source-id -> revision-id (current catalog)
   tool-catalog-binding: {:binding/id :revision/ids ...} or nil
   history: string or vector of messages
-  opts: {:cas <cas-config-or-map-or-path> :policy <host-policy>}
+  opts: {:cas <cas-config-or-map-or-path> :policy <host-policy> :ptc <ptc-map>}
+
+  :ptc in opts controls CodeMode declaration (P9): when
+  (:enabled? (:ptc opts)) is truthy and the tool surface has tools,
+  the code_execution function tool (single source in tool.specs) is
+  emitted alongside existing tools. Otherwise not declared (fail-safe).
 
   Returns a PreparedModelCall map that additionally carries
   :prompt/provenance — a structured header attributing each message to a
@@ -35,22 +72,29 @@
    (base->prepared base-call session-bindings catalog tool-catalog-binding nil {}))
   ([base-call session-bindings catalog tool-catalog-binding history]
    (base->prepared base-call session-bindings catalog tool-catalog-binding history {}))
-  ([base-call session-bindings catalog tool-catalog-binding history {:keys [cas policy]}]
-   (let [base-messages (:base/messages base-call (:messages base-call []))
-         requested-tools (:requested-tools base-call (:tools base-call))
+  ([base-call session-bindings catalog tool-catalog-binding history {:keys [cas policy ptc] :as opts}]
+   (let [ptc-enabled? (or (ptc-enabled? opts) (ptc-enabled? ptc))
+         base-messages (:base/messages base-call (:messages base-call []))
+         requested-tools-raw (:requested-tools base-call (:tools base-call))
+         requested-tools (maybe-include-code-execution (or requested-tools-raw []) ptc-enabled?)
          ;; tool catalog: use provided binding or derive via ToolSurface pin
          tool-catalog (or tool-catalog-binding
-                          (:surface/binding (tool-surface/pin catalog)))
+                          (:surface/binding (tool-surface/pin catalog (when ptc-enabled? {:enabled? true}))))
          ;; context materialization: delegate refresh variability to ToolSurface
          ;; so pin vs refresh concerns stay decoupled (C3). The wrapper surface
          ;; carries the pinned binding; refresh-context recomputes
          ;; EffectiveContext from fresh bindings and CAS with fail-closed
          ;; handling for missing CAS.
          surface (if tool-catalog-binding
-                   {:surface/tools catalog
-                    :surface/pinned-at (:captured-at tool-catalog-binding)
-                    :surface/binding tool-catalog-binding}
-                   (tool-surface/pin catalog))
+                   (let [base-tools (cond
+                                      (sequential? catalog) (vec catalog)
+                                      (map? catalog) catalog
+                                      :else catalog)
+                         tools-with-ptc (maybe-include-code-execution base-tools ptc-enabled?)]
+                     {:surface/tools tools-with-ptc
+                      :surface/pinned-at (:captured-at tool-catalog-binding)
+                      :surface/binding tool-catalog-binding})
+                   (tool-surface/pin catalog (when ptc-enabled? {:enabled? true})))
          {:keys [context]} (tool-surface/refresh-context surface session-bindings cas
                                                          {:catalog catalog :history history :policy policy})
          effective context
@@ -99,13 +143,13 @@
   "Capture tool catalog binding at start of a tool-loop. Delegates to
   evoclj.runtime.tool-surface/pin and returns the binding for backward
   compatibility. The full ToolSurface is available via tool-surface/pin."
-  [catalog]
-  (:surface/binding (tool-surface/pin catalog)))
+  ([catalog] (:surface/binding (tool-surface/pin catalog)))
+  ([catalog opts] (:surface/binding (tool-surface/pin catalog opts))))
 
 (defn capture-tool-catalog-binding
   "Alias for pin-catalog for scheduler compatibility. Delegates to ToolSurface."
-  [catalog]
-  (:surface/binding (tool-surface/pin catalog)))
+  ([catalog] (:surface/binding (tool-surface/pin catalog)))
+  ([catalog opts] (:surface/binding (tool-surface/pin catalog opts))))
 
 (defn base-call-from-intent
   "Extract BaseModelCall from an intent. Tolerates both new and legacy payload shapes."
@@ -119,15 +163,16 @@
 
 (defn assemble
   "Scheduler-facing wrapper for base->prepared. Takes base-call and opts map with
-  :session-bindings, :tool-catalog/binding, :cas, :history, :policy, :catalog."
+  :session-bindings, :tool-catalog/binding, :cas, :history, :policy, :catalog, :ptc."
   [base-call opts]
   (let [session-bindings (:session-bindings opts)
         tool-binding (:tool-catalog/binding opts)
         catalog (:catalog opts)
         cas (:cas opts)
         history (:history opts)
-        policy (:policy opts)]
-    (base->prepared base-call (or session-bindings []) (or catalog {}) tool-binding (or history "") {:cas cas :policy policy})))
+        policy (:policy opts)
+        ptc (:ptc opts)]
+    (base->prepared base-call (or session-bindings []) (or catalog {}) tool-binding (or history "") {:cas cas :policy policy :ptc ptc})))
 
 (defn rebuild-context
   "Rebuild only the context portion for next round, keeping pinned

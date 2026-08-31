@@ -239,3 +239,47 @@
   (ensure-schema-value! :input-schema (:input-schema x))
   (ensure-schema-value! :output-schema (:output-schema x))
   x)
+
+;; ---------------------------------------------------------------------------
+;; Code execution tool (P9) — single source C-Tool definition
+;; ---------------------------------------------------------------------------
+
+(def code-execution-tool-id
+  "Canonical ToolId for the CodeMode sandbox execution tool."
+  :ptc/code-execution)
+
+(def code-execution-tool
+  "Canonical C-Tool value object for code_execution. Reused by
+  ToolSurface and Assembler for declaration; no duplication elsewhere.
+  The SCI sandbox executes the code with injected toolFns (P8)."
+  {:tool/id code-execution-tool-id
+   :input-schema [:map
+                  [:code string?]
+                  [:language {:optional true} string?]]
+   :output-schema [:map
+                   [:value any?]
+                   [:status {:optional true} keyword?]]
+   :required-action :ptc/code-execution
+   :effect :pure
+   :tool/audience #{:model}})
+
+(def code-execution-wire-tool
+  "Wire declaration for code_execution as seen by the model
+  (OpenAI function-tool shape plus :tool id for scheduler routing).
+  Single wire shape derived from code-execution-tool (INV-05)."
+  {:name "code_execution"
+   :description "Execute SCI Clojure code with toolFns"
+   :parameters {:type "object"
+                :properties {:code {:type "string"
+                                    :description "SCI Clojure source code to execute"}
+                             :language {:type "string"
+                                        :description "Language identifier, must be sci-clojure"}}
+                :required ["code"]}
+   :tool code-execution-tool-id})
+
+(defn code-execution-wire-tool?
+  "True when m is the code_execution wire declaration."
+  [m]
+  (and (map? m)
+       (= "code_execution" (:name m))
+       (= code-execution-tool-id (:tool m))))

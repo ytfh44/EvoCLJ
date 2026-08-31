@@ -263,10 +263,20 @@
                               (catch Throwable _ nil))
             pinned-source (or live-catalog initial-tools)
             _ (when-let [provider-registry (:registry (:dispatch executor))]
-                (registry/resolve-tool-catalog provider-registry pinned-source))
-            pinned-surface (try (tool-surface/pin pinned-source)
+                ;; P9: code_execution is not in the provider registry; filter it
+                ;; before resolution so declaration does not fail-closed via
+                ;; catalog-unresolved. The filter is scoped to the single
+                ;; code_execution name, preserving fail-closed for all other
+                ;; dangling ids.
+                (let [filtered (if (sequential? pinned-source)
+                                 (remove #(= "code_execution" (:name %)) pinned-source)
+                                 pinned-source)]
+                  (when (seq filtered)
+                    (registry/resolve-tool-catalog provider-registry filtered))))
+            ptc (:ptc executor)
+            pinned-surface (try (tool-surface/pin pinned-source ptc)
                                 (catch Throwable _
-                                  (tool-surface/pin initial-tools)))
+                                  (tool-surface/pin initial-tools ptc)))
             pinned (:surface/binding pinned-surface)]
         (loop [current-base-call base-call
                current-intent intent
@@ -286,7 +296,8 @@
                                                {:session-bindings bindings
                                                 :tool-catalog/binding pinned
                                                 :cas cas
-                                                :history ""})
+                                                :history ""
+                                                :ptc ptc})
                            (catch Throwable _ nil))
                 tool-map (if prepared (:tool-map prepared) (tool-map-of current-intent))
                 effective-intent (if prepared
