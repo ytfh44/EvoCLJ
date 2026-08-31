@@ -8,11 +8,13 @@
   refresh each round)."
   (:require [evoclj.intent.core :as intent]
             [evoclj.intent.dispatch :as dispatch]
+            [evoclj.intent.pipeline :as pipeline]
             [evoclj.kernel.error :as err]
             [evoclj.provider.dialect :as dialect]
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.assembler :as assembler]
             [evoclj.runtime.tool-surface :as tool-surface]
+            [evoclj.sci.boundary :as boundary]
             [evoclj.sci.computation :as computation]
             [evoclj.store.binding :as binding-store]
             [evoclj.store.cas :as cas]
@@ -151,6 +153,57 @@
    :content (if (= :ok outcome)
               (pr-str value)
               (str "error: " (name outcome)))})
+
+(defn- make-tool-fns
+  "Factory that builds {tool-id -> host fn} crossing the broker via the pipeline.
+
+  tool-map is a map of tool-id (string/keyword) to tool declaration.
+  executor is the runtime executor holding :dispatch (broker context)
+  and :stores. pin holds session/phenotype/node attribution, cause is
+  the causal event id. Each returned fn takes a single EDN args value,
+  materializes it, builds a validated :intent/tool-call via
+  intent/tool-call, dispatches through pipeline/pipeline (single
+  handleError, single limitsCheck per INV-05), materializes the
+  result, and returns it. Failures throw typed errors; the fn never
+  calls the provider directly, satisfying GC-08.
+
+  Not yet wired into the CodeMode loop; exposed as a factory for P8
+  sandbox tests."
+  [tool-map executor pin cause]
+  (when-not (map? tool-map)
+    (throw (err/error :orchestrator/invalid-tool-map
+                      "tool-map must be a map"
+                      {:reason :invalid-tool-map :value (err/sanitize tool-map)})))
+  (let [broker-ctx (or (:dispatch executor)
+                       (when-let [reg (:registry executor)]
+                         (dispatch/make-broker-context {:registry reg}))
+                       (throw (err/error :orchestrator/missing-broker
+                                         "executor must carry :dispatch broker context"
+                                         {:reason :missing-broker})))]
+    (into {}
+          (for [[tool-id _spec] tool-map]
+            (let [kw (if (keyword? tool-id) tool-id (keyword (str tool-id)))
+                    tid (name kw)]
+              [tid
+               (fn [args]
+                 (let [safe-args (boundary/materialize-edn args {:max-depth 64 :max-size 100000})
+                       session-id (or (:session/id pin) (:session/id executor) (random-uuid))
+                       raw-pid (or (:phenotype/id pin) (:phenotype/id executor))
+                       phenotype-id (if (and (string? raw-pid) (re-matches #"^sha256:[0-9a-f]{64}$" raw-pid))
+                                      raw-pid
+                                      (str "sha256:" (apply str (repeat 64 "a"))))
+                       raw-nid (or (:node/id pin) :sandbox)
+                       node-id (if (keyword? raw-nid) raw-nid (keyword (str raw-nid)))
+                       cause-id (let [c (if (map? cause) (:event/id cause) cause)]
+                                  (if (int? c) c 1))
+                       budget (or (:budget pin) {:wall-ms 1000})
+                       intent (intent/tool-call session-id phenotype-id node-id cause-id {:tool/id kw :args safe-args} budget)
+                       result (pipeline/pipeline broker-ctx intent)]
+                   (if (= :ok (:result/status result))
+                     (boundary/materialize-edn (:value result) {:max-depth 64 :max-size 100000})
+                     (throw (err/error (or (:error/type result) :provider/execution-failed)
+                                       (or (:error/message result) "tool execution failed")
+                                       (dissoc result :result/status))))))])))))
 
 (defn- execute-tool-calls!
   "Execute every model-requested tool call through the broker and collect tool-result messages."

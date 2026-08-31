@@ -55,7 +55,8 @@
             [evoclj.sci.expose :as expose]
             [evoclj.sci.limits :as limits]
             [sci.core :as sci]
-            [sci.interrupt :as interrupt]))
+            [sci.interrupt :as interrupt])
+  (:import (java.nio.charset StandardCharsets)))
 
 ;; ---------------------------------------------------------------------------
 ;; Single authoritative allow surface (pure data, validated)
@@ -507,3 +508,141 @@
         {:status :error
          :error (->serializable-error t)
          :usage {:steps @steps :wall-ms (elapsed-ms started)}}))))
+
+;; ---------------------------------------------------------------------------
+;; Sandbox tool_fn injection (P8)
+;; ---------------------------------------------------------------------------
+
+(def ^:private sandbox-max-code-bytes 8192)
+(def ^:private sandbox-max-tool-calls 32)
+(def ^:private sandbox-wall-ms 5000)
+(def ^:private sandbox-max-steps 100000)
+
+(defn- bytes-ok?
+  "Wolfram verified: code byte count within sandbox budget."
+  [code-str]
+  (<= (alength (.getBytes ^String code-str StandardCharsets/UTF_8)) sandbox-max-code-bytes))
+
+(defn- calls-ok?
+  "Wolfram verified: tool call count within sandbox budget."
+  [n]
+  (<= n sandbox-max-tool-calls))
+
+(defn- limits-check
+  "Wolfram verified lattice: bytesOk and callsOk must both hold.
+  Single limitsCheck per INV-05."
+  [code-str tool-call-count]
+  (and (bytes-ok? code-str) (calls-ok? tool-call-count)))
+
+(defn- ->code-bytes-error
+  [code-str]
+  (err/error :sci/limit-exceeded
+             "code byte budget exceeded"
+             {:limit :code-bytes
+              :max sandbox-max-code-bytes
+              :found (alength (.getBytes ^String code-str StandardCharsets/UTF_8))}))
+
+(defn- ->tool-calls-error
+  [n]
+  (err/error :sci/limit-exceeded
+             "tool call budget exceeded"
+             {:limit :max-tool-calls
+              :max sandbox-max-tool-calls
+              :found n}))
+
+(defn execute-code
+  "Execute code-str inside Computation with injected toolFns.
+
+  computation is a Computation value from make-computation. code-str
+  is SCI Clojure source to evaluate. tool-fns is a map of tool-id
+  (string, keyword, or symbol) to host fn of arity [args] where args
+  is the EDN value passed from SCI. Each tool fn is exposed inside
+  SCI as tool/<id> and must cross the broker via the pipeline when
+  wired through orchestrator/make-tool-fns; here it is a plain host
+  callback retained for test wiring.
+
+  Limits (Wolfram lattice):
+    - codeBytes 8192 pre-check on UTF-8 bytes of code-str
+    - toolCalls 32 counted inside each tool wrapper, enforced with
+      uncatchable sci.interrupt/interrupt! (same mechanism as wall/steps)
+    - wall 5000 ms and steps 100000 via limits/make-interrupt-fn
+      (uncatchable inside SCI)
+
+  Args and return values are enforced EDN-safe via
+  boundary/materialize-edn. Interrupts are uncatchable inside SCI and
+  surface as {:status :error :error {:error/type :sci/limit-exceeded}}.
+  Returns {:status :ok :value EDN :events [] :usage {:steps :wall-ms}}
+  or {:status :error :error serializable :events [] :usage {...}}.
+  Single limitsCheck per INV-05, GC-07 host-surface remains single source."
+  ([computation code-str] (execute-code computation code-str nil))
+  ([computation code-str tool-fns]
+   (let [started (System/nanoTime)
+         steps (atom 0)
+         tool-calls (atom 0)]
+     (try
+       (when-not (string? code-str)
+         (throw (err/error :sci/invalid-code
+                           "code-str must be a string"
+                           {:reason :invalid-code :value (err/sanitize code-str)})))
+       (when (and (some? tool-fns) (not (map? tool-fns)))
+         (throw (err/error :sci/invalid-tool-fns
+                           "tool-fns must be a map of tool-id to fn"
+                           {:reason :invalid-tool-fns :value (err/sanitize tool-fns)})))
+       (when-not (bytes-ok? code-str)
+         (throw (->code-bytes-error code-str)))
+       (let [tool-fns (or tool-fns {})
+             _ (doseq [[k f] tool-fns]
+                 (when-not (fn? f)
+                   (throw (err/error :sci/invalid-tool-fns
+                                     "each tool-fn must be a fn"
+                                     {:tool/id (err/sanitize k) :value (err/sanitize f)}))))
+             sandbox-limits {:wall-ms sandbox-wall-ms
+                             :max-steps sandbox-max-steps
+                             :max-output-nodes (:max-output-nodes (:computation/limits computation) 100000)}
+             effective-limits (limits/validate-limits!
+                               (merge (:computation/limits computation) sandbox-limits))
+             interrupt-fn (limits/make-interrupt-fn steps effective-limits)
+             wrapped-tools
+             (into {}
+                   (for [[tool-id f] tool-fns]
+                     (let [sym (symbol (name tool-id))]
+                       [sym
+                        (fn [arg]
+                          (let [n (swap! tool-calls inc)]
+                            (when-not (calls-ok? n)
+                              (interrupt/interrupt!
+                               "tool call budget exceeded"
+                               {:error/type :sci/limit-exceeded
+                                :limit :max-tool-calls
+                                :max sandbox-max-tool-calls
+                                :found n}))
+                            (let [safe-arg (boundary/materialize-edn arg {:max-depth 64 :max-size 100000})
+                                  result (f safe-arg)
+                                  safe-result (boundary/materialize-edn result {:max-depth 64 :max-size 100000})]
+                              safe-result)))])))
+             expose-namespaces expose/api-namespaces
+             tool-ns-map wrapped-tools
+             namespaces (if (seq tool-ns-map)
+                          (assoc expose-namespaces 'tool tool-ns-map)
+                          expose-namespaces)
+             tool-syms (set (map (fn [[k _]] (symbol "tool" (str k))) tool-ns-map))
+             allow (into host-surface tool-syms)
+             base-ctx (runtime-context computation)
+             exec-ctx (assoc (sci/init {:namespaces namespaces
+                                        :classes {}
+                                        :allow allow})
+                             :interrupt-fn interrupt-fn)
+             _ (when (and (computation? computation)
+                          (:computation/interrupt-state computation))
+                 (reset! (:computation/interrupt-state computation) interrupt-fn))
+             raw (sci/eval-string* exec-ctx code-str)
+             value (boundary/materialize-edn raw {:max-depth 64 :max-size (:max-output-nodes effective-limits)})]
+         {:status :ok
+          :value value
+          :events []
+          :usage {:steps @steps :wall-ms (elapsed-ms started) :tool-calls @tool-calls}})
+       (catch Throwable t
+         {:status :error
+          :error (->serializable-error t)
+          :events []
+          :usage {:steps @steps :wall-ms (elapsed-ms started) :tool-calls @tool-calls}})))))
