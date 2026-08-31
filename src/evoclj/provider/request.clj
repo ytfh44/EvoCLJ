@@ -6,7 +6,10 @@
   edn->json and supported-option? are defined once (INV-05).
   Parse dispatch is the single entry point (parse-response
   provider raw) and fixes the anthropic tool_use dropping.
-  :code is parsed but not executed (carried through as {:language :source})."
+  :code is lifted only from code_execution tool_use via
+  dialect/lift-code-from-tool-calls and is carried through as
+  {:language :source} (parsed but not executed, no fence regex
+  duplication here — see dialect for the single lift impl)."
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [evoclj.kernel.error :as err]
@@ -27,13 +30,19 @@
    [:options {:optional true} :map]
    [:dialect {:optional true} :map]])
 
+;; Single source of :code schema (INV-05); :code is lifted only from code_execution tool_use in dialect/lift-code-from-tool-calls; no duplicated code block regex schema.
+;; No CodeSchema in evoclj.tool.specs — this inline [:map [:language keyword?] [:source string?]]
+;; is the single definition (INV-05) published via dialect lift; no duplicated schema elsewhere.
 (def ModelResponse
   "Canonical ModelResponse EDN produced by parse-response.
   :text is the concatenated visible text, :reasoning is an
   optional interleaved reasoning trace, :tool-calls is the
   optional vector of parsed tool calls, :usage carries token
   counters, :code is an optional parsed code block
-  {:language <keyword> :source <string>} (parsed but not executed)."
+  {:language <keyword> :source <string>} lifted only from
+  code_execution tool_use via dialect/lift-code-from-tool-calls
+  (parsed but not executed). Single source of :code schema (INV-05);
+  no fence handling here — parse-response dispatches to dialect."
   [:map
    [:text string?]
    [:reasoning {:optional true} string?]
@@ -43,6 +52,7 @@
               [:tool/name string?]
               [:tool/arguments :map]]]]
    [:usage {:optional true} :map]
+   ;; Single impl for :code (INV-05) — published via dialect lift, no duplicated schema.
    [:code {:optional true} [:map [:language keyword?] [:source string?]]]])
 
 ;; --- EDN -> JSON (single definition) ----------------------------------------

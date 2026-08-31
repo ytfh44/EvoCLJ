@@ -137,37 +137,32 @@
     {}))
 
 (defn- extract-code-block
-  "Extract the first fenced code block from text.
-
-  When text is a string, finds the first ```lang\\ncode\\n``` or ```\\ncode\\n```
-  block (dot-all, non-greedy). Returns nil when no block is found, otherwise
-  {:language <keyword> :source <trimmed-string>} defaulting language to :clojure
-  when the fence has no language tag. Pure EDN, no network."
+  "Deprecated: fence extraction no longer sources :code; retained for text display only.\n  Previously extracted the first fenced code block from text, now NOT used for :code.\n  :code is lifted only from structured code_execution tool_use via lift-code-from-tool-calls.\n  Kept for backward compat and potential text display; returns same shape but callers must not use it for :code."
   [text]
   (when (string? text)
     (when-let [[_ lang code] (re-find #"(?s)```(?:(\w+)\n)?(.*?)\n```" text)]
       {:language (keyword (or lang "clojure"))
        :source (str/trim (or code ""))})))
 
+(defn- lift-code-from-tool-calls
+  "Extract :code ONLY from structured code_execution tool_use.\n  tool-calls is a seq of {:tool/name string :tool/arguments map}.\n  Returns {:language <keyword> :source <string>} from the first\n  code_execution entry, or nil. Handles args keys :code/:source/\"code\"/\"source\"\n  and language keys :language/\"language\" (keyword or string), defaulting to :clojure.\n  INV-05 single impl: both parse-openai-response and parse-anthropic-response call this.\n  :code is lifted only from structured code_execution tool_use, not from fenced text."
+  [tool-calls]
+  (when (seq tool-calls)
+    (some (fn [{:tool/keys [name arguments]}]
+            (when (= "code_execution" name)
+              (let [args (if (map? arguments) arguments {})
+                    src (or (:code args) (:source args) (get args "code") (get args "source"))
+                    lang-raw (or (:language args) (get args "language") "clojure")
+                    lang (cond
+                           (keyword? lang-raw) lang-raw
+                           (string? lang-raw) (keyword lang-raw)
+                           :else :clojure)]
+                (when (and (string? src) (not (str/blank? src)))
+                  {:language lang
+                   :source (str/trim src)}))))
+          tool-calls)))
 (defn parse-openai-response
-  "Parse a decoded OpenAI-compatible chat-completions response map
-  into the canonical provider result.
-
-  `dialect` supplies the interleaved reasoning field name (as a
-  keyword, e.g. :reasoning_content) — the text under that field in
-  the first choice message becomes :model/output :reasoning. A nil
-  or :none interleaved dialect extracts no reasoning.
-
-  Also extracts the first fenced code block from the visible text
-  via extract-code-block; when present the result carries :code
-  {:language <keyword> :source <string>} (parsed but not executed).
-
-  Returns {:model/output {:text <str> :reasoning <str or absent>}
-           :code {:language <keyword> :source <string>}?
-           :usage {:input-tokens <int> :output-tokens <int>
-                   :reasoning-tokens <int or absent>}}.
-  Throws :provider/output-invalid when the response has no choices
-  or the first choice has no message."
+  "Parse a decoded OpenAI-compatible chat-completions response map\n  into the canonical provider result.\n\n  `dialect` supplies the interleaved reasoning field name (as a\n  keyword, e.g. :reasoning_content) — the text under that field in\n  the first choice message becomes :model/output :reasoning. A nil\n  or :none interleaved dialect extracts no reasoning.\n\n  :code is lifted only from structured code_execution tool_use, not from fenced text.\n  When tool-calls contain {:tool/name \"code_execution\"} the first matching\n  call's arguments :code/:source (or \"code\"/\"source\") becomes :code\n  {:language <keyword> :source <string>} (parsed but not executed).\n\n  Returns {:model/output {:text <str> :reasoning <str or absent>}\n           :code {:language <keyword> :source <string>}?\n           :usage {:input-tokens <int> :output-tokens <int>\n                   :reasoning-tokens <int or absent>}}.\n  Throws :provider/output-invalid when the response has no choices\n  or the first choice has no message."
   [dialect response]
   (let [dialect (or dialect {})
         interleaved (:interleaved dialect :none)
@@ -191,7 +186,7 @@
         usage (:usage response)
         reasoning-tokens (get-in usage [:completion_tokens_details
                                         :reasoning_tokens])
-        code (extract-code-block text)]
+        code (lift-code-from-tool-calls tool-calls)]
     (when-not (and (vector? choices) (seq choices) (map? message))
       (throw (ex-info "openai response has no usable first choice"
                       {:error/type :provider/output-invalid
@@ -226,17 +221,7 @@
         tool-calls))
 
 (defn parse-anthropic-response
-  "Parse a decoded Anthropic messages response map into the
-  canonical provider result: text blocks concatenate into :text;
-  tool_use blocks become :tool-calls entries (retaining the
-  tool-use id, name, and input map). Usage carries input/output
-  tokens. No reasoning extraction: Anthropic reasoning lives in
-  the thinking block and is not interleaved in v1.
-
-  Also extracts the first fenced code block from the concatenated
-  text via extract-code-block; when present the result carries
-  :code {:language <keyword> :source <string>} (parsed but not
-  executed). Pure EDN, no network."
+  "Parse a decoded Anthropic messages response map into the\n  canonical provider result: text blocks concatenate into :text;\n  tool_use blocks become :tool-calls entries (retaining the\n  tool-use id, name, and input map). Usage carries input/output\n  tokens. No reasoning extraction: Anthropic reasoning lives in\n  the thinking block and is not interleaved in v1.\n\n  :code is lifted only from structured code_execution tool_use, not from fenced text.\n  When tool-calls contain {:tool/name \"code_execution\"} the first matching\n  call's arguments :code/:source (or \"code\"/\"source\") becomes :code\n  {:language <keyword> :source <string>} (parsed but not executed). Pure EDN, no network."
   [response]
   (let [content (:content response)
         blocks (if (vector? content) content [])
@@ -244,7 +229,6 @@
                                (:text b)))
                     blocks)
         text (apply str texts)
-        code (extract-code-block text)
         tool-calls (keep (fn [b]
                            (when (and (map? b) (= "tool_use" (:type b)))
                              (when (and (string? (:id b)) (string? (:name b)))
@@ -253,13 +237,13 @@
                                 :tool/arguments (if (map? (:input b)) (:input b) {})})))
                          blocks)
         tool-calls (seq tool-calls)
+        code (lift-code-from-tool-calls tool-calls)
         usage (:usage response)]
     (cond-> {:model/output {:text text}
              :usage {:input-tokens (get-in usage [:input_tokens] 0)
                      :output-tokens (get-in usage [:output_tokens] 0)}}
       tool-calls (assoc :tool-calls (vec tool-calls))
       code (assoc :code code))))
-
 ;; --- cost ----------------------------------------------------------------------
 
 (defn estimate-cost

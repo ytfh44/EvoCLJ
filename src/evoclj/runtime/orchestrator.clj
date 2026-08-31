@@ -13,6 +13,7 @@
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.assembler :as assembler]
             [evoclj.runtime.tool-surface :as tool-surface]
+            [evoclj.sci.computation :as computation]
             [evoclj.store.binding :as binding-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event])
@@ -275,17 +276,17 @@
                        pinned-surface))
               step)))))))
 
-;; CodeModeOrchestrator — empty PTC orchestrator with fail-safe off switch.
-;; No actual code execution. Reads :ptc from the per-session executor map
-;; (kernel/system :build) at call time; when :ptc is missing the check falls
-;; back to false and fails safe. When enabled, delegates the full tool-calling
-;; loop to a fresh TraditionalOrchestrator. This empty implementation preserves
-;; the existing broker-per-tool-call contract (GC-07/08) — future PTC code
-;; execution will still require broker dispatch per tool call.
-(defrecord CodeModeOrchestrator []
+;; CodeModeOrchestrator holds an injected Computation value (C-Computation).
+;; The Computation is closed and serializable; it owns the SCI context and limits.
+;; orchestrate requires the injected computation and checks :enabled? via the
+;; Computation's limits or the executor's :ptc map (executor :ptc :enabled?
+;; is the single fail-safe flag). When disabled or when computation is
+;; nil/not-enabled, throws :ptc/not-enabled. When enabled delegates to
+;; TraditionalOrchestrator preserving broker-per-tool-call (GC-07/08).
+(defrecord CodeModeOrchestrator [computation]
   Orchestrator
-  (orchestrate [_this executor pin cause intent outputs]
-    (let [enabled? (boolean (:enabled? (:ptc executor)))]
+  (orchestrate [this executor pin cause intent outputs]
+    (let [enabled? (boolean (and computation (:enabled? (:ptc executor))))]
       (if (not enabled?)
         (throw (err/error :ptc/not-enabled "PTC is disabled" {:ptc (:ptc executor)}))
         (orchestrate (->TraditionalOrchestrator) executor pin cause intent outputs)))))

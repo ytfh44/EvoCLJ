@@ -4,11 +4,14 @@
   - disabled / missing :ptc throws :ptc/not-enabled
   - enabled delegates to TraditionalOrchestrator (no code execution yet)
   - Traditional path unchanged when disabled
-  - dialect parses :code once (INV-05) and ModelResponse carries it"
+  - dialect parses :code only from code_execution tool_use (INV-05) and ModelResponse carries it"
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.string :as str]
+            [cheshire.core :as json]
             [evoclj.runtime.orchestrator :as orch]
             [evoclj.provider.dialect :as dialect]
             [evoclj.provider.request :as request]
+            [evoclj.sci.computation :as computation]
             [malli.core :as m]))
 
 ;; ---------------------------------------------------------------------------
@@ -18,13 +21,40 @@
 (defn- error-type [e]
   (:error/type (ex-data e)))
 
+(defn- raw-openai-with-code
+  "Helper: raw OpenAI response with code_execution tool_call carrying code-str.
+  language defaults to :clojure when not supplied. source-key controls whether
+  the tool argument uses :code or :source."
+  ([code-str] (raw-openai-with-code code-str {}))
+  ([code-str {:keys [language source-key] :or {language "clojure" source-key :code}}]
+   {:choices [{:message {:content "hi"
+                         :tool_calls [{:id "call_1"
+                                       :type "function"
+                                       :function {:name "code_execution"
+                                                  :arguments (json/generate-string
+                                                              (cond-> {source-key code-str}
+                                                                language (assoc :language language)))}}]}}]
+    :usage {:prompt_tokens 1 :completion_tokens 2}}))
+
+(defn- raw-anthropic-with-code
+  "Helper: raw Anthropic response with code_execution tool_use carrying code-str."
+  ([code-str] (raw-anthropic-with-code code-str {}))
+  ([code-str {:keys [language source-key] :or {language "clojure" source-key :code}}]
+   {:content [{:type "tool_use"
+               :id "toolu_1"
+               :name "code_execution"
+               :input (cond-> {source-key code-str}
+                        language (assoc :language language))}]
+    :usage {:input_tokens 1 :output_tokens 2}}))
+
 ;; ---------------------------------------------------------------------------
 ;; Orchestrator fail-safe
 ;; ---------------------------------------------------------------------------
 
 (deftest codemode-disabled-throws
   (testing "missing :ptc fails safe (false default)"
-    (let [cm (orch/->CodeModeOrchestrator)
+    (let [comp (computation/make-computation {})
+          cm (orch/->CodeModeOrchestrator comp)
           executor {}]
       (try
         (orch/orchestrate cm executor nil nil {:intent/type :intent/model-call :payload {:model/id "test/model"}} [])
@@ -33,7 +63,8 @@
           (is (= :ptc/not-enabled (error-type e)))
           (is (= "PTC is disabled" (.getMessage e)))))))
   (testing "explicit :ptc {:enabled? false} throws"
-    (let [cm (orch/->CodeModeOrchestrator)
+    (let [comp (computation/make-computation {})
+          cm (orch/->CodeModeOrchestrator comp)
           executor {:ptc {:enabled? false}}]
       (try
         (orch/orchestrate cm executor nil nil {:intent/type :intent/model-call :payload {:model/id "test/model"}} [])
@@ -41,7 +72,8 @@
         (catch clojure.lang.ExceptionInfo e
           (is (= :ptc/not-enabled (error-type e)))))))
   (testing "disabled also gates non-model intents (fail-safe is global)"
-    (let [cm (orch/->CodeModeOrchestrator)
+    (let [comp (computation/make-computation {})
+          cm (orch/->CodeModeOrchestrator comp)
           executor {:ptc {:enabled? false}}]
       (try
         (orch/orchestrate cm executor nil nil {:intent/type :intent/other :payload {}} [])
@@ -51,7 +83,8 @@
 
 (deftest codemode-enabled-delegates
   (testing "enabled delegates to TraditionalOrchestrator — no :ptc/not-enabled"
-    (let [cm (orch/->CodeModeOrchestrator)
+    (let [comp (computation/make-computation {})
+          cm (orch/->CodeModeOrchestrator comp)
           executor {:ptc {:enabled? true :language :sci-clojure}
                     :stores {:tool-catalog (atom []) :sqlite nil :cas nil}
                     :dispatch {:registry nil}}]
@@ -89,29 +122,69 @@
           (is (= :ok (:outcome result))))))))
 
 ;; ---------------------------------------------------------------------------
-;; :code block parsing (INV-05 single impl)
+;; :code block parsing (INV-05 single impl — tool_use only, fence != :code)
 ;; ---------------------------------------------------------------------------
 
 (deftest code-block-parsing
-  (testing "openai response with fenced clojure block yields :code"
+  (testing "fenced text does NOT yield :code for openai"
     (let [raw {:choices [{:message {:content "hi\n```clojure\n(+ 1 2)\n```"}}]
                :usage {:prompt_tokens 1 :completion_tokens 2}}]
-      (let [parsed (dialect/parse-openai-response {} raw)]
-        (is (= {:language :clojure :source "(+ 1 2)"} (:code parsed)))
-        (is (= "hi\n```clojure\n(+ 1 2)\n```" (get-in parsed [:model/output :text]))))))
-  (testing "openai blank language defaults to :clojure and trims source"
-    (let [raw {:choices [{:message {:content "```\n  hello  \n```"}}]
-               :usage {}}]
-      (is (= {:language :clojure :source "hello"} (:code (dialect/parse-openai-response {} raw))))))
+      (is (nil? (:code (dialect/parse-openai-response {} raw)))
+          "fenced block in text must not produce :code; only code_execution tool_use does")))
   (testing "openai no block yields no :code"
     (let [raw {:choices [{:message {:content "just text"}}] :usage {}}]
       (is (nil? (:code (dialect/parse-openai-response {} raw))))))
-  (testing "anthropic response with fenced block yields :code"
+  (testing "openai code_execution tool_use yields :code"
+    (let [raw {:choices [{:message {:content "hi"
+                                    :tool_calls [{:id "call_1"
+                                                  :type "function"
+                                                  :function {:name "code_execution"
+                                                             :arguments "{\"code\":\"(+ 1 2)\"}"}}]}}]
+               :usage {:prompt_tokens 1 :completion_tokens 2}}]
+      (is (= {:language :clojure :source "(+ 1 2)"} (:code (dialect/parse-openai-response {} raw))))))
+  (testing "openai code_execution with :source/:language variant yields :code"
+    (let [raw {:choices [{:message {:content "hi"
+                                    :tool_calls [{:id "call_1"
+                                                  :type "function"
+                                                  :function {:name "code_execution"
+                                                             :arguments "{\"source\":\"print(1)\",\"language\":\"python\"}"}}]}}]
+               :usage {}}]
+      (is (= {:language :python :source "print(1)"} (:code (dialect/parse-openai-response {} raw))))))
+  (testing "openai blank language defaults to :clojure and trims source via tool_use"
+    (let [raw {:choices [{:message {:content "hi"
+                                    :tool_calls [{:id "call_1"
+                                                  :type "function"
+                                                  :function {:name "code_execution"
+                                                             :arguments "{\"code\":\"  hello  \"}"}}]}}]
+               :usage {}}]
+      (is (= {:language :clojure :source "hello"} (:code (dialect/parse-openai-response {} raw))))))
+  (testing "openai non-code tool does not yield :code"
+    (let [raw {:choices [{:message {:content "hi"
+                                    :tool_calls [{:id "call_1"
+                                                  :type "function"
+                                                  :function {:name "web_search"
+                                                             :arguments "{\"query\":\"hi\"}"}}]}}]
+               :usage {}}]
+      (is (nil? (:code (dialect/parse-openai-response {} raw))))))
+  (testing "fenced text does NOT yield :code for anthropic"
     (let [raw {:content [{:type "text" :text "hi\n```python\nprint(1)\n```"}]
                :usage {:input_tokens 1 :output_tokens 2}}]
-      (is (= {:language :python :source "print(1)"} (:code (dialect/parse-anthropic-response raw))))))
+      (is (nil? (:code (dialect/parse-anthropic-response raw)))
+          "fenced block in text must not produce :code; only code_execution tool_use does")))
   (testing "anthropic no block yields no :code"
     (let [raw {:content [{:type "text" :text "no code here"}] :usage {}}]
+      (is (nil? (:code (dialect/parse-anthropic-response raw))))))
+  (testing "anthropic code_execution tool_use yields :code"
+    (let [raw {:content [{:type "tool_use" :id "toolu_1" :name "code_execution" :input {:code "(+ 1 2)"}}]
+               :usage {:input_tokens 1 :output_tokens 2}}]
+      (is (= {:language :clojure :source "(+ 1 2)"} (:code (dialect/parse-anthropic-response raw))))))
+  (testing "anthropic code_execution with :source/:language variant yields :code"
+    (let [raw {:content [{:type "tool_use" :id "toolu_1" :name "code_execution" :input {:language "python" :source "print(1)"}}]
+               :usage {:input_tokens 1 :output_tokens 2}}]
+      (is (= {:language :python :source "print(1)"} (:code (dialect/parse-anthropic-response raw))))))
+  (testing "anthropic non-code tool does not yield :code"
+    (let [raw {:content [{:type "tool_use" :id "toolu_1" :name "other_tool" :input {:code "(+ 1 2)"}}]
+               :usage {}}]
       (is (nil? (:code (dialect/parse-anthropic-response raw))))))
   (testing "ModelResponse malli validates :code"
     (is (m/validate request/ModelResponse {:text "hi" :code {:language :clojure :source "x"}}))
@@ -119,9 +192,20 @@
     (is (not (m/validate request/ModelResponse {:text "hi" :code {:language "oops" :source 123}})))))
 
 (deftest code-carried-but-not-executed
-  (testing "parse preserves :code without execution (pure EDN)"
-    (let [raw {:choices [{:message {:content "```clojure\n(+ 1 2)\n```"}}] :usage {}}
+  (testing "parse preserves :code without execution (pure EDN) via tool_use"
+    (let [raw {:choices [{:message {:content "hi"
+                                    :tool_calls [{:id "call_1"
+                                                  :type "function"
+                                                  :function {:name "code_execution"
+                                                             :arguments "{\"code\":\"(+ 1 2)\"}"}}]}}]
+               :usage {}}
           parsed (dialect/parse-openai-response {} raw)]
       (is (= "(+ 1 2)" (get-in parsed [:code :source])))
       ;; Ensure no eval happened: source is still a string, not a number.
+      (is (string? (get-in parsed [:code :source])))))
+  (testing "anthropic code_execution also carried as string without execution"
+    (let [raw {:content [{:type "tool_use" :id "toolu_1" :name "code_execution" :input {:code "(+ 1 2)"}}]
+               :usage {}}
+          parsed (dialect/parse-anthropic-response raw)]
+      (is (= "(+ 1 2)" (get-in parsed [:code :source])))
       (is (string? (get-in parsed [:code :source]))))))

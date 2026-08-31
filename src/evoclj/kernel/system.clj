@@ -94,6 +94,7 @@
             [evoclj.environment.registry :as env-reg]
             [evoclj.environment.source :as env-src]
             [evoclj.mcp.source :as mcp-source]
+            [evoclj.sci.computation :as computation]
             [evoclj.skill.adapter :as skill-adapter]
             [clojure.string :as str]
             [evoclj.eval.profile :as profile]
@@ -344,7 +345,6 @@
 ;; see that namespace for the init-key / halt-key! methods.
 
 ;; --- :runtime/executor ------------------------------------------------------------
-
 (defmethod ig/init-key :runtime/executor
   [_ config]
   "Build the :runtime/executor component: the scheduler HOST — the
@@ -354,8 +354,12 @@
   by :build from a compiled Phenotype, because the Phenotype is
   constructed inside an isolated SCI runtime and is never a host
   component (Global Constraints 22, 23)."
-
-  (let [limits (or (:scheduler config) {}) ptc (or (:ptc config) {:enabled? false})]
+  (let [limits (or (:scheduler config) {})
+        raw-ptc (or (:ptc config) {:enabled? false})
+        ptc (if (:enabled? raw-ptc)
+              (merge (computation/make-computation {:limits (or (:limits raw-ptc) limits)})
+                     {:enabled? true})
+              {:enabled? false})]
     {:scheduler scheduler/run-session!
      :stores {:sqlite (:sqlite (:store config))
               :cas (:cas (:store config))}
