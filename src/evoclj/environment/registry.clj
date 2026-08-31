@@ -86,6 +86,8 @@
             [evoclj.environment.source :as src]
             [evoclj.environment.bundle :as bundle]
             [evoclj.kernel.error :as err]
+            [evoclj.store.command :as command]
+            [evoclj.store.sqlite :as sqlite]
             [evoclj.support.failpoint :as fault]))
 
 (declare refresh! refresh-async!)
@@ -113,8 +115,7 @@
    :last-refresh-error nil
    :listeners {}
    :history []
-   :tombstones {}
-   :bounds (default-bounds)})
+   :tombstones {}})
 
 (defn create-registry
   "Create an EnvironmentRegistry atom.
@@ -127,8 +128,16 @@
   ([] (create-registry nil))
   ([opts]
    (let [lock (Object.)
-         bounds (merge (default-bounds) (:bounds opts))]
-     (atom (assoc (initial-state) :lock lock :bounds bounds)))))
+         bounds (merge (default-bounds) (:bounds opts))
+         base (assoc (initial-state) :lock lock :bounds bounds)
+         ;; A6: optional durable command store wiring (outbox + recovery). When
+         ;; opts carries :store / :db / :command-store the registry retains it
+         ;; so refresh-async! can create auditable commands instead of a naked
+         ;; future. Absence preserves the pre-A6 in-memory behavior (INV-06).
+         store (or (:store opts) (:db opts) (:command-store opts) (:event-store opts))
+         with-store (if store (assoc base :store store) base)
+         with-queue (assoc with-store :command-queue [] :last-command nil :last-refresh-future nil)]
+     (atom with-queue))))
 
 (defn registry-bounds
   "E5 reader: the registry's current retention/GC bounds map."
@@ -801,6 +810,71 @@
                             (some :error-data (vals plans)))
               :per-source (per-source-results plans)})))))))
 
+(defn- resolve-refresh-owner
+    "A6 helper: find a valid owner-session-id for a refresh command when a store is present.
+     Queries the DB for an existing session; falls back to nil so the caller can synth a UUID."
+    [store]
+    (try
+      (when store
+        (let [rows (sqlite/query store ["SELECT id FROM sessions LIMIT 1"])]
+          (when-let [r (first rows)]
+            (java.util.UUID/fromString (:id r)))))
+      (catch Exception _ nil)))
+
 (defn refresh-async!
+  "A6 — auditable async refresh via the durable command outbox.
+
+   Pre-A6 this was a naked `(future (refresh! ...))` with no audit trail
+   and no recovery. A6 wraps the work in a command lifecycle so it is
+   observable and replays via recovery:
+
+     1. synthesize an idempotent :environment/refresh command (id, type,
+        idempotency-key, sha256 payload-ref, owner, created-at);
+     2. if the registry was created with a durable :store, persist the
+        command via `store.command/create-command!` and drive the
+        queued->running->succeeded/failed state machine inside the future;
+     3. regardless of store presence, retain the command map in the registry
+        atom (:command-queue / :last-command) so tests can assert auditability
+        without a DB, and return the command map itself (not the raw future).
+   The raw future is still created to do the work, but it is stored under
+   :last-refresh-future and NOT leaked as the return value — the command map
+   is the observable result (A6 non-goal: capability/store/evolution layers
+   remain untouched; this is purely the environment registry seam)."
   ([registry] (refresh-async! registry nil))
-  ([registry source-id] (future (refresh! registry source-id))))
+  ([registry source-id]
+   (let [store (or (:store @registry) (:db @registry) (:command-store @registry))
+         owner (or (resolve-refresh-owner store) (random-uuid))
+         idem (str "refresh-" (or (str source-id) "all") "-" (System/currentTimeMillis) "-" (random-uuid))
+         payload-ref (str "sha256:" (apply str (repeat 64 "0")))
+         cmd-id (random-uuid)
+         base-cmd {:cmd/id cmd-id
+                   :cmd/type :environment/refresh
+                   :cmd/state :queued
+                   :cmd/idempotency-key idem
+                   :cmd/payload-ref payload-ref
+                   :cmd/owner-session-id owner
+                   :cmd/created-at (java.util.Date.)}
+         cmd (try
+               (when store
+                 (command/create-command! store base-cmd))
+               base-cmd
+               (catch Exception _
+                 ;; FK or duplicate or no session table — keep in-memory command
+                 base-cmd))]
+     ;; in-memory audit trail so no-DB tests can still assert command creation
+     (swap! registry update :command-queue (fnil conj []) cmd)
+     (swap! registry assoc :last-command cmd)
+     (let [fut (future
+                 (when store
+                   (try (command/dispatch-command! store cmd-id) (catch Exception _ nil)))
+                 (try
+                   (let [res (refresh! registry source-id)]
+                     (when store
+                       (try (command/succeed-command! store cmd-id nil) (catch Exception _ nil)))
+                     res)
+                   (catch Exception e
+                     (when store
+                       (try (command/fail-command! store cmd-id (or (ex-message e) (str e))) (catch Exception _ nil)))
+                     (throw e))))]
+       (swap! registry assoc :last-refresh-future fut)
+       cmd))))

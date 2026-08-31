@@ -65,7 +65,8 @@
   denying. A capability is a bounded host-owned grant, so garbage
   never authorizes and never hides a caller bug (the same rule as
   evoclj.capability.lease)."
-  (:require [evoclj.capability.lease :as lease]
+  (:require [clojure.set :as set]
+            [evoclj.capability.lease :as lease]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err]
             [malli.core :as m]))
@@ -98,6 +99,22 @@
    :intent/memory-read :invoke
    :intent/memory-write :invoke})
 
+(def allowed-actions-by-kind
+  "Per-kind allowed action sets (P6 de-folding). :tool is no longer
+  collapsed to #{:invoke} — callers may request :read/:write/:invoke
+  and leases are checked against that exact action. :filesystem and
+  :filesystem/path expose the filesystem action vocabulary. :model and
+  :memory remain :invoke-only. The union is the global allowlist."
+  {:tool #{:invoke :read :write}
+   :model #{:invoke}
+   :memory #{:invoke}
+   :filesystem #{:read :list :stat :write :create :delete :invoke}
+   :filesystem/path #{:read :list :stat :write :create :delete}})
+
+(def ^:private global-allowed-actions
+  "Union of all per-kind allowed actions — used for unknown-action detection."
+  (apply set/union (vals allowed-actions-by-kind)))
+
 (defn intent-action
   "The action intent requests: :invoke for a v0 :intent/tool-call,
   :intent/model-call, :intent/memory-read, and :intent/memory-write;
@@ -106,6 +123,49 @@
   granted by a v0 lease (fail closed)."
   [intent]
   (get v0-actions (:intent/type intent)))
+
+(defn resolve-action
+  "Resolve the requested action for a normalized request + intent with
+  per-kind de-folding (P6). Honors the resource's :action (or top-level
+  :action) when present; otherwise falls back to the intent's v0 action.
+  For :model the action is always :invoke (the model is invoked
+  regardless of the resource operation). For :tool, a missing action
+  defaults to :invoke for backward compat but :read/:write are honored
+  when supplied. For :filesystem/:filesystem/path the resource action
+  is honored verbatim. Returns a keyword (or nil for unknown intent
+  types with no resource action)."
+  [normalized-request intent]
+  (let [resource (:resource normalized-request)
+        kind (:kind resource)
+        req-action (or (:action resource) (:action normalized-request))
+        fallback (get v0-actions (:intent/type intent))]
+    (cond
+      (= :model kind) :invoke
+      req-action req-action
+      fallback fallback
+      :else nil)))
+
+(defn resolve-target-action
+  "Per-kind action resolution for a registry target (P6). :request
+  honors the resource's classification (first-class ResourceAction of
+  the tuple, INV-07) and falls back to the intent action when the
+  resource carries none; :intent always uses the intent action. For
+  :tool the request action is :invoke/:read/:write-distinct; for
+  :filesystem/path the request action is the filesystem verb; for
+  :model the action is always :invoke."
+  [target normalized-request intent]
+  (let [resource (:resource normalized-request)
+        kind (:kind resource)]
+    (case (:action-from target)
+      :request (let [req-action (or (:action resource) (:action normalized-request))
+                     fallback (get v0-actions (:intent/type intent))]
+                 (cond
+                   (= :model kind) :invoke
+                   req-action req-action
+                   fallback fallback
+                   :else :invoke))
+      :intent (get v0-actions (:intent/type intent))
+      nil)))
 
 ;; --- input gate ------------------------------------------------------------
 

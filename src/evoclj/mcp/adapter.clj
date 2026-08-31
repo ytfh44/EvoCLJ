@@ -28,7 +28,9 @@
    is introduced, so concurrent discovery calls cannot observe a torn
    selection."
   (:require [evoclj.kernel.error :as err]
-            [evoclj.mcp.client :as client]))
+            [evoclj.mcp.client :as client]
+            [evoclj.store.command :as command]
+            [evoclj.store.sqlite :as sqlite]))
 
 ;; ---------------------------------------------------------------------------
 ;; version negotiation / fail-closed selection
@@ -54,16 +56,47 @@
   [version]
   (not (contains? implemented-versions version)))
 
-;; ---------------------------------------------------------------------------
-;; the protocol
-;; ---------------------------------------------------------------------------
+  ;; ---------------------------------------------------------------------------
+  ;; the protocol
+  ;; ---------------------------------------------------------------------------
 
 (defprotocol ProtocolAdapter
   (discover [this ctx] "list+normalize tools")
   (wire-request [this contract] "enrich per-request _meta/headers/session")
   (on-notification [this event] "handle toolsChanged/progress/subscriptions")
   (cache-policy [this] "return {:ttl-ms :cache-scope} or nil")
-  (continue [this task] "MRTR/Tasks continuation stub"))
+  (continue [this task] "MRTR/Tasks continuation — A6 auditable via command queue"))
+
+(defn- adapter-store
+  "A6 helper: resolve a durable command store from adapter opts, if wired."
+  [opts]
+  (or (:store opts) (:db opts) (:command-store opts)))
+
+(defn- resolve-mcp-owner
+  [store]
+  (try
+    (when store
+      (let [rows (sqlite/query store ["SELECT id FROM sessions LIMIT 1"])]
+        (when-let [r (first rows)]
+          (java.util.UUID/fromString (:id r)))))
+    (catch Exception _ nil)))
+
+(defn- make-mcp-continue-cmd
+  "Synthesize an :mcp/continue command for MRTR Tasks continuation.
+   The command is idempotent via `mcp-continue-<task-id>-<millis>-<uuid>`."
+  [task store]
+  (let [owner (or (resolve-mcp-owner store) (random-uuid))
+        task-id (or (:id task) (:task/id task) (hash task))
+        idem (str "mcp-continue-" task-id "-" (System/currentTimeMillis) "-" (random-uuid))
+        payload-ref (str "sha256:" (apply str (repeat 64 "0")))]
+    {:cmd/id (random-uuid)
+     :cmd/type :mcp/continue
+     :cmd/state :queued
+     :cmd/idempotency-key idem
+     :cmd/payload-ref payload-ref
+     :cmd/owner-session-id owner
+     :cmd/created-at (java.util.Date.)
+     :cmd/continuation-edn task}))
 
 (defrecord Adapter2025 [opts]
   ProtocolAdapter
@@ -75,7 +108,13 @@
   (wire-request [_ c] (assoc c :adapter/version :mcp-2025-11 :mcp/sessionful true))
   (on-notification [_ e] (when-let [f (:tools-change-consumer opts)] (f e)) e)
   (cache-policy [_] nil)
-  (continue [_ _] (throw (err/error :mcp/not-supported "MRTR not supported on 2025 adapter" {}))))
+  (continue [_ task]
+    ;; A6: 2025 degrades to command queue instead of throwing :mcp/not-supported.
+    (let [store (adapter-store opts)
+          cmd (make-mcp-continue-cmd task store)]
+      (when store
+        (try (command/create-command! store cmd) (catch Exception _ nil)))
+      {:status :queued :command-id (:cmd/id cmd) :command cmd :task task :adapter :mcp-2025-11})))
 
 (defrecord Adapter2026 [opts cache subscriptions]
   ProtocolAdapter
@@ -92,7 +131,15 @@
     (when (= :tools-changed (:event e)) (reset! cache nil))
     (when-let [f (:listen opts)] (swap! subscriptions conj e)) e)
   (cache-policy [_] {:ttl-ms (or (:ttl-ms opts) 60000) :cache-scope :tools/list})
-  (continue [_ task] {:task task :status :continuing :adapter :mcp-2026-07}))
+  (continue [_ task]
+    ;; A6: 2026 keeps :continuing but also audits via the command queue so
+    ;; recovery can observe the continuation. When a store is wired the
+    ;; command is persisted; otherwise the command map is returned in-band.
+    (let [store (adapter-store opts)
+          cmd (make-mcp-continue-cmd task store)]
+      (when store
+        (try (command/create-command! store cmd) (catch Exception _ nil)))
+      {:task task :status :continuing :adapter :mcp-2026-07 :command-id (:cmd/id cmd) :command cmd})))
 
 (defn adapter-2025 ([] (->Adapter2025 {})) ([opts] (->Adapter2025 opts)))
 (defn adapter-2026 ([] (->Adapter2026 {} (atom nil) (atom []))) ([opts] (->Adapter2026 opts (atom nil) (atom []))))

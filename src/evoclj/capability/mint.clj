@@ -11,7 +11,8 @@
   Callers (evolution_tools, mount/filesystem issue-fs-lease,
   cli/session tool-lease/model-lease) must delegate here; grep for
   :cap/id in src/ should only hit this file (plus tests)."
-  (:require [evoclj.capability.schema :as schema]
+  (:require [clojure.set :as set]
+            [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err])
   (:import (java.util Date UUID)))
 
@@ -52,13 +53,7 @@
                            :constraints constraints-val
                            :issued-at issued
                            :expires-at expires}
-                    ;; allow callers that supplied :cap/id via opts map key
-                    ;; already handled; ensure :cap/id wins even if opts had
-                    ;; :cap-id alias — already resolved above.
                     true identity)]
-    ;; Assert positive window with the mandated error type before sealing.
-    ;; schema/make-lease also asserts this, but we keep the check here so
-    ;; the error is :capability/schema-invalid even if schema were relaxed.
     (when-not (.before ^Date ^Date issued ^Date expires)
       (throw (err/error :capability/schema-invalid
                         "capability lease must span positive window: :expires-at after :issued-at"
@@ -67,6 +62,120 @@
       (when registry
         (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false}))
       lease)))
+
+(declare lease-revoked?)
+
+(defn derive-lease!
+  "Derive a narrowed child lease from a sealed parent lease (P4 attenuation).
+
+  Attenuation rule (Wolfram [W-08..W-11]): the child must be *narrower* than
+  the parent in every dimension — never wider:
+
+    - actions  — child ⊆ parent
+    - max-calls — child max-calls <= parent max-calls (nil means unlimited)
+    - issued   — child issued >= parent issued
+    - expires  — child expires <= parent expires
+    - resource — child resource == parent resource (P4 keeps resource fixed)
+
+  The child is sealed via schema/make-lease, carries
+  :cap/attenuated-from (and :attenuated-from) in its :constraints for audit,
+  and is recorded in `registry` when supplied.
+
+  registry — LeaseRegistry atom or nil
+  parent-lease — sealed CapabilityLease (schema/lease? true), not revoked
+  opts — map with optional keys:
+    :subject     override subject (for subagent delegation; must still be valid)
+    :resource    override resource (must equal parent resource)
+    :actions     set of actions (default: parent actions)
+    :constraints map (default: {} merged with parent constraints, see below)
+    :issued-at   #inst (default: now)
+    :expires-at  #inst (default: parent expires)
+    :cap-id / :cap/id  child cap id (default: fresh UUID)
+
+  Throws :capability/attenuation-invalid when any narrowing rule is violated,
+  and :capability/schema-invalid when the resulting lease is malformed."
+  [registry parent-lease {:keys [subject resource actions constraints issued-at expires-at cap-id] :as opts}]
+  (when-not (schema/lease? parent-lease)
+    (throw (err/error :capability/attenuation-invalid
+                      "derive-lease! requires a sealed CapabilityLease as parent"
+                      {:value (err/sanitize parent-lease)})))
+  (when (and registry (lease-revoked? registry (:cap/id parent-lease)))
+    (throw (err/error :capability/attenuation-invalid
+                      "cannot derive from a revoked parent lease"
+                      {:parent-cap-id (:cap/id parent-lease)})))
+  (let [parent-subject (:subject parent-lease)
+        parent-resource (:resource parent-lease)
+        parent-actions (:actions parent-lease)
+        parent-constraints (:constraints parent-lease)
+        parent-issued (:issued-at parent-lease)
+        parent-expires (:expires-at parent-lease)
+        parent-cap-id (:cap/id parent-lease)
+        child-subject (or subject (:subject opts) parent-subject)
+        child-resource (if (contains? (or opts {}) :resource) (:resource opts) parent-resource)
+        child-actions-raw (if (contains? (or opts {}) :actions) actions parent-actions)
+        child-actions-set (when child-actions-raw
+                            (if (set? child-actions-raw) child-actions-raw (set child-actions-raw)))
+        child-constraints-raw (or constraints (:constraints opts) parent-constraints)
+        child-issued (or issued-at (:issued-at opts) parent-issued)
+        child-expires (or expires-at (:expires-at opts) parent-expires)
+        cap-id-val (or (:cap/id opts) cap-id (UUID/randomUUID))]
+    (when-not (= child-resource parent-resource)
+      (throw (err/error :capability/attenuation-invalid
+                        "derived lease resource must equal parent resource"
+                        {:parent-resource (err/sanitize parent-resource)
+                         :child-resource (err/sanitize child-resource)})))
+    (when-not (set/subset? (or child-actions-set #{}) (or parent-actions #{}))
+      (throw (err/error :capability/attenuation-invalid
+                        "derived actions must be subset of parent actions"
+                        {:parent-actions (err/sanitize parent-actions)
+                         :child-actions (err/sanitize child-actions-set)})))
+    (let [parent-max (get parent-constraints :max-calls)
+          child-max (get child-constraints-raw :max-calls)]
+      (when (some? parent-max)
+        (when (nil? child-max)
+          (throw (err/error :capability/attenuation-invalid
+                            "derived lease must not widen max-calls: parent has finite max-calls but child is unlimited"
+                            {:parent-max-calls parent-max
+                             :child-max-calls child-max})))
+        (when (and (some? child-max) (> child-max parent-max))
+          (throw (err/error :capability/attenuation-invalid
+                            "derived max-calls must be <= parent max-calls"
+                            {:parent-max-calls parent-max
+                             :child-max-calls child-max}))))
+      (when (.before ^Date ^Date child-issued ^Date parent-issued)
+        (throw (err/error :capability/attenuation-invalid
+                          "derived issued-at must be >= parent issued-at"
+                          {:parent-issued-at parent-issued
+                           :child-issued-at child-issued})))
+      (when (.after ^Date ^Date child-expires ^Date parent-expires)
+        (throw (err/error :capability/attenuation-invalid
+                          "derived expires-at must be <= parent expires-at"
+                          {:parent-expires-at parent-expires
+                           :child-expires-at child-expires})))
+      (when-not (.before ^Date ^Date child-issued ^Date child-expires)
+        (throw (err/error :capability/schema-invalid
+                          "derived lease must span positive window: :expires-at after :issued-at"
+                          {:value (err/sanitize {:cap/id cap-id-val
+                                                 :subject child-subject
+                                                 :resource child-resource
+                                                 :actions child-actions-set
+                                                 :constraints child-constraints-raw
+                                                 :issued-at child-issued
+                                                 :expires-at child-expires})})))
+      (let [merged-constraints (assoc child-constraints-raw
+                                      :cap/attenuated-from parent-cap-id
+                                      :attenuated-from parent-cap-id)
+            lease-map {:cap/id cap-id-val
+                       :subject child-subject
+                       :resource child-resource
+                       :actions child-actions-set
+                       :constraints merged-constraints
+                       :issued-at child-issued
+                       :expires-at child-expires}
+            lease (schema/make-lease lease-map)]
+        (when registry
+          (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false}))
+        lease))))
 
 ;; ---------------------------------------------------------------------------
 ;; Generic LeaseRegistry helpers (P5) — unified shape for ANY kind

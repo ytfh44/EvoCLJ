@@ -77,6 +77,7 @@
             [evoclj.provider.model-registry :as model-registry]
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]
+            [evoclj.runtime.subagent :as subagent]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m]))
 ;; --- constants and context -------------------------------------------------
@@ -128,7 +129,7 @@
   Returns a closed map. Malformed input throws
   :broker/context-invalid."
   [{:keys [registry leases usage now max-attempts model-registry
-           requested-capabilities effects freshness]}]
+           requested-capabilities effects freshness db]}]
   (when-not (instance? clojure.lang.Atom registry)
     (throw (err/error :broker/context-invalid
                       "broker context requires a provider registry atom"
@@ -184,7 +185,8 @@
      :model-registry model-registry
      :requested-capabilities requested-capabilities
      :effects effects
-     :freshness freshness}))
+     :freshness freshness
+     :db db}))
 
 ;; --- freshness / binding helpers ------------------------------------------
 ;; Pipeline delegates to binding/capture-tool-binding via evoclj.intent.pipeline
@@ -360,7 +362,39 @@
       :intent/memory-write
       (dispatch-registered! broker-context intent :memory/kv false)
       :intent/model-call (dispatch-model-call! broker-context intent)
+      :intent/subagent-spawn
+      (let [db (:db broker-context)]
+        (if-not db
+          (result-error intent :intent/dispatch-invalid
+                        "subagent spawn requires :db in broker context"
+                        {:intent/type (:intent/type intent)}
+                        nil @(:usage broker-context))
+          (try
+            (let [parent-id (get-in intent [:payload :parent/session-id])
+                  child-spec (get-in intent [:payload :child/spec])
+                  res (subagent/spawn-subagent! db parent-id (or child-spec {}) (:leases broker-context))
+                  child-id (:child/session-id res)]
+              (attach-journal
+               (result-ok intent {:child/session-id child-id
+                                  :child/capabilities (:child/capabilities res)}
+                          nil @(:usage broker-context))
+               nil intent nil))
+            (catch clojure.lang.ExceptionInfo e
+              (let [edata (ex-data e)]
+                (attach-journal
+                 (result-error intent (or (:error/type edata) :intent/dispatch-failed)
+                               (.getMessage e)
+                               edata
+                               nil @(:usage broker-context))
+                 nil intent nil)))
+            (catch Exception e
+              (attach-journal
+               (result-error intent :intent/dispatch-failed
+                             (.getMessage e)
+                             {:cause (.getMessage e)}
+                             nil @(:usage broker-context))
+               nil intent nil)))))
       (result-error intent :intent/unsupported-dispatch
-                    "the v0 dispatcher executes :intent/tool-call, :intent/memory-read, :intent/memory-write, and :intent/model-call intents only"
+                    "the v0 dispatcher executes :intent/tool-call, :intent/memory-read, :intent/memory-write, :intent/model-call, and :intent/subagent-spawn intents only"
                     {:intent/type (:intent/type intent)}
                     nil @(:usage broker-context)))))
