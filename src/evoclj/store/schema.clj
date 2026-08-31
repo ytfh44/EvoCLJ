@@ -13,6 +13,7 @@
   Global Constraint 22: registry values are plain EDN Malli schemas round-tripping
   through pr-str / clojure.edn read-string."
   (:require [evoclj.kernel.error :as err]
+            [evoclj.store.capability-store :as cap-store]
             [evoclj.store.command :as command]
             [malli.core :as m]))
 
@@ -152,3 +153,23 @@
 (def command-state?
   "Re-export of evoclj.store.command/command-state?."
   command/command-state?)
+;; --- Capabilities store re-export (P7) ---------------------------------------
+;; Additive persistence layer for CapabilityLease (migration 013).
+;; Helpers are owned by evoclj.store.capability-store; re-exported here so the
+;; central schema file remains a single discovery point without duplicating.
+
+(def insert-capability!
+  "Re-export of evoclj.store.capability-store/insert-capability!."
+  cap-store/insert-capability!)
+
+(def fetch-capability
+  "Re-export of evoclj.store.capability-store/fetch-capability."
+  cap-store/fetch-capability)
+
+(def revoke-capability!
+  "Re-export of evoclj.store.capability-store/revoke-capability!."
+  cap-store/revoke-capability!)
+
+(def list-capabilities
+  "Re-export of evoclj.store.capability-store/list-capabilities."
+  cap-store/list-capabilities)
