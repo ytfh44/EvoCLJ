@@ -15,4 +15,7 @@
     (is (nil? (adapter/cache-policy (adapter/adapter-2025))))
     (adapter/on-notification a26 {:event :tools-changed})
     (is (= :continuing (:status (adapter/continue a26 {:id 1})))))
-  (is (thrown? Exception (adapter/continue (adapter/adapter-2025) {:id 1}))))
+  ;; A6: 2025 no longer throws :mcp/not-supported — it degrades to a queued
+  ;; command envelope so recovery can redeliver the continuation.
+  (is (= :queued (:status (adapter/continue (adapter/adapter-2025) {:id 1}))))
+  (is (uuid? (:command-id (adapter/continue (adapter/adapter-2025) {:id 2}))) "2025 continue carries a command-id for audit"))
