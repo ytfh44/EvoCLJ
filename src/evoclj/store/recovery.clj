@@ -43,26 +43,23 @@
     them — promotion is exclusively the component compare-and-set path and
     this scan performs no writes at all (Step 3).
 
-  `startup-integrity-scan` (Step 4) wraps the recovery scan with a
-  configurable strict mode. The PRODUCTION DEFAULT is strict
-  (fail-closed): when the scan finds corruption — an unresolved payload
-  reference, an invalid event chain, or a CURRENT generation whose
-  Genome artifact is absent or fails content verification (Database
-  Invariant 7) — strict mode throws :store/integrity-failure carrying
-  the full report, so the runtime refuses to start. Orphaned sessions
-  and stale candidates are NOT corruption: they are the expected residue
-  of a crash and never block startup. A missing/ambiguous CURRENT row
-  when generations exist violates Database Invariant 6 and is a hard
-  finding too; an empty store (:none) has nothing to protect.
+  Command recovery (DAG A5) follows the same discipline — report, not
+  fabricate completion. `find-orphaned-commands` classifies commands left
+  in :queued (submitted, never dispatched) or :running (dispatched,
+  never settled) as crash residue. `recover-commands!` acts on it:
+  :queued orphans stay :queued for redelivery (the idempotency_key
+  UNIQUE constraint de-duplicates a resubmit), and :running orphans are
+  marked :failed with {:error/type :recovery/orphaned}. Recovery NEVER
+  fabricates :succeeded.
 
   Known boundary: the current-generation check verifies that the
   generation's genome_id resolves to an intact CAS artifact (existence
   plus a re-hashing read). Tree-level Genome loading and manifest
-  verification belong to the Genome loader (Milestone 6+); at this
   milestone the store enforces the durable half of Invariant 7."
   (:require [clojure.java.jdbc :as jdbc]
             [evoclj.kernel.error :as err]
             [evoclj.store.cas :as cas]
+            [evoclj.store.command :as cmd]
             [evoclj.store.event :as event]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite])
@@ -273,3 +270,54 @@
                         "startup integrity scan found corruption; refusing to start"
                         report))
       (assoc report :ok? ok?))))
+
+;; ---------------------------------------------------------------------------
+;; Command recovery (DAG A5) — orphaned queued/running commands
+;; ---------------------------------------------------------------------------
+
+(def orphan-command-error
+  "The recovery marker for a command left :running when the process
+  died: crash residue, not a real execution failure. Persisted via
+  fail-command! (state -> :failed) and carried in the recovery report."
+  {:error/type :recovery/orphaned})
+
+(defn find-orphaned-commands
+  "Commands left in a non-terminal in-flight state when the process
+  died: :queued (submitted but never dispatched) or :running (dispatched
+  but never settled). Returns a vector of :cmd/* maps ordered by
+  created-at. This is the read-side classification; it never writes.
+  Succeeded/failed/timed-out/cancelled commands are terminal and are
+  never reported as orphans."
+  [db]
+  (into []
+        (mapcat (fn [state] (cmd/fetch-commands-by-state db state)))
+        [:queued :running]))
+
+(defn recover-commands!
+  "Recovery action for orphaned commands (report, not fabricate
+  completion). For each :queued orphan leaves the row :queued (no
+  change) so redelivery is possible — the idempotency_key UNIQUE
+  constraint de-duplicates a resubmit of the same command. For each
+  :running orphan marks the row :failed with {:error/type
+  :recovery/orphaned} via fail-command!, surfacing the crash residue
+  instead of pretending it completed. Recovery NEVER fabricates
+  :succeeded.
+
+  Returns a report:
+    {:orphaned-commands [...]   all :cmd/* maps found
+     :recovered-queued  [...]   ids left :queued for redelivery
+     :recovered-running [...]   {:cmd/id .. :recovery/error ..}
+                                (row now :failed)}"
+  [db]
+  (let [orphans (find-orphaned-commands db)]
+    (reduce (fn [report cmd]
+              (if (= :running (:cmd/state cmd))
+                ;; running orphan -> marked failed (crash residue reported)
+                (let [_ (cmd/fail-command! db (:cmd/id cmd) orphan-command-error)]
+                  (update report :recovered-running
+                          conj {:cmd/id (:cmd/id cmd)
+                                :recovery/error orphan-command-error}))
+                ;; queued orphan -> stays queued for redelivery (no change)
+                (update report :recovered-queued conj (:cmd/id cmd))))
+            {:orphaned-commands orphans :recovered-queued [] :recovered-running []}
+            orphans)))
