@@ -45,6 +45,7 @@
   each requested call through the broker (the adapter itself holds no
   broker — Global Constraint 8)."
   (:require [clojure.edn :as edn]
+            [evoclj.capability.mint :as cap-mint]
             [evoclj.evolution.history :as history]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
@@ -325,7 +326,6 @@
   requested call through the capability broker (the mutator adapter
   itself holds no broker — Global Constraint 8)."
   [evidence-tool-catalog-entry history-tool-catalog-entry])
-
 ;; --- the subject-bound lease --------------------------------------------------
 
 (defn evolution-tool-lease
@@ -336,27 +336,34 @@
   sibling phenotype from the same Genome is a different subject and
   never matches (Global Constraint 9).
 
-  Optional opts: :cap/id (default a fresh uuid), :issued-at (default
+  Optional opts: :cap-id (default a fresh uuid), :issued-at (default
   now), :expires-at (default one hour after :issued-at — a bounded
-  grant), :constraints (default {} — no call limit)."
+  grant), :constraints (default {} — no call limit), :registry
+  (optional LeaseRegistry atom to record the lease for revocation).
+  Delegates to evoclj.capability.mint/mint-lease! (P2 single issuance
+  surface)."
   [phenotype-id tool-id & [opts]]
-  (let [issued (or (:issued-at opts) (Date.))
+  (let [registry (:registry opts)
+        cap-id-val (or (get opts (keyword "cap/id")) (:cap-id opts) (UUID/randomUUID))
+        issued (or (:issued-at opts) (Date.))
         expires (or (:expires-at opts)
-                    (Date/from (.plus (Instant/ofEpochMilli (.getTime issued))
+                    (Date/from (.plus (Instant/ofEpochMilli (.getTime ^Date issued))
                                       (Duration/ofHours 1))))]
-    {:cap/id (or (:cap/id opts) (UUID/randomUUID))
-     :subject {:phenotype/id phenotype-id}
-     :resource {:kind :tool :id tool-id}
-     :actions #{:invoke}
-     :constraints (or (:constraints opts) {})
-     :issued-at issued
-     :expires-at expires}))
+    (cap-mint/mint-lease! registry
+                          {:cap-id cap-id-val
+                           :subject {:phenotype/id phenotype-id}
+                           :resource {:kind :tool :id tool-id}
+                           :actions #{:invoke}
+                           :constraints (or (:constraints opts) {})
+                           :issued-at issued
+                           :expires-at expires})))
+
 
 (defn mutator-tool-leases
   "The v0 grant set a host mints for the LLM mutator's subject: both
   evolution retrieval leases for ONE phenotype id, so the mutator can
   retrieve evidence and history through the broker. Optional opts are
-  forwarded to evolution-tool-lease."
+  forwarded to evolution-tool-lease (including :registry)."
   [phenotype-id & [opts]]
   (mapv #(evolution-tool-lease phenotype-id % opts)
         [evidence-tool-id history-tool-id]))
