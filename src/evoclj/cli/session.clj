@@ -680,7 +680,7 @@
                             :actions #{:invoke}
                             :constraints {:max-calls 10000}
                             :issued-at now
-                            :expires-at (Date. (+ (.getTime now) 60000))})))
+                            :expires-at (Date. (+ (.getTime now) 60000))}))))
 
 (defn- program-sources
   "Decode every compiled program's source text from the immutable
