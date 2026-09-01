@@ -35,7 +35,15 @@
   Fleet S2: state vocabulary and transitions are defined in
   evoclj.store.session-states (single canonical source).
   Fleet P5/F: genome/phenotype/resolution existence is enforced via
-  VerifiedDigest and FK at rest (011)."
+  VerifiedDigest and FK at rest (011).
+
+  W1 (Work unified lifecycle): Session is now immutable context (pin:
+  Genome/Resolution/CodeImage/Deployment/Generation). The durable
+  lifecycle is Work (queued/running/waiting/succeeded/failed/cancelled/timed-out)
+  in evoclj.store.work / evoclj.runtime.work. This namespace's
+  transition-session! remains for backward compat (component tests still
+  drive Session), but new code should drive Work; scheduler mirrors
+  Session transitions to Work for the 48->7 collapse."
 ;; E1: Event prev vs causal-links — session creation uses :prev/event-id nil + :causal-links #{}, no :cause.
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]

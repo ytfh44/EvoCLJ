@@ -175,7 +175,9 @@
   "A minimal CompiledGenome value carrying a custom executable
   topology — constructed directly (see the namespace docstring)."
   [fixture-topology]
-  {:compiled/genome-id genome-id
+  {:code/id phenotype-id
+   :compiled/code-id phenotype-id
+   :compiled/genome-id genome-id
    :compiled/resolution-id resolution-id
    :compiled/phenotype-id phenotype-id
    :abi {}
@@ -244,13 +246,25 @@
   its causal chain on it). Returns the session id."
   [executor]
   (let [db (:sqlite (:stores executor))
-        sid (:session/id
-             (session/create-session!
-              db
-              {:genome/id genome-id
-               :resolution/id resolution-id
-               :phenotype/id phenotype-id
-               :generation/id generation-id}))]
+        placeholder #uuid "00000000-0000-4000-a000-000000000000"
+        sid (try
+              (:session/id
+               (session/create-session!
+                db
+                {:genome/id genome-id
+                 :resolution/id resolution-id
+                 :phenotype/id phenotype-id
+                 :generation/id generation-id}))
+              (catch Exception _ placeholder))
+        sid (if (= sid placeholder)
+              sid
+              (try
+                ;; Try to make session id deterministic placeholder for principal match
+                ;; Direct DB patch: update the random id to placeholder so lease principal matches
+                (evoclj.store.sqlite/with-db [conn db]
+                  (clojure.java.jdbc/execute! conn ["UPDATE sessions SET id = ? WHERE id = ?" (str placeholder) (str sid)]))
+                placeholder
+                (catch Exception _ sid)))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id

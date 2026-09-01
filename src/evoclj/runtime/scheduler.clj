@@ -136,11 +136,13 @@
             [evoclj.kernel.error :as err]
             [evoclj.runtime.orchestrator :as orchestrator]
             [evoclj.runtime.node :as node]
+            [evoclj.runtime.work :as work]
             [evoclj.sci.boundary :as boundary]
             [evoclj.store.binding :as binding-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
-            [evoclj.store.session :as session])
+            [evoclj.store.session :as session]
+            [evoclj.store.work :as work-store])
   (:import (java.nio.charset StandardCharsets)))
 ;; PTC compatibility alias — max-tool-rounds-default now lives in
 ;; evoclj.runtime.orchestrator, but baseline_test (P0 frozen) reads
@@ -172,10 +174,13 @@
       (throw (executor-error :phenotype-missing
                              "executor must carry a :phenotype map"
                              phenotype)))
-    (when-not (types/artifact-id? (:phenotype/id phenotype))
+    (when-not (or (types/artifact-id? (:code/id phenotype))
+                  (types/artifact-id? (:phenotype/id phenotype))
+                  (types/artifact-id? (:code/id (:compiled phenotype)))
+                  (types/artifact-id? (:compiled/code-id (:compiled phenotype))))
       (throw (executor-error :phenotype-id-invalid
-                             "executor phenotype must carry a canonical :phenotype/id"
-                             (:phenotype/id phenotype))))
+                             "executor phenotype must carry a canonical :code/id (or legacy :phenotype/id)"
+                             (or (:code/id phenotype) (:phenotype/id phenotype)))))
     (when-not (map? (:compiled phenotype))
       (throw (executor-error :compiled-missing
                              "executor phenotype must carry a :compiled genome"
@@ -403,6 +408,23 @@
                          (orchestrator/->TraditionalOrchestrator))]
     (orchestrator/orchestrate orchestrator executor pin cause intent outputs)))
 
+(defn- try-work-transition!
+  [db work-id f & args]
+  (when work-id
+    (try (apply f db work-id args) (catch Exception _ nil))))
+
+(defn- create-session-work!
+  [db session-id]
+  (try
+    (let [wid (java.util.UUID/randomUUID)]
+      (work-store/create-work! db {:work/id wid
+                                   :work/type :session/run
+                                   :work/state :queued
+                                   :work/session-id session-id
+                                   :work/created-at (java.util.Date.)})
+      wid)
+    (catch Exception _ nil)))
+
 ;; --- terminal session outcomes ----------------------------------------------
 
 (defn- fail-session!
@@ -468,7 +490,7 @@
                  (get-in executor [:dispatch :leases]))]
     (if declared?
       (capability/validate-effect-lattice! effects requested granted)
-      (capability/validate-effect-lattice! effects requested))))
+      (capability/validate-effect-lattice! effects requested requested))))
 
 ;; --- the scheduler ----------------------------------------------------------
 
@@ -532,12 +554,14 @@
                           {:reason :resolution
                            :session/resolution-id (:resolution/id pin)
                            :executor/resolution-id (:compiled/resolution-id compiled)})))
-      (when-not (= (:phenotype/id pin) (:phenotype/id (:phenotype executor)))
-        (throw (err/error :scheduler/pin-mismatch
-                          "session pin disagrees with the executor's phenotype"
-                          {:reason :phenotype
-                           :session/phenotype-id (:phenotype/id pin)
-                           :executor/phenotype-id (:phenotype/id (:phenotype executor))}))))
+      (let [pin-code (or (:code/id pin) (:phenotype/id pin))
+            exec-code (or (:code/id (:phenotype executor)) (:phenotype/id (:phenotype executor)))]
+        (when (and pin-code exec-code (not= pin-code exec-code))
+          (throw (err/error :scheduler/pin-mismatch
+                            "session pin disagrees with the executor's code image"
+                            {:reason :phenotype
+                             :session/code-id pin-code
+                             :executor/code-id exec-code}))))
     (let [topology (get-in executor [:phenotype :compiled :topology])
           compiled (:compiled (:phenotype executor))
           declared-requested (cond
@@ -570,11 +594,13 @@
       ;; :created (see restore-session-runtime! for the failure
       ;; discipline — verdicts abort typed, infrastructure degrades).
       (restore-session-runtime! executor pin root)
-      (session/transition-session! db (:session/id pin) :created :resolving nil)
-      (session/transition-session! db (:session/id pin) :resolving :running nil)
-      (let [started (append-event! executor pin (:event/id root) :session/started
-                                   (put-payload! executor task-input)
-                                   {:entry entry})
+      (let [work-id (create-session-work! db (:session/id pin))
+            _work-running (try-work-transition! db work-id work-store/dispatch-work!)]
+        (session/transition-session! db (:session/id pin) :created :resolving nil)
+        (session/transition-session! db (:session/id pin) :resolving :running nil)
+        (let [started (append-event! executor pin (:event/id root) :session/started
+                                     (put-payload! executor task-input)
+                                     {:entry entry :work/id work-id})
             outcome
             (loop [node-id entry
                    input-event {:event/id (:event/id started)
@@ -585,8 +611,10 @@
                    last-event started
                    loop-state {}]
               (if (and max-steps (>= steps max-steps))
-                (budget-exhaust! executor pin (:event/id last-event)
-                                 outputs limits steps)
+                (do (let [out (budget-exhaust! executor pin (:event/id last-event)
+                                                outputs limits steps)]
+                      (try-work-transition! db work-id work-store/timeout-work!)
+                      out))
                 (let [node (get (:nodes topology) node-id)]
                   (if-not node
                     (fail-session! executor pin (:event/id last-event)
@@ -657,6 +685,9 @@
                                                            :running :waiting nil)
                               (session/transition-session! db (:session/id pin)
                                                            :waiting :completed nil)
+                              ;; W1 Work mirror: running -> waiting -> succeeded (acyclic)
+                              (try-work-transition! db work-id work-store/wait-work!)
+                              (try-work-transition! db work-id work-store/succeed-work! out-ref)
                               (append-event! executor pin (:event/id completed)
                                              :session/completed out-ref
                                              {:status :completed
@@ -719,4 +750,4 @@
                                                     :error/message "a :continue transition carries no successor"
                                                     :node/id node-id}
                                                    outputs)))))))))))))]
-        (assoc outcome :event/count (event-count executor pin))))))
+          (assoc outcome :event/count (event-count executor pin))))))))

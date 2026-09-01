@@ -88,6 +88,7 @@
             [evoclj.kernel.error :as err]
             [evoclj.store.command :as command]
             [evoclj.store.sqlite :as sqlite]
+            [evoclj.store.work :as work-store]
             [evoclj.support.failpoint :as fault]))
 
 (declare refresh! refresh-async!)
@@ -134,10 +135,13 @@
          ;; opts carries :store / :db / :command-store the registry retains it
          ;; so refresh-async! can create auditable commands instead of a naked
          ;; future. Absence preserves the pre-A6 in-memory behavior (INV-06).
-         store (or (:store opts) (:db opts) (:command-store opts) (:event-store opts))
+         store (or (:store opts) (:db opts) (:command-store opts) (:event-store opts) (:work-store opts))
          with-store (if store (assoc base :store store) base)
-         with-queue (assoc with-store :command-queue [] :last-command nil :last-refresh-future nil)]
-     (atom with-queue))))
+         ;; W1: Work unified lifecycle replaces command+future dual track.
+         ;; No :command-queue/:last-command/:last-refresh-future.
+         ;; Works are durable in the `works` table; registry keeps :work-queue for in-memory audit.
+         with-work (assoc with-store :work-queue [] :last-work nil)]
+     (atom with-work))))
 
 (defn registry-bounds
   "E5 reader: the registry's current retention/GC bounds map."
@@ -822,59 +826,48 @@
       (catch Exception _ nil)))
 
 (defn refresh-async!
-  "A6 — auditable async refresh via the durable command outbox.
+  "W1 — auditable refresh via the durable Work lifecycle (queued/running/succeeded/failed).
 
-   Pre-A6 this was a naked `(future (refresh! ...))` with no audit trail
-   and no recovery. A6 wraps the work in a command lifecycle so it is
-   observable and replays via recovery:
+   Replaces A6's future+command dual track. Work is the single durable
+   lifecycle; no :last-refresh-future is stored and no raw future is leaked.
 
-     1. synthesize an idempotent :environment/refresh command (id, type,
-        idempotency-key, sha256 payload-ref, owner, created-at);
-     2. if the registry was created with a durable :store, persist the
-        command via `store.command/create-command!` and drive the
-        queued->running->succeeded/failed state machine inside the future;
-     3. regardless of store presence, retain the command map in the registry
-        atom (:command-queue / :last-command) so tests can assert auditability
-        without a DB, and return the command map itself (not the raw future).
-   The raw future is still created to do the work, but it is stored under
-   :last-refresh-future and NOT leaked as the return value — the command map
-   is the observable result (A6 non-goal: capability/store/evolution layers
-   remain untouched; this is purely the environment registry seam)."
+     1. synthesize a :environment/refresh work (id, type, state :queued,
+        session owner, created-at);
+     2. if the registry carries a durable :store, persist the work via
+        `store.work/create-work!` and drive queued->running->succeeded/failed
+        synchronously (no future — Work is the durable handle);
+     3. retain the work map in the registry atom (:work-queue / :last-work)
+        for in-memory auditability and return the work map.
+   The returned map is the Work contract (not a future)."
   ([registry] (refresh-async! registry nil))
   ([registry source-id]
-   (let [store (or (:store @registry) (:db @registry) (:command-store @registry))
+   (let [store (or (:store @registry) (:db @registry) (:command-store @registry) (:work-store @registry))
          owner (or (resolve-refresh-owner store) (random-uuid))
-         idem (str "refresh-" (or (str source-id) "all") "-" (System/currentTimeMillis) "-" (random-uuid))
-         payload-ref (str "sha256:" (apply str (repeat 64 "0")))
-         cmd-id (random-uuid)
-         base-cmd {:cmd/id cmd-id
-                   :cmd/type :environment/refresh
-                   :cmd/state :queued
-                   :cmd/idempotency-key idem
-                   :cmd/payload-ref payload-ref
-                   :cmd/owner-session-id owner
-                   :cmd/created-at (java.util.Date.)}
-         cmd (try
-               (when store
-                 (command/create-command! store base-cmd))
-               base-cmd
-               (catch Exception _
-                 ;; FK or duplicate or no session table — keep in-memory command
-                 base-cmd))]
-     ;; in-memory audit trail so no-DB tests can still assert command creation
-     (swap! registry update :command-queue (fnil conj []) cmd)
-     (swap! registry assoc :last-command cmd)
-     (let [fut (future
-                 (when store
-                   (try (command/dispatch-command! store cmd-id) (catch Exception _ nil)))
-                 (try
-                   (let [res (refresh! registry source-id)]
-                     (when store
-                       (try (command/succeed-command! store cmd-id nil) (catch Exception _ nil)))
-                     res)
-                   (catch Exception e
-                     (when store
-                       (try (command/fail-command! store cmd-id (or (ex-message e) (str e))) (catch Exception _ nil)))
-                     (throw e))))]
-       (swap! registry assoc :last-refresh-future fut)
-       cmd))))
+         work-id (random-uuid)
+         base-work {:work/id work-id
+                    :work/type :environment/refresh
+                    :work/state :queued
+                    :work/session-id owner
+                    :work/created-at (java.util.Date.)}
+         work (try
+                (when store
+                  (work-store/create-work! store base-work))
+                base-work
+                (catch Exception _
+                  base-work))
+         ;; in-memory audit trail (W1: Work only, no command dual track)
+         _ (swap! registry update :work-queue (fnil conj []) work)
+         _ (swap! registry assoc :last-work work)]
+     ;; drive Work lifecycle synchronously (no future)
+     (when store
+       (try (work-store/dispatch-work! store work-id) (catch Exception _ nil)))
+     (try
+       (let [res (refresh! registry source-id)]
+         (when store
+           (try (work-store/succeed-work! store work-id nil) (catch Exception _ nil)))
+         res)
+       (catch Exception e
+         (when store
+           (try (work-store/fail-work! store work-id (or (ex-message e) (str e))) (catch Exception _ nil)))
+         nil))
+     work)))

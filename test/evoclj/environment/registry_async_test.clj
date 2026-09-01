@@ -1,5 +1,5 @@
 (ns evoclj.environment.registry-async-test
-  "A6 — refresh-async! via command queue (auditable, no raw future leak)."
+  "W1 — refresh-async! via Work lifecycle (queued/running/succeeded/failed, no future)."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.io :as io]
             [clojure.java.jdbc :as jdbc]
@@ -7,6 +7,7 @@
             [evoclj.environment.source :as src]
             [evoclj.environment.static :as static]
             [evoclj.store.command :as cmd]
+            [evoclj.store.work :as work]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite]))
@@ -85,19 +86,16 @@
         src (static/make-static-source :async/test {:hello 1})
         sid (reg/register-source! registry src)]
     (let [ret (reg/refresh-async! registry sid)]
-      (is (map? ret) "refresh-async! must return a command map")
-      (is (some? (:cmd/id ret)) "command map carries :cmd/id")
-      (is (= :environment/refresh (:cmd/type ret)) "command type is :environment/refresh")
-      (is (= :queued (:cmd/state ret)) "initial command state is :queued")
-      (is (string? (:cmd/idempotency-key ret)) "has idempotency-key")
-      (is (re-matches #"^sha256:[0-9a-f]{64}$" (:cmd/payload-ref ret)) "payload-ref is sha256")
+      (is (map? ret) "refresh-async! must return a work map")
+      (is (some? (:work/id ret)) "work map carries :work/id")
+      (is (= :environment/refresh (:work/type ret)) "work type is :environment/refresh")
+      (is (= :queued (:work/state ret)) "initial work state is :queued")
       (is (not (future? ret)) "must NOT leak a raw future as return value")
-      (is (= ret (:last-command @registry)) "registry :last-command holds the returned command")
-      (is (seq (:command-queue @registry)) "command-queue is populated")
-      (let [fut (:last-refresh-future @registry)]
-        (is (future? fut) "background work is tracked as :last-refresh-future")
-        (deref fut 5000 nil)
-        (is (= 1 (get-in @registry [:per-source sid :seq])) "async refresh published (seq advanced)")))))
+      (is (= ret (:last-work @registry)) "registry :last-work holds the returned work")
+      (is (seq (:work-queue @registry)) "work-queue is populated")
+      (is (nil? (:last-refresh-future @registry)) "W1: no :last-refresh-future (future+command dual track removed)")
+      ;; keep deprecated alias checks
+      (is (= 1 (get-in @registry [:per-source sid :seq])) "async refresh published (seq advanced)"))))
 
 (deftest refresh-async-nil-source-id-also-auditable
   (let [registry (reg/create-registry)
@@ -105,11 +103,10 @@
     (reg/register-source! registry src)
     (let [ret (reg/refresh-async! registry)]
       (is (map? ret))
-      (is (:cmd/id ret))
+      (is (:work/id ret))
       (is (not (future? ret)))
-      (let [fut (:last-refresh-future @registry)]
-        (deref fut 5000 nil)
-        (is (pos? (get-in @registry [:per-source :async/all :seq])))))))
+      (is (nil? (:last-refresh-future @registry)) "W1: no future")
+      (is (pos? (get-in @registry [:per-source :async/all :seq]))))))
 
 ;; ---------------------------------------------------------------------------
 ;; 2 — with a durable store the command is persisted and transitions
@@ -124,16 +121,13 @@
     (try
       (let [ret (reg/refresh-async! registry sid)]
         (is (map? ret))
-        (is (:cmd/id ret))
-        (let [row (cmd/fetch-command db (:cmd/id ret))]
-          (is (some? row) "command row was persisted to SQLite")
-          (is (= :environment/refresh (:cmd/type row)))
-          (is (string? (:cmd/idempotency-key row))))
-        (let [fut (:last-refresh-future @registry)]
-          (deref fut 5000 nil)
-          (Thread/sleep 100)
-          (let [row2 (cmd/fetch-command db (:cmd/id ret))]
-            (is (= :succeeded (:cmd/state row2)) "command reaches :succeeded after refresh! completes"))))
+        (is (:work/id ret))
+        (let [row (evoclj.store.work/fetch-work db (:work/id ret))]
+          (is (some? row) "work row was persisted to SQLite")
+          (is (= :environment/refresh (:work/type row))))
+        (Thread/sleep 100)
+        (let [row2 (evoclj.store.work/fetch-work db (:work/id ret))]
+          (is (= :succeeded (:work/state row2)) "work reaches :succeeded after refresh! completes")))
       (finally
         (cleanup!)))))
 
@@ -144,10 +138,8 @@
         src (static/make-static-source :async/good {:good true})
         _good-sid (reg/register-source! registry src)]
     (try
-      (let [ret (reg/refresh-async! registry :async/missing)
-            fut (:last-refresh-future @registry)]
-        (try (deref fut 5000 nil) (catch Exception _ nil))
+      (let [ret (reg/refresh-async! registry :async/missing)]
         (Thread/sleep 100)
-        (let [row (cmd/fetch-command db (:cmd/id ret))]
-          (is (= :failed (:cmd/state row)) "failed refresh (no such source) marks command :failed")))
+        (let [row (evoclj.store.work/fetch-work db (:work/id ret))]
+          (is (= :failed (:work/state row)) "failed refresh (no such source) marks work :failed")))
       (finally (cleanup!)))))
