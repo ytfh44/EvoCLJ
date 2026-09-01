@@ -175,7 +175,7 @@
         :else nil)))
   (serialize [_ r] (pr-str {:kind :filesystem :path (canonicalize-path (:path r))}))
   (deserialize [_ s] (try (edn/read-string s) (catch Exception _ nil)))
-  (allowed-actions [_] #{:read :list :stat :write :create :delete})
+  (allowed-actions [_] #{:invoke :read :list :stat :write :create :delete})
   (authorization-targets [_] [{:source :request :action-from :request}]))
 
 (defrecord FilesystemPathDescriptor []
@@ -211,7 +211,7 @@
                                                      (canonicalize-path (:path r)))}
               (contains? r :mount/id) (assoc :mount/id (:mount/id r)))))
   (deserialize [_ s] (try (edn/read-string s) (catch Exception _ nil)))
-  (allowed-actions [_] #{:read :list :stat :write :create :delete})
+  (allowed-actions [_] #{:invoke :read :list :stat :write :create :delete})
   (authorization-targets [_] [{:source :tool :action-from :intent}
                                {:source :request :action-from :request}]))
 

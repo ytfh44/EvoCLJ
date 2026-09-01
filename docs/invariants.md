@@ -6,19 +6,21 @@ has two parts:
 
 1. **Inherited constraints (GC-01 – GC-24)** — the Global Constraints of
    the implementation plan, restated as one-line reminders.
-2. **Repair invariants (INV-01 – INV-09)** — additional invariants added
-   by the repair plan, each grounded in a concrete observed incident,
-   with its violation consequence and the machine-checkable guard that
-   enforces it.
+2. **Repair invariants (INV-01 – INV-13)** — additional invariants added
+   by the repair plan and the V1 refinement (Principal/Grant/Work/Hydration/Event),
+   each grounded in a concrete observed incident, with its violation
+   consequence and the machine-checkable guard that enforces it.
 
 **Normative source:** part 1 is a *pointer*, not a replacement — the
 authoritative wording of GC-01 – GC-24 is
 `docs/implementation-plan.md` (the "Global Constraints" section,
 lines 9–34). Where this file and the implementation plan disagree, the
 implementation plan wins. Part 2 derives from
-`docs/codebase/REPAIR-PLAN.md` (section "新增不变量", items 1–9) and the
-confirmed findings recorded in `docs/codebase/BASELINE-TRIAGE.md` and the
-repair ledger's progress log.
+`docs/codebase/REPAIR-PLAN.md` (section "新增不变量", items 1–9) plus the
+V1 refinement (`local://evoclj-reconstruction-dag-2.md` V1 — Principal I2,
+Grant C2, Work W1/W2, Hydration H1, Event prev/causal-links E1, Authority P1)
+and the confirmed findings recorded in `docs/codebase/BASELINE-TRIAGE.md`
+and the repair ledger's progress log.
 
 All `file:line` references below were valid at the time of writing; they
 are evidence anchors, not stability promises — when a cited location
@@ -36,8 +38,8 @@ declarative form.
 | # | One-line summary |
 | --- | --- |
 | GC-01 | A Genome is immutable and content-addressed. |
-| GC-02 | Every session stays pinned to exactly one Genome ID and one Resolution ID for its whole lifetime. |
-| GC-03 | A live Phenotype must not modify its own Genome in place. |
+| GC-02 | Every session stays pinned to exactly one CodeImage/Deployment/Execution pin for its lifetime (I1 refines Genome+Resolution into CodeImage/Deployment). |
+| GC-03 | A live Execution must not modify its own CodeImage in place. |
 | GC-04 | Evolution produces successor candidates only through structured, deterministic mutations. |
 | GC-05 | Every mutation identifies parent Genome, evidence, hypothesis, risk class, operations, and expected effect. |
 | GC-06 | Mutation application is deterministic: same parent bytes + same mutation value ⇒ same candidate hash. |
@@ -54,7 +56,7 @@ declarative form.
 | GC-17 | Every promoted generation retains complete lineage: parent, mutation, evidence, evaluation, decision, deployment state. |
 | GC-18 | Rollback restores future generation selection only; it never claims to reverse already-committed external effects. |
 | GC-19 | Kernel source, authority root, audit root, evaluator-isolation root, and promotion root are not agent-mutable. |
-| GC-20 | Every externally visible effect is attributable to session-id, phenotype-id, node-id, intent-id, authorization decision, and outcome. |
+| GC-20 | Every externally visible effect is attributable to session-id, execution-id, node-id, intent-id, authorization decision, and outcome (Principal replaces phenotype pin for attribution scope after I1/I2). |
 | GC-21 | Large immutable payloads are stored by content hash; SQLite rows hold references, not duplicated bodies. |
 | GC-22 | Public module boundaries exchange validated Clojure data only — no raw Java objects, lazy seqs, futures, or open resources across Genome/SCI/Intent/Event boundaries. |
 | GC-23 | Candidate evaluation workspaces, SCI contexts, session namespaces, and mutable temp state stay isolated from the current production generation. |
@@ -62,7 +64,7 @@ declarative form.
 
 ---
 
-## Part 2 — Repair Invariants (INV-01 – INV-09)
+## Part 2 — Repair Invariants (INV-01 – INV-13)
 
 Each entry states: the invariant, the **Motivation** (real incident with
 `file:line` evidence), an example **Violation consequence**, and the
@@ -251,47 +253,31 @@ Source→Revision→Projector→Bundle transaction.
   Reviewers reject any `snapshot!` whose return depends on mutable state
   beyond the captured source.
 
-### INV-07 — Authorization tuple: Subject × Tool × Resource × ResourceAction
+### INV-07 — Authorization tuple: Principal × Tool × Resource × ResourceAction (refines Subject)
 
-Every authorization decision is made over the full four-part tuple. An
+Every authorization decision is made over the full four-part tuple with a **Principal single field** (I2). An
 action dimension that is collapsed, defaulted, or implied — rather than
 explicitly granted — violates GC-09/GC-14 discipline at the granularity
-level.
-
+level. The tuple is now `Principal` (tagged union `{:principal/type :session|:job|:eval|:operator :session/id/:job/id/:eval/id}`) × Tool/Resource × ResourceAction, not the heritage `Subject` with two keys.
 - **Motivation.** The current policy layer maps *every* v0 intent type to
   the single hard-coded action `:invoke`
   (`src/evoclj/capability/policy.clj:18-24`), so resource-level actions
   (read vs write vs delete on the same resource) cannot be distinguished
   by grants; the lease carries `:actions` (`src/evoclj/capability/lease.clj:165`)
   but nothing below the tool level ever varies it. WO-M14 records the
-  corresponding broker gap (dual authorization to generalize into a
-  resource-kind registry).
-- **Violation consequence.** Granting a subject permission to invoke a
+  corresponding broker gap, and V1 I2 refines the subject half: heritage
+  `Subject {session/id, phenotype/id}` is retired — phenotype identity is now in `CodeImage/Deployment` (I1) and session pin, the lease principal is a single field tagged union tested in `capability/lease_test.clj` (I2 Principal algebra: exact equality, no wildcard, no second anchor).
+- **Violation consequence.** Granting a principal permission to invoke a
   tool implicitly authorizes every effect class that tool can produce
   (e.g. a memory tool's read and destructive write), making least-
   privilege grants unexpressible and audit reasoning coarser than the
-  event log suggests (undermines GC-20 attribution quality).
-- **Enforcement.** Closed by WO-M14 (resource action enters policy;
-  broker dual authorization generalized into a resource-kind registry).
-  Mechanical check: `evoclj.capability.broker-resource-action-registry-test`
-  (new, M14) drives `evoclj.capability.broker/authorize` through the
-  production path and asserts the six required behaviors: the
-  ResourceAction is a first-class tuple component (a `:filesystem`
-  request carrying `:action :read` is allowed only when the lease grants
-  `:read`, and `:read` vs `:write` are distinct); the broker dispatches
-  uniformly per registered kind via `default-resource-kind-registry`
-  (`src/evoclj/capability/broker.clj:95`), so the former hard-coded
-  `:filesystem/path` dual branch is gone (a custom registry with a
-  request-only target authorizes without a tool grant, while the
-  default still requires it); an unregistered resource kind is denied
-  fail-closed with `:capability/unknown-resource-kind`; an action absent
-  from the lease's `:actions` is denied with `:capability/action-denied`;
-  and `evoclj.capability.policy-property-test` / `evoclj.capability.broker-test`
-  remain green (deny on any unmatched component, monotone in the lease
-  set). No default action synthesis: a `:request` target uses the
-  resource's own `:action` (or the intent action only as explicit
-  fallback in `resolve-target-action`,
-  `src/evoclj/capability/broker.clj:112`), never an implicit `:invoke`.
+- **Violation consequence.** Granting a principal permission to invoke a
+  tool implicitly authorizes every effect class that tool can produce
+  (e.g. a memory tool's read and destructive write), making least-
+  privilege grants unexpressible and audit reasoning coarser than the
+  event log suggests (undermines GC-20 attribution). Using a heritage two-key subject lets a lease for one session's execution alias to a sibling execution on the same genome, breaking isolation; using a heritage cross-session conflation of linear and causal edges misroutes causality.
+- **Enforcement.** Closed by WO-M14 + V1 I2/C2: `capability/schema.clj` exposes `PrincipalSchema` (tagged union) and `Grant` product `ResourceScope×ActionSet`; resource action enters policy via `ResourceKindDescriptor`; broker dual authorization generalized into a resource-kind registry. Mechanical check: `evoclj.capability.broker-resource-action-registry-test`
+  drives `evoclj.capability.broker/authorize` through the production path and asserts: the ResourceAction is a first-class tuple component; the broker dispatches uniformly per registered kind via `default-resource-kind-registry` (`src/evoclj/capability/broker.clj:95`); an unregistered kind is denied fail-closed with `:capability/unknown-resource-kind`; an action absent from lease `:actions` is denied with `:capability/action-denied`; `evoclj.capability.policy-property-test` / `evoclj.capability.broker-test` remain green plus new `evoclj.capability.grant-property-test` (100 rounds per lattice law) locks Grant product.
 
 ### INV-08 — Documentation hashes must resolve
 
@@ -365,6 +351,37 @@ lacks are all banned.
   full suite remains the final gate for every batch (baseline-failure set
   must shrink monotonically).
 
+### INV-10 — Principal single field (I2) — replaces heritage two-key subject
+
+A lease binds exactly one **Principal** tagged union `{:principal/type :session|:job|:eval|:operator}` — no second anchor, no `phenotype/id` on the lease, no wildcard, equality is exact tagged-value equality. The `CodeImage/Deployment/Execution` pin (I1) is orthogonal and lives on the `sessions`/`events` rows, not on the principal.
+
+- **Motivation.** Heritage `Subject {session/id, phenotype/id}` mixed session identity with code identity; a lease for session A on genome G could alias to session B on G if B reuses G, breaking isolation. V1 splits them (I1+I2): `sessions.code_image_id` pins code, `capabilities.principal_type/principal_id` pins principal; `validate-lease` canonicalizes legacy `:subject` → `:principal` for compat but new code must write `:principal`. `capability/lease_test.clj` Step 1 asserts exact principal matching — SessionPrincipal(sid) only matches the same sid, sibling sessions on same genome are distinct.
+- **Violation consequence.** A lease minted for `:session S1` authorizes `S2` on same genome (alias), or an operator lease matches any session (over-broad), or a grant for `:job J1` also matches `:eval E1` (type confusion). Adversarial lineage shows the fix: `subject_anchor_test.clj` (I2) pins that `OperatorPrincipal` never equals `SessionPrincipal`.
+- **Enforcement.** Landed by WO-I2 (migration `015-principal.sql`, `capability/schema.clj` `PrincipalSchema` + `SessionPrincipalSchema` etc., sealed `CapabilityLease` with `.principal`, `capability_table_test.clj` FK-free principal scoping): targeted tests in `evoclj.capability.lease-test` and `evoclj.capability.subject-anchor-test` assert exact tagged equality, no wildcard, single field, plus `test/evoclj/store/capability_table_test.clj` asserts capabilities are principal-scoped not FK-bound. Mechanical guard: `scripts/verify-forms.clj` [W-08] `principalSingleFieldQ` checks `docs/formal/perm-model.md` mentions single `Principal` and `capability/schema.clj` has `PrincipalSchema` with four variants; a grep audit finds no production write path that still emits `:subject` without canonicalization.
+
+### INV-11 — Grant lattice: ResourceScope × ActionSet with meet (C2)
+
+A grant is the product `Grant = ResourceScope × ActionSet`; `covers?` is the conjunction of `resource-covers?` ∧ `action-set-covers?`; `attenuates?` is the Grant order (narrowing); `meet` is the greatest lower bound (resource-meet × action-set-intersection, nil when empty/disjoint).
+
+- **Motivation.** Heritage attenuation checked `actions ⊆` and `maxCalls ≤` and window narrower as independent booleans without a product structure; adding a new resource kind required ad-hoc `path-inside?` checks in multiple places, and `derive-lease!` could produce an expanded resource while shrinking actions yet still claim "narrowing" (dimension leakage). C2 factors leases into `Grant` algebra so each dimension composes: a child lease attenuates iff its Grant attenuates (both halves), its Principal equals, its window is narrower, and its quota is narrower (`Lease = Grant × Principal × TimeWindow × Quota`).
+- **Violation consequence.** A child lease claims `filesystem/path /a/b` covering `/a` (expanded) while actions shrink, yet passes attenuation because the check only compared action sets. Or two grants for `/a/b` and `/a/c` claim their meet is `/a/b` (wrong — disjoint, should be nil). The lattice laws (idempotent, commutative, greatest lower bound) fail, so revocation cascade via narrowing breaks.
+- **Enforcement.** Landed by WO-C2 (`capability/grant.clj` `Grant` record + `resource_kind.clj` descriptors + `constraint.clj`): `evoclj.capability.grant-property-test` samples 100 random Grants per law (idempotent meet, commutative meet, greatest lower bound, meet attenuates parents, covers reflexive, attenuates transitive) — see `test/evoclj/capability/grant_property_test.clj`. Mechanical guard: `scripts/verify-forms.clj` [W-11..W-14] verify lattice; property tests 100 rounds pass is required for any capability change (PROTOCOL-B step 2). Reviewers reject any attenuation that does not delegate to `Grant.attenuates?`.
+
+### INV-12 — Work is the sole durable lifecycle; Session×Command 48 → 7 collapse (W1/W2)
+
+`Work` (`works` table, 7-state SM `queued|running|waiting|succeeded|failed|cancelled|timed-out`) is the **only** durable lifecycle; `AsyncCommand` 6-state and `SubAgentSession` 8-state are retired; `Session` is an immutable context pin (I1 `code_image_id/deployment_id/execution_id`). The heritage product `8 × 6 = 48` collapses to `7`; `Work.running` IS execution (future is internal await handle, not second source of truth). Cancel/timeout are CAS on `works.state`; recovery drives `running|waiting → failed` with `:recovery/orphaned`, never fabricates `succeeded`; `queued` stays `queued` for redelivery.
+
+- **Motivation.** Heritage kept two durable tables (`commands` + `subagent_sessions` + `sessions` state) with overlapping waiting states and dual `budgetExhausted`/`failed` terminals; a subagent's durable identity was split across rows, so orphan recovery required scanning three tables and had causal ambiguity (which row drives hash chain?). W1 migrates all new writes to `works` (`018-work.sql` backfills from `commands`) and `store/command.clj` aliases to `store/work` for compat; W2 removes bare `future` shadowing — `Work.running` equals execution, verified by `runtime/work.clj` acyclic SM and `store/work.clj` CAS.
+- **Violation consequence.** A `future` handle leaks outside `Work` and its completion races the DB row (ghost success after cancel). Or a subagent child is both a `commands` row and a `sessions` row — cancel revokes one but not the other, so the child outlives revocation. Recovery fabricates `succeeded` for an orphan `running` Work, claiming work completed that never did.
+- **Enforcement.** Landed by WO-W1/W2 (`runtime/work.clj` 7-state vocabulary + `verify-work-sm` + `collapse-ratio`, `store/work.clj` 5 CAS helpers, `018-work.sql`, `store/recovery.clj` → `store/work` recovery): `evoclj.runtime.work-test` (`work-collapses-48-to-7`, `work-sm-*`) + `test/evoclj/store/work_property_test.clj` (100 rounds per SM walk) assert `48 → 7` and acyclic/terminals; `evoclj.store.work-store-work-test` drives each transition via CAS; `evoclj.store.recovery-test` asserts orphan `queued` stays and `running|waiting` → `failed` with `:recovery/orphaned`. Mechanical guard: `scripts/verify-forms.clj` [W-19..W-25] verify product collapse; a grep audit ensures no production path writes `commands` without also writing `works` and no bare `future` is exposed as API.
+
+### INV-13 — Hydration pin → ExecutionHandle & Event prev + causal-links refinement (H1+E1)
+
+`hydrate(pin) → ExecutionHandle` (H1) is the single construction path from a pinned session (`code_image_id`/`deployment_id`/`execution_id`/`generation_id`) to a fresh execution context (SCI, usage atom, CAS temp dir, DB-truth leases); unknown pin fails closed with `:hydrate/pin-not-found` (never synthetic). Events use **E1 split**: `prev/event-id` is the linear predecessor in the same session (nil only for `:session/created`, otherwise immediately preceding `seq = new-seq -1`, validated to stay local), `causal-links #{ {:from :type} }` is the cross-session semantic graph (any session `from` must exist, cross-session allowed), the earlier `:cause` alias is retained only for local linear predecessor compatibility. `verify-event-chain` checks positional `seq` continuity (`events[i].seq = i+1`), linear `prev` linkage, graph edge existence, and sha256 header digest.
+
+- **Motivation.** (a) Heritage `Session` creation fused code loading with lease minting and left `resolve` implicit inside `sessions` state — testing regen required mutating session rows. H1 extracts a pure factory `hydrate` so the pin is immutable and execution is fresh per call. (b) Heritage `Event.cause` overloaded linear order + causality + cross-session; the former heritage invariant tied to the same session rejected legitimate cross-session `subagent/result` edges and allowed a `prev` that skipped `seq` while still passing set-equality checks. E1 separates them: `prev` drives `prev-hash` and `seq` (linear), `causal-links` drives `subagent/result` (graph). The former "[W-25] seq values are the multiset {1..M}" was shown by Wolfram to accept `{1,3,2}` — the positional fix plus E1 resolves both.
+- **Violation consequence.** (a) Hydration synthesizes a lease on DB miss (ghost authority) or reuses an `ExecutionHandle` across distinct pins (cross-execution leakage). (b) An event's `prev` skips one `seq` (`seq 1 → seq 3`) yet the legacy local check still passes because a predecessor exists in the same session and is earlier (but not immediately preceding) — the linear hash chain is broken but verification reports ok. A `:subagent/result` parent edge with `from` cross-session is rejected as a local mismatch even though it is correct semantic causality.
+
 ---
 
 ## Part 3 — Maintenance rules
@@ -385,7 +402,7 @@ lacks are all banned.
    number directly.
 4. **Precedence.** GC-01–GC-24 remain normatively defined in
    `docs/implementation-plan.md`; the one-line summaries above are
-   navigational. INV-01–INV-09 extend (never override) the Global
+   navigational. INV-01–INV-13 extend (never override) the Global
    Constraints. Discrepancies are bugs to report, matching the
    maintenance notes in `docs/README.md`.
 5. **Index sync.** Any rename or addition of a top-level document must be

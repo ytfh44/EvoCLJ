@@ -166,22 +166,33 @@ h)
 
 (defn validate-effect-lattice!
   "Validate that `effects` ⊆ `requested` ⊆ `granted`.
+  2-arity checks only effects ⊆ requested (heritage callers); 3-arity checks full chain.
   Throws :capability/lattice-invalid with :reason :effect-not-requested
   or :requested-not-granted."
-  [effects requested granted]
-  (validate-effect-set! effects)
-  (validate-effect-set! requested)
-  (validate-effect-set! granted)
-  (let [missing-req (set/difference effects requested)]
-    (when (seq missing-req)
-      (throw (err/error :capability/lattice-invalid
-                        "effect not requested"
-                        {:reason :effect-not-requested
-                         :missing (vec (sort missing-req))}))))
-  (let [missing-grant (set/difference requested granted)]
-    (when (seq missing-grant)
-      (throw (err/error :capability/lattice-invalid
-                        "requested not granted"
-                        {:reason :requested-not-granted
-                         :missing (vec (sort missing-grant))})))
-    {:effects effects :requested requested :granted granted}))
+  ([effects requested]
+   (validate-effect-set! effects)
+   (validate-effect-set! requested)
+   (let [missing-req (set/difference effects requested)]
+     (when (seq missing-req)
+       (throw (err/error :capability/lattice-invalid
+                         "effect not requested"
+                         {:reason :effect-not-requested
+                          :missing (vec (sort missing-req))}))))
+   {:effects effects :requested requested})
+  ([effects requested granted]
+   (validate-effect-set! effects)
+   (validate-effect-set! requested)
+   (validate-effect-set! granted)
+   (let [missing-req (set/difference effects requested)]
+     (when (seq missing-req)
+       (throw (err/error :capability/lattice-invalid
+                         "effect not requested"
+                         {:reason :effect-not-requested
+                          :missing (vec (sort missing-req))}))))
+   (let [missing-grant (set/difference requested granted)]
+     (when (seq missing-grant)
+       (throw (err/error :capability/lattice-invalid
+                         "requested not granted"
+                         {:reason :requested-not-granted
+                          :missing (vec (sort missing-grant))})))
+     {:effects effects :requested requested :granted granted})))

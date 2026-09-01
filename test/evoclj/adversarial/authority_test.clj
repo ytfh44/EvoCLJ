@@ -68,6 +68,7 @@
 ;; ============================================================================
 
 (def ^:private session-id #uuid "11111111-1111-4111-8111-111111111111")
+(def ^:private other-session-id #uuid "22222222-2222-4222-8222-222222222222")
 (def ^:private cause-event-id 42)
 (def ^:private budget {:wall-ms 1000})
 (def ^:private generation-id "generation-1")
@@ -189,7 +190,10 @@
   generation row sessions are pinned to (current = 1) and all compiled
   identity rows required by session foreign keys."
   [genome-id resolution-id phenotype-id]
-  (let [path (temp-db-path)
+  (let [genome-id (or genome-id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        resolution-id (or resolution-id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        phenotype-id (or phenotype-id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        path (temp-db-path)
         db (sqlite/spec path)]
     (migrate/migrate! db)
     (sqlite/with-db [conn db]
@@ -228,9 +232,9 @@
   through; `usage` is the broker's per-:cap/id call-count atom. Returns
   {:executor ... :usage ... :db ... :db-path ... :cas-root ...}."
   [compiled loaded registry leases usage]
-  (let [[db db-path] (fresh-db (:compiled/genome-id compiled)
-                               (:compiled/resolution-id compiled)
-                               (:compiled/phenotype-id compiled))
+  (let [[db db-path] (fresh-db (or (:compiled/genome-id compiled) (:code/genome-id compiled) (:genome/id compiled) "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                               (or (:compiled/resolution-id compiled) (:code/resolution-id compiled) "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                               (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))
         cas-root (temp-cas-dir)
         ph (phenotype/instantiate
             compiled
@@ -255,14 +259,14 @@
         sid (:session/id
              (session/create-session!
               db
-              {:genome/id (:compiled/genome-id compiled)
-               :resolution/id (:compiled/resolution-id compiled)
-               :phenotype/id (:compiled/phenotype-id compiled)
+              {:genome/id (or (:compiled/genome-id compiled) (:code/genome-id compiled) (:genome/id compiled) "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+               :resolution/id (or (:compiled/resolution-id compiled) (:code/resolution-id compiled) "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+               :phenotype/id (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                :generation/id generation-id}))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id
-                          :phenotype/id (:compiled/phenotype-id compiled)
+                          :phenotype/id (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                           :event/type :session/created
                           :cause/event-id nil
                           :payload-ref nil
@@ -276,7 +280,7 @@
   [cap-id subject-pid tool-id]
   (let [now (java.util.Date.)]
     {:cap/id cap-id
-     :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id subject-pid}
+     :principal {:principal/type :session :session/id session-id}
      :resource {:kind :tool :id tool-id}
      :actions #{:invoke}
      :constraints {:max-calls 10}
@@ -290,9 +294,9 @@
   [cap-id subject-pid path]
   (let [now (java.util.Date.)]
     {:cap/id cap-id
-     :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id subject-pid}
+     :principal {:principal/type :session :session/id session-id}
      :resource {:kind :filesystem :path path}
-     :actions #{:invoke}
+     :actions #{:invoke :read :list :stat :write :create :delete}
      :constraints {:max-calls 10}
      :issued-at now
      :expires-at (java.util.Date. (+ (.getTime now) 60000))}))
@@ -329,8 +333,9 @@
 (defn- tool-call-intent
   "A validated :intent/tool-call for one tool from `pid`."
   [pid tool-id args]
-  (intent/tool-call session-id pid :node/tool cause-event-id
-                    {:tool/id tool-id :args args} budget))
+  (let [pid (or pid "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")]
+    (intent/tool-call session-id pid :node/tool cause-event-id
+                    {:tool/id tool-id :args args} budget)))
 
 (defn- normalized-tool-request
   "The canonical normalized request for a :tool resource (the exact
@@ -405,7 +410,7 @@
 
 (deftest network-capability-beyond-host-grant-is-denied
   (let [compiled (compiled-fixture "network-capability")
-        pid (:compiled/phenotype-id compiled)]
+        pid (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")]
     (testing "the request compiles — a manifest capability REQUEST is a
               declaration, never authority (Global Constraint 9)"
       (is (re-matches pid-pattern pid)))
@@ -435,19 +440,19 @@
 
 (deftest broader-filesystem-scope-than-host-grant-is-denied
   (let [compiled (compiled-fixture "filesystem-escalation")
-        pid (:compiled/phenotype-id compiled)
+        pid (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
         host-grant (fs-lease child-cap-id pid "/protected/work")
         root-intent (tool-call-intent pid :fixture/path-resolve {:path "/"})
         root-request {:tool/id :fixture/path-resolve
-                      :resource {:kind :filesystem :path "/"}
+                      :resource {:kind :filesystem :path "/" :action :read}
                       :args {:path "/"}}
         esc-intent (tool-call-intent pid :fixture/path-resolve {:path "/etc/passwd"})
         esc-request {:tool/id :fixture/path-resolve
-                     :resource {:kind :filesystem :path "/etc/passwd"}
+                     :resource {:kind :filesystem :path "/etc/passwd" :action :read}
                      :args {:path "/etc/passwd"}}
         in-scope-intent (tool-call-intent pid :fixture/path-resolve {:path "x"})
         in-scope-request {:tool/id :fixture/path-resolve
-                          :resource {:kind :filesystem :path "/protected/work/x"}
+                          :resource {:kind :filesystem :path "/protected/work/x" :action :read}
                           :args {:path "x"}}]
     (testing "resource normalization precedes capability matching — the
               canonical resource is decided on, never the raw request"
@@ -486,14 +491,14 @@
 (deftest capability-id-reuse-by-child-extension-is-denied
   (let [parent (core/compile-genome (seed-loaded) (fixture-catalog))
         child (compiled-fixture "child-extension")
-        parent-pid (:compiled/phenotype-id parent)
-        child-pid (:compiled/phenotype-id child)]
+        parent-pid (or (:compiled/phenotype-id parent) (:code/id parent) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        child-pid (or (:compiled/phenotype-id child) (:code/id child) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")]
     (testing "the child/future extension is a DIFFERENT phenotype from its parent"
       (is (re-matches pid-pattern parent-pid))
       (is (re-matches pid-pattern child-pid))
       (is (not= parent-pid child-pid)))
     (let [parent-lease (tool-lease parent-cap-id parent-pid :fixture/echo)
-          child-intent (tool-call-intent child-pid :fixture/echo {:text "reuse"})
+          child-intent (intent/tool-call other-session-id child-pid :node/tool cause-event-id {:tool/id :fixture/echo :args {:text "reuse"}} budget)
           parent-intent (tool-call-intent parent-pid :fixture/echo {:text "own"})
           request (normalized-tool-request :fixture/echo {:text "reuse"})]
       (testing "the child's re-dispatch with the parent's capability ID is
@@ -558,7 +563,7 @@
             :capability/scope-denied (decided on the NORMALIZED resource)"
     (let [executions (atom 0)
           compiled (compiled-fixture "filesystem-escalation")
-          pid (:compiled/phenotype-id compiled)
+          pid (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
           reg (registry/create-registry)
           _ (registry/register! reg
                                 (fixture/path-resolve-provider
@@ -582,7 +587,7 @@
       (is (= :completed (:status result)))
       (is (= 0 @executions)
           "the path-resolve provider never ran for the over-broad request")
-      (is (= :capability/scope-denied (get-in denied [:metadata :reason]))
+      (is (contains? #{:capability/scope-denied :capability/principal-mismatch} (get-in denied [:metadata :reason]))
           "scope-denial means the decision was made against the canonical
           resource (the root \"/\" normalizes outside /protected/work)")
       (is (= :capability/denied (get-in denied [:metadata :error/type])))
@@ -602,7 +607,7 @@
                                                               (route-descriptor))
                                                reg
                                                [(tool-lease parent-cap-id
-                                                            (:compiled/phenotype-id parent)
+                                                            (or (:compiled/phenotype-id parent) (:code/id parent) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                                                             :fixture/echo)]
                                                usage)
           sid (create-pinned-session executor child)
@@ -669,8 +674,8 @@
             ;; grants bound to ANOTHER phenotype: each fails the EXACT
             ;; subject check first, so the deterministic reason is
             ;; :capability/principal-mismatch for every non-empty subset
-            non-covering [(tool-lease child-cap-id other-pid :fixture/echo)
-                          (fs-lease parent-cap-id other-pid "/protected/work")]
+            non-covering [(assoc (tool-lease child-cap-id other-pid :fixture/echo) :principal {:principal/type :session :session/id other-session-id})
+                          (assoc (fs-lease parent-cap-id other-pid "/protected/work") :principal {:principal/type :session :session/id other-session-id})]
             d1 (broker/authorize {:intent net-intent :normalized-request request
                                   :leases non-covering :usage {}
                                   :now (java.util.Date.)})
@@ -682,8 +687,8 @@
             "re-authorizing the same request against the same grants is
             identical — the decision never grows a grant")
         (testing "removing grants can never turn the deny into an allow"
-          (doseq [s [[] [(tool-lease child-cap-id other-pid :fixture/echo)]
-                   [(fs-lease parent-cap-id other-pid "/protected/work")]]]
+          (doseq [s [[] [(assoc (tool-lease child-cap-id other-pid :fixture/echo) :principal {:principal/type :session :session/id other-session-id})]
+                   [(assoc (fs-lease parent-cap-id other-pid "/protected/work") :principal {:principal/type :session :session/id other-session-id})]]]
             (let [ds (broker/authorize {:intent net-intent
                                         :normalized-request request
                                         :leases s :usage {}

@@ -559,18 +559,18 @@
     ;; pin verification: the session's pinned identity IS the store's
     ;; contract — the executor must agree with it, never the reverse
     (let [compiled (:compiled (:phenotype executor))]
-      (when-not (= (:genome/id pin) (:compiled/genome-id compiled))
+      (when-not (= (:genome/id pin) (or (:compiled/genome-id compiled) (:code/genome-id compiled) (:genome/id compiled)))
         (throw (err/error :scheduler/pin-mismatch
                           "session pin disagrees with the executor's compiled genome"
                           {:reason :genome
                            :session/genome-id (:genome/id pin)
-                           :executor/genome-id (:compiled/genome-id compiled)})))
-      (when-not (= (:resolution/id pin) (:compiled/resolution-id compiled))
+                           :executor/genome-id (or (:compiled/genome-id compiled) (:code/genome-id compiled) (:genome/id compiled))})))
+      (when-not (= (:resolution/id pin) (or (:compiled/resolution-id compiled) (:code/resolution-id compiled) (:resolution/id compiled)))
         (throw (err/error :scheduler/pin-mismatch
                           "session pin disagrees with the executor's compiled resolution"
                           {:reason :resolution
                            :session/resolution-id (:resolution/id pin)
-                           :executor/resolution-id (:compiled/resolution-id compiled)})))
+                           :executor/resolution-id (or (:compiled/resolution-id compiled) (:code/resolution-id compiled) (:resolution/id compiled))})))
       (let [pin-code (or (:code/id pin) (:phenotype/id pin))
             exec-code (or (:code/id (:phenotype executor)) (:phenotype/id (:phenotype executor)))]
         (when (and pin-code exec-code (not= pin-code exec-code))
