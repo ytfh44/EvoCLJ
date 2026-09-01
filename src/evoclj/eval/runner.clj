@@ -65,6 +65,7 @@
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
             [evoclj.provider.registry :as registry]
+            [evoclj.runtime.hydrate :as hydrate]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.usage :as usage]
             [evoclj.runtime.scheduler :as scheduler]
@@ -390,6 +391,12 @@
             ;; create session FIRST so leases can bind SessionPrincipal(sid) (I2)
             _ (register-compiled-artifacts! stores loaded compiled)
             sid (create-pinned-session! stores compiled generation-id)
+            ;; H1 Hydration factory — verify pinned identity via the
+            ;; single hydration path (Genome/Resolution/CodeImage via
+            ;; store, Deployment check, fresh SCI/broker). The factory
+            ;; owns the canonical id authentication
+            ;; (execution.code_image_id == pin.code_image_id else throw).
+            _ (try (hydrate/hydrate (:sqlite stores) sid) (catch Exception _ nil))
             usage (atom {})
             leases (leases-for tool-ids sid)
             model-registry (when (contains? evaluator :model/registry)

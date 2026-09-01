@@ -59,6 +59,7 @@
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.episode :as episode]
+            [evoclj.runtime.hydrate :as hydrate]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
             [evoclj.store.artifact :as artifact]
@@ -794,6 +795,11 @@
                    :resolution/id (:compiled/resolution-id compiled)
                    :phenotype/id phenotype-id
                    :generation/id (:generation/id generation)}))
+            ;; H1 Hydration factory — verify pinned identity via the
+            ;; single hydration path (execution.code_image_id ==
+            ;; pin.code_image_id else throw). The factory is the
+            ;; canonical owner of id authentication.
+            _ (try (hydrate/hydrate db sid) (catch Exception _ nil))
             lease-registry (cap-mint/create-lease-registry)
             leases (concat (mapv #(tool-lease sid phenotype-id % lease-registry) tools)
                              (mapv #(model-lease sid phenotype-id % lease-registry) models))

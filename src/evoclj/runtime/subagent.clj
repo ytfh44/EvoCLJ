@@ -305,86 +305,22 @@
 ;; Child execution (S3)
 ;; ---------------------------------------------------------------------------
 
-(defn- child-topology
-  "Minimal echo topology for child execution: :tool -> :emit.
-  Used by run-subagent! to provide deterministic execution for tests."
-  []
-  {:graph/id :graph/subagent-echo
-   :entry :node/tool
-   :nodes {:node/tool {:node/type :tool :tool :fixture/echo :next :node/emit}
-           :node/emit {:node/type :emit}}
-   :limits {:max-steps 64}})
+;; ---------------------------------------------------------------------------
+;; Child execution (S3) — H1 Hydration factory
+;; ---------------------------------------------------------------------------
 
 (defn- build-child-executor
-  "Build an isolated child executor for `child-session`.
-  Same genome/resolution/phenotype as parent (from child's pin), fresh
-  SCI runtime, fresh CAS, fresh registry with :fixture/echo, and a
-  synthetic derived lease for the child subject. The lease is attenuated
-  from the parent (actions ⊆ parent) — for S3 tests the synthetic lease
-  is the minimal attenuation (same :invoke on :fixture/echo). If the DB
-  already contains persisted child leases in `capabilities` table, they
-  are preferred; otherwise the synthetic lease is used. Ensures child has
-  its own SCI runtime (new phenotype instance, not shared)."
+  "Build an isolated child executor for `child-session` via the
+  hydration factory. Delegates to evoclj.runtime.hydrate/hydrate so
+  there is exactly one place that loads Genome/Resolution/CodeImage,
+  verifies Deployment/Execution ids, loads program sources, materializes
+  bindings, and creates a fresh SCI + broker pair. Synthetic
+  topology/programs/CAS/fixture lease are owned by the factory, not
+  copied here."
   [db child-session]
-  (let [child-id (:session/id child-session)
-        phenotype-id (:phenotype/id child-session)
-        genome-id (:genome/id child-session)
-        resolution-id (:resolution/id child-session)
-        compiled-topology (topology/compile-topology (child-topology))
-        compiled {:compiled/genome-id genome-id
-                  :compiled/resolution-id resolution-id
-                  :compiled/phenotype-id phenotype-id
-                  :compiled/code-id phenotype-id
-                  :abi {}
-                  :manifest {:capabilities/requested #{:tool/call}}
-                  :requested-capabilities #{:tool/call}
-                  :effects #{:tool/call}
-                  :topology compiled-topology
-                  :programs {:program/route {:program/id :program/route :entry 'test.route/run}
-                             :program/boom {:program/id :program/boom :entry 'test.boom/run}}}
-        program-sources {:program/route "(ns test.route) (defn run [x] x)"
-                         :program/boom "(ns test.boom) (defn run [x] (throw (ex-info \"boom\" {:error/type :test/boom})))"}
-        reg (registry/create-registry)
-        _ (registry/register! reg (fixture/echo-provider {}))
-        now (Date.)
-        expires (Date. (+ (.getTime now) 600000))
-        synthetic-lease {:cap/id (UUID/randomUUID)
-                         :principal {:principal/type :session :session/id child-id}
-                         :resource {:kind :tool :id :fixture/echo}
-                         :actions #{:invoke}
-                         :constraints {:max-calls 10}
-                         :issued-at now
-                         :expires-at expires}
-        ;; Try to load persisted child leases from capabilities table (P7) if present
-        persisted-leases (try
-                           (let [spec (db-spec db)
-                                 rows (sqlite/query spec
-                                                    ["SELECT id, principal_type, principal_id, resource_kind, resource_id, actions, issued_at, expires_at FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0"
-                                                     (str child-id)])]
-                             (when (seq rows)
-                               (mapv (fn [r]
-                                       {:cap/id (UUID/fromString (:id r))
-                                        :principal {:principal/type :session :session/id (types/session-id (:principal_id r))}
-                                        :resource {:kind (keyword (:resource_kind r)) :id (keyword (:resource_id r))}
-                                        :actions (set (map keyword (str/split (:actions r) #",")))
-                                        :constraints {}
-                                        :issued-at (Date. (.getTime (java.time.Instant/parse (:issued_at r))))
-                                        :expires-at (Date. (.getTime (java.time.Instant/parse (:expires_at r))))})
-                                     rows)))
-                           (catch Exception _ nil))
-        usage (atom {})
-        ph (phenotype/instantiate compiled {:stores {:sqlite :poison :cas {:root :poison}}
-                                            :providers {:registry reg}
-                                            :capabilities {:leases persisted-leases :usage usage}
-                                            :program-sources program-sources})
-        cas-dir (str (Files/createTempDirectory "evoclj-cas-subagent-" (make-array FileAttribute 0)))
-        cas-store (cas/->cas cas-dir)
-        make-broker-context @(requiring-resolve 'evoclj.intent.dispatch/make-broker-context)
-        dispatch-ctx (make-broker-context {:registry reg :leases persisted-leases :usage usage :db db})]
-    {:phenotype ph
-     :stores {:sqlite db :cas cas-store}
-     :dispatch dispatch-ctx
-     :cas/dir cas-dir}))
+  (let [hydrate @(requiring-resolve 'evoclj.runtime.hydrate/hydrate)
+        pin (if (map? child-session) child-session {:session/id child-session})]
+    (hydrate db pin)))
 
 (defn run-subagent!
   "Synchronously execute a child subagent session.
