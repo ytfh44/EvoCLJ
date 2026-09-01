@@ -68,6 +68,7 @@
   never authorizes and never hides a caller bug (the same rule as
   evoclj.capability.lease)."
   (:require [clojure.set :as set]
+            [evoclj.capability.grant :as grant]
             [evoclj.capability.lease :as lease]
             [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.schema :as schema]
@@ -171,6 +172,10 @@
         (< consumed max-calls))))
 
 (defn- check-lease
+  "Check a single lease against a request via Grant (C2) product order.
+  ResourceScope × ActionSet: lease Grant must cover request Grant
+  (resource covers? + actions superset).  Preserves the fixed reason order
+  principal -> window -> action -> scope -> budget for deterministic denies."
   [lease principal resource action now usage]
   (cond
     (not (lease/principal-matches? lease principal))
@@ -179,10 +184,21 @@
     (not (lease/valid-at? lease now))
     [2 {:decision :deny :reason :capability/expired}]
 
-    (not (contains? (:actions lease) action))
+    ;; Grant-level: check ActionSet first for distinct :action-denied reason,
+    ;; then ResourceScope for :scope-denied. This is the decomposition of
+    ;; Grant covers? = actions ⊇  ∧  resource covers? .
+    (not (grant/action-set-covers? (:actions lease) #{action}))
     [3 {:decision :deny :reason :capability/action-denied}]
 
-    (not (lease/resource-covers? lease resource action))
+    (not (grant/resource-covers? (:resource lease) resource))
+    [4 {:decision :deny :reason :capability/scope-denied}]
+
+    ;; Fallback: full Grant covers? as single predicate (kept for completeness;
+    ;; the two checks above already partition its failure modes).
+    ;; If either dimension failed we already returned; this branch is unreachable
+    ;; but guards against future ActionSet/ResourceScope changes.
+    (not (grant/covers? {:resource (:resource lease) :actions (:actions lease)}
+                         {:resource resource :actions #{action}}))
     [4 {:decision :deny :reason :capability/scope-denied}]
 
     (not (within-call-budget? lease usage))

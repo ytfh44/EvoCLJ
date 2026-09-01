@@ -12,6 +12,7 @@
   cli/session tool-lease/model-lease) must delegate here; grep for
   :cap/id in src/ should only hit this file (plus tests)."
   (:require [clojure.set :as set]
+            [evoclj.capability.grant :as grant]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err])
   (:import (java.util Date UUID)))
@@ -75,11 +76,13 @@
   Attenuation rule (Wolfram [W-08..W-11]): the child must be *narrower* than
   the parent in every dimension — never wider:
 
-    - actions  — child ⊆ parent
+    - actions  — child ⊆ parent  (ActionSet lattice, C2)
     - max-calls — child max-calls <= parent max-calls (nil means unlimited)
     - issued   — child issued >= parent issued
     - expires  — child expires <= parent expires
-    - resource — child resource == parent resource (P4 keeps resource fixed)
+    - resource — child resource attenuated by parent (Grant attenuates?, C2)
+                 i.e. parent Grant covers child Grant via ResourceKindDescriptor
+                 (filesystem /work attenuates to /work/project-a; tool requires equality)
 
   The child is sealed via schema/make-lease, carries
   :cap/attenuated-from (and :attenuated-from) in its :constraints for audit,
@@ -89,7 +92,7 @@
   parent-lease — sealed CapabilityLease (schema/lease? true), not revoked
   opts — map with optional keys:
     :principal   override principal (for subagent delegation; must still be valid)
-    :resource    override resource (must equal parent resource)
+    :resource    override resource (must be attenuated by parent, C2)
     :actions     set of actions (default: parent actions)
     :constraints map (default: {} merged with parent constraints, see below)
     :issued-at   #inst (default: now)
@@ -125,15 +128,18 @@
         child-issued (or issued-at (:issued-at opts) parent-issued)
         child-expires (or expires-at (:expires-at opts) parent-expires)
         cap-id-val (or (:cap/id opts) cap-id (UUID/randomUUID))]
-    (when-not (= child-resource parent-resource)
-      (throw (err/error :capability/attenuation-invalid
-                        "derived lease resource must equal parent resource"
-                        {:parent-resource (err/sanitize parent-resource)
-                         :child-resource (err/sanitize child-resource)})))
     (when-not (set/subset? (or child-actions-set #{}) (or parent-actions #{}))
       (throw (err/error :capability/attenuation-invalid
                         "derived actions must be subset of parent actions"
                         {:parent-actions (err/sanitize parent-actions)
+                         :child-actions (err/sanitize child-actions-set)})))
+    (when-not (grant/attenuates? {:resource parent-resource :actions (or parent-actions #{})}
+                                  {:resource child-resource :actions (or child-actions-set #{})})
+      (throw (err/error :capability/attenuation-invalid
+                        "derived lease resource must be attenuated by parent (Grant attenuates?)"
+                        {:parent-resource (err/sanitize parent-resource)
+                         :child-resource (err/sanitize child-resource)
+                         :parent-actions (err/sanitize parent-actions)
                          :child-actions (err/sanitize child-actions-set)})))
     (let [parent-max (get parent-constraints :max-calls)
           child-max (get child-constraints-raw :max-calls)]

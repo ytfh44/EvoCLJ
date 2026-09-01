@@ -37,6 +37,7 @@
   forms) is component (evoclj.provider). Unknown resource kinds fail
   closed: nothing is covered."
   (:require [clojure.string :as str]
+            [evoclj.capability.grant :as grant]
             [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err]
@@ -92,17 +93,23 @@
 (defn principal-matches?
   "True when the requesting `principal` equals the lease's principal (I2).
   No wildcard, no nil, no placeholder — exact equality on the tagged union.
-  Legacy :subject maps are canonicalized to Principal for compat."
+  Legacy :subject maps are canonicalized to Principal for compat (filesystem tests)."
   [lease principal]
-  (validate-input! lease schema/PrincipalSchema principal)
-  (let [raw (or (:principal lease) (:subject lease))
-        lp (if (and (map? raw) (:principal/type raw))
-             raw
-             (cond
-               (and (map? raw) (:session/id raw)) {:principal/type :session :session/id (:session/id raw)}
-               (map? raw) {:principal/type :operator}
-               :else raw))]
-    (= lp principal)))
+  (let [canonical-principal (cond
+                              (and (map? principal) (:principal/type principal)) principal
+                              (and (map? principal) (:session/id principal) (not (contains? principal :principal/type))) {:principal/type :session :session/id (:session/id principal)}
+                              (and (map? principal) (:job/id principal) (not (contains? principal :principal/type))) {:principal/type :job :job/id (:job/id principal)}
+                              (and (map? principal) (:eval/id principal) (not (contains? principal :principal/type))) {:principal/type :eval :eval/id (:eval/id principal)}
+                              :else principal)]
+    (validate-input! lease schema/PrincipalSchema canonical-principal)
+    (let [raw (or (:principal lease) (:subject lease))
+          lp (if (and (map? raw) (:principal/type raw))
+               raw
+               (cond
+                 (and (map? raw) (:session/id raw)) {:principal/type :session :session/id (:session/id raw)}
+                 (map? raw) {:principal/type :operator}
+                 :else raw))]
+      (= lp canonical-principal))))
 
 (defn subject-matches?
   "Deprecated alias for principal-matches? — use principal-matches?."
@@ -110,8 +117,9 @@
   (principal-matches? lease principal))
 (defn resource-covers?
   "True when the lease's :resource grant covers the canonical
-  `normalized-resource` for `action`: dispatches via ResourceKindDescriptor
-  (C1). The action must be in the lease's :actions set AND the descriptor's
+  `normalized-resource` for `action`: Grant covers? (C2) product order.
+  Delegates to evoclj.capability.grant/covers? (ResourceScope × ActionSet).
+  The action must be in the lease's :actions set AND the descriptor's
   covers? must be true. Unknown kinds fail closed."
   [lease normalized-resource action]
   (validate-input! lease)
@@ -120,15 +128,8 @@
                       "resource must be a map and action a keyword"
                       {:value (err/sanitize normalized-resource)
                        :action (err/sanitize action)})))
-  (let [granted (:resource lease)
-        gk (:kind granted)
-        rk-kind (:kind normalized-resource)]
-    (and (contains? (:actions lease) action)
-         (= gk rk-kind)
-         (boolean
-          (if-let [d (rk/get-descriptor gk)]
-            (rk/covers? d granted normalized-resource action)
-            false)))))
+  (grant/covers? {:resource (:resource lease) :actions (:actions lease)}
+                 {:resource normalized-resource :actions #{action}}))
 
 ;; ---------------------------------------------------------------------------
 ;; Generic LeaseRegistry helpers (P5) — unified for ANY kind
