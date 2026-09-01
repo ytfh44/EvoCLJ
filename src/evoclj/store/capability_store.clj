@@ -1,21 +1,18 @@
 (ns evoclj.store.capability-store
-  "Store-backed CapabilityLease persistence (P7, I2, C1).
+  "P1 single-source Authority: DB is source of truth, memory LeaseRegistry is versioned cache.
 
-  Durable table `capabilities` (migration 013/015/016) mirrors the sealed lease
+  Durable table `capabilities` (migrations 013/015/016/019) mirrors the sealed lease
   shape: principal (tagged union), open resource_kind + faithful resource_edn
-  (EDN, C1), JSON actions, positive window, revoked flag. Helpers are thin
-  wrappers over sqlite spec — no mandatory DB read in the hot verify path (the
-  in-memory LeaseRegistry remains authoritative); this is the additive
-  persistence layer.
+  (C1, no CHECK), JSON actions, positive window, revoked flag + revoked_at,
+  and faithful lease_edn (pr-str of sealed lease). All writes are durable
+  before cache: callers must INSERT/UPDATE WHERE revoked=0 then swap! cache.
+  Best-effort try/catch dual writes are removed; synthetic fallback on DB miss
+  is deny (no synthetic lease).
 
-  Actions are stored as JSON array strings; constraints as JSON string
-  (or nil). Resource identity is stored as `resource_edn` via the
-  ResourceKindDescriptor serializer (adding a kind is a single-file Descriptor
-  registration, never a schema change). `resource_kind` (no CHECK) and legacy
-  `resource_id` columns are kept for queryability and backward-compat reads.
-  Timestamps are TEXT ISO-8601 UTC. The helpers validate minimally with Malli
-  but rely on DB CHECKs for the closed invariants."
+  Helpers are thin wrappers over sqlite spec and throw on CHECK/FK violation.
+  Restart hydrates from DB via list-active-capabilities / hydrate-registry!."
   (:require [cheshire.core :as json]
+            [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [clojure.string :as str]
             [evoclj.capability.resource-kind :as rk]
@@ -53,33 +50,41 @@
   (when s (json/parse-string s true)))
 
 (defn- row->capability
-  "Map a DB row (keyword keys) to a normalized capability map."
+  "Map a DB row (keyword keys) to a normalized capability map. Parses
+  :resource from resource_edn (faithful C1), JSON actions/constraints,
+  and exposes :revoked boolean + :revoked-at and :lease-edn (EDN faithful)."
   [row]
-  {:id (:id row)
-   :principal-type (:principal_type row)
-   :principal-id (:principal_id row)
-   :subject-session-id (:subject_session_id row)
-   :subject-phenotype-id (:subject_phenotype_id row)
-   :resource-kind (:resource_kind row)
-   :resource-id (:resource_id row)
-   :resource-edn (:resource_edn row)
-   :resource (rk/deserialize-resource (:resource_edn row))
-   :actions (or (when-let [a (:actions row)]
-                  (try (json/parse-string a) (catch Exception _ [a])))
-                [])
-   :actions-raw (:actions row)
-   :constraints (:constraints row)
-   :constraints-parsed (parse-json (:constraints row))
-   :issued-at (:issued_at row)
-   :expires-at (:expires_at row)
-   :revoked (let [v (:revoked row)] (if (number? v) (pos? v) (boolean v)))
-   :revoked-raw (:revoked row)
-   :created-at (:created_at row)})
+  (let [lease-edn-str (:lease_edn row)
+        lease-edn (when lease-edn-str
+                    (try (edn/read-string lease-edn-str) (catch Exception _ nil)))]
+    {:id (:id row)
+     :principal-type (:principal_type row)
+     :principal-id (:principal_id row)
+     :subject-session-id (:subject_session_id row)
+     :subject-phenotype-id (:subject_phenotype_id row)
+     :resource-kind (:resource_kind row)
+     :resource-id (:resource_id row)
+     :resource-edn (:resource_edn row)
+     :resource (or (:resource lease-edn) (rk/deserialize-resource (:resource_edn row)))
+     :actions (or (when-let [a (:actions row)]
+                    (try (json/parse-string a) (catch Exception _ [a])))
+                  [])
+     :actions-raw (:actions row)
+     :constraints (:constraints row)
+     :constraints-parsed (parse-json (:constraints row))
+     :issued-at (:issued_at row)
+     :expires-at (:expires_at row)
+     :revoked (let [v (:revoked row)] (if (number? v) (pos? v) (boolean v)))
+     :revoked-raw (:revoked row)
+     :revoked-at (:revoked_at row)
+     :lease-edn lease-edn-str
+     :lease lease-edn
+     :created-at (:created_at row)}))
 
 (defn fetch-capability
   "Fetch capability by `cap-id` (TEXT PRIMARY KEY), or nil when absent.
   Returns a normalized map with parsed actions/constraints, parsed
-  :resource (from resource_edn) and boolean :revoked."
+  :resource (from resource_edn or lease_edn) and boolean :revoked."
   [db cap-id]
   (when cap-id
     (when-let [row (first (sqlite/query db ["SELECT * FROM capabilities WHERE id = ?" (str cap-id)]))]
@@ -90,8 +95,6 @@
   row shape or a lease map with nested :principal/:resource."
   [lease]
   (let [id (or (:id lease) (:cap/id lease) (str (:capId lease)))
-        ;; principal resolution: explicit flat, or nested :principal, or legacy :subject
-        ;; Coerced to a plain kind NAME ("session"), never ":session".
         ptype (let [raw (or (:principal-type lease)
                             (:principal_type lease)
                             (get-in lease [:principal :principal/type])
@@ -134,7 +137,18 @@
         issued (or (:issued-at lease) (:issued_at lease) (str (java.time.Instant/now)))
         expires (or (:expires-at lease) (:expires_at lease) (str (.plusSeconds (java.time.Instant/now) 3600)))
         created (or (:created-at lease) (:created_at lease) (str (java.time.Instant/now)))
-        revoked (:revoked lease 0)]
+        fmt #(cond
+               (instance? java.util.Date %) (str (.toInstant ^java.util.Date %))
+               (instance? java.time.Instant %) (str %)
+               (string? %) %
+               :else (str %))
+        issued (fmt issued)
+        expires (fmt expires)
+        created (fmt created)
+        revoked (:revoked lease 0)
+        lease-edn (or (:lease_edn lease) (:lease-edn lease)
+                      (when (map? lease)
+                        (try (pr-str lease) (catch Exception _ nil))))]
     {:id (str id)
      :principal_type (str ptype)
      :principal_id (str pid)
@@ -148,25 +162,34 @@
      :issued_at (str issued)
      :expires_at (str expires)
      :revoked (if (boolean? revoked) (if revoked 1 0) (if (number? revoked) revoked (if revoked 1 0)))
+     :revoked_at (when (or (= revoked 1) (true? revoked) (= (:revoked lease) true)) (str (java.time.Instant/now)))
+     :lease_edn lease-edn
      :created_at (str created)}))
+
 ;; --- public helpers -------------------------------------------------------
+
 (defn insert-capability!
   "Insert a capability row. `lease` may be a flat helper map or a
   capability-like map with nested :principal/:resource. Returns the
-  inserted row as a normalized map. Throws on CHECK / FK violation."
+  inserted row as a normalized map. Throws on CHECK / FK violation.
+  P1: caller must swap! cache only after this durable commit succeeds."
   [db lease]
-  (let [row (capability->row lease)]
+  (let [row (capability->row lease)
+        row (assoc row :revoked 0 :revoked_at nil)]
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :capabilities row))
     (fetch-capability db (:id row))))
+
 (defn revoke-capability!
-  "Mark capability `cap-id` as revoked (SET revoked = 1). Idempotent:
-  revoking an already-revoked row is a no-op. Returns the updated
-  normalized map, or nil when no such row exists."
+  "Mark capability `cap-id` as revoked: UPDATE WHERE revoked=0.
+  Idempotent and durable-first: sets revoked=1 and revoked_at=NOW only
+  when currently not revoked. Returns the updated normalized map, or nil
+  when no such row exists. Caller must swap! cache only after this succeeds."
   [db cap-id]
-  (sqlite/with-db [conn db]
-    (jdbc/update! conn :capabilities {:revoked 1} ["id = ?" (str cap-id)]))
-  (fetch-capability db cap-id))
+  (let [now (str (java.time.Instant/now))]
+    (sqlite/with-db [conn db]
+      (jdbc/update! conn :capabilities {:revoked 1 :revoked_at now} ["id = ? AND revoked = 0" (str cap-id)]))
+    (fetch-capability db cap-id)))
 
 (defn list-capabilities
   "List capabilities, optionally filtered by {:principal-type t :principal-id id :subject-session-id s :resource-kind k :revoked? bool}."
@@ -183,3 +206,47 @@
          params (mapcat rest clauses)
          sql (str "SELECT * FROM capabilities" (or where ""))]
      (mapv row->capability (sqlite/query db (into [sql] params))))))
+
+(defn list-active-capabilities
+  "List non-revoked capabilities, optionally filtered. Shorthand for revoked?=false."
+  ([db] (list-active-capabilities db {}))
+  ([db opts] (list-capabilities db (assoc opts :revoked? false))))
+
+(defn hydrate-registry!
+  "Restart hydration: load all active (revoked=0) capabilities from DB into
+  `registry` atom as versioned cache entries {:lease <sealed> :revoked? false}.
+  Increments version (::version) after load. Returns count of hydrated entries.
+  DB is truth; cache is replaced."
+  [db registry]
+  (let [rows (list-active-capabilities db)
+        leases (keep (fn [row]
+                       (or (:lease row)
+                           (let [p {:principal/type (keyword (:principal-type row))
+                                    (if (= "session" (:principal-type row)) :session/id
+                                        (if (= "job" (:principal-type row)) :job/id
+                                            (if (= "eval" (:principal-type row)) :eval/id :operator/id)))
+                                    (try (java.util.UUID/fromString (:principal-id row))
+                                         (catch Exception _ (:principal-id row)))}
+                                 res (:resource row)
+                                 actions (set (map keyword (:actions row)))
+                                 constraints (or (:constraints-parsed row) {})]
+                             (try
+                               {:cap/id (java.util.UUID/fromString (:id row))
+                                :principal p
+                                :resource res
+                                :actions actions
+                                :constraints constraints
+                                :issued-at (java.util.Date/from (java.time.Instant/parse (:issued-at row)))
+                                :expires-at (java.util.Date/from (java.time.Instant/parse (:expires-at row)))}
+                               (catch Exception _ nil)))))
+                     rows)
+        entries (into {} (map (fn [l] [(:cap/id l) {:lease l :revoked? false}]) leases))]
+    (swap! registry (fn [m]
+                      (-> (merge (select-keys m [:evoclj.capability.mint/version]) entries)
+                          (assoc :evoclj.capability.mint/version (inc (get m :evoclj.capability.mint/version 0))))))
+    (count entries)))
+
+(defn registry-version
+  "Return the cache version of `registry` (0 if uninitialized)."
+  [registry]
+  (get @registry :evoclj.capability.mint/version 0))

@@ -207,23 +207,27 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- load-persisted-leases
-  "Try to load leases persisted for the session from the capabilities
-  table (P7). Returns vector or nil."
+  "P1: load active (revoked=0) leases from DB via capability-store.
+  DB is truth; no synthetic fallback. Returns vector (empty when none) or nil on error."
   [db sid]
   (try
-    (let [spec (db-spec db)
-          rows (sqlite/query spec
-                             ["SELECT id, principal_type, principal_id, resource_kind, resource_id, actions, issued_at, expires_at FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0"
-                              (str sid)])]
+    (let [cap-store (requiring-resolve 'evoclj.store.capability-store/list-active-capabilities)
+          rows (@cap-store db {:principal-type "session" :principal-id (str sid)})]
       (when (seq rows)
-        (mapv (fn [r]
-                {:cap/id (UUID/fromString (:id r))
-                 :principal {:principal/type :session :session/id (types/session-id (:principal_id r))}
-                 :resource {:kind (keyword (:resource_kind r)) :id (keyword (:resource_id r))}
-                 :actions (set (map keyword (str/split (:actions r) #",")))
-                 :constraints {}
-                 :issued-at (Date. (.getTime (java.time.Instant/parse (:issued_at r))))
-                 :expires-at (Date. (.getTime (java.time.Instant/parse (:expires_at r))))})
+        (mapv (fn [row]
+                (or (:lease row)
+                    (let [actions-raw (:actions row)
+                          actions (set (map keyword actions-raw))
+                          constraints (or (:constraints-parsed row) {})
+                          principal {:principal/type :session :session/id (types/session-id (:principal-id row))}
+                          resource (:resource row)]
+                      {:cap/id (try (UUID/fromString (:id row)) (catch Exception _ (UUID/randomUUID)))
+                       :principal principal
+                       :resource resource
+                       :actions actions
+                       :constraints constraints
+                       :issued-at (try (Date/from (java.time.Instant/parse (:issued-at row))) (catch Exception _ (Date.)))
+                       :expires-at (try (Date/from (java.time.Instant/parse (:expires-at row))) (catch Exception _ (Date. (+ (System/currentTimeMillis) 3600000))))})))
               rows)))
     (catch Exception _ nil)))
 
@@ -286,16 +290,8 @@
             reg (registry/create-registry)
             _ (registry/register! reg (fixture/echo-provider {}))
             persisted (load-persisted-leases db sid)
-            now (Date.)
-            expires (Date. (+ (.getTime now) 600000))
-            synthetic {:cap/id (UUID/randomUUID)
-                       :principal {:principal/type :session :session/id sid}
-                       :resource {:kind :tool :id :fixture/echo}
-                       :actions #{:invoke}
-                       :constraints {:max-calls 10}
-                       :issued-at now
-                       :expires-at expires}
-            leases (or persisted [synthetic])
+            ;; P1: no synthetic fallback — DB miss means deny (empty leases). Restart hydrates from DB.
+            leases (or persisted [])
             usage (atom {})
             ph (phenotype/instantiate compiled
                                       {:stores {:sqlite :poison :cas {:root :poison}}

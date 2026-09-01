@@ -28,8 +28,8 @@
 
 (def latest-version
   "The schema version this codebase knows how to migrate to. Must equal
-  the count of migration files; bumped to 18 for W1 Work unified lifecycle."
-  18)
+  the count of migration files; bumped to 19 for P1 single-source Authority (DB truth, versioned cache)."
+  19)
 (def ^:private version-key "schema_version")
 (def ^:private applied-key "applied_migrations")
 (def ^:private migrations-dir "migrations")

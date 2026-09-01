@@ -180,15 +180,14 @@
            :expires-at expires})))))
 
 ;; ---------------------------------------------------------------------------
-;; Generic LeaseRegistry helpers (P5) — unified for ANY kind
-;; Delegates to capability/mint (single definition). Kept here as well so
-;; callers can require either mint or lease. Idempotent revoke, fail-closed.
+;; Generic LeaseRegistry helpers (P5/P1) — versioned cache, delegates to mint
 ;; ---------------------------------------------------------------------------
 
 (defn create-lease-registry
   "Create a fresh LeaseRegistry atom (delegates to capability/mint)."
   []
-  (atom {}))
+  (let [f (requiring-resolve 'evoclj.capability.mint/create-lease-registry)]
+    (@f)))
 
 (defn get-lease
   "Look up a recorded lease by :cap/id, or nil (delegates to mint)."
@@ -206,39 +205,44 @@
   (lease-revoked? registry cap-id))
 
 (defn revoke-lease!
-  "Revoke the recorded lease with :cap/id, idempotent."
-  [registry cap-id]
-  (swap! registry update cap-id (fn [rec]
-                                  (cond-> (or rec {:lease nil :revoked? true})
-                                    true (assoc :revoked? true))))
-  nil)
+  "Revoke the recorded lease with :cap/id, idempotent.
+  Arity [registry cap-id] memory-only; [db registry cap-id] durable P1."
+  ([registry cap-id]
+   (let [f (requiring-resolve 'evoclj.capability.mint/revoke-lease!)]
+     (@f registry cap-id)))
+  ([db registry cap-id]
+   (let [f (requiring-resolve 'evoclj.capability.mint/revoke-lease!)]
+     (@f db registry cap-id))))
 
 (defn revoke-leases!
-  "Revoke each lease in `leases` via `revoke-lease!`. Idempotent. S4 helper
-  mirroring capability/mint. Delegates to revoke-lease! for each cap-id."
-  [registry leases]
-  (when (and registry (seq leases))
-    (doseq [l leases]
-      (when-let [cap-id (:cap/id l)]
-        (revoke-lease! registry cap-id))))
-  nil)
+  "Revoke each lease in `leases` via `revoke-lease!`. Idempotent."
+  ([registry leases]
+   (let [f (requiring-resolve 'evoclj.capability.mint/revoke-leases!)]
+     (@f registry leases)))
+  ([db registry leases]
+   (let [f (requiring-resolve 'evoclj.capability.mint/revoke-leases!)]
+     (@f db registry leases))))
 
 (defn leases-for-session
   "Return leases in `registry` for SessionPrincipal `session-id` (str-coerced compare)."
   [registry session-id]
-  (let [sid (str session-id)]
-    (->> @registry
-         vals
-         (keep :lease)
-         (filterv (fn [l]
-                    (let [p (or (:principal l) (:subject l))]
-                      (and (= :session (:principal/type p))
-                           (= sid (str (:session/id p))))))))))
+  (let [f (requiring-resolve 'evoclj.capability.mint/leases-for-session)]
+    (@f registry session-id)))
 
 (defn leases-for-principal
   "Return leases in `registry` for exact `principal` (equality)."
   [registry principal]
-  (->> @registry
-       vals
-       (keep :lease)
-       (filterv (fn [l] (= principal (or (:principal l) (:subject l)))))))
+  (let [f (requiring-resolve 'evoclj.capability.mint/leases-for-principal)]
+    (@f registry principal)))
+
+(defn registry-version
+  "Return monotonic version of registry (delegates to mint)."
+  [registry]
+  (let [f (requiring-resolve 'evoclj.capability.mint/registry-version)]
+    (@f registry)))
+
+(defn hydrate-registry!
+  "Restart hydration: load active capabilities from DB into registry (delegates to mint)."
+  [db registry]
+  (let [f (requiring-resolve 'evoclj.capability.mint/hydrate-registry!)]
+    (@f db registry)))

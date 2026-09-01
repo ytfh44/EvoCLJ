@@ -176,7 +176,7 @@
   "Test helper — clear the global subagent lease registry and index.
   Safe to call between fixtures."
   []
-  (reset! subagent-lease-registry {})
+  (reset! subagent-lease-registry {:evoclj.capability.mint/version 0})
   (reset! leases-by-session {})
   nil)
 
@@ -244,44 +244,14 @@
                                   :cause/event-id nil
                                   :payload-ref nil
                                   :metadata {}})
-          ;; Derive child leases (attenuated — same actions is minimal narrowing)
+          ;; P1: derive child leases durably — DB INSERT before cache (attenuated)
           derived (mapv (fn [pl]
-                          (mint/derive-lease! nil pl {:principal child-principal
-                                                      :actions (:actions pl)}))
+                          (mint/derive-lease! db subagent-lease-registry pl {:principal child-principal
+                                                                              :actions (:actions pl)}))
                         parent-leases)
-          ;; S4: register derived leases in global in-memory registry and session index
+          ;; keep session index in sync with durable leases (versioned cache mirror)
           _ (when (seq derived)
-              (doseq [l derived]
-                (try (mint/register-lease! subagent-lease-registry l)
-                     (catch Exception _ (swap! subagent-lease-registry assoc (:cap/id l) {:lease l :revoked? false}))))
-              (swap! leases-by-session update child-id (fnil into []) derived)
-              ;; Best-effort persist to capabilities table for DB durability (P7)
-              (try
-                (let [cap-store-ns (try (requiring-resolve 'evoclj.store.capability-store/insert-capability!)
-                                        (catch Exception _ nil))]
-                  (when cap-store-ns
-                    (doseq [l derived]
-                      (try
-                        (let [p (or (:principal l) (:subject l))
-                              pid (case (:principal/type p)
-                                    :session (str (:session/id p))
-                                    :job (str (:job/id p))
-                                    :eval (str (:eval/id p))
-                                    :operator "operator"
-                                    (str p))]
-                          (@cap-store-ns db {:id (str (:cap/id l))
-                                           :principal_type (name (:principal/type p))
-                                           :principal_id pid
-                                           :resource_kind (name (:kind (:resource l)))
-                                           :resource_id (str (:id (:resource l)))
-                                           :actions (mapv name (:actions l))
-                                           :constraints (:constraints l)
-                                           :issued_at (str (:issued-at l))
-                                           :expires_at (str (:expires-at l))
-                                           :revoked 0
-                                           :created_at (str (java.time.Instant/now))}))
-                        (catch Exception _)))))
-                (catch Exception _)))
+              (swap! leases-by-session update child-id (fnil into []) derived))
           parent-events (event/events-for-session db parent-id)
           latest (last parent-events)
           _ (when-not latest
@@ -356,10 +326,9 @@
   with `task`. Returns the scheduler result map
   {:status :completed|:failed|:budget-exhausted ...}.
 
-  Child intents go through the broker with the child's derived leases
-  (already attenuated in S2 — here represented by a fresh synthetic lease
-  for :fixture/echo, or persisted child leases if present in the
-  capabilities table). The child has its own event chain (per-session seq
+  Child intents go through the broker with the child's persisted derived leases
+  from the capabilities table (P1 DB truth); DB miss means deny, no synthetic lease.
+  The child has its own event chain (per-session seq
   1..M) independent from the parent; the parent's :subagent/spawned event
   already links to the child (S2).
 
@@ -428,49 +397,30 @@
                   (recur (into rest-q children) visited' (into result children)))))))))))
 
 (defn- revoke-leases-for-session*
-  "Revoke all leases associated with `session-id` both in the global
-  subagent-lease-registry (in-memory, checked by broker) and in the
-  persistent capabilities table (when present). Idempotent."
+  "P1 durable-first revocation: UPDATE capabilities WHERE revoked=0 before swap! cache.
+  DB is truth, memory is versioned cache. Idempotent and strict — no try/catch swallow."
   [db session-id]
   (let [sid (try (types/session-id session-id) (catch Exception _ session-id))
-        ;; in-memory index
         mem-leases (get @leases-by-session sid [])
-        ;; also scan registry directly (covers leases not in index, e.g. legacy)
-        registry-leases (try (mint/leases-for-session subagent-lease-registry sid) (catch Exception _ []))
-        all-leases (distinct (concat mem-leases registry-leases))]
-    ;; revoke in-memory
+        registry-leases (mint/leases-for-session subagent-lease-registry sid)
+        all-leases (distinct (concat mem-leases registry-leases))
+        cap-ids (distinct (concat (mapv :cap/id all-leases) (mapv :cap/id mem-leases)))
+        db-cap-ids (let [rows (sqlite/query (db-spec db) ["SELECT id FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0" (str sid)])
+                         ids (mapv #(:id %) rows)]
+                     ids)
+        all-db-ids (distinct (concat (mapv str cap-ids) db-cap-ids))]
+    ;; DURABLE FIRST: update DB rows for all ids (WHERE revoked=0 inside revoke-capability!)
+    (doseq [id all-db-ids]
+      (when id
+        (let [revoke! (requiring-resolve 'evoclj.store.capability-store/revoke-capability!)]
+          (@revoke! db (str id)))))
+    ;; THEN cache: tombstone in-memory registry and session index
+    (doseq [id all-db-ids]
+      (let [cap-id (try (UUID/fromString (str id)) (catch Exception _ id))]
+        (mint/revoke-lease! subagent-lease-registry cap-id)))
     (doseq [l all-leases]
       (when-let [cap-id (:cap/id l)]
-        (try (mint/revoke-lease! subagent-lease-registry cap-id) (catch Exception _))))
-    ;; revoke any remaining registry entries that would have been missed (tombstone path)
-    ;; ensure leases-by-session leases are also tombstoned even if not in registry yet
-    (doseq [l mem-leases]
-      (when-let [cap-id (:cap/id l)]
-        (try (mint/revoke-lease! subagent-lease-registry cap-id) (catch Exception _))))
-    ;; DB fallback: mark capabilities rows as revoked; also ensure cap ids from mem are revoked in DB
-    (let [cap-ids (distinct (concat (mapv :cap/id all-leases) (mapv :cap/id mem-leases)))]
-      (doseq [cap-id cap-ids]
-        (when cap-id
-          (try
-            (let [revoke-fn (try (requiring-resolve 'evoclj.store.capability-store/revoke-capability!)
-                                 (catch Exception _ nil))]
-              (when revoke-fn (@revoke-fn db cap-id)))
-            (catch Exception _))))
-      ;; also revoke any DB rows for session that were not in mem (direct query)
-      (try
-        (let [rows (sqlite/query (db-spec db) ["SELECT id FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0" (str sid)])
-              ids (mapv #(:id %) rows)]
-          (doseq [id ids]
-            (try
-              (let [cap-id (try (UUID/fromString (str id)) (catch Exception _ id))]
-                (mint/revoke-lease! subagent-lease-registry cap-id))
-              (catch Exception _))
-            (try
-              (let [revoke-fn (try (requiring-resolve 'evoclj.store.capability-store/revoke-capability!)
-                                   (catch Exception _ nil))]
-                (when revoke-fn (@revoke-fn db (str id))))
-              (catch Exception _))))
-        (catch Exception _)))
+        (mint/revoke-lease! subagent-lease-registry cap-id)))
     nil))
 
 (defn- append-cancel-events!
