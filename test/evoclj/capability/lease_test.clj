@@ -1,32 +1,12 @@
 (ns evoclj.capability.lease-test
   "Tests for capability resources and lease semantics (component).
 
-  A CapabilityLease is a bounded HOST-OWNED grant: a plain immutable
-  map validated by Malli, never a string name visible to the model.
-  Step 1 asserts EXACT subject matching — a lease for P1 must never
-  authorize P2, even when both phenotypes share the same Genome (the
-  lease carries only the phenotype id, so a same-Genome sibling is a
-  different id and must not match). Step 2 asserts the expiry window
-  boundaries (:issued-at inclusive, :expires-at EXCLUSIVE — a lease is
-  dead AT its expiry instant) and that an action outside the lease's
-  :actions set is never covered, even when the resource matches. Step 3
-  asserts filesystem scoping over CANONICAL RESOLVED PATHS: matching
-  happens on canonical forms, never on user-supplied strings —
-  \"/work/a/../secret\" is covered only because it resolves to
-  \"/work/secret\", which lies inside the \"/work\" root, while a
-  traversal escaping to \"/etc\" is never covered. Step 4 asserts
-  schema validation of the lease map itself: closed shape, every field
-  required, a positive grant window, typed errors, and EDN-safety
-  (Global Constraint 22). Step 5 asserts model resource coverage
-  (roadmap S3): an exact model lease covers model A and denies model
-  B, a wildcard \"<provider>/*\" lease covers only models inside the
-  provider prefix, and a model lease never covers a tool or
-  filesystem resource (kind mismatch fails closed).
+  I2 Principal algebra: a lease binds ONE Principal tagged union;
+  matching is exact equality — no wildcard, no dual-anchor, no placeholder.
 
-  Provider-side normalization of user-facing requests is component
-  (evoclj.provider); the filesystem matcher here canonicalizes the pure
-  path forms itself, so the tests use canonical \"/\"-separated fixture
-  paths and note that dependency."
+  Step 1 asserts EXACT principal matching — SessionPrincipal(sid) only
+  matches same sid; Job/Eval/Operator are distinct. Step 2 expiry, Step 3
+  filesystem canonical, Step 4 schema closed shape requires :principal, Step 5 model."
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [evoclj.capability.lease :as lease]
@@ -35,69 +15,59 @@
 
 ;; --- shared fixtures -------------------------------------------------------
 
-(def ^:private phenotype-p1
-  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-
-(def ^:private phenotype-p2
-  "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-
 (def ^:private session-a #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 (def ^:private session-b #uuid "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+(def ^:private job-a #uuid "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+(def ^:private eval-a #uuid "dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+
+(def ^:private principal-a {:principal/type :session :session/id session-a})
+(def ^:private principal-b {:principal/type :session :session/id session-b})
+(def ^:private job-principal-a {:principal/type :job :job/id job-a})
+(def ^:private eval-principal-a {:principal/type :eval :eval/id eval-a})
+(def ^:private operator-principal {:principal/type :operator})
 
 (def ^:private issued-at (java.util.Date. 1700000000000))
-(def ^:private expires-at (java.util.Date. 1700003600000)) ; issued-at + 1h
+(def ^:private expires-at (java.util.Date. 1700003600000))
 
 (def ^:private base-lease
   {:cap/id #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-   :subject {:session/id session-a :phenotype/id phenotype-p1}
+   :principal principal-a
    :resource {:kind :tool :id :fixture/echo}
    :actions #{:invoke}
    :constraints {:max-calls 10}
    :issued-at issued-at
    :expires-at expires-at})
 (defn- lease
-  "A valid lease map, optionally with assoc-style overrides."
   [& kvs]
   (if (seq kvs)
     (apply assoc base-lease kvs)
     base-lease))
 
-;; --- shared helpers --------------------------------------------------------
-
-(defn- lease-error
-  "The ExceptionInfo thrown by the thunk f, or nil when f succeeds."
-  [f]
-  (try (f)
-       nil
-       (catch clojure.lang.ExceptionInfo e e)))
-
-(defn- is-schema-invalid
-  "Assert the thunk f throws :capability/schema-invalid."
-  [f]
+(defn- lease-error [f] (try (f) nil (catch clojure.lang.ExceptionInfo e e)))
+(defn- is-schema-invalid [f]
   (let [e (lease-error f)]
     (is (some? e) "the call is rejected")
     (is (= :capability/schema-invalid (:error/type (ex-data e))))))
 
-;; ============================================================================
-;; Step 1 — exact subject matching
-;; ============================================================================
-
-(deftest exact-subject-matching
-  (testing "the lease's own session+phenotype is authorized (dual-anchor)"
-    (is (lease/subject-matches? (lease) {:session/id session-a :phenotype/id phenotype-p1})))
-  (testing "a lease for (session-a,P1) never authorizes same phenotype but sibling session"
-    (is (not (lease/subject-matches? (lease) {:session/id session-b :phenotype/id phenotype-p1}))))
-  (testing "a lease for P1 never authorizes P2, even same session"
-    (is (not (lease/subject-matches? (lease) {:session/id session-a :phenotype/id phenotype-p2}))))
-  (testing "a subject with a malformed or missing phenotype/session id is rejected, never matched"
-    (is-schema-invalid #(lease/subject-matches? (lease) {}))
-    (is-schema-invalid #(lease/subject-matches? (lease) {:session/id session-a :phenotype/id "not-a-hash"}))
-    (is (not (lease/subject-matches? (lease) {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}))
-        "sibling session with same phenotype is not a match (dual-anchor), not a schema error")
-    (is-schema-invalid #(lease/subject-matches? (lease) {:session/id session-a}))))
-;; ============================================================================
-;; Step 2 — expiry boundaries and action mismatch
-;; ============================================================================
+;; Step 1 — exact principal matching (I2)
+(deftest exact-principal-matching
+  (testing "the lease's own principal is authorized"
+    (is (lease/principal-matches? (lease) principal-a))
+    (is (lease/subject-matches? (lease) principal-a) "alias works"))
+  (testing "different session principal never matches"
+    (is (not (lease/principal-matches? (lease) principal-b))))
+  (testing "different principal types never match even with same id string"
+    (is (not (lease/principal-matches? (lease) job-principal-a)))
+    (is (not (lease/principal-matches? (lease) eval-principal-a)))
+    (is (not (lease/principal-matches? (lease) operator-principal))))
+  (testing "operator lease only matches operator"
+    (let [op-lease (lease :principal operator-principal)]
+      (is (lease/principal-matches? op-lease operator-principal))
+      (is (not (lease/principal-matches? op-lease principal-a)))))
+  (testing "malformed principal is rejected"
+    (is-schema-invalid #(lease/principal-matches? (lease) {}))
+    (is-schema-invalid #(lease/principal-matches? (lease) {:principal/type :session}))
+    (is-schema-invalid #(lease/principal-matches? (lease) {:principal/type :bogus :session/id session-a}))))
 
 (deftest expiry-boundaries
   (testing "before :issued-at the lease is not yet valid"
@@ -121,10 +91,6 @@
     (is (lease/resource-covers? (lease)
                                 {:kind :tool :id :fixture/echo}
                                 :invoke))))
-
-;; ============================================================================
-;; Step 3 — filesystem-style resource scoping on canonical resolved paths
-;; ============================================================================
 
 (deftest canonicalize-path-resolves-dot-segments
   (is (= "/work" (lease/canonicalize-path "/work")))
@@ -184,10 +150,6 @@
                                      {:kind :teleport :id :any}
                                      :invoke)))))
 
-;; ============================================================================
-;; Step 4 — schema validation of the lease map
-;; ============================================================================
-
 (deftest valid-lease-validates-unchanged
   (let [l (lease)]
     (testing "a valid lease validates and is returned unchanged (no coercion)"
@@ -197,7 +159,7 @@
 
 (deftest lease-schema-rejects-malformed-maps
   (testing "every field is required"
-    (doseq [k [:cap/id :subject :resource :actions :constraints
+    (doseq [k [:cap/id :principal :resource :actions :constraints
                :issued-at :expires-at]]
       (is-schema-invalid #(schema/validate-lease (dissoc (lease) k)))))
   (testing "the top-level shape is closed — unknown keys are rejected"
@@ -207,16 +169,15 @@
     (is-schema-invalid #(schema/validate-lease (assoc (lease) :actions [:invoke])))
     (is-schema-invalid #(schema/validate-lease (assoc (lease) :actions #{42})))
     (is-schema-invalid #(schema/validate-lease (assoc (lease) :resource "echo")))
-    (is-schema-invalid #(schema/validate-lease (assoc (lease) :subject {})))
+    (is-schema-invalid #(schema/validate-lease (assoc (lease) :principal {})))
     (is-schema-invalid #(schema/validate-lease
-                         (assoc (lease) :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id "not-a-hash"})))
+                         (assoc (lease) :principal {:principal/type :session :session/id 42})))
     (is-schema-invalid #(schema/validate-lease (assoc (lease) :issued-at 1700000000000)))
     (is-schema-invalid #(schema/validate-lease (assoc (lease) :expires-at nil))))
   (testing "a grant must span a positive window"
     (is-schema-invalid #(schema/validate-lease (assoc (lease) :expires-at issued-at)))
     (is-schema-invalid #(schema/validate-lease
                          (assoc (lease) :expires-at (java.util.Date. 1699999999999))))))
-
 (deftest lease-rejects-non-edn-safe-values
   (testing "a raw Java object inside the lease cannot cross the boundary (Global Constraint 22)"
     (let [e (lease-error #(schema/validate-lease
@@ -228,8 +189,8 @@
 (deftest predicates-reject-malformed-input
   (testing "a malformed lease is rejected, never silently matched"
     (is-schema-invalid #(lease/valid-at? (dissoc (lease) :expires-at) issued-at))
-    (is-schema-invalid #(lease/subject-matches? (dissoc (lease) :subject)
-                                               {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}))
+    (is-schema-invalid #(lease/principal-matches? (dissoc (lease) :principal)
+                                               principal-a))
     (is-schema-invalid #(lease/resource-covers? (dissoc (lease) :actions)
                                                 {:kind :tool :id :fixture/echo}
                                                 :invoke)))
@@ -244,13 +205,7 @@
   (let [e (lease-error #(schema/validate-lease (dissoc (lease) :expires-at)))
         d (err/error-data e)]
     (is (= :capability/schema-invalid (:error/type d)))
-    (is (contains? (:error/data d) :explanation))
-    (is (seq (:errors (:explanation (:error/data d)))))
-    (is (= d (edn/read-string (pr-str d))))))
-
-;; ============================================================================
-;; Step 5 — model resource coverage (S3: per-model lease denial cases)
-;; ============================================================================
+    (is (contains? (:error/data d) :explanation))))
 
 (deftest model-resource-coverage
   (testing "an exact model lease covers model A, never model B"

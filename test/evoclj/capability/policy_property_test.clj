@@ -41,14 +41,13 @@
   "The fixed decision instant; lease windows are generated around it."
   (Date. 1700000000000))
 
-(def ^:private phenotype-pool
-  ["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-   "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-   "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"])
+(def ^:private principal-pool
+  [{:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+   {:principal/type :session :session/id #uuid "11111111-1111-4111-8111-111111111111"}
+   {:principal/type :job :job/id #uuid "22222222-2222-4222-8222-222222222222"}
+   {:principal/type :operator}])
 
-(def ^:private subject-pool
-  (mapv (fn [id] {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id id}) phenotype-pool))
+(def ^:private subject-pool principal-pool)
 
 (def ^:private resource-pool
   [{:kind :tool :id :fixture/echo}
@@ -82,30 +81,30 @@
 
 (def ^:private lease-gen
   (gen/fmap
-   (fn [[cap-id subject resource actions constraints [i-ms e-ms]]]
+   (fn [[cap-id principal resource actions constraints [i-ms e-ms]]]
      {:cap/id cap-id
-      :subject subject
+      :principal principal
       :resource resource
       :actions actions
       :constraints constraints
       :issued-at (date-at i-ms)
       :expires-at (date-at e-ms)})
    (gen/tuple gen/uuid
-              (gen/elements subject-pool)
+              (gen/elements principal-pool)
               (gen/elements resource-pool)
               (gen/elements actions-pool)
               (gen/elements constraints-pool)
               (gen/elements window-pool))))
 
 (defn- request-gen
-  "Generator of [subject resource action now]. With probability 1/2 the
-  request is coupled to a random generated lease (its subject,
+  "Generator of [principal resource action now]. With probability 1/2 the
+  request is coupled to a random generated lease (its principal,
   resource, one of its actions, and an instant inside its window), so
   allow cases are exercised often; otherwise it is fully independent."
   [leases]
   (if (seq leases)
     (gen/one-of
-     [(gen/tuple (gen/elements subject-pool)
+     [(gen/tuple (gen/elements principal-pool)
                  (gen/elements resource-pool)
                  (gen/elements action-pool)
                  (gen/return now))
@@ -114,11 +113,11 @@
          (let [issued (:issued-at l)
                expires (:expires-at l)
                mid (Date. (quot (+ (.getTime issued) (.getTime expires)) 2))]
-           [(:subject l) (:resource l)
+           [(:principal l) (:resource l)
             (first (shuffle (vec (:actions l))))
             mid]))
        (gen/elements leases))])
-    (gen/tuple (gen/elements subject-pool)
+    (gen/tuple (gen/elements principal-pool)
                (gen/elements resource-pool)
                (gen/elements action-pool)
                (gen/return now))))
@@ -171,7 +170,7 @@
 
 (def ^:private deny-reasons
   "The documented non-missing deny codes (decide's contract)."
-  #{:capability/subject-mismatch :capability/expired :capability/action-denied
+  #{:capability/principal-mismatch :capability/expired :capability/action-denied
     :capability/scope-denied :capability/budget-exceeded})
 
 (defspec first-allow-wins-and-deny-when-nothing-allows 200

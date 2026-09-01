@@ -23,7 +23,7 @@
   - :intent             a validated v0 Intent (re-validated here with
                         evoclj.intent.schema; carries the Global
                         Constraint 20 attribution the decision
-                        subject is derived from).
+                        principal is derived from).
   - :normalized-request the CANONICAL resource descriptor produced by
                         provider normalize-request (component):
                         {:tool/id ... :resource {...} ...}. It must
@@ -150,7 +150,7 @@
   (reg/assert-registry! registry)
   (let [lease-reg (or lease-registry leases-registry revocation-registry)
         revoked? (fn [lease] (when lease-reg (boolean (get-in @lease-reg [(:cap/id lease) :revoked?]))))
-        subject (policy/intent-subject intent)
+        principal (policy/intent-principal intent)
         reg-sealed (or registry default-resource-kind-registry)
         kind (:kind (:resource normalized-request))
         targets (reg/registry-get reg-sealed kind)]
@@ -170,12 +170,12 @@
                 non-revoked (if lease-reg (remove revoked? all-leases) all-leases)
                 d (if unknown-action?
                     {:decision :deny :reason :capability/unknown-action}
-                    (policy/decide non-revoked subject res act now (or usage {})))
+                    (policy/decide non-revoked principal res act now (or usage {})))
                 d (if (= :deny (:decision d))
                     ;; no non-revoked lease allowed; check if a revoked one would have allowed
                     (let [revoked-leases (if lease-reg (filter revoked? all-leases) [])
                           rd (when (and (seq revoked-leases) (not unknown-action?))
-                               (policy/decide revoked-leases subject res act now (or usage {})))]
+                               (policy/decide revoked-leases principal res act now (or usage {})))]
                       (if (and rd (= :allow (:decision rd)))
                         {:decision :deny :reason :capability/revoked}
                         d))

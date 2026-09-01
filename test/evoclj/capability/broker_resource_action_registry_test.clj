@@ -65,7 +65,7 @@
   overrides (e.g. :actions, :resource)."
   [cap-id & kvs]
   (let [base {:cap/id cap-id
-              :subject {:session/id session-id :phenotype/id phenotype-p1}
+              :principal {:principal/type :session :session/id session-id}
               :resource {:kind :tool :id :fixture/echo}
               :actions #{:invoke}
               :constraints {:max-calls 10}
@@ -83,7 +83,7 @@
   granting `actions` over `path`, optionally overridden."
   [cap-id actions path & kvs]
   (let [base {:cap/id cap-id
-              :subject {:session/id session-id :phenotype/id phenotype-p1}
+              :principal {:principal/type :session :session/id session-id}
               :resource {:kind :filesystem :path path}
               :actions actions
               :constraints {:max-calls 10}
@@ -96,7 +96,7 @@
   over `path`."
   [cap-id actions path & kvs]
   (let [base {:cap/id cap-id
-              :subject {:session/id session-id :phenotype/id phenotype-p1}
+              :principal {:principal/type :session :session/id session-id}
               :resource {:kind :filesystem/path :path path}
               :actions actions
               :constraints {:max-calls 10}

@@ -404,24 +404,21 @@
 
 (defn- verify-binding-fs-lease!
   "B4 fail-closed re-verification: when the caller supplies a filesystem
-  lease (`:fs-lease`), RE-verify it against the session's pinned phenotype
-  and the supplied instant BEFORE any runtime state is published — a stale /
+  lease, it is re-verified (case R: requester :: revoked) so only a
+  valid lease is activation-worthy. Verify-FS-lease's registry path
+  ensures the granted lease is genuine and the window covers :now; an
   expired / revoked lease is rejected with a typed error, never silently
   honored. When no `:fs-lease` is supplied this is a no-op (the engine
   grants no filesystem access without a lease). Reuses
   evoclj.mount.filesystem/verify-fs-lease! (single implementation, INV-05).
-  Returns the lease when present. P3 dual-anchor: the verification subject
-  is {:session/id :phenotype/id}, so sibling sessions never match."
+  Returns the lease when present. I2: verification principal is
+  SessionPrincipal(session-id), principal equality."
   [db session-id fs-lease opts]
   (when fs-lease
-    (let [{:keys [phenotype_id]} (fetch-session db session-id)]
-      (mount-fs/verify-fs-lease! fs-lease
-                                 {:subject (if phenotype_id
-                                             {:session/id (types/session-id session-id)
-                                              :phenotype/id phenotype_id}
-                                             (get-in fs-lease [:subject]))
+    (mount-fs/verify-fs-lease! fs-lease
+                                 {:principal {:principal/type :session :session/id (types/session-id session-id)}
                                   :now (:now opts)
-                                  :registry (:fs-lease-registry opts)})))
+                                  :registry (:fs-lease-registry opts)}))
   fs-lease)
 
 ;; ---------------------------------------------------------------------------

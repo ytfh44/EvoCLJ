@@ -28,11 +28,8 @@
 
 (def latest-version
   "The schema version this codebase knows how to migrate to. Must equal
-  the highest migration file number on the classpath; the equality is
-  enforced fail-closed by validate-migration-chain! on every
-  migration-files/migrate! call."
-  14)
-
+  the count of migration files; bumped to 15 for I2 Principal."
+  15)
 (def ^:private version-key "schema_version")
 (def ^:private applied-key "applied_migrations")
 (def ^:private migrations-dir "migrations")

@@ -24,7 +24,7 @@
              when no recording is needed. When supplied the sealed lease is
              stored with :revoked? false so verify/revoke paths work.
 
-    :subject     { :session/id <uuid> :phenotype/id \"sha256:...\" } — required, dual-anchor
+    :principal   Principal tagged union (I2) — required
     :resource    { :kind ... } — required (open, provider-defined)
     :actions     set of keywords — required, non-empty ⊆ allowlist
     :constraints map — optional, default {}
@@ -32,14 +32,18 @@
     :expires-at  #inst — optional, default issued+1h; must be after issued
     :cap/id      uuid — optional, default fresh (alias :cap-id also accepted)
 
+  Accepts legacy :subject as alias for :principal (break-compat transition:
+  if both supplied, :principal wins; if neither, validates and throws).
+
   Validates via schema/validate-lease and asserts positive window
   (issued < expires) else throws :capability/schema-invalid via
   schema/make-lease. Returns the sealed CapabilityLease instance."
-  [registry {:keys [subject resource actions constraints issued-at expires-at cap-id] :as opts}]
+  [registry {:keys [principal subject resource actions constraints issued-at expires-at cap-id] :as opts}]
   (let [cap-id-val (or (:cap/id opts) cap-id (UUID/randomUUID))
         issued (or issued-at (Date.))
         expires (or expires-at (Date. (+ (.getTime ^Date issued) 3600000)))
         constraints-val (or constraints (:constraints opts) {})
+        principal-val (or principal subject (:principal opts) (:subject opts))
         actions-val (cond
                       (nil? actions) (:actions opts)
                       :else actions)
@@ -47,7 +51,7 @@
         actions-set (when actions-val
                       (if (set? actions-val) actions-val (set actions-val)))
         lease-map (cond-> {:cap/id cap-id-val
-                           :subject subject
+                           :principal principal-val
                            :resource resource
                            :actions actions-set
                            :constraints constraints-val
@@ -84,7 +88,7 @@
   registry — LeaseRegistry atom or nil
   parent-lease — sealed CapabilityLease (schema/lease? true), not revoked
   opts — map with optional keys:
-    :subject     override subject (for subagent delegation; must still be valid)
+    :principal   override principal (for subagent delegation; must still be valid)
     :resource    override resource (must equal parent resource)
     :actions     set of actions (default: parent actions)
     :constraints map (default: {} merged with parent constraints, see below)
@@ -92,9 +96,11 @@
     :expires-at  #inst (default: parent expires)
     :cap-id / :cap/id  child cap id (default: fresh UUID)
 
+  Legacy :subject alias accepted for :principal.
+
   Throws :capability/attenuation-invalid when any narrowing rule is violated,
   and :capability/schema-invalid when the resulting lease is malformed."
-  [registry parent-lease {:keys [subject resource actions constraints issued-at expires-at cap-id] :as opts}]
+  [registry parent-lease {:keys [principal subject resource actions constraints issued-at expires-at cap-id] :as opts}]
   (when-not (schema/lease? parent-lease)
     (throw (err/error :capability/attenuation-invalid
                       "derive-lease! requires a sealed CapabilityLease as parent"
@@ -103,14 +109,14 @@
     (throw (err/error :capability/attenuation-invalid
                       "cannot derive from a revoked parent lease"
                       {:parent-cap-id (:cap/id parent-lease)})))
-  (let [parent-subject (:subject parent-lease)
+  (let [parent-principal (or (:principal parent-lease) (:subject parent-lease))
         parent-resource (:resource parent-lease)
         parent-actions (:actions parent-lease)
         parent-constraints (:constraints parent-lease)
         parent-issued (:issued-at parent-lease)
         parent-expires (:expires-at parent-lease)
         parent-cap-id (:cap/id parent-lease)
-        child-subject (or subject (:subject opts) parent-subject)
+        child-principal (or principal subject (:principal opts) (:subject opts) parent-principal)
         child-resource (if (contains? (or opts {}) :resource) (:resource opts) parent-resource)
         child-actions-raw (if (contains? (or opts {}) :actions) actions parent-actions)
         child-actions-set (when child-actions-raw
@@ -156,7 +162,7 @@
         (throw (err/error :capability/schema-invalid
                           "derived lease must span positive window: :expires-at after :issued-at"
                           {:value (err/sanitize {:cap/id cap-id-val
-                                                 :subject child-subject
+                                                 :principal child-principal
                                                  :resource child-resource
                                                  :actions child-actions-set
                                                  :constraints child-constraints-raw
@@ -166,7 +172,7 @@
                                       :cap/attenuated-from parent-cap-id
                                       :attenuated-from parent-cap-id)
             lease-map {:cap/id cap-id-val
-                       :subject child-subject
+                       :principal child-principal
                        :resource child-resource
                        :actions child-actions-set
                        :constraints merged-constraints
@@ -237,12 +243,24 @@
   nil)
 
 (defn leases-for-session
-  "Return all leases in `registry` whose subject's :session/id equals
-  `session-id` (UUID or string-coerced via str). Returns vector of
-  CapabilityLease values (possibly empty). Pure read of the atom."
+  "Return all leases in `registry` whose principal is SessionPrincipal(session-id).
+  Str-coerced compare for UUID/string ids."
   [registry session-id]
-  (let [sid (str session-id)]
+  (let [sid (str session-id)
+        target {:principal/type :session :session/id (try (java.util.UUID/fromString sid) (catch Exception _ sid))}]
+    ;; str-coerced matching handles both UUID and string forms
     (->> @registry
          vals
          (keep :lease)
-         (filterv (fn [l] (= sid (str (get-in l [:subject :session/id]))))))))
+         (filterv (fn [l]
+                    (let [p (or (:principal l) (:subject l))]
+                      (and (= :session (:principal/type p))
+                           (= sid (str (:session/id p))))))))))
+
+(defn leases-for-principal
+  "Return all leases in `registry` for exact `principal` (equality)."
+  [registry principal]
+  (->> @registry
+       vals
+       (keep :lease)
+       (filterv (fn [l] (= principal (or (:principal l) (:subject l)))))))

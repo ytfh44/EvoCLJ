@@ -34,7 +34,7 @@
 (deftest tool-lease-invoke-allows-invoke-denies-write
   (testing "tool lease with #{:invoke} allows :invoke request but denies :write"
     (let [lease {:cap/id #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-                 :subject {:session/id session-id :phenotype/id phenotype-p1}
+                 :principal {:principal/type :session :session/id session-id}
                  :resource {:kind :tool :id :fixture/echo}
                  :actions #{:invoke}
                  :constraints {:max-calls 10}
@@ -76,7 +76,7 @@
           (is (= :deny (:decision d)))
           (is (contains? #{:capability/action-denied :capability/unknown-action :capability/denied} (:reason d)))))
       (testing "via policy/decide directly"
-        (let [subject {:session/id session-id :phenotype/id phenotype-p1}
+        (let [subject {:principal/type :session :session/id session-id}
               res {:kind :tool :id :fixture/echo}]
           (is (= :allow (:decision (policy/decide [lease] subject res :invoke in-window {}))))
           (is (= :capability/action-denied (:reason (policy/decide [lease] subject res :write in-window {}))))))
@@ -97,7 +97,7 @@
 (deftest filesystem-lease-read-allows-read-denies-write
   (testing "filesystem lease with #{:read} allows :read but denies :write"
     (let [fs-lease {:cap/id #uuid "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
-                    :subject {:session/id session-id :phenotype/id phenotype-p1}
+                    :principal {:principal/type :session :session/id session-id}
                     :resource {:kind :filesystem :path "/work"}
                     :actions #{:read}
                     :constraints {:max-calls 10}
@@ -124,7 +124,7 @@
           (is (= :deny (:decision d)))
           (is (= :capability/action-denied (:reason d)))))
       (testing "via policy/decide directly"
-        (let [subject {:session/id session-id :phenotype/id phenotype-p1}
+        (let [subject {:principal/type :session :session/id session-id}
               res {:kind :filesystem :path "/work/secret"}]
           (is (= :allow (:decision (policy/decide [fs-lease] subject res :read in-window {}))))
           (is (= :capability/action-denied (:reason (policy/decide [fs-lease] subject res :write in-window {}))))))
@@ -139,7 +139,7 @@
 (deftest unknown-action-denied-fail-closed
   (testing "unknown action is denied fail-closed"
     (let [lease {:cap/id #uuid "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
-                 :subject {:session/id session-id :phenotype/id phenotype-p1}
+                 :principal {:principal/type :session :session/id session-id}
                  :resource {:kind :tool :id :fixture/echo}
                  :actions #{:invoke}
                  :constraints {:max-calls 10}
@@ -159,20 +159,20 @@
           "unknown action must be denied, not allowed"))
     (testing "unknown action via policy/decide is also denied"
       (let [lease {:cap/id #uuid "ffffffff-ffff-4fff-8fff-ffffffffffff"
-                   :subject {:session/id session-id :phenotype/id phenotype-p1}
+                   :principal {:principal/type :session :session/id session-id}
                    :resource {:kind :tool :id :fixture/echo}
                    :actions #{:invoke}
                    :constraints {}
                    :issued-at issued-at
                    :expires-at expires-at}
-            subject {:session/id session-id :phenotype/id phenotype-p1}
+            subject {:principal/type :session :session/id session-id}
             res {:kind :tool :id :fixture/echo}]
         (is (= :capability/action-denied (:reason (policy/decide [lease] subject res :unknown-verb in-window {}))))))))
 
 (deftest regression-invoke-still-allows
   (testing "regression: existing :invoke leases still allow when no explicit action"
     (let [lease {:cap/id #uuid "10101010-1010-4101-8101-101010101010"
-                 :subject {:session/id session-id :phenotype/id phenotype-p1}
+                 :principal {:principal/type :session :session/id session-id}
                  :resource {:kind :tool :id :fixture/echo}
                  :actions #{:invoke}
                  :constraints {}
@@ -188,12 +188,12 @@
                                                   :usage {}
                                                   :now in-window}))))
       (is (= :allow (:decision (policy/decide [lease]
-                                              {:session/id session-id :phenotype/id phenotype-p1}
+                                              {:principal/type :session :session/id session-id}
                                               {:kind :tool :id :fixture/echo}
                                               :invoke in-window {}))))))
   (testing "model kind always :invoke (P6 fallback)"
     (let [model-lease {:cap/id #uuid "20202020-2020-4202-8202-202020202020"
-                       :subject {:session/id session-id :phenotype/id phenotype-p1}
+                       :principal {:principal/type :session :session/id session-id}
                        :resource {:kind :model :id "deepseek/deepseek-v4-flash"}
                        :actions #{:invoke}
                        :constraints {}

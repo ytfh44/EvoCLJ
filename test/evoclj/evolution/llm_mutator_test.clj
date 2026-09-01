@@ -845,7 +845,7 @@
 
 (deftest out-of-scope-subject-denied-with-standard-deny-codes
   (testing "a lease binds ONE phenotype: a sibling phenotype is denied
-            with :capability/subject-mismatch and the provider never runs"
+            with :capability/principal-mismatch and the provider never runs"
     (let [store (fresh-store)
           _ (freeze-pack! store)
           ctx (broker-context
@@ -858,7 +858,7 @@
                                    {:evidence/id placeholder-hash}))]
       (is (= :error (:result/status result)))
       (is (= :capability/denied (:error/type result)))
-      (is (= :capability/subject-mismatch (get-in result [:error/data :reason])))))
+      (is (= :capability/principal-mismatch (get-in result [:error/data :reason])))))
   (testing "no lease at all is denied with :capability/missing"
     (let [store (fresh-store)
           ctx (broker-context

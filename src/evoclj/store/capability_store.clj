@@ -1,8 +1,8 @@
 (ns evoclj.store.capability-store
-  "Store-backed CapabilityLease persistence (P7).
+  "Store-backed CapabilityLease persistence (P7, I2).
 
-  Durable table `capabilities` (migration 013) mirrors the sealed lease
-  shape: dual-anchor subject, closed resource_kind, JSON actions,
+  Durable table `capabilities` (migration 013/015) mirrors the sealed lease
+  shape: principal (tagged union), closed resource_kind, JSON actions,
   positive window, revoked flag. Helpers are thin wrappers over
   sqlite spec — no mandatory DB read in the hot verify path (the in-memory
   LeaseRegistry remains authoritative); this is the additive persistence
@@ -26,8 +26,8 @@
   "Minimal row schema for insert validation."
   [:map
    [:id :string]
-   [:subject-session-id :string]
-   [:subject-phenotype-id :string]
+   [:principal-type :string]
+   [:principal-id :string]
    [:resource-kind [:and :string [:fn #(contains? allowed-resource-kinds %)]]]
    [:resource-id :string]
    [:actions [:vector :string]]
@@ -50,6 +50,8 @@
   "Map a DB row (keyword keys) to a normalized capability map."
   [row]
   {:id (:id row)
+   :principal-type (:principal_type row)
+   :principal-id (:principal_id row)
    :subject-session-id (:subject_session_id row)
    :subject-phenotype-id (:subject_phenotype_id row)
    :resource-kind (:resource_kind row)
@@ -77,18 +79,27 @@
 
 (defn- capability->row
   "Normalize a lease-like map to DB row params. Accepts either the store
-  row shape or a lease map with nested :subject/:resource. For tests we
-  accept the flat helper shape."
+  row shape or a lease map with nested :principal/:resource."
   [lease]
   (let [id (or (:id lease) (:cap/id lease) (str (:capId lease)))
-        sess (or (:subject-session-id lease)
-                 (get-in lease [:subject :session/id])
-                 (get-in lease [:subject "session/id"])
-                 (:subject_session_id lease))
-        pheno (or (:subject-phenotype-id lease)
-                  (get-in lease [:subject :phenotype/id])
-                  (get-in lease [:subject "phenotype/id"])
-                  (:subject_phenotype_id lease))
+        ;; principal resolution: explicit flat, or nested :principal, or legacy :subject
+        ptype (or (:principal-type lease)
+                  (:principal_type lease)
+                  (get-in lease [:principal :principal/type])
+                  (get-in lease [:principal "principal/type"])
+                  (when-let [p (or (:principal lease) (:subject lease))]
+                    (name (:principal/type p)))
+                  "session")
+        pid (or (:principal-id lease)
+                (:principal_id lease)
+                (get-in lease [:principal :session/id])
+                (get-in lease [:principal :job/id])
+                (get-in lease [:principal :eval/id])
+                (when (= ptype "operator") "operator")
+                (get-in lease [:subject :session/id])
+                (get-in lease [:subject "session/id"])
+                (:subject-session-id lease)
+                (:subject_session_id lease))
         rkind (or (:resource-kind lease)
                   (get-in lease [:resource :kind])
                   (get-in lease [:resource "kind"])
@@ -100,13 +111,15 @@
                 (str rkind "-resource"))
         actions (or (:actions lease) ["invoke"])
         constraints (:constraints lease)
-        issued (or (:issued-at lease) (:issued_at lease) (:issued-at lease) (str (java.time.Instant/now)))
+        issued (or (:issued-at lease) (:issued_at lease) (str (java.time.Instant/now)))
         expires (or (:expires-at lease) (:expires_at lease) (str (.plusSeconds (java.time.Instant/now) 3600)))
         created (or (:created-at lease) (:created_at lease) (str (java.time.Instant/now)))
         revoked (:revoked lease 0)]
     {:id (str id)
-     :subject_session_id (str sess)
-     :subject_phenotype_id (str pheno)
+     :principal_type (str ptype)
+     :principal_id (str pid)
+     :subject_session_id (str pid)
+     :subject_phenotype_id (str (or (:subject-phenotype-id lease) (:subject_phenotype_id lease) pid))
      :resource_kind (str rkind)
      :resource_id (str rid)
      :actions (coerce-json actions)
@@ -118,12 +131,8 @@
 ;; --- public helpers -------------------------------------------------------
 (defn insert-capability!
   "Insert a capability row. `lease` may be a flat helper map or a
-  capability-like map with nested :subject/:resource. Returns the
-  inserted row as a normalized map. Throws on CHECK / FK violation.
-
-  Actions are persisted as a JSON array string; constraints as JSON
-  (or nil). Timestamps are expected as ISO-8601 TEXT; comparison
-  `expires_at > issued_at` is lexical (ISO-8601) at the DB."
+  capability-like map with nested :principal/:resource. Returns the
+  inserted row as a normalized map. Throws on CHECK / FK violation."
   [db lease]
   (let [row (capability->row lease)]
     (sqlite/with-db [conn db]
@@ -139,11 +148,12 @@
   (fetch-capability db cap-id))
 
 (defn list-capabilities
-  "List capabilities, optionally filtered by {:subject-session-id s :resource-kind k :revoked? bool}.
-  Returns a vector of normalized maps."
+  "List capabilities, optionally filtered by {:principal-type t :principal-id id :subject-session-id s :resource-kind k :revoked? bool}."
   ([db] (list-capabilities db {}))
-  ([db {:keys [subject-session-id resource-kind revoked?]}]
+  ([db {:keys [principal-type principal-id subject-session-id resource-kind revoked?]}]
    (let [clauses (cond-> []
+                   principal-type (conj ["principal_type = ?" principal-type])
+                   principal-id (conj ["principal_id = ?" principal-id])
                    subject-session-id (conj ["subject_session_id = ?" subject-session-id])
                    resource-kind (conj ["resource_kind = ?" resource-kind])
                    (some? revoked?) (conj ["revoked = ?" (if revoked? 1 0)]))

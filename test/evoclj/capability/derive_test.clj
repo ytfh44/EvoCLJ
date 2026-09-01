@@ -21,7 +21,7 @@
 (defn- parent-opts
   []
   {:cap-id (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-   :subject {:session/id session-a :phenotype/id phenotype-p1}
+   :principal {:principal/type :session :session/id session-a}
    :resource {:kind :tool :id :fixture/echo}
    :actions #{:read :list :stat}
    :constraints {:max-calls 10}
@@ -158,16 +158,16 @@
       (is (attenuation-invalid?
            #(mint/derive-lease! registry parent {:actions #{:read}}))))))
 
-;; --- subject override for subagent delegation ---
+;; --- principal override for subagent delegation ---
 
-(deftest subject-override-allowed
-  (testing "subject override to child session still creates valid lease (resource same)"
+(deftest principal-override-allowed
+  (testing "principal override to child session still creates valid lease (resource same)"
     (let [parent (parent-lease)
-          child-subject {:session/id session-b :phenotype/id phenotype-p1}
-          child (mint/derive-lease! nil parent {:subject child-subject
+          child-principal {:principal/type :session :session/id session-b}
+          child (mint/derive-lease! nil parent {:principal child-principal
                                                 :actions #{:read}})]
       (is (schema/lease? child))
-      (is (= child-subject (:subject child)))
+      (is (= child-principal (:principal child)))
       (is (= (:cap/id parent) (get-in child [:constraints :cap/attenuated-from])))))
   (testing "resource override to different resource fails"
     (let [parent (parent-lease)]

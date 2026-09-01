@@ -21,7 +21,7 @@
 (defn- base-opts
   []
   {:cap-id #uuid "11111111-1111-4111-8111-111111111111"
-   :subject {:session/id session-a :phenotype/id phenotype-p1}
+   :principal {:principal/type :session :session/id session-a}
    :resource {:kind :tool :id :fixture/echo}
    :actions #{:invoke}
    :constraints {}
@@ -36,10 +36,9 @@
       (is (schema/lease? lease) "must be sealed")
       (is (identical? lease (schema/validate-lease lease)) "sealed lease validates")
       (is (= #uuid "11111111-1111-4111-8111-111111111111" (:cap/id lease)))
-      (is (= {:session/id session-a :phenotype/id phenotype-p1} (:subject lease)))
+      (is (= {:principal/type :session :session/id session-a} (:principal lease)))
       (is (= {:kind :tool :id :fixture/echo} (:resource lease)))
       (is (= #{:invoke} (:actions lease))))))
-
 ;; --- 2. mint with zero window throws :capability/schema-invalid ---
 
 (deftest mint-zero-window-throws-schema-invalid

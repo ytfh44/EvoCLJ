@@ -498,7 +498,7 @@
           request (normalized-tool-request :fixture/echo {:text "reuse"})]
       (testing "the child's re-dispatch with the parent's capability ID is
                 denied — subject matching is EXACT (Global Constraint 9)"
-        (is (= :capability/subject-mismatch
+        (is (= :capability/principal-mismatch
                (:reason (broker/authorize {:intent child-intent
                                            :normalized-request request
                                            :leases [parent-lease]
@@ -506,7 +506,7 @@
                                            :now (java.util.Date.)}))))
         (testing "even a lease for the SAME tool and SAME request shape
                   does not transfer — the grant binds ONE phenotype"
-          (is (= :capability/subject-mismatch
+          (is (= :capability/principal-mismatch
                  (:reason (broker/authorize {:intent child-intent
                                              :normalized-request request
                                              :leases [(tool-lease child-cap-id
@@ -589,7 +589,7 @@
       (is (:valid? (event/verify-event-chain db sid)))
       (is (= {} @usage))))
   (testing "child reusing the parent's capability ID -> :intent/denied
-            :capability/subject-mismatch (EXACT subject matching)"
+            :capability/principal-mismatch (EXACT subject matching)"
     (let [executions (atom 0)
           parent (core/compile-genome (seed-loaded) (fixture-catalog))
           child (compiled-fixture "child-extension")
@@ -612,7 +612,7 @@
       (is (= :completed (:status result)))
       (is (= 0 @executions)
           "the child's reuse attempt never ran the echo provider")
-      (is (= :capability/subject-mismatch (get-in denied [:metadata :reason]))
+      (is (= :capability/principal-mismatch (get-in denied [:metadata :reason]))
           "the audit names the exact-match failure — the grant binds the parent only")
       (is (= :capability/denied (get-in denied [:metadata :error/type])))
       (is (:valid? (event/verify-event-chain db sid)))
@@ -668,7 +668,7 @@
             request (normalized-tool-request :net/fetch {:url "https://x"})
             ;; grants bound to ANOTHER phenotype: each fails the EXACT
             ;; subject check first, so the deterministic reason is
-            ;; :capability/subject-mismatch for every non-empty subset
+            ;; :capability/principal-mismatch for every non-empty subset
             non-covering [(tool-lease child-cap-id other-pid :fixture/echo)
                           (fs-lease parent-cap-id other-pid "/protected/work")]
             d1 (broker/authorize {:intent net-intent :normalized-request request
@@ -677,7 +677,7 @@
             d2 (broker/authorize {:intent net-intent :normalized-request request
                                   :leases non-covering :usage {}
                                   :now (java.util.Date.)})]
-        (is (= {:decision :deny :reason :capability/subject-mismatch} d1))
+        (is (= {:decision :deny :reason :capability/principal-mismatch} d1))
         (is (= d1 d2)
             "re-authorizing the same request against the same grants is
             identical — the decision never grows a grant")
@@ -690,6 +690,6 @@
                                         :now (java.util.Date.)})]
               (is (= :deny (:decision ds))
                   (str "subset must deny: " (pr-str s)))
-              (is (contains? #{:capability/missing :capability/subject-mismatch}
+              (is (contains? #{:capability/missing :capability/principal-mismatch}
                              (:reason ds))
                   (str "deny reason is deterministic: " (pr-str s)))))))))

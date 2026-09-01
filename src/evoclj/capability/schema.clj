@@ -2,22 +2,33 @@
   "Malli schemas for the v0 CapabilityLease (component).
 
   A CapabilityLease is a bounded, HOST-OWNED grant: a plain immutable
-  map the kernel issues so a Phenotype may cross an effect — never a
+  map the kernel issues so a Principal may cross an effect — never a
   string name visible to the model (component acceptance). The contract
   is normative:
 
     {:cap/id #uuid \"...\"
-     :subject {:session/id #uuid \"...\" :phenotype/id \"sha256:...\"}
+     :principal {:principal/type :session :session/id #uuid \"...\"}
      :resource {:kind :tool :id :fixture/echo}
      :actions #{:invoke}
      :constraints {:max-calls 10}
      :issued-at #inst \"...\"
      :expires-at #inst \"...\"}
+
+  Principal is a tagged union (I2):
+    SessionPrincipal  {:principal/type :session  :session/id <uuid>}
+    JobPrincipal      {:principal/type :job      :job/id <uuid|string>}
+    EvalPrincipal     {:principal/type :eval     :eval/id <uuid|string>}
+    OperatorPrincipal {:principal/type :operator}
+
+  Principal equality is identity — no wildcard, no dual-anchor, no
+  placeholder. Session pin validation is separate (Generation pin, not
+  lease subject).
+
   Global Constraint 8 makes every external effect cross the
   kernel-owned Intent/Capability Broker, so a lease exists only as a
   kernel-issued value; Global Constraint 9 says a visible action/tool
   never itself grants resource authority, so the lease binds a
-  resource AND an action set AND a subject — the schema validates the
+  resource AND an action set AND a principal — the schema validates the
   shape, and evoclj.capability.lease decides coverage; Global
   Constraint 19 keeps the authority root agent-immutable, so leases
   are immutable host-owned values, never agent-writable; Global
@@ -32,33 +43,87 @@
   :capability/not-edn-safe or :capability/schema-invalid carrying a
   fully serializable Malli explanation (safe for pr-str /
   clojure.edn read-string round-tripping)."
-  (:require [evoclj.intent.schema :as intent-schema]
-            [evoclj.kernel.error :as err]
+  (:require [evoclj.kernel.error :as err]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m]))
 
-;; --- lease shape ------------------------------------------------------------
-
-(def PhenotypeIdSchema
-  "A canonical content-addressed PhenotypeId string
-  (\"sha256:<64 hex>\"), the same v0 ABI form used by the Intent
-  schemas (evoclj.intent.schema). One definition of the id, reused at
-  every boundary."
-  intent-schema/PhenotypeIdSchema)
+;; --- principal shape (I2) ---------------------------------------------------
 
 (def SessionIdSchema
-  "A session identifier — UUID or non-empty string form.
-  P3 dual-anchor: every CapabilityLease subject MUST carry a session."
+  "A session identifier — UUID or non-empty string form."
   [:or uuid? [:string {:min 1}]])
 
-(def SubjectSchema
-  "The lease subject: the SINGLE session+phenotype pair the grant belongs to.
-  Dual-anchor [W-01] when both sides carry :session/id: BOTH session and
-  phenotype must be equal; for backward compat with pre-P3 leases,
-  :session/id is optional and ignored when missing."
+(def JobIdSchema
+  "A job identifier — UUID or non-empty string form."
+  [:or uuid? [:string {:min 1}]])
+
+(def EvalIdSchema
+  "An eval identifier — UUID or non-empty string form."
+  [:or uuid? [:string {:min 1}]])
+
+(def SessionPrincipalSchema
+  "Session principal — one live session."
   [:map {:closed true}
-   [:phenotype/id PhenotypeIdSchema]
-   [:session/id {:optional true} SessionIdSchema]])
+   [:principal/type [:= :session]]
+   [:session/id SessionIdSchema]])
+
+(def JobPrincipalSchema
+  "Job principal — one evolution/mutation job."
+  [:map {:closed true}
+   [:principal/type [:= :job]]
+   [:job/id JobIdSchema]])
+
+(def EvalPrincipalSchema
+  "Eval principal — one evaluation side."
+  [:map {:closed true}
+   [:principal/type [:= :eval]]
+   [:eval/id EvalIdSchema]])
+
+(def OperatorPrincipalSchema
+  "Operator principal — singleton, no id."
+  [:map {:closed true}
+   [:principal/type [:= :operator]]])
+
+(def PrincipalSchema
+  "Tagged union of all principals (I2)."
+  [:multi {:dispatch :principal/type}
+   [:session SessionPrincipalSchema]
+   [:job JobPrincipalSchema]
+   [:eval EvalPrincipalSchema]
+   [:operator OperatorPrincipalSchema]])
+
+;; Backcompat alias — deprecated, do not use in new code
+(def SubjectSchema
+  "Deprecated alias for PrincipalSchema. Use PrincipalSchema."
+  PrincipalSchema)
+
+(def PhenotypeIdSchema
+  "Legacy phenotype id kept for migration compat (not part of principal)."
+  [:string {:min 1}])
+
+(defn session-principal
+  "Construct a SessionPrincipal for `sid`."
+  [sid]
+  {:principal/type :session :session/id sid})
+
+(defn job-principal
+  "Construct a JobPrincipal for `jid`."
+  [jid]
+  {:principal/type :job :job/id jid})
+
+(defn eval-principal
+  "Construct an EvalPrincipal for `eid`."
+  [eid]
+  {:principal/type :eval :eval/id eid})
+
+(def operator-principal
+  "Singleton OperatorPrincipal."
+  {:principal/type :operator})
+
+(defn principal?
+  "True when x is a valid Principal value."
+  [x]
+  (m/validate PrincipalSchema x))
 
 (def ^:private allowed-actions
   "Closed allowlist for lease actions — [W-03] actions must be non-empty
@@ -79,7 +144,8 @@
 (def CapabilityLeaseSchema
   "The v0 CapabilityLease contract: a closed map of the seven normative
   fields. The top level is closed — no field may be missing, renamed,
-  or extended. :actions is a set of keywords constrained to the closed
+  or extended. :principal is the tagged union Principal (I2);
+  :actions is a set of keywords constrained to the closed
   allowlist #{:invoke :read :list :stat :write :create :delete} and
   must be non-empty; :resource and :constraints are open maps whose
   shapes are provider-defined. The grant must span a positive window
@@ -87,7 +153,7 @@
   [:and
    [:map {:closed true}
     [:cap/id uuid?]
-    [:subject SubjectSchema]
+    [:principal PrincipalSchema]
     [:resource [:map {:closed false}]]
     [:actions [:and
                [:set [:enum :invoke :read :list :stat :write :create :delete]]
@@ -104,13 +170,14 @@
 
 (def ^:private lease-secret (Object.))
 
-(deftype CapabilityLease [capId subject resource actions constraints issued expires ^:private secret]
+(deftype CapabilityLease [capId principal resource actions constraints issued expires ^:private secret]
   clojure.lang.ILookup
   (valAt [this k] (.valAt this k nil))
   (valAt [this k notFound]
     (case k
       :cap/id capId
-      :subject subject
+      :principal principal
+      :subject principal
       :resource resource
       :actions actions
       :constraints constraints
@@ -124,7 +191,7 @@
   (without [this k] (throw (UnsupportedOperationException. "CapabilityLease is sealed")))
   clojure.lang.Seqable
   (seq [this] (seq {:cap/id capId
-                    :subject subject
+                    :principal principal
                     :resource resource
                     :actions actions
                     :constraints constraints
@@ -132,7 +199,7 @@
                     :expires-at expires}))
   java.lang.Iterable
   (iterator [this] (.iterator ^java.lang.Iterable (seq {:cap/id capId
-                                                        :subject subject
+                                                        :principal principal
                                                         :resource resource
                                                         :actions actions
                                                         :constraints constraints
@@ -157,7 +224,7 @@
   [lease]
   (when (lease? lease)
     {:cap/id (.-capId ^CapabilityLease lease)
-     :subject (.-subject ^CapabilityLease lease)
+     :principal (.-principal ^CapabilityLease lease)
      :resource (.-resource ^CapabilityLease lease)
      :actions (.-actions ^CapabilityLease lease)
      :constraints (.-constraints ^CapabilityLease lease)
@@ -167,12 +234,32 @@
 
 ;; --- validation entry point ------------------------------------------------
 
+(defn- subject->principal
+  "Convert legacy :subject map to Principal tagged union for compat.
+  If subject has :session/id -> SessionPrincipal, else -> OperatorPrincipal."
+  [s]
+  (cond
+    (and (map? s) (:session/id s)) {:principal/type :session :session/id (:session/id s)}
+    (map? s) {:principal/type :operator}
+    :else nil))
+
+(defn- canonicalize-lease-map
+  "If map has legacy :subject and no :principal, convert to :principal and dissoc :subject."
+  [m]
+  (if (and (map? m) (contains? m :subject) (not (contains? m :principal)))
+    (-> m (assoc :principal (subject->principal (:subject m))) (dissoc :subject))
+    m))
+
 (defn validate-lease
   "Validate x as a v0 CapabilityLease.
 
   Accepts both a plain EDN map and a sealed CapabilityLease instance
   (INV-05: single implementation). For a sealed instance, projects via
   lease->map then validates the map; for a map, validates directly.
+
+  Legacy :subject maps are canonicalized to :principal for compat (I2
+  migration): {:principal/type :session :session/id sid} -> SessionPrincipal(sid),
+  bare phenotype -> OperatorPrincipal. Validation never coerces otherwise.
 
   First the EDN-safe boundary gate (Global Constraint 22): the map
   must be plain, fully realized EDN data — raw Java objects, lazy
@@ -186,7 +273,8 @@
   sanitized input under :value and a fully serializable Malli
   explanation under :explanation."
   [x]
-  (let [m (if (lease? x) (lease->map x) x)]
+  (let [raw (if (lease? x) (lease->map x) x)
+        m (canonicalize-lease-map raw)]
     (when-not (boundary/edn-safe? m)
       (throw (err/error :capability/not-edn-safe
                         "capability lease must be plain EDN-safe data (Global Constraint 22)"
@@ -203,9 +291,11 @@
   and asserts issued < expires (positive window); on failure throws
   :capability/schema-invalid (never :capability/not-edn-safe for window
   or allowlist violations). Returns a sealed CapabilityLease instance
-  on success — construct-time validated."
+  on success — construct-time validated.
+  Legacy :subject maps are accepted and canonicalized to :principal."
   [m]
-  (let [validated (validate-lease m)]
+  (let [m (canonicalize-lease-map m)
+        validated (validate-lease m)]
     ;; validate-lease already enforces positive-window? via schema and
     ;; rejects non-EDN; extra assert keeps window failure typed as
     ;; :capability/schema-invalid even if schema were relaxed.
@@ -215,11 +305,12 @@
                         "capability lease must span positive window: :expires-at after :issued-at"
                         {:value (err/sanitize m)
                          :explanation (err/sanitize (m/explain CapabilityLeaseSchema m))})))
-    (CapabilityLease. (:cap/id validated)
-                      (:subject validated)
-                      (:resource validated)
-                      (:actions validated)
-                      (:constraints validated)
-                      (:issued-at validated)
-                      (:expires-at validated)
-                      lease-secret)))
+    (let [p (or (:principal validated) (:subject validated) (:principal m) (subject->principal (:subject m)))]
+      (CapabilityLease. (:cap/id validated)
+                        p
+                        (:resource validated)
+                        (:actions validated)
+                        (:constraints validated)
+                        (:issued-at validated)
+                        (:expires-at validated)
+                        lease-secret))))

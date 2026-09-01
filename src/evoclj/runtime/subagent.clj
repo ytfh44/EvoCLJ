@@ -4,7 +4,7 @@
   spawn-subagent! creates a child session pinned to the parent's
   Genome/Resolution/Phenotype/Generation (Global Constraint 2, same
   genome/resolution as parent), a new UUID, and status :created.  The
-  child's subject is {:session/id child-id :phenotype/id parent-phenotype}.
+  child's subject is {:principal/type :session :session/id child-id}.
 
   Child capabilities are derived leases via mint/derive-lease! attenuated
   from the parent's leases (actions ⊆ parent, [W-08..W-11]).  A
@@ -193,7 +193,7 @@
     :phenotype/id, :generation/id as the parent (pinned identity, never assumes).
   - appends a :session/created root event for the child (so its chain is valid).
   - derives one child lease per parent lease via mint/derive-lease! with
-    subject {:session/id child-id :phenotype/id parent-phenotype} and the
+    subject {:principal/type :session :session/id child-id} and the
     same actions/resource (attenuation: actions ⊆ parent is enforced by
     derive-lease!; same actions is the minimal attenuation).
   - appends a :subagent/spawned event to the parent's chain (cause = parent's
@@ -219,14 +219,13 @@
           parent-leases (or parent-leases [])
           ;; S6 — enforce depth/budget caps before creating the child
           _ (check-depth-and-budget! db parent-id)
-          ;; Create child session pinned to parent's identity
           child-request {:genome/id (:genome/id parent)
                          :resolution/id (:resolution/id parent)
                          :phenotype/id (:phenotype/id parent)
                          :generation/id (:generation/id parent)}
           child-session (session/create-session! db child-request)
           child-id (:session/id child-session)
-          child-subject {:session/id child-id :phenotype/id (:phenotype/id parent)}
+          child-principal {:principal/type :session :session/id child-id}
           ;; Child's :session/created root (host's job — every session opens with it)
           _ (event/append-event! db
                                  {:session/id child-id
@@ -238,7 +237,7 @@
                                   :metadata {}})
           ;; Derive child leases (attenuated — same actions is minimal narrowing)
           derived (mapv (fn [pl]
-                          (mint/derive-lease! nil pl {:subject child-subject
+                          (mint/derive-lease! nil pl {:principal child-principal
                                                       :actions (:actions pl)}))
                         parent-leases)
           ;; S4: register derived leases in global in-memory registry and session index
@@ -254,9 +253,16 @@
                   (when cap-store-ns
                     (doseq [l derived]
                       (try
-                        (@cap-store-ns db {:id (str (:cap/id l))
-                                           :subject_session_id (str (:session/id (:subject l)))
-                                           :subject_phenotype_id (str (:phenotype/id (:subject l)))
+                        (let [p (or (:principal l) (:subject l))
+                              pid (case (:principal/type p)
+                                    :session (str (:session/id p))
+                                    :job (str (:job/id p))
+                                    :eval (str (:eval/id p))
+                                    :operator "operator"
+                                    (str p))]
+                          (@cap-store-ns db {:id (str (:cap/id l))
+                                           :principal_type (name (:principal/type p))
+                                           :principal_id pid
                                            :resource_kind (name (:kind (:resource l)))
                                            :resource_id (str (:id (:resource l)))
                                            :actions (mapv name (:actions l))
@@ -264,10 +270,9 @@
                                            :issued_at (str (:issued-at l))
                                            :expires_at (str (:expires-at l))
                                            :revoked 0
-                                           :created_at (str (java.time.Instant/now))})
+                                           :created_at (str (java.time.Instant/now))}))
                         (catch Exception _)))))
                 (catch Exception _)))
-          ;; Parent's latest event is the cause for :subagent/spawned
           parent-events (event/events-for-session db parent-id)
           latest (last parent-events)
           _ (when-not latest
@@ -344,7 +349,7 @@
         now (Date.)
         expires (Date. (+ (.getTime now) 600000))
         synthetic-lease {:cap/id (UUID/randomUUID)
-                         :subject {:session/id child-id :phenotype/id phenotype-id}
+                         :principal {:principal/type :session :session/id child-id}
                          :resource {:kind :tool :id :fixture/echo}
                          :actions #{:invoke}
                          :constraints {:max-calls 10}
@@ -354,13 +359,12 @@
         persisted-leases (try
                            (let [spec (db-spec db)
                                  rows (sqlite/query spec
-                                                    ["SELECT id, subject_session_id, subject_phenotype_id, resource_kind, resource_id, actions, issued_at, expires_at FROM capabilities WHERE subject_session_id = ? AND revoked = 0"
+                                                    ["SELECT id, principal_type, principal_id, resource_kind, resource_id, actions, issued_at, expires_at FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0"
                                                      (str child-id)])]
                              (when (seq rows)
                                (mapv (fn [r]
                                        {:cap/id (UUID/fromString (:id r))
-                                        :subject {:session/id (types/session-id (:subject_session_id r))
-                                                  :phenotype/id (:subject_phenotype_id r)}
+                                        :principal {:principal/type :session :session/id (types/session-id (:principal_id r))}
                                         :resource {:kind (keyword (:resource_kind r)) :id (keyword (:resource_id r))}
                                         :actions (set (map keyword (str/split (:actions r) #",")))
                                         :constraints {}
@@ -368,16 +372,15 @@
                                         :expires-at (Date. (.getTime (java.time.Instant/parse (:expires_at r))))})
                                      rows)))
                            (catch Exception _ nil))
-        leases (or (when (seq persisted-leases) persisted-leases) [synthetic-lease])
         usage (atom {})
         ph (phenotype/instantiate compiled {:stores {:sqlite :poison :cas {:root :poison}}
                                             :providers {:registry reg}
-                                            :capabilities {:leases leases :usage usage}
+                                            :capabilities {:leases persisted-leases :usage usage}
                                             :program-sources program-sources})
         cas-dir (str (Files/createTempDirectory "evoclj-cas-subagent-" (make-array FileAttribute 0)))
         cas-store (cas/->cas cas-dir)
         make-broker-context @(requiring-resolve 'evoclj.intent.dispatch/make-broker-context)
-        dispatch-ctx (make-broker-context {:registry reg :leases leases :usage usage :db db})]
+        dispatch-ctx (make-broker-context {:registry reg :leases persisted-leases :usage usage :db db})]
     {:phenotype ph
      :stores {:sqlite db :cas cas-store}
      :dispatch dispatch-ctx
@@ -488,7 +491,7 @@
             (catch Exception _))))
       ;; also revoke any DB rows for session that were not in mem (direct query)
       (try
-        (let [rows (sqlite/query (db-spec db) ["SELECT id FROM capabilities WHERE subject_session_id = ? AND revoked = 0" (str sid)])
+        (let [rows (sqlite/query (db-spec db) ["SELECT id FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0" (str sid)])
               ids (mapv #(:id %) rows)]
           (doseq [id ids]
             (try

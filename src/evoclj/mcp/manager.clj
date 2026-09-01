@@ -194,8 +194,7 @@
                            persists each progress event to the real append-only
                            event store (M17: progress enters the event store).
      :event-store-ctx      zero-arg fn returning the per-append session pin
-                           {:session/id :generation/id :phenotype/id
-                            :cause/event-id} required by evoclj.store.event.
+                           {:principal/type :session :session/id :generation/id} required by evoclj.store.event.
                            Only consulted when :event-store is set."
   ([] (create-manager {}))
   ([{:keys [max-reopen-failures cooldown-ms now-fn

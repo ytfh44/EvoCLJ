@@ -179,7 +179,7 @@
                               [(lease :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p2})])]
       (let [r (dispatch/dispatch! ctx echo-intent)]
         (is (= :error (:result/status r)))
-        (is (= :capability/subject-mismatch (get-in r [:authorization :reason])))
+        (is (= :capability/principal-mismatch (get-in r [:authorization :reason])))
         (is (= 0 @counter))))))
 
 ;; ============================================================================

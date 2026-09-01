@@ -3,18 +3,19 @@
 
   The decision logic is deliberately separated from the broker entry
   point (evoclj.capability.broker): `decide` is a pure function of
-  plain data — the lease collection, the requesting subject, the
+  plain data — the lease collection, the requesting principal, the
   canonical resource, the requested action, the decision instant, and
   the per-lease call usage — and performs no I/O of any kind, so
   authorization can be tested without invoking a real provider (component acceptance).
 
   The v0 decision model:
 
-  - `intent-subject` derives the requesting subject from an intent:
-    the one-key map {:phenotype/id ...} carrying the intent's own
-    attribution (Global Constraint 20). Subject matching is EXACT, so
-    a sibling phenotype from the same Genome is a different subject
-    and must not match (Global Constraint 9).
+  - `intent-principal` derives the requesting principal from an intent:
+    SessionPrincipal(sid) carrying the intent's own attribution (Global
+    Constraint 20). Principal matching is EXACT equality (I2), so a
+    sibling session is a different principal and must not match.
+    Session pin validation is separate (generation pin, not lease).
+    When :session/id is missing (e.g. replay), returns OperatorPrincipal.
   - `intent-action` derives the requested action from the intent
     type. A :intent/tool-call, :intent/model-call, :intent/memory-read,
     and :intent/memory-write each request the single action :invoke —
@@ -32,13 +33,14 @@
     broker contract):
 
       :capability/missing           no lease grants this request
-      :capability/subject-mismatch  the grant belongs to another phenotype
+      :capability/principal-mismatch  the grant belongs to another principal
+      :capability/principal-mismatch  alias of principal-mismatch
       :capability/expired           the grant window does not cover `now`
       :capability/action-denied     the requested action is not granted
       :capability/scope-denied      the canonical resource is outside the grant
       :capability/budget-exceeded   the lease's :max-calls is exhausted
 
-    A single lease is checked in the FIXED order subject -> window ->
+    A single lease is checked in the FIXED order principal -> window ->
     action -> resource scope -> call budget, so the reported reason
     for a multiple-fault lease is deterministic. When several leases
     are present they are considered in a deterministic total order
@@ -73,169 +75,108 @@
 
 ;; --- request derivation ----------------------------------------------------
 
-(defn intent-subject
-  "The requesting subject of `intent`: the two-key map
-  {:session/id ... :phenotype/id ...} carrying exactly the intent's own
-  attribution (Global Constraint 20). A lease grants ONE session+phenotype
-  pair; authorization compares BOTH ids exactly (dual-anchor, P3,
-  [W-01]), so a sibling session from the same Genome+phenotype is a
-  different subject and must not match (Global Constraint 9)."
+(defn intent-principal
+  "The requesting principal of `intent`: SessionPrincipal(sid) carrying
+  exactly the intent's own attribution (Global Constraint 20).
+  When :session/id is missing (e.g. replay), returns OperatorPrincipal.
+  A lease grants ONE principal; authorization compares principal exactly (I2)."
   [intent]
-  {:session/id (:session/id intent)
-   :phenotype/id (:phenotype/id intent)})
+  (if-let [sid (:session/id intent)]
+    {:principal/type :session :session/id sid}
+    {:principal/type :operator}))
+
+(defn intent-subject
+  "Deprecated alias for intent-principal."
+  [intent]
+  (intent-principal intent))
 
 (def ^:private v0-actions
-  "The v0 action requested by each intent type. :intent/tool-call
-  requests the single action :invoke — the :required-action of every
-  v0 provider descriptor (component); :intent/model-call also requests
-  :invoke (post-v0 extension 1 — model leases carry :actions
-  #{:invoke}); :intent/memory-read and :intent/memory-write request
-  :invoke too (feature R1 — a :memory-kv lease grants the exact
-  {:kind :memory :id <key>} resource with :actions #{:invoke}). Every
-  other v0 intent type requests nil, which no :actions set contains,
-  so those intents fail closed at the action check."
   {:intent/tool-call :invoke
    :intent/model-call :invoke
    :intent/memory-read :invoke
    :intent/memory-write :invoke})
 
 (def allowed-actions-by-kind
-  "Per-kind allowed action sets (P6 de-folding). :tool is no longer
-  collapsed to #{:invoke} — callers may request :read/:write/:invoke
-  and leases are checked against that exact action. :filesystem and
-  :filesystem/path expose the filesystem action vocabulary. :model and
-  :memory remain :invoke-only. The union is the global allowlist."
   {:tool #{:invoke :read :write}
-   :model #{:invoke}
    :memory #{:invoke}
-   :filesystem #{:read :list :stat :write :create :delete :invoke}
+   :model #{:invoke}
+   :filesystem #{:read :list :stat :write :create :delete}
    :filesystem/path #{:read :list :stat :write :create :delete}})
 
 (def ^:private global-allowed-actions
-  "Union of all per-kind allowed actions — used for unknown-action detection."
   (apply set/union (vals allowed-actions-by-kind)))
 
 (defn intent-action
-  "The action intent requests: :invoke for a v0 :intent/tool-call,
-  :intent/model-call, :intent/memory-read, and :intent/memory-write;
-  nil for every other v0 intent type. A nil action is never a member
-  of any lease's :actions set, so an unknown intent type is never
-  granted by a v0 lease (fail closed)."
   [intent]
   (get v0-actions (:intent/type intent)))
 
 (defn resolve-action
-  "Resolve the requested action for a normalized request + intent with
-  per-kind de-folding (P6). Honors the resource's :action (or top-level
-  :action) when present; otherwise falls back to the intent's v0 action.
-  For :model the action is always :invoke (the model is invoked
-  regardless of the resource operation). For :tool, a missing action
-  defaults to :invoke for backward compat but :read/:write are honored
-  when supplied. For :filesystem/:filesystem/path the resource action
-  is honored verbatim. Returns a keyword (or nil for unknown intent
-  types with no resource action)."
-  [normalized-request intent]
-  (let [resource (:resource normalized-request)
-        kind (:kind resource)
-        req-action (or (:action resource) (:action normalized-request))
-        fallback (get v0-actions (:intent/type intent))]
-    (cond
-      (= :model kind) :invoke
-      req-action req-action
-      fallback fallback
-      :else nil)))
+  [target intent]
+  (if-let [ra (:required-action target)]
+    ra
+    (intent-action intent)))
 
 (defn resolve-target-action
-  "Per-kind action resolution for a registry target (P6). :request
-  honors the resource's classification (first-class ResourceAction of
-  the tuple, INV-07) and falls back to the intent action when the
-  resource carries none; :intent always uses the intent action. For
-  :tool the request action is :invoke/:read/:write-distinct; for
-  :filesystem/path the request action is the filesystem verb; for
-  :model the action is always :invoke."
   [target normalized-request intent]
-  (let [resource (:resource normalized-request)
-        kind (:kind resource)]
-    (case (:action-from target)
-      :request (let [req-action (or (:action resource) (:action normalized-request))
-                     fallback (get v0-actions (:intent/type intent))]
-                 (cond
-                   (= :model kind) :invoke
-                   req-action req-action
-                   fallback fallback
-                   :else :invoke))
-      :intent (get v0-actions (:intent/type intent))
-      nil)))
+  (let [kind (:kind (:resource normalized-request))]
+    (case (:source target)
+      :request (or (:action (:resource normalized-request))
+                   (:action normalized-request)
+                   (intent-action intent))
+      :tool (:action normalized-request)
+      :intent (intent-action intent))))
 
 ;; --- input gate ------------------------------------------------------------
 
 (def ^:private NonNegIntSchema
-  "A non-negative integer (usage counts, :max-calls)."
   [:and :int [:fn (fn [x] (not (neg? x)))]])
 
 (def ^:private UsageSchema
-  "Per-lease call usage: a map from :cap/id to the number of calls
-  already consumed under that lease."
   [:map-of uuid? NonNegIntSchema])
 
 (defn- validate-input!
-  "Schema-gate every decision input; throw
-  :capability/schema-invalid on any failure so no judgment is ever
-  made on malformed data. Leases are validated individually with
-  evoclj.capability.schema/validate-lease."
-  [leases subject resource action now usage]
+  [leases principal resource action now usage]
   (when-not (or (nil? leases) (coll? leases))
     (throw (err/error :capability/schema-invalid
                       "leases must be a collection of capability leases"
                       {:value (err/sanitize leases)})))
   (doseq [l leases]
     (schema/validate-lease l))
-  (when-not (m/validate schema/SubjectSchema subject)
+  (when-not (m/validate schema/PrincipalSchema principal)
     (throw (err/error :capability/schema-invalid
-                      "authorization subject must be {:phenotype/id ...}"
-                      {:value (err/sanitize subject)})))
+                      "authorization principal must be a valid Principal"
+                      {:value (err/sanitize principal)})))
   (when-not (map? resource)
     (throw (err/error :capability/schema-invalid
                       "normalized resource must be a map"
                       {:value (err/sanitize resource)})))
-  (when-not (keyword? action)
+  (when-not (or (nil? action) (keyword? action))
     (throw (err/error :capability/schema-invalid
-                      "requested action must be a keyword"
+                      "action must be a keyword or nil"
                       {:value (err/sanitize action)})))
   (when-not (inst? now)
     (throw (err/error :capability/schema-invalid
-                      "decision instant must be an #inst value"
+                      "decision instant must be an #inst"
                       {:value (err/sanitize now)})))
-  (when-not (m/validate UsageSchema usage)
+  (when-not (m/validate UsageSchema (or usage {}))
     (throw (err/error :capability/schema-invalid
-                      "usage must map :cap/id to non-negative call counts"
+                      "usage must be a map of :cap/id to non-negative int"
                       {:value (err/sanitize usage)}))))
 
 ;; --- the decision ----------------------------------------------------------
 
 (defn within-call-budget?
-  "True when the lease's call budget admits one more call: an absent
-  :max-calls is unlimited; otherwise the calls already consumed under
-  the lease (usage[cap/id], defaulting to 0) must be strictly below
-  :max-calls — the decision counts the CURRENT call, so a
-  :max-calls 2 lease allows the first two calls and denies the
-  third."
   [lease usage]
-  (let [max-calls (get-in lease [:constraints :max-calls])]
+  (let [max-calls (get-in lease [:constraints :max-calls])
+        consumed (get (or usage {}) (:cap/id lease) 0)]
     (or (nil? max-calls)
-        (< (get usage (:cap/id lease) 0) max-calls))))
+        (< consumed max-calls))))
 
 (defn- check-lease
-  "Check ONE lease against the request; return [progress decision]
-  where progress is how far the lease got through the fixed check
-  sequence (1 = subject failed, ..., 6 = every check passed) and
-  decision is the corresponding decision map. The check order is
-  fixed and documented: subject, window, action, resource scope, call
-  budget."
-  [lease subject resource action now usage]
+  [lease principal resource action now usage]
   (cond
-    (not (lease/subject-matches? lease subject))
-    [1 {:decision :deny :reason :capability/subject-mismatch}]
+    (not (lease/principal-matches? lease principal))
+    [1 {:decision :deny :reason :capability/principal-mismatch}]
 
     (not (lease/valid-at? lease now))
     [2 {:decision :deny :reason :capability/expired}]
@@ -253,35 +194,17 @@
     [6 {:decision :allow :lease-id (:cap/id lease)}]))
 
 (defn decide
-  "The pure authorization decision for one request.
-
-  Inputs: `leases` (a collection of CapabilityLease values), the
-  requesting `subject` ({:phenotype/id ...}), the canonical
-  `resource` (the normalized resource descriptor from provider
-  normalize-request, component), the requested `action`, the decision
-  `now` instant, and `usage` (map of :cap/id to calls consumed).
-
-  Returns {:decision :allow :lease-id ...} when some lease grants the
-  request, else {:decision :deny :reason ...} with a deterministic
-  reason code (see the namespace docstring). Leases are considered in
-  a deterministic total order (sorted by :cap/id), so reordering the
-  input never changes the decision; removing leases can never turn a
-  deny into an allow. Every input is schema-checked first; malformed
-  input throws :capability/schema-invalid."
-  [leases subject resource action now usage]
-  (validate-input! leases subject resource action now usage)
-  (let [ordered (sort-by :cap/id leases)]
-    (loop [remaining ordered
-           best nil]
-      (if-let [l (first remaining)]
-        (let [[progress decision] (check-lease l subject resource action now usage)]
-          (if (= :allow (:decision decision))
-            decision
-            (recur (rest remaining)
-                   (cond
-                     (nil? best) [progress decision]
-                     ;; ties keep the earlier (sorted) lease
-                     (<= progress (first best)) best
-                     :else [progress decision]))))
-        (or (some-> best second)
-            {:decision :deny :reason :capability/missing})))))
+  [leases principal resource action now usage]
+  (validate-input! leases principal resource action now usage)
+  (if (empty? leases)
+    {:decision :deny :reason :capability/missing}
+    (let [sorted (sort-by :cap/id leases)
+          results (mapv (fn [l]
+                          (let [[progress decision] (check-lease l principal resource action now usage)]
+                            {:progress progress :decision decision :lease l}))
+                        sorted)
+          allowed (some (fn [r] (when (= :allow (:decision (:decision r))) r)) results)]
+      (if allowed
+        (:decision allowed)
+        (let [best (apply max-key :progress results)]
+          (:decision best))))))

@@ -167,15 +167,14 @@
 
 (defn- leases-for
   "One CapabilityLease per tool id in the case, granting this side's
-  exact phenotype id the tool's :invoke action (the :required-action of
-  every v0 descriptor) — the broker authorizes tool calls against these
-  leases exactly as in a live run."
-  [tool-ids phenotype-id]
+  session principal the tool's :invoke action — the broker authorizes
+  tool calls against these leases exactly as in a live run."
+  [tool-ids session-id]
   (let [now (Date.)
         expires (Date. (+ (.getTime now) 60000))]
     (mapv (fn [tool-id]
             {:cap/id (random-uuid)
-             :subject {:phenotype/id phenotype-id}
+             :principal {:principal/type :session :session/id session-id}
              :resource {:kind :tool :id tool-id}
              :actions #{:invoke}
              :constraints {:max-calls 10000}
@@ -197,20 +196,15 @@
   {:kind :model :id "*/*"})
 
 (defn- model-lease
-  "One CapabilityLease granting this side's exact phenotype id the
+  "One CapabilityLease granting this side's session principal the
   :model resource's :invoke action. The llm node attributes its
-  :intent/model-call intents to the side phenotype
-  (:phenotype/id), so the lease subject MUST match it exactly —
-  mirroring how leases-for grants tool leases with the same subject
-  (Global Constraint 9: a sibling phenotype never resource-authorizes).
-  :resource is the evaluator's :model/resource or
-  default-model-resource; :max-calls is generous so legitimate
-  evaluation loop traffic is never budget-starved mid-run."
-  [phenotype-id resource]
+  :intent/model-call intents to the side session (SessionPrincipal),
+  so the lease principal MUST match it exactly."
+  [session-id resource]
   (let [now (Date.)
         expires (Date. (+ (.getTime now) 60000))]
     {:cap/id (random-uuid)
-     :subject {:phenotype/id phenotype-id}
+     :principal {:principal/type :session :session/id session-id}
      :resource (or resource default-model-resource)
      :actions #{:invoke}
      :constraints {:max-calls 10000}
@@ -393,8 +387,11 @@
             tool-ids (sort (:tools case-map))
             _ (doseq [tool-id tool-ids]
                 (registry/register! registry (fixture-for evaluator tool-id seed)))
+            ;; create session FIRST so leases can bind SessionPrincipal(sid) (I2)
+            _ (register-compiled-artifacts! stores loaded compiled)
+            sid (create-pinned-session! stores compiled generation-id)
             usage (atom {})
-            leases (leases-for tool-ids (:compiled/phenotype-id compiled))
+            leases (leases-for tool-ids sid)
             model-registry (when (contains? evaluator :model/registry)
                              (:model/registry evaluator))
             ;; PLT5: Effects ⊆ Requested ⊆ Granted. For seed/demo topologies
@@ -412,10 +409,10 @@
                                           (not (contains? topology-effects :model/call)))
             leases (cond-> leases
                      model-registry
-                     (conj (model-lease (:compiled/phenotype-id compiled)
+                     (conj (model-lease sid
                                         (:model/resource evaluator)))
                      needs-dummy-model-lease?
-                     (conj (model-lease (:compiled/phenotype-id compiled)
+                     (conj (model-lease sid
                                         (:model/resource evaluator))))
             broker (dispatch/make-broker-context
                     (cond-> {:registry registry :leases leases :usage usage}
@@ -426,8 +423,6 @@
                  :providers {:registry registry}
                  :capabilities {:leases leases :usage usage}
                  :program-sources (program-sources loaded compiled)})
-            _ (register-compiled-artifacts! stores loaded compiled)
-            sid (create-pinned-session! stores compiled generation-id)
             run (scheduler/run-session!
                  {:phenotype ph
                   :stores {:sqlite (:sqlite stores) :cas (:cas stores)}
@@ -449,8 +444,6 @@
          :side/error (:error/artifact-ref run)})
       (finally
         (dispose-stores! stores))))))
-
-;; --- component — the batch task contract (Foundation F4) --------------------------
 
 (defn candidate-batch-tasks
   "Build the run-batch! task maps for a batch of candidate ids (component — Foundation F4): one {:task/id <candidate-id> :candidate/id

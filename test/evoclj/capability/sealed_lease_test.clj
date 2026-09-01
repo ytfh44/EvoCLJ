@@ -20,7 +20,7 @@
   "Canonical well-formed lease map for P1 tests."
   []
   {:cap/id #uuid "11111111-1111-4111-8111-111111111111"
-   :subject {:session/id session-a :phenotype/id phenotype-p1}
+   :principal {:principal/type :session :session/id session-a}
    :resource {:kind :tool :id :fixture/echo}
    :actions #{:invoke}
    :constraints {:max-calls 10}
@@ -62,22 +62,20 @@
         (let [mm (base-map)]
           (is (identical? mm (schema/validate-lease mm))))))))
 
-;; --- W-05: missing phenotype -> rejected ---
+;; --- W-05: missing principal -> rejected ---
 
-(deftest missing-phenotype-rejected
-  (testing "missing :phenotype/id in subject is rejected with :capability/schema-invalid"
-    (let [missing-pheno (assoc (base-map) :subject {})
-          missing-subject (dissoc (base-map) :subject)]
-      (is (throws-schema-invalid? #(schema/validate-lease missing-pheno))
-          "validate-lease on map missing phenotype")
-      (is (throws-schema-invalid? #(schema/make-lease missing-pheno))
-          "make-lease missing phenotype")
-      (is (throws-schema-invalid? #(schema/validate-lease missing-subject))
-          "validate-lease missing subject key")
-      (is (throws-schema-invalid? #(schema/make-lease missing-subject))
-          "make-lease missing subject"))))
-
-;; --- W-06: bad action outside allowlist -> rejected ---
+(deftest missing-principal-rejected
+  (testing "missing :principal in lease is rejected with :capability/schema-invalid"
+    (let [missing-principal (assoc (base-map) :principal {})
+          missing-key (dissoc (base-map) :principal)]
+      (is (throws-schema-invalid? #(schema/validate-lease missing-principal))
+          "validate-lease on map with empty principal")
+      (is (throws-schema-invalid? #(schema/make-lease missing-principal))
+          "make-lease empty principal")
+      (is (throws-schema-invalid? #(schema/validate-lease missing-key))
+          "validate-lease missing principal key")
+      (is (throws-schema-invalid? #(schema/make-lease missing-key))
+          "make-lease missing principal"))))
 
 (deftest bad-action-outside-allowlist-rejected
   (testing "action outside closed allowlist is rejected"

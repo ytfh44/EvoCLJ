@@ -1,6 +1,6 @@
 (ns evoclj.capability.subject-anchor-test
-  "P3 — subject dual-anchor session+phenotype ([W-01]).
-  Verifies: mint with missing session fails, sibling sessions diverge, same session+phenotype matches."
+  "I2 — Principal equality is identity; session pin validation separate.
+  Verifies: mint with valid principal succeeds, different principals diverge, same principal matches."
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.capability.lease :as lease]
             [evoclj.capability.mint :as mint]
@@ -9,99 +9,58 @@
             [evoclj.mount.filesystem :as fs])
   (:import (java.util Date UUID)))
 
-(def ^:private phenotype-p1
-  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-
 (def ^:private issued-at (Date. 1700000000000))
 (def ^:private expires-at (Date. 1700003600000))
 
 (def ^:private session-a (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"))
 (def ^:private session-b (UUID/fromString "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"))
 
-(defn- base-subject [session-id phenotype]
-  {:session/id session-id :phenotype/id phenotype})
+(def ^:private principal-a {:principal/type :session :session/id session-a})
+(def ^:private principal-b {:principal/type :session :session/id session-b})
+(def ^:private job-a {:principal/type :job :job/id #uuid "cccccccc-cccc-4ccc-8ccc-cccccccccccc"})
+(def ^:private operator {:principal/type :operator})
 
-(defn- base-lease-opts [session-id phenotype]
+(defn- base-lease-opts [principal]
   {:cap-id (UUID/fromString "11111111-1111-4111-8111-111111111111")
-   :subject (base-subject session-id phenotype)
+   :principal principal
    :resource {:kind :tool :id :fixture/echo}
    :actions #{:invoke}
-   :constraints {}
+   :constraints {:max-calls 10}
    :issued-at issued-at
    :expires-at expires-at})
 
-;; --- 1. mint with missing session -> fails :capability/schema-invalid ---
+(deftest mint-with-principal-succeeds
+  (testing "mint-lease! with valid SessionPrincipal succeeds"
+    (let [lease (mint/mint-lease! nil (base-lease-opts principal-a))]
+      (is (schema/lease? lease))
+      (is (= principal-a (:principal lease)))))
+  (testing "mint with OperatorPrincipal succeeds"
+    (let [lease (mint/mint-lease! nil (base-lease-opts operator))]
+      (is (schema/lease? lease))))
+  (testing "mint with missing principal is rejected"
+    (let [opts (dissoc (base-lease-opts principal-a) :principal)]
+      (is (= :capability/schema-invalid (:error/type (ex-data (try (mint/mint-lease! nil opts) nil (catch clojure.lang.ExceptionInfo e e)))))))))
 
-(deftest mint-missing-session-rejected
-  (testing "mint-lease! with subject missing :session/id is allowed via lenient (session optional for backward compat)"
-    (let [opts (assoc (base-lease-opts session-a phenotype-p1)
-                      :subject {:phenotype/id phenotype-p1})]
-      (is (some? (mint/mint-lease! nil opts))
-          "missing session allowed via lenient")))
-  (testing "make-lease with subject missing :session/id is allowed via lenient"
-    (let [m {:cap/id (UUID/fromString "22222222-2222-4222-8222-222222222222")
-             :subject {:phenotype/id phenotype-p1}
-             :resource {:kind :tool :id :fixture/echo}
-             :actions #{:invoke}
-             :constraints {}
-             :issued-at issued-at
-             :expires-at expires-at}]
-      (is (some? (schema/make-lease m))
-          "missing session allowed via lenient")))
-  (testing "mint with subject missing :phenotype/id is also rejected"
-    (let [opts (assoc (base-lease-opts session-a phenotype-p1)
-                      :subject {:session/id session-a})]
-      (try
-        (mint/mint-lease! nil opts)
-        (is false "should have thrown")
-        (catch clojure.lang.ExceptionInfo e
-          (is (= :capability/schema-invalid (:error/type (ex-data e)))))))))
+(deftest principal-equality-is-identity
+  (testing "same principal matches"
+    (let [lease (mint/mint-lease! nil (base-lease-opts principal-a))]
+      (is (lease/principal-matches? lease principal-a))
+      (is (lease/subject-matches? lease principal-a) "alias")))
+  (testing "different session principals do not match"
+    (let [lease (mint/mint-lease! nil (base-lease-opts principal-a))]
+      (is (not (lease/principal-matches? lease principal-b)))))
+  (testing "different principal types do not match"
+    (let [lease (mint/mint-lease! nil (base-lease-opts principal-a))]
+      (is (not (lease/principal-matches? lease job-a)))
+      (is (not (lease/principal-matches? lease operator))))))
 
-;; --- 2. sibling sessions same genome+phenotype but different session -> subject-matches? false ---
-
-(deftest sibling-sessions-do-not-match
-  (testing "same phenotype, different session ids must not match (dual-anchor isolation)"
-    (let [lease (mint/mint-lease! nil (base-lease-opts session-a phenotype-p1))
-          sibling-subject (base-subject session-b phenotype-p1)]
-      (is (false? (lease/subject-matches? lease sibling-subject))
-          "sibling session with same phenotype must be false")
-      (is (true? (lease/subject-matches? lease (base-subject session-a phenotype-p1)))
-          "same session+phenotype must be true")))
-  (testing "same session, different phenotype must not match"
-    (let [lease (mint/mint-lease! nil (base-lease-opts session-a phenotype-p1))
-          other-phenotype "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          other-subject (base-subject session-a other-phenotype)]
-      (is (false? (lease/subject-matches? lease other-subject))
-          "same session but different phenotype must be false"))))
-
-;; --- 3. same session+phenotype -> true (positive case) ---
-
-(deftest same-session-phenotype-matches
-  (testing "identical session+phenotype subject matches"
-    (let [subject (base-subject session-a phenotype-p1)
-          lease (mint/mint-lease! nil (base-lease-opts session-a phenotype-p1))]
-      (is (true? (lease/subject-matches? lease subject)))
-      ;; also verify via raw subject map equality through schema
-      (is (true? (lease/subject-matches? lease {:session/id session-a :phenotype/id phenotype-p1})))))
-  (testing "string session ids also work when lease uses string"
-    (let [sess-str "session-123"
-          subj {:session/id sess-str :phenotype/id phenotype-p1}
-          lease (mint/mint-lease! nil {:cap-id (UUID/fromString "33333333-3333-4333-8333-333333333333")
-                                       :subject subj
-                                       :resource {:kind :tool :id :fixture/echo}
-                                       :actions #{:invoke}
-                                       :constraints {}
-                                       :issued-at issued-at
-                                       :expires-at expires-at})]
-      (is (true? (lease/subject-matches? lease subj)))
-      (is (false? (lease/subject-matches? lease (assoc subj :session/id "other-session")))))))
-
-;; --- 4. filesystem lease also enforces dual-anchor ---
-
-(deftest filesystem-lease-requires-dual-anchor
-  (testing "mount/filesystem issue-fs-lease allows missing session via lenient"
-    (is (some? (fs/issue-fs-lease nil {:subject {:phenotype/id phenotype-p1}
-                        :mount-id [:workspace "id"]
-                        :path "foo"
-                        :actions #{:read}}))
-        "missing session allowed via lenient")))
+(deftest filesystem-lease-requires-principal
+  (testing "filesystem lease with valid principal is verifiable"
+    (let [reg (fs/create-lease-registry)
+          lease (fs/issue-fs-lease reg {:principal principal-a :mount-id [:workspace "ws"] :path "" :actions #{:read} :issued-at issued-at :expires-at expires-at})]
+      (is (schema/lease? lease))
+      (is (= lease (fs/verify-fs-lease! lease {:now issued-at :principal principal-a :registry reg})))))
+  (testing "filesystem lease with different principal fails principal-mismatch"
+    (let [reg (fs/create-lease-registry)
+          lease (fs/issue-fs-lease reg {:principal principal-a :mount-id [:workspace "ws"] :path "" :actions #{:read} :issued-at issued-at :expires-at expires-at})]
+      (is (thrown? clojure.lang.ExceptionInfo (fs/verify-fs-lease! lease {:now issued-at :principal principal-b :registry reg}))))))

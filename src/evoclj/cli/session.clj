@@ -637,21 +637,22 @@
 ;; `run` — execute one session pinned to a generation
 ;; ============================================================================
 (defn- tool-lease
-  "One per-session CapabilityLease granting this session+phenotype's exact id
+  "One per-session CapabilityLease granting this session's principal
   the tool's :invoke action for the next minute (the CLI grants
   leases ONLY for the tools the operator names with --tool; a visible
   tool never grants resource authority — Global Constraint 9).
   Delegates to evoclj.capability.mint/mint-lease! (P2 single issuance
-  surface). Subject is dual-anchor {:session/id :phenotype/id} (P3).
+  surface). Principal is SessionPrincipal(sid) (I2) — session pin
+  validation is separate (generation pin, not lease).
   When `lease-registry` is supplied the lease is recorded so it can be
   revoked (P5); when nil the lease is minted without recording (backcompat)."
-  ([session-id phenotype-id tool-id]
-   (tool-lease session-id phenotype-id tool-id nil))
-  ([session-id phenotype-id tool-id lease-registry]
+  ([session-id _phenotype-id tool-id]
+   (tool-lease session-id nil tool-id nil))
+  ([session-id _phenotype-id tool-id lease-registry]
    (let [now (Date.)]
      (cap-mint/mint-lease! lease-registry
                            {:cap-id (UUID/randomUUID)
-                            :subject {:session/id session-id :phenotype/id phenotype-id}
+                            :principal {:principal/type :session :session/id session-id}
                             :resource {:kind :tool :id tool-id}
                             :actions #{:invoke}
                             :constraints {:max-calls 10000}
@@ -659,23 +660,23 @@
                             :expires-at (Date. (+ (.getTime now) 60000))}))))
 
 (defn- model-lease
-  "One per-session CapabilityLease granting this session+phenotype's exact id
+  "One per-session CapabilityLease granting this session's principal
   the :invoke action on ONE model resource for the next minute (the
   CLI grants leases ONLY for the models the operator names with
   --model, by their full models.dev id, e.g.
   deepseek/deepseek-v4-flash; a visible model never grants resource
   authority — Global Constraint 9). Delegates to
   evoclj.capability.mint/mint-lease! (P2 single issuance surface).
-  Subject is dual-anchor {:session/id :phenotype/id} (P3).
+  Principal is SessionPrincipal(sid) (I2).
   When `lease-registry` is supplied the lease is recorded so it can be
   revoked (P5)."
-  ([session-id phenotype-id model-id]
-   (model-lease session-id phenotype-id model-id nil))
-  ([session-id phenotype-id model-id lease-registry]
+  ([session-id _phenotype-id model-id]
+   (model-lease session-id nil model-id nil))
+  ([session-id _phenotype-id model-id lease-registry]
    (let [now (Date.)]
      (cap-mint/mint-lease! lease-registry
                            {:cap-id (UUID/randomUUID)
-                            :subject {:session/id session-id :phenotype/id phenotype-id}
+                            :principal {:principal/type :session :session/id session-id}
                             :resource {:kind :model :id model-id}
                             :actions #{:invoke}
                             :constraints {:max-calls 10000}

@@ -97,22 +97,19 @@
   [lease-registry cap-id]
   (cap-mint/revoke-lease! lease-registry cap-id))
 
-(defn- phenotype-id-valid?
-  "True when subject is a { :session/id <uuid|string> :phenotype/id <sha256> } map
-  conforming to the capability SubjectSchema (exact session+phenotype dual-anchor, P3)."
-  [subject]
-  (boolean (m/validate cap-schema/SubjectSchema subject)))
+(defn- principal-valid?
+  "True when principal is a valid Principal tagged union (I2)."
+  [principal]
+  (boolean (m/validate cap-schema/PrincipalSchema principal)))
 
 (defn issue-fs-lease
   "The filesystem lease issuer (B4). Mint one v0 CapabilityLease granting
-  ONE authorized subject `actions` over the canonical :filesystem/path
+  ONE authorized principal `actions` over the canonical :filesystem/path
   resource {:mount/id mount-id :path path}, spanning a positive window.
 
   Inputs (all required unless noted):
-    :subject     { :session/id <uuid|string> :phenotype/id \"sha256:...\" } — the
-                 SINGLE session+phenotype pair the grant belongs to (exact
-                 dual-anchor; a sibling session with the same phenotype is
-                 a different subject and never matches, P3).
+    :principal   Principal tagged union (I2) — the SINGLE principal the grant belongs to
+                 (exact equality; no wildcard, session pin separate).
     :mount-id    canonical vector mount id ([:skill \"x\" \"sha256:...\"] or
                  [:workspace \"id\"]).
     :path        mount-relative path the grant covers (\"\" = whole mount).
@@ -123,23 +120,26 @@
     :constraints optional map (default {} — no call limit).
     :cap-id      optional #uuid (default fresh, alias cap/id also accepted).
 
+  Legacy :subject alias accepted for :principal.
+
   When `lease-registry` is supplied the lease is recorded (verifiable and
   revocable). Returns the sealed lease. Throws typed errors:
-    :capability/schema-invalid  — malformed subject/mount/path/actions/window
+    :capability/schema-invalid  — malformed principal/mount/path/actions/window
     :filesystem/path-outside-mount — path escapes the mount.
 
   The issuer is the wired production path for granting filesystem access —
   simplified bare { :mount/id :path :actions } maps are NOT grants and are
-  rejected by the access path (B4: subject/expiry are forced). Delegates
+  rejected by the access path (B4: principal/expiry are forced). Delegates
   to evoclj.capability.mint/mint-lease! (P2 single issuance surface)."
   [lease-registry
-   {:keys [subject mount-id path actions issued-at expires-at constraints]
+   {:keys [principal subject mount-id path actions issued-at expires-at constraints]
     :as opts}]
-  (let [cap-id (or (get opts (keyword "cap/id")) (:cap-id opts))]
-    (when-not (phenotype-id-valid? subject)
+  (let [cap-id (or (get opts (keyword "cap/id")) (:cap-id opts))
+        princ (or principal subject (:principal opts) (:subject opts))]
+    (when-not (principal-valid? princ)
       (throw (err/error :capability/schema-invalid
-                        "fs lease subject must be a dual-anchor session+phenotype ({:session/id uuid :phenotype/id sha256})"
-                        {:subject (err/sanitize subject)})))
+                        "fs lease principal must be a valid Principal tagged union"
+                        {:principal (err/sanitize princ)})))
     (when-not (backend/mount-id? mount-id)
       (throw (err/error :capability/schema-invalid
                         "fs lease requires a canonical vector :mount/id"
@@ -160,7 +160,7 @@
                             "fs lease :expires-at must be an #inst" {:expires-at expires})))
         (cap-mint/mint-lease! lease-registry
                               {:cap-id (or cap-id (UUID/randomUUID))
-                               :subject subject
+                               :principal princ
                                :resource {:kind :filesystem/path :mount/id mount-id :path canonical}
                                :actions (set actions)
                                :constraints (or constraints {})
@@ -176,12 +176,12 @@
                                    supplied) is not recorded at all (the
                                    issuer is the only source of a grant)
     :capability/expired          — the window does not cover `:now`
-    :capability/subject-mismatch — `:subject` (when supplied) differs from
-                                   the lease's bound subject
+    :capability/principal-mismatch — `:principal` (when supplied) differs from
+                                   the lease's bound principal
   Returns the lease when valid. `:now` defaults to the access clock (expiry
   is FORCED — never optional). Uses evoclj.capability.lease for the expiry
-  and subject judgements (single implementation, INV-05)."
-  [lease {:keys [now subject registry]}]
+  and principal judgements (single implementation, INV-05)."
+  [lease {:keys [now principal subject registry]}]
   (cap-schema/validate-lease lease)
   (when (some? registry)
     (let [rec (get @registry (:cap/id lease))]
@@ -196,44 +196,41 @@
                         {:cap/id (:cap/id lease)
                          :expires-at (:expires-at lease)
                          :now t}))))
-  (when (and subject (not (lease/subject-matches? lease subject)))
-    (throw (err/error :capability/subject-mismatch
-                      "lease belongs to a different subject"
-                      {:cap/id (:cap/id lease)
-                       :lease-subject (:subject lease)
-                       :request-subject (err/sanitize subject)})))
-  lease)
-
-;; ---------------------------------------------------------------------------
-;; Lease enforcement — the access path FORCES subject and expiry (B4).
-;; The lease MUST be a valid CapabilityLease (a bare { :mount/id :path :actions }
-;; map is NOT a grant); a malformed lease throws, never silently grants or
+  (let [req-princ (or principal subject)]
+    (when (and req-princ (not (lease/principal-matches? lease req-princ)))
+      (throw (err/error :capability/principal-mismatch
+                        "lease belongs to a different principal"
+                        {:cap/id (:cap/id lease)
+                         :lease-principal (or (:principal lease) (:subject lease))
+                         :request-principal (err/sanitize req-princ)})))
+    lease))
 ;; denies. Coverage is delegated to evoclj.capability.lease (INV-05 — one
 ;; implementation, no re-implemented expiry/subject logic here).
 ;; ---------------------------------------------------------------------------
 
 (defn- lease-grants?
   "True when a valid `lease` grants `action` for mount-id + req-path.
-  B4: subject and expiry are FORCED — but only on the lease that actually
+  B4: principal and expiry are FORCED — but only on the lease that actually
   covers this request (scope + action). A lease that does not cover the
   request simply does not grant (returns false, so another lease may); a
   lease that DOES cover it but is expired, revoked, or bound to a
-  different subject throws the precise typed error (:capability/expired /
-  :capability/revoked / :capability/subject-mismatch). The requesting
-  subject comes from opts :subject (required for a covering lease); the
+  different principal throws the precise typed error (:capability/expired /
+  :capability/revoked / :capability/principal-mismatch). The requesting
+  principal comes from opts :principal (or legacy :subject) (required for a covering lease); the
   instant from opts :now (defaults to the access clock); revocation /
   recording from opts :registry (when supplied)."
-  [lease mount-id req-path action {:keys [now subject registry] :as opts}]
+  [lease mount-id req-path action {:keys [now principal subject registry] :as opts}]
   (cap-schema/validate-lease lease)
   (if (lease/resource-covers? lease
                               {:kind :filesystem/path :mount/id mount-id :path req-path}
                               action)
     (do
-      (when-not subject
-        (throw (err/error :filesystem/lease-subject-required
-                          "filesystem access requires a requesting :subject to enforce the lease subject binding"
-                          {:mount/id mount-id :action action})))
-      (verify-fs-lease! lease {:now now :subject subject :registry registry})
+      (let [princ (or principal subject)]
+        (when-not princ
+          (throw (err/error :filesystem/lease-principal-required
+                            "filesystem access requires a requesting :principal to enforce the lease principal binding"
+                            {:mount/id mount-id :action action})))
+        (verify-fs-lease! lease {:now now :principal princ :registry registry}))
       true)
     false))
 
@@ -357,14 +354,16 @@
     (let [{:keys [mount/id path action]} authorized-request
           op (or action :read)
           leases (:leases authorized-request)
-          ;; The broker already authorized subject/expiry during decide; the
+          ;; The broker already authorized principal/expiry during decide; the
           ;; provider re-enforces them fail-closed. Derive the requesting
-          ;; subject from the request when present, else from the lease it
+          ;; principal from the request when present, else from the lease it
           ;; will authorize against (a self-match is a no-op — the broker is
           ;; responsible), and never skip expiry (default to the access clock).
           opts {:leases leases
-                :subject (or (:subject authorized-request)
-                             (some-> (first (or leases [])) :subject))
+                :principal (or (:principal authorized-request)
+                               (:subject authorized-request)
+                               (some-> (first (or leases [])) :principal)
+                               (some-> (first (or leases [])) :subject))
                 :now (or (:now authorized-request) (java.util.Date.))}]
       (case op
         :read (provider-read this id path opts)

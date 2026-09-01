@@ -44,7 +44,7 @@
         (try (jdbc/insert! conn :generations {:id gen :genome_id genome :resolution_id resolution :parent_id nil :state "active" :current 1 :created_at now}) (catch Exception _))))
     db))
 (defn- parent-lease [session-id phenotype-id actions]
-  (mint/mint-lease! nil {:subject {:session/id session-id :phenotype/id phenotype-id}
+  (mint/mint-lease! nil {:principal {:principal/type :session :session/id session-id}
                          :resource {:kind :tool :id :fixture/echo}
                          :actions actions
                          :constraints {:max-calls 10}

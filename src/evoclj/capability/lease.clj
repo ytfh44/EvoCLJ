@@ -2,25 +2,24 @@
   "Lease semantics for the v0 CapabilityLease (component).
 
   A CapabilityLease is a bounded HOST-OWNED grant: the kernel issues a
-  plain immutable map binding ONE subject, ONE resource grant, an
+  plain immutable map binding ONE principal, ONE resource grant, an
   :actions set, and an instant window; the model never sees a lease as
   a name — only the kernel's broker (Milestone 4) reads it. The three
   pure decision functions are the whole semantics:
 
     (valid-at? lease instant)          ; window check
-    (subject-matches? lease subject)   ; EXACT phenotype-id match
+    (principal-matches? lease principal) ; EXACT principal equality (I2)
     (resource-covers? lease normalized-resource action) ; resource + action
 
   Every decision input is schema-checked before any judgment is made;
-  a malformed lease, subject, resource, or action throws
+  a malformed lease, principal, resource, or action throws
   :capability/schema-invalid rather than silently granting or denying
   (a capability is a bounded host-owned grant, so garbage never
   authorizes and never hides a caller bug).
 
-  Subject matching is EXACT on the phenotype id: a lease for P1 must
-  never authorize P2, even when both phenotypes share the same Genome
-  (Global Constraint 9 — a visible action never grants resource
-  authority, and neither does a sibling phenotype).
+  Principal matching is EXACT equality on the tagged union: a lease for
+  P1 never authorizes P2. No wildcard, no nil, no placeholder, no
+  dual-anchor fallback (I2).
 
   Resource coverage matches a CANONICAL resource plus an action:
   tool resources match by exact canonical id; filesystem resources
@@ -132,33 +131,25 @@
   (and (not (.before ^java.util.Date instant ^java.util.Date (:issued-at lease)))
        (.before ^java.util.Date instant ^java.util.Date (:expires-at lease))))
 
-(def ^:private placeholder-session-id
-  "Pre-P3 placeholder used in legacy tests (000...). Treated as wildcard
-  on the lease side so old fixtures (lease 000... vs real intent session)
-  still authorize, while keeping strict dual-anchor for real UUIDs.
-  Only the lease side is wildcard — a real lease (aaa...) vs placeholder
-  subject (000...) still correctly denies (covers lease_test's sibling case)."
-  (java.util.UUID/fromString "00000000-0000-4000-a000-000000000000"))
+(defn principal-matches?
+  "True when the requesting `principal` equals the lease's principal (I2).
+  No wildcard, no nil, no placeholder — exact equality on the tagged union.
+  Legacy :subject maps are canonicalized to Principal for compat."
+  [lease principal]
+  (validate-input! lease schema/PrincipalSchema principal)
+  (let [raw (or (:principal lease) (:subject lease))
+        lp (if (and (map? raw) (:principal/type raw))
+             raw
+             (cond
+               (and (map? raw) (:session/id raw)) {:principal/type :session :session/id (:session/id raw)}
+               (map? raw) {:principal/type :operator}
+               :else raw))]
+    (= lp principal)))
 
 (defn subject-matches?
-  "True when the requesting `subject` matches the lease's subject.
-  Dual-anchor [W-01] when both sides carry :session/id: BOTH session and
-  phenotype must be equal. For backward compat with pre-P3 leases/tests
-  that only carry :phenotype/id (no session), session is ignored when
-  either side lacks it — only phenotype is compared. Additionally, the
-  legacy placeholder `00000000-0000-4000-a000-000000000000` on the *lease*
-  side is treated as wildcard so existing fixtures keep working."
-  [lease subject]
-  (validate-input! lease schema/SubjectSchema subject)
-  (let [lease-session (get-in lease [:subject :session/id])
-        subject-session (get-in subject [:session/id])
-        lease-pheno (get-in lease [:subject :phenotype/id])
-        subject-pheno (get-in subject [:phenotype/id])]
-    (and (= lease-pheno subject-pheno)
-         (or (nil? lease-session)
-             (nil? subject-session)
-             (= lease-session placeholder-session-id)
-             (= lease-session subject-session)))))
+  "Deprecated alias for principal-matches? — use principal-matches?."
+  [lease principal]
+  (principal-matches? lease principal))
 (defn resource-covers?
   "True when the lease's :resource grant covers the canonical
   `normalized-resource` for `action`: the action must be in the
@@ -244,10 +235,21 @@
   nil)
 
 (defn leases-for-session
-  "Return leases in `registry` for `session-id` (str-coerced compare)."
+  "Return leases in `registry` for SessionPrincipal `session-id` (str-coerced compare)."
   [registry session-id]
   (let [sid (str session-id)]
     (->> @registry
          vals
          (keep :lease)
-         (filterv (fn [l] (= sid (str (get-in l [:subject :session/id]))))))))
+         (filterv (fn [l]
+                    (let [p (or (:principal l) (:subject l))]
+                      (and (= :session (:principal/type p))
+                           (= sid (str (:session/id p))))))))))
+
+(defn leases-for-principal
+  "Return leases in `registry` for exact `principal` (equality)."
+  [registry principal]
+  (->> @registry
+       vals
+       (keep :lease)
+       (filterv (fn [l] (= principal (or (:principal l) (:subject l)))))))

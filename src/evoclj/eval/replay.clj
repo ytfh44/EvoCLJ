@@ -451,23 +451,24 @@
         (:programs compiled)))
 
 (defn- leases-for
-  "One CapabilityLease per tool id in the case's trace, granting this
-  phenotype's exact id the tool's :invoke action (the :required-action
-  of every v0 descriptor). The broker authorizes tool calls against
+  "One CapabilityLease per tool id in the case's trace, granting a
+  deterministic principal the tool's :invoke action. Uses operator
+  principal for replay (isolated, no session) — the replay runner
+  attributes intents to operator when no session is present, so the
+  lease principal matches. Broker authorizes tool calls against
   these leases exactly as it would in a live run."
-  [case phenotype-id]
+  [case _phenotype-id]
   (let [now (Date.)
         expires (Date. (+ (.getTime now) 60000))]
     (mapv (fn [tool-id]
             {:cap/id (random-uuid)
-             :subject {:phenotype/id phenotype-id}
+             :principal {:principal/type :operator}
              :resource {:kind :tool :id tool-id}
              :actions #{:invoke}
              :constraints {:max-calls 10000}
              :issued-at now
              :expires-at expires})
           (sort (keys (:responses case))))))
-
 (defn- dispatch-one!
   "Dispatch one intent through the broker and record its observable
   outcome: {:tool/id ... :result/status :ok | :error :error/type

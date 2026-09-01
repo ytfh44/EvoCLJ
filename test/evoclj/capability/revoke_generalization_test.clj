@@ -19,7 +19,7 @@
 (def ^:private expires-at (Date. 1700003600000))
 (def ^:private in-window (Date. 1700001800000))
 
-(def ^:private subject-a {:session/id session-a :phenotype/id phenotype-p1})
+(def ^:private subject-a {:principal/type :session :session/id session-a})
 
 (defn- throws-type? [thunk expected-type]
   (try (thunk) false
