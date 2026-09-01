@@ -2,7 +2,7 @@
   "component tests for the SQLite schema and migration runner.
 
   Step 1: a fresh temporary database applies all migrations once and
-  ends with all 16 normative tables plus a recorded schema version.
+  ends with all 17 normative tables plus a recorded schema version.
   Step 2: a second apply is a safe no-op that verifies the version and
   leaves the schema undamaged. Step 3: the required unique constraints
   hold — generation id, per-session event sequence, the single CURRENT
@@ -34,11 +34,11 @@
 ;; --- shared fixtures -------------------------------------------------------
 
 (def ^:private expected-tables
-  "The 18 normative tables (component + 006 session_bindings + 009 genomes)."
+  "The 19 normative tables (component + 006 session_bindings + 009 genomes)."
   #{"meta" "generations" "candidates" "mutations" "sessions" "events"
     "artifacts" "genomes" "model_calls" "tool_calls" "episodes" "eval_runs"
     "eval_cases" "eval_results" "capability_leases" "promotions"
-    "session_bindings" "kernel_state"})
+    "session_bindings" "kernel_state" "causal_links"})
 
 (def ^:private now "2025-01-01T00:00:00Z")
 (def ^:private g1 "generation-1")
@@ -231,14 +231,14 @@
 
 (deftest fresh-database-applies-all-migrations
   (let [db (sqlite/spec (temp-db-path))]
-    (is (= {:status :applied :version 16} (migrate/migrate! db)))
-    (is (= 16 (migrate/current-version db)))
-    (testing "all 16 normative tables exist"
+    (is (= {:status :applied :version 17} (migrate/migrate! db)))
+    (is (= 17 (migrate/current-version db)))
+    (testing "all 17 normative tables exist"
       (is (every? (table-names db) expected-tables)))
     (testing "schema version and applied migrations are recorded in meta"
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
-      (is (= "16" (meta-value db "schema_version")))
-      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql"
+      (is (= "17" (meta-value db "schema_version")))
+      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql 017-event-prev-causal-links.sql"
              (meta-value db "applied_migrations"))))
     (testing "003-routing.sql added the session routing audit columns"
       (let [cols (set (map :name (sqlite/query db
@@ -253,10 +253,10 @@
 (deftest second-apply-is-a-safe-noop
   (let [db (fresh-db)
         tables-before (table-names db)]
-    (is (= {:status :noop :version 16} (migrate/migrate! db)))
+    (is (= {:status :noop :version 17} (migrate/migrate! db)))
     (testing "no duplicate/schema damage"
       (is (= tables-before (table-names db)))
-      (is (= "16" (meta-value db "schema_version")))
+      (is (= "17" (meta-value db "schema_version")))
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
       ;; the migrated schema still works
       (insert-generation! db g1 {})
@@ -419,9 +419,9 @@
   ;; files applied and recorded). Rewind only the version stamp.
   (let [db (fresh-db)
         _ (set-meta! db "schema_version" "5")]
-    (is (= {:status :noop :version 16} (migrate/migrate! db)))
+    (is (= {:status :noop :version 17} (migrate/migrate! db)))
     (testing "the version record was brought forward to 9"
-      (is (= "16" (meta-value db "schema_version"))))
+      (is (= "17" (meta-value db "schema_version"))))
     (testing "the schema was not touched"
       (is (every? (table-names db) expected-tables)))))
 
@@ -452,22 +452,29 @@
         _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN code_image_id"]) (catch Exception _ nil))
         _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN deployment_id"]) (catch Exception _ nil))
         _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN execution_id"]) (catch Exception _ nil))
+        _ (sqlite/exec! db ["DROP TABLE IF EXISTS causal_links"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_from_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_to_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_type_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS events_prev_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS events_cause_idx"])
+        _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN prev_event_id"]) (catch Exception _ nil))
         _ (set-meta! db "applied_migrations"
                      "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql")
         _ (set-meta! db "schema_version" "5")
         result (migrate/migrate! db)]
     (testing "only 006-009 runs; status :applied at version 9"
-      (is (= {:status :applied :version 16} result)))
+      (is (= {:status :applied :version 17} result)))
     (testing "session_bindings exists again"
       (is (contains? (table-names db) "session_bindings")))
     (testing "the records agree with the classpath"
-      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql"
+      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql 017-event-prev-causal-links.sql"
              (meta-value db "applied_migrations")))
-      (is (= "16" (meta-value db "schema_version"))))
+      (is (= "17" (meta-value db "schema_version"))))
     (testing "pre-existing data survives the additive upgrade"
       (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
     (testing "a follow-up apply is a verified no-op"
-      (is (= {:status :noop :version 16} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 17} (migrate/migrate! db))))))
 
 (deftest version-three-database-upgrades-additively-through-six
   ;; A version-3 database predates the enrichment store, deploy log,
@@ -497,12 +504,19 @@
         _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN code_image_id"]) (catch Exception _ nil))
         _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN deployment_id"]) (catch Exception _ nil))
         _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN execution_id"]) (catch Exception _ nil))
+        _ (sqlite/exec! db ["DROP TABLE IF EXISTS causal_links"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_from_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_to_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_type_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS events_prev_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS events_cause_idx"])
+        _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN prev_event_id"]) (catch Exception _ nil))
         _ (set-meta! db "applied_migrations"
                      "001-init.sql 002-memory.sql 003-routing.sql")
         _ (set-meta! db "schema_version" "3")
         result (migrate/migrate! db)]
     (testing "004-010 run; status :applied at version 10"
-      (is (= {:status :applied :version 16} result)))
+      (is (= {:status :applied :version 17} result)))
     (testing "the three later tables are back"
       (let [tables (table-names db)]
         (is (contains? tables "enrichments"))
@@ -513,21 +527,21 @@
                                      ["SELECT id FROM generations WHERE id = 'generation-1'"]))]
         (is (= g1 (:id row)))))
     (testing "the records agree with the classpath"
-      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql"
+      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql 017-event-prev-causal-links.sql"
              (meta-value db "applied_migrations")))
-      (is (= "16" (meta-value db "schema_version"))))))
+      (is (= "17" (meta-value db "schema_version"))))))
 
 (deftest version-ahead-of-code-fails-cleanly
   ;; Exactly one past the new latest-version: still never guessed at.
   (let [db (fresh-db)
-        _ (set-meta! db "schema_version" "17")
+        _ (set-meta! db "schema_version" "18")
         e (migrate-error db)]
     (is (some? e))
     (is (= :store/schema-mismatch (:error/type (ex-data e))))
     (is (= :version-ahead (:reason (ex-data e))))
-    (is (= 17 (:actual (ex-data e))))
+    (is (= 18 (:actual (ex-data e))))
     (testing "the failed attempt changed nothing"
-      (is (= "17" (meta-value db "schema_version"))))))
+      (is (= "18" (meta-value db "schema_version"))))))
 
 (deftest mid-chain-failure-leaves-prior-version-intact
   ;; Fault path: a pending migration's SQL fails mid-chain (here 006's
@@ -558,6 +572,13 @@
     (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN code_image_id"]) (catch Exception _ nil))
     (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN deployment_id"]) (catch Exception _ nil))
     (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN execution_id"]) (catch Exception _ nil))
+    (sqlite/exec! db ["DROP TABLE IF EXISTS causal_links"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_from_idx"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_to_idx"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_type_idx"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS events_prev_idx"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS events_cause_idx"])
+    (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN prev_event_id"]) (catch Exception _ nil))
     (sqlite/exec! db ["CREATE TABLE session_bindings (bogus TEXT)"])
     (set-meta! db "applied_migrations"
                "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql")
@@ -577,7 +598,7 @@
                                                ["PRAGMA table_info(session_bindings)"]))))))
         (testing "the database still upgrades once the obstruction is cleared"
           (sqlite/exec! db ["DROP TABLE session_bindings"])
-          (is (= {:status :applied :version 16} (migrate/migrate! db)))
+          (is (= {:status :applied :version 17} (migrate/migrate! db)))
           (is (contains? (table-names db) "session_bindings"))
           (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))))))
 
@@ -596,7 +617,7 @@
 (def ^:private full-chain
   ["001-init.sql" "002-memory.sql" "003-routing.sql"
    "004-enrichment.sql" "005-deploy.sql" "006-session-bindings.sql"
-   "007-singleton-current.sql" "008-normalize-candidate.sql" "009-cas-fk-existence.sql" "010-promotion-outbox.sql" "011-session-memory-fk.sql" "012-commands.sql" "013-capabilities.sql" "014-code-image-deployment-execution.sql" "015-principal.sql" "016-resource-edn.sql"])
+   "007-singleton-current.sql" "008-normalize-candidate.sql" "009-cas-fk-existence.sql" "010-promotion-outbox.sql" "011-session-memory-fk.sql" "012-commands.sql" "013-capabilities.sql" "014-code-image-deployment-execution.sql" "015-principal.sql" "016-resource-edn.sql" "017-event-prev-causal-links.sql"])
 
 (deftest latest-version-matches-the-migration-file-set
   ;; The three-way reconciliation pin: constant == file set == recorded
@@ -628,8 +649,8 @@
         (is (= :store/migration-chain-invalid (:error/type (ex-data e))))
         (is (= :chain-duplicate (:reason (ex-data e))))))
     (testing "a chain whose top disagrees with latest-version"
-      (let [e-short (chain-error (butlast full-chain))     ; tops out at 15
-            e-long (chain-error (conj full-chain "017-beyond.sql"))] ; tops at 17
+      (let [e-short (chain-error (butlast full-chain))     ; tops out at 16
+            e-long (chain-error (conj full-chain "018-beyond.sql"))] ; tops at 18
         (is (= :store/migration-chain-invalid (:error/type (ex-data e-short))))
         (is (= :latest-version-drift (:reason (ex-data e-short))))
         (is (= :latest-version-drift (:reason (ex-data e-long))))))
@@ -681,6 +702,14 @@
     (sqlite/exec! db ["DROP TABLE IF EXISTS executions"])
     (sqlite/exec! db ["DROP TABLE IF EXISTS deployments"])
     (sqlite/exec! db ["DROP TABLE IF EXISTS code_images"]))
+  (when (< n 17)
+    (sqlite/exec! db ["DROP TABLE IF EXISTS causal_links"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_from_idx"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_to_idx"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_type_idx"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS events_prev_idx"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS events_cause_idx"])
+    (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN prev_event_id"]) (catch Exception _ nil)))
   (set-meta! db "applied_migrations" (str/join " " (take n full-chain)))
   (set-meta! db "schema_version" (str n)))
 
@@ -688,7 +717,7 @@
   (let [db (fresh-db)]
     (insert-generation! db g1 {})
     (rewind-to-version! db 1)
-    (is (= {:status :applied :version 16} (migrate/migrate! db)))
+    (is (= {:status :applied :version 17} (migrate/migrate! db)))
     (testing "002-memory.sql invariants hold after the incremental apply"
       (insert-session! db "s1" g1)
       (insert! db :episodic_memory
@@ -702,14 +731,14 @@
     (testing "no data loss"
       (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
     (testing "re-running is a verified noop"
-      (is (= {:status :noop :version 16} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 17} (migrate/migrate! db))))))
 
 (deftest incremental-step-2-to-3-adds-session-routing-audit
   (let [db (fresh-db)]
     (insert-generation! db g1 {})
     (insert-session! db "old-s" g1)
     (rewind-to-version! db 2)
-    (is (= {:status :applied :version 16} (migrate/migrate! db)))
+    (is (= {:status :applied :version 17} (migrate/migrate! db)))
     (testing "003-routing.sql invariants: additive audit columns, index present"
       (let [row (first (sqlite/query db
                                      ["SELECT routing_deployment_version, routing_bucket
@@ -733,13 +762,13 @@
     (testing "no data loss"
       (is (= 2 (count (sqlite/query db ["SELECT id FROM sessions"])))))
     (testing "re-running is a verified noop"
-      (is (= {:status :noop :version 16} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 17} (migrate/migrate! db))))))
 
 (deftest incremental-step-3-to-4-adds-append-only-enrichments
   (let [db (fresh-db)]
     (insert-generation! db g1 {})
     (rewind-to-version! db 3)
-    (is (= {:status :applied :version 16} (migrate/migrate! db)))
+    (is (= {:status :applied :version 17} (migrate/migrate! db)))
     (testing "004-enrichment.sql invariants: append-only discipline survives the upgrade"
       (insert! db :enrichments
                {:id "enr-1" :entity_kind ":genome" :entity_id "e1"
@@ -757,13 +786,13 @@
     (testing "no data loss"
       (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
     (testing "re-running is a verified noop"
-      (is (= {:status :noop :version 16} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 17} (migrate/migrate! db))))))
 
 (deftest incremental-step-4-to-5-adds-deployment-decision-log
   (let [db (fresh-db)]
     (insert-generation! db g1 {})
     (rewind-to-version! db 4)
-    (is (= {:status :applied :version 16} (migrate/migrate! db)))
+    (is (= {:status :applied :version 17} (migrate/migrate! db)))
     (testing "005-deploy.sql invariants: constrained decision vocabulary"
       (insert! db :deployment_decisions
                {:id "d1" :generation_id g1 :decision "deployed"
@@ -776,14 +805,14 @@
     (testing "no data loss"
       (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
     (testing "re-running is a verified noop"
-      (is (= {:status :noop :version 16} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 17} (migrate/migrate! db))))))
 
 (deftest incremental-step-5-to-6-adds-durable-session-bindings
   (let [db (fresh-db)]
     (insert-generation! db g1 {})
     (insert-session! db "bound-s" g1)
     (rewind-to-version! db 5)
-    (is (= {:status :applied :version 16} (migrate/migrate! db)))
+    (is (= {:status :applied :version 17} (migrate/migrate! db)))
     (testing "006-session-bindings.sql invariants after the incremental apply"
       (let [binding {:id "b1" :session_id "bound-s" :binding_type "skill"
                      :logical_id "[:skill \"debugging\"]" :revision_id hash1
@@ -806,7 +835,7 @@
       (is (= 1 (count (sqlite/query db ["SELECT id FROM sessions"]))))
       (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
     (testing "re-running is a verified noop"
-      (is (= {:status :noop :version 16} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 17} (migrate/migrate! db))))))
 
 ;; ============================================================================
 ;; component — an existing version-1 database upgrades additively
@@ -858,6 +887,13 @@
         _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN code_image_id"]) (catch Exception _ nil))
         _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN deployment_id"]) (catch Exception _ nil))
         _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN execution_id"]) (catch Exception _ nil))
+        _ (sqlite/exec! db ["DROP TABLE IF EXISTS causal_links"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_from_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_to_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS causal_links_type_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS events_prev_idx"])
+        _ (sqlite/exec! db ["DROP INDEX IF EXISTS events_cause_idx"])
+        _ (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN prev_event_id"]) (catch Exception _ nil))
         _ (sqlite/exec! db ["UPDATE meta SET value = '1' WHERE key = 'schema_version'"])
         _ (sqlite/exec! db ["UPDATE meta SET value = '001-init.sql'
                             WHERE key = 'applied_migrations'"])
@@ -880,11 +916,11 @@
                                      'created', '2025-01-01T00:00:00Z')"])
         result (migrate/migrate! db)]
     (testing "only the pending migration runs; the version moves to 9"
-      (is (= {:status :applied :version 16} result)))
+      (is (= {:status :applied :version 17} result)))
     (testing "the old session row survives untouched with NULL routing columns"
       (let [row (first (sqlite/query db ["SELECT routing_deployment_version, routing_bucket
                                           FROM sessions WHERE id = 'old-session'"]))]
         (is (nil? (:routing_deployment_version row)))
         (is (nil? (:routing_bucket row)))))
     (testing "a third apply is a verified no-op"
-      (is (= {:status :noop :version 16} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 17} (migrate/migrate! db))))))

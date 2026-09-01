@@ -1,25 +1,32 @@
 (ns evoclj.store.event-schema
-  "Malli schemas for the public Event contract (component; the `Event`
-  contract in docs/implementation-plan.md).
+  "Malli schemas for the public Event contract (E1; the `Event`
+  contract in docs/implementation-plan.md after the E1 split).
+
+  E1 splits the overloaded `Event.cause` into two orthogonal axes:
+  * `:prev/event-id` — linear predecessor inside the SAME session
+    (the log's hash chain). `nil` only for the v0 root set
+    `#{:session/created}` which opens a session; every other event
+    must carry a prev that is the immediate predecessor
+    `(seq = prev-seq + 1)` in the same session.
+  * `:causal-links` — semantic causality graph edges that MAY cross
+    sessions (e.g. child terminal -> parent result). Each edge is
+    `{:from <event-id> :type <keyword>}` where `:from` may be any
+    prior event (any session) and `:to` is implicitly the appended
+    event.
 
   `AppendRequestSchema` validates what callers may hand to
-  evoclj.store.event/append-event!: a session pin (:session/id,
-  :generation/id, :phenotype/id), an :event/type from the Event
-  Taxonomy, an optional :cause/event-id that must reference an EARLIER
-  event in the SAME session (root events excepted — the v0 root set is
-  #{:session/created}, defined and documented in
-  evoclj.store.event/root-event-types), an optional :payload-ref
-  content address (Global Constraint 21: rows reference, they never
-  duplicate payloads), small :metadata, and an optional :created-at
-  (defaults to now, stored canonicalized as ISO-8601 UTC). Unknown
-  keys are rejected: trust boundaries use closed maps.
+  `evoclj.store.event/append-event!`. Legacy `:cause/event-id` is
+  still accepted as a deprecated alias for `:prev/event-id` when the
+  latter is absent (same-session only, for backward compat during the
+  wave), but new code must use `:prev/event-id` + `:causal-links`.
 
   `EventSchema` validates the persisted event returned by the store:
-  the contract's :event/id, :event/seq, :prev-hash, :event-hash and
-  :created-at fields, with :session/id as a #uuid value and
-  :created-at as an inst.
+  includes `:prev/event-id`, `:causal-links` (set, possibly empty),
+  `:prev-hash`, `:event-hash`, etc. Deprecated `:cause/event-id` is
+  tolerated as an optional mirror of `:prev/event-id` for compat but
+  not required.
 
-  Both validators throw :store/event-invalid carrying a humanized
+  Both validators throw `:store/event-invalid` carrying a humanized
   Malli explanation."
   (:require [malli.core :as m]
             [malli.error :as me]
@@ -30,8 +37,15 @@
   "Canonical content-address form of an event hash: sha256:<64 hex>."
   #"^sha256:[0-9a-f]{64}$")
 
+(def CausalLinkSchema
+  "One causal edge supplied at append time: {:from <event-id> :type <keyword>}.
+  `:to` is implicitly the event being appended."
+  [:map {:closed true}
+   [:from pos-int?]
+   [:type keyword?]])
+
 (def EventSchema
-  "The persisted Event contract (implementation-plan `Event`)."
+  "The persisted Event contract (implementation-plan `Event` after E1)."
   [:map {:closed true}
    [:event/id pos-int?]
    [:event/seq pos-int?]
@@ -39,7 +53,9 @@
    [:generation/id string?]
    [:phenotype/id [:fn types/artifact-id?]]
    [:event/type keyword?]
-   [:cause/event-id [:maybe pos-int?]]
+   [:prev/event-id [:maybe pos-int?]]
+   [:causal-links {:optional true} [:set CausalLinkSchema]]
+   [:cause/event-id {:optional true} [:maybe pos-int?]]
    [:payload-ref [:maybe [:fn types/artifact-id?]]]
    [:prev-hash [:maybe [:and string? [:re event-hash-re]]]]
    [:event-hash [:and string? [:re event-hash-re]]]
@@ -47,15 +63,17 @@
    [:metadata :map]])
 
 (def AppendRequestSchema
-  "The append-event! input contract."
+  "The append-event! input contract (E1)."
   [:map {:closed true}
    [:session/id [:fn types/session-id?]]
    [:generation/id string?]
    [:phenotype/id [:fn types/artifact-id?]]
    [:event/type keyword?]
-   [:cause/event-id [:maybe pos-int?]]
-   [:payload-ref [:maybe [:fn types/artifact-id?]]]
-   [:metadata :map]
+   [:prev/event-id {:optional true} [:maybe pos-int?]]
+   [:causal-links {:optional true} [:set CausalLinkSchema]]
+   [:cause/event-id {:optional true} [:maybe pos-int?]]
+   [:payload-ref {:optional true} [:maybe [:fn types/artifact-id?]]]
+   [:metadata {:optional true} :map]
    [:created-at {:optional true} [:fn inst?]]])
 
 (defn validate-event

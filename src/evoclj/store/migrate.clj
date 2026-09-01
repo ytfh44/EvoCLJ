@@ -28,8 +28,8 @@
 
 (def latest-version
   "The schema version this codebase knows how to migrate to. Must equal
-  the count of migration files; bumped to 16 for C1 ResourceKindDescriptor."
-  16)
+  the count of migration files; bumped to 17 for E1 Event prev vs causal-links."
+  17)
 (def ^:private version-key "schema_version")
 (def ^:private applied-key "applied_migrations")
 (def ^:private migrations-dir "migrations")

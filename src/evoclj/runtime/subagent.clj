@@ -653,10 +653,11 @@
   `child-session-id`  — UUID of the child session (must be :completed).
   `cas-ref`           — sha256:<64 hex> CAS reference for the child's result artifact.
 
-  Validates that the child session exists and is :completed and that cas-ref
-  is a sha256 string, then appends a :subagent/result event to the parent's
-  chain (cause = parent's latest event id) with metadata
-  {:child/session-id child-id :result/cas-ref cas-ref :result/status :succeeded}.
+  E1: appends a :subagent/result event to the parent's chain with
+  `:prev/event-id = parent's latest` and
+  `:causal-links #{ {:from <child-terminal-event-id> :type :subagent/result} }`
+  so cross-session causality is explicit in the graph, not overloaded
+  onto prev.
 
   Typed errors: :store/session-invalid when db nil, :store/session-not-found
   when parent missing, :subagent/not-found when child missing,
@@ -686,20 +687,25 @@
           (throw (ex-info (str "parent session not found: " parent-id)
                           {:error/type :store/session-not-found
                            :session/id parent-id})))
-        ;; optional parent-child link verification (best-effort, no hard fail if table absent)
-        ;; but do not block delivery when link missing due to legacy data
         (let [parent-events (event/events-for-session db parent-id)
               _ (when (empty? parent-events)
                   (throw (ex-info "parent session has no events"
                                   {:error/type :store/event-invalid
                                    :session/id parent-id})))
-              cause-id (:event/id (last parent-events))]
+              prev-id (:event/id (last parent-events))
+              child-events (event/events-for-session db child-id)
+              child-terminal (last child-events)
+              child-terminal-id (when child-terminal (:event/id child-terminal))
+              causal-links (if child-terminal-id
+                             #{{:from child-terminal-id :type :subagent/result}}
+                             #{})]
           (event/append-event! db
                                {:session/id parent-id
                                 :generation/id (:generation/id parent)
                                 :phenotype/id (:phenotype/id parent)
                                 :event/type :subagent/result
-                                :cause/event-id cause-id
+                                :prev/event-id prev-id
+                                :causal-links causal-links
                                 :payload-ref nil
                                 :metadata {:child/session-id child-id
                                            :result/cas-ref cas-ref
@@ -713,8 +719,8 @@
   `child-session-id`  — UUID of the child session (must be :failed).
   `error`             — EDN-safe error data (e.g. {:error/type :foo :error/message \"boom\"}).
 
-  Validates child is :failed, then appends :subagent/result with
-  {:child/session-id child-id :result/status :failed :error error} to the parent.
+  E1: appends :subagent/result with prev = parent latest and
+  causal-links #{ {:from <child-terminal> :type :subagent/result} }.
   Typed errors mirror deliver-result! but with :subagent/not-failed when child not failed."
   [db parent-session-id child-session-id error]
   (when (nil? db)
@@ -741,21 +747,24 @@
                   (throw (ex-info "parent session has no events"
                                   {:error/type :store/event-invalid
                                    :session/id parent-id})))
-              cause-id (:event/id (last parent-events))]
+              prev-id (:event/id (last parent-events))
+              child-events (event/events-for-session db child-id)
+              child-terminal (last child-events)
+              child-terminal-id (when child-terminal (:event/id child-terminal))
+              causal-links (if child-terminal-id
+                             #{{:from child-terminal-id :type :subagent/result}}
+                             #{})]
           (event/append-event! db
                                {:session/id parent-id
                                 :generation/id (:generation/id parent)
                                 :phenotype/id (:phenotype/id parent)
                                 :event/type :subagent/result
-                                :cause/event-id cause-id
+                                :prev/event-id prev-id
+                                :causal-links causal-links
                                 :payload-ref nil
                                 :metadata {:child/session-id child-id
                                            :result/status :failed
                                            :error error}}))))))
-
-;; ---------------------------------------------------------------------------
-;; S6 — broker tool surface :agent/spawn + :agent/status (activate_skill façade)
-;; ---------------------------------------------------------------------------
 
 (def AgentSpawnArgsSchema
   "Malli input schema for :agent/spawn (model-facing). :task is required,

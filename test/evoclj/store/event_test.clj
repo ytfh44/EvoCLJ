@@ -1,20 +1,12 @@
 (ns evoclj.store.event-test
-  "component tests for the append-only causal event log.
+  "E1 tests for the append-only event log: prev (linear) vs causal-links (graph).
 
-  Step 1: the per-session :event/seq is monotonic and allocated inside
-  a transaction — sequential appends yield contiguous 1..n sequences,
-  and concurrent-ish appends from two threads (SQLite serializes
-  writers) never interleave or duplicate them. Step 2: a cause must
-  reference an EARLIER event in the SAME session; root events
-  (:session/created) are exempt and carry a nil cause. Step 3: the
-  event namespace exposes no update/delete API — only append/read/
-  verify functions. Step 4: query by session/sequence/type. Step 5:
-  the hash-chain fields make tampering detectable — copying historical
-  rows into a fresh database with a modified :event/type,
-  :payload-ref, or :prev-hash fails verify-event-chain.
+  Step 1: per-session :event/seq monotonic. Step 2: :prev/event-id must be
+  the immediate predecessor in the SAME session (nil only for root
+  :session/created); :causal-links may cross sessions. Step 3: no update/delete.
+  Step 4: query. Step 5: hash-chain tamper detection. F7 redaction unchanged.
 
-  Fresh temp databases are migrated from the classpath migrations and
-  deleted after every test."
+  Fresh temp databases are migrated and deleted after every test."
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.security.redact :as redact]
@@ -33,26 +25,22 @@
 (def ^:private db-paths (atom []))
 
 (defn- temp-db-path
-  "A throwaway SQLite file in the system temp dir."
   []
-  (let [p (str (java.nio.file.Files/createTempFile
-                "evoclj-event-" ".db"
-                (make-array java.nio.file.attribute.FileAttribute 0)))]
+  (let [f (java.io.File/createTempFile "evoclj-event-test-" ".sqlite")
+        p (.getAbsolutePath f)]
+    (.delete f)
     (swap! db-paths conj p)
     p))
 
 (defn- cleanup!
-  "Delete every temp db file created during this run."
   []
   (doseq [p @db-paths]
-    (java.nio.file.Files/deleteIfExists
-     (java.nio.file.Paths/get p (make-array String 0))))
+    (try (.delete (java.io.File. p)) (catch Exception _ nil)))
   (reset! db-paths []))
 
 (use-fixtures :each (fn [f] (f) (cleanup!)))
 
 (defn- fresh-db
-  "A migrated database spec backed by a fresh temp file."
   []
   (let [db (sqlite/spec (temp-db-path))]
     (migrate/migrate! db)
@@ -67,7 +55,6 @@
   ([db sid]
    (sqlite/with-db [conn db]
      (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
-       ;; P5/F + P4: ensure FK targets for generations (genome + resolution)
        (try (jdbc/insert! conn :artifacts {:hash genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
        (try (jdbc/insert! conn :artifacts {:hash resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
        (try (jdbc/insert! conn :artifacts {:hash phenotype :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
@@ -92,13 +79,14 @@
 
 (defn- base-event
   "An append-event! request skeleton; callers override :event/type and
-  supply a real :cause/event-id for non-root events."
+  supply a real :prev/event-id for non-root events. :causal-links defaults to #{}."
   [sid & [overrides]]
   (merge {:session/id sid
           :generation/id gen
           :phenotype/id phenotype
           :event/type :intent/proposed
-          :cause/event-id nil
+          :prev/event-id nil
+          :causal-links #{}
           :payload-ref nil
           :metadata {:source :event-test}}
          overrides))
@@ -111,17 +99,17 @@
 (defn- insert-row!
   "Insert a raw events row (DB column map) into db, letting
   AUTOINCREMENT assign the id. FK-safe when rows are inserted in
-  causal order (a cause always references an already-inserted, lower
-  id)."
+  causal order. For E1 we insert both cause_event_id and prev_event_id
+  (same value) so legacy readers stay coherent."
   [db row]
   (sqlite/exec! db
                 ["INSERT INTO events
                     (session_id, event_seq, generation_id, phenotype_id,
-                     event_type, cause_event_id, payload_ref, payload,
+                     event_type, cause_event_id, prev_event_id, payload_ref, payload,
                      prev_hash, event_hash, created_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                  (:session_id row) (:event_seq row) (:generation_id row)
-                 (:phenotype_id row) (:event_type row) (:cause_event_id row)
+                 (:phenotype_id row) (:event_type row) (:cause_event_id row) (:prev_event_id row)
                  (:payload_ref row) (:payload row) (:prev_hash row)
                  (:event_hash row) (:created_at row)]))
 
@@ -133,8 +121,8 @@
   (let [db (fresh-db)
         sid (seed-session! db)
         e1 (event/append-event! db (base-event sid {:event/type :session/created}))
-        e2 (event/append-event! db (base-event sid {:cause/event-id (:event/id e1)}))
-        e3 (event/append-event! db (base-event sid {:cause/event-id (:event/id e2)}))]
+        e2 (event/append-event! db (base-event sid {:prev/event-id (:event/id e1)}))
+        e3 (event/append-event! db (base-event sid {:prev/event-id (:event/id e2)}))]
     (is (= [1 2 3] (mapv :event/seq [e1 e2 e3])))
     (is (< (:event/seq e1) (:event/seq e2) (:event/seq e3)))
     (testing "a fresh session restarts its sequence at 1"
@@ -146,39 +134,40 @@
   (let [db (fresh-db)
         sid (seed-session! db)
         root (event/append-event! db (base-event sid {:event/type :session/created}))
-        cause (:event/id root)
         per-thread 25
         worker (fn []
                  (dotimes [_ per-thread]
-                   (event/append-event! db (base-event sid {:cause/event-id cause}))))
-        t1 (future (worker))
-        t2 (future (worker))]
-    @t1
-    @t2
-    (let [events (event/events-for-session db sid)
-          seqs (mapv :event/seq events)
-          expected (range 1 (inc (inc (* 2 per-thread))))]
-      (testing "1 root + 50 worker events = 51 unique contiguous seqs"
-        (is (= (count expected) (count seqs)))
-        (is (= (set expected) (set seqs)))
-        (is (= (sort seqs) seqs))
-        (is (= expected seqs)))
-      (testing "the chain still verifies after concurrent appends"
-        (is (= {:valid? true :events 51} (event/verify-event-chain db sid)))))))
+                   (let [latest (last (event/events-for-session db sid))]
+                     (event/append-event! db (base-event sid {:prev/event-id (:event/id latest)})))))]
+    (let [t1 (future (worker))
+          t2 (future (worker))]
+      @t1
+      @t2
+      (let [events (event/events-for-session db sid)
+            seqs (mapv :event/seq events)
+            expected (range 1 (inc (inc (* 2 per-thread))))]
+        (testing "1 root + 50 worker events = 51 unique contiguous seqs"
+          (is (= (count expected) (count seqs)))
+          (is (= (set expected) (set seqs)))
+          (is (= (sort seqs) seqs))
+          (is (= expected seqs)))
+        (testing "the chain still verifies after concurrent appends"
+          (is (= {:valid? true :events 51} (event/verify-event-chain db sid))))))))
 
 ;; ============================================================================
-;; Step 2 — cause references: earlier same-session only; root events exempt
+;; Step 2 — prev references: immediate predecessor same-session; causal-links cross
 ;; ============================================================================
 
-(deftest root-event-is-exempt-from-cause-rule
+(deftest root-event-is-exempt-from-prev-rule
   (let [db (fresh-db)
         sid (seed-session! db)
         e (event/append-event! db (base-event sid {:event/type :session/created}))]
     (is (= 1 (:event/seq e)))
-    (is (nil? (:cause/event-id e)))
+    (is (nil? (:prev/event-id e)))
+    (is (empty? (:causal-links e)))
     (is (nil? (:prev-hash e)))))
 
-(deftest non-root-event-requires-a-cause
+(deftest non-root-event-requires-a-prev
   (let [db (fresh-db)
         sid (seed-session! db)]
     (event/append-event! db (base-event sid {:event/type :session/created}))
@@ -186,48 +175,74 @@
       (is (some? e))
       (is (= :store/event-invalid (:error/type (ex-data e)))))))
 
-(deftest root-event-with-a-cause-rejected
+(deftest root-event-with-a-prev-rejected
   (let [db (fresh-db)
         sid (seed-session! db)
         root (event/append-event! db (base-event sid {:event/type :session/created}))]
     (let [e (event-error #(event/append-event! db
                                                (base-event sid {:event/type :session/created
-                                                                :cause/event-id (:event/id root)})))]
+                                                                :prev/event-id (:event/id root)})))]
       (is (some? e))
       (is (= :store/event-invalid (:error/type (ex-data e)))))))
 
-(deftest earlier-same-session-cause-is-accepted
+(deftest earlier-same-session-prev-is-accepted
   (let [db (fresh-db)
         sid (seed-session! db)
         root (event/append-event! db (base-event sid {:event/type :session/created}))
-        e2 (event/append-event! db (base-event sid {:cause/event-id (:event/id root)}))
-        e3 (event/append-event! db (base-event sid {:cause/event-id (:event/id e2)}))]
-    (is (= (:event/id root) (:cause/event-id e2)))
-    (is (= (:event/id e2) (:cause/event-id e3)))
-    (testing "a cause may reference any earlier event, not only the previous one"
-      (let [e4 (event/append-event! db (base-event sid {:cause/event-id (:event/id root)}))]
-        (is (= (:event/id root) (:cause/event-id e4)))))))
+        e2 (event/append-event! db (base-event sid {:prev/event-id (:event/id root)}))
+        e3 (event/append-event! db (base-event sid {:prev/event-id (:event/id e2)}))]
+    (is (= (:event/id root) (:prev/event-id e2)))
+    (is (= (:event/id e2) (:prev/event-id e3)))
+    (testing "a prev may reference any earlier event, not only the immediate predecessor"
+      (let [e4 (event/append-event! db (base-event sid {:prev/event-id (:event/id root)}))]
+        (is (= (:event/id root) (:prev/event-id e4)))))))
 
-(deftest cause-must-reference-an-existing-event
+(deftest prev-must-reference-an-existing-event
   (let [db (fresh-db)
         sid (seed-session! db)]
     (event/append-event! db (base-event sid {:event/type :session/created}))
-    ;; a "later" event cannot be referenced: it does not exist yet, so
-    ;; any nonexistent id (past or future) is rejected
-    (let [e (event-error #(event/append-event! db (base-event sid {:cause/event-id 99999})))]
+    (let [e (event-error #(event/append-event! db (base-event sid {:prev/event-id 99999})))]
       (is (some? e))
       (is (= :store/cause-not-found (:error/type (ex-data e)))))))
 
-(deftest cause-must-be-in-the-same-session
+(deftest prev-must-be-in-the-same-session
   (let [db (fresh-db)
         sid1 (seed-session! db)
         sid2 (seed-session! db)
         root2 (event/append-event! db (base-event sid2 {:event/type :session/created}))]
     (event/append-event! db (base-event sid1 {:event/type :session/created}))
     (let [e (event-error #(event/append-event! db
-                                               (base-event sid1 {:cause/event-id (:event/id root2)})))]
+                                               (base-event sid1 {:prev/event-id (:event/id root2)})))]
       (is (some? e))
       (is (= :store/cause-session-mismatch (:error/type (ex-data e)))))))
+
+(deftest causal-links-may-cross-sessions
+  (let [db (fresh-db)
+        sid1 (seed-session! db)
+        sid2 (seed-session! db)
+        root1 (event/append-event! db (base-event sid1 {:event/type :session/created}))
+        root2 (event/append-event! db (base-event sid2 {:event/type :session/created}))
+        e2 (event/append-event! db (base-event sid1 {:prev/event-id (:event/id root1)}))
+        ;; cross-session causal link: parent event e2 causes child event
+        child-e2 (event/append-event! db (base-event sid2 {:prev/event-id (:event/id root2)
+                                                            :causal-links #{{:from (:event/id e2) :type :test/cross}}}))]
+    (is (= (:event/id root2) (:prev/event-id child-e2)))
+    (is (= #{{:from (:event/id e2) :type :test/cross}} (:causal-links child-e2)))
+    (testing "causal link is queryable"
+      (is (= #{{:from (:event/id e2) :type :test/cross}} (event/get-causal-links db (:event/id child-e2)))))
+    (testing "prev chain still linear and verifies"
+      (is (= {:valid? true :events 2} (event/verify-event-chain db sid1)))
+      (is (= {:valid? true :events 2} (event/verify-event-chain db sid2))))))
+
+(deftest causal-links-from-must-exist
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        root (event/append-event! db (base-event sid {:event/type :session/created}))]
+    (let [e (event-error #(event/append-event! db
+                                               (base-event sid {:prev/event-id (:event/id root)
+                                                                :causal-links #{{:from 99999 :type :test/missing}}})))]
+      (is (some? e))
+      (is (= :store/causal-link-not-found (:error/type (ex-data e)))))))
 
 (deftest unknown-session-rejected
   (let [db (fresh-db)]
@@ -248,7 +263,7 @@
         sid (seed-session! db)
         root (event/append-event! db (base-event sid {:event/type :session/created}))]
     (let [e (event-error #(event/append-event! db
-                                               (assoc (base-event sid {:cause/event-id (:event/id root)})
+                                               (assoc (base-event sid {:prev/event-id (:event/id root)})
                                                       :bogus 1)))]
       (is (some? e))
       (is (= :store/event-invalid (:error/type (ex-data e)))))))
@@ -266,7 +281,7 @@
       (is (every? publics
                   ["append-event!" "events-for-session" "get-event-by-seq"
                    "get-event-by-id" "events-by-type" "verify-event-chain"
-                   "root-event-types"])))))
+                   "root-event-types" "get-causal-links"])))))
 
 ;; ============================================================================
 ;; Step 4 — queries by session / sequence / type
@@ -276,10 +291,10 @@
   (let [db (fresh-db)
         sid (seed-session! db)
         root (event/append-event! db (base-event sid {:event/type :session/created}))
-        p1 (event/append-event! db (base-event sid {:cause/event-id (:event/id root)}))
+        p1 (event/append-event! db (base-event sid {:prev/event-id (:event/id root)}))
         a1 (event/append-event! db (base-event sid {:event/type :intent/authorized
-                                                    :cause/event-id (:event/id p1)}))
-        p2 (event/append-event! db (base-event sid {:cause/event-id (:event/id a1)}))]
+                                                    :prev/event-id (:event/id p1)}))
+        p2 (event/append-event! db (base-event sid {:prev/event-id (:event/id a1)}))]
     (testing "all events of the session, ascending"
       (is (= [1 2 3 4] (mapv :event/seq (event/events-for-session db sid)))))
     (testing "by sequence"
@@ -308,7 +323,9 @@
     (is (= gen (:generation/id e)))
     (is (= phenotype (:phenotype/id e)))
     (is (= :session/created (:event/type e)))
+    (is (nil? (:prev/event-id e)))
     (is (nil? (:cause/event-id e)))
+    (is (empty? (:causal-links e)))
     (is (nil? (:payload-ref e)))
     (is (nil? (:prev-hash e)))
     (is (re-matches #"^sha256:[0-9a-f]{64}$" (:event-hash e)))
@@ -319,8 +336,8 @@
   (let [db (fresh-db)
         sid (seed-session! db)
         root (event/append-event! db (base-event sid {:event/type :session/created}))
-        e2 (event/append-event! db (base-event sid {:cause/event-id (:event/id root)}))
-        e3 (event/append-event! db (base-event sid {:cause/event-id (:event/id e2)}))]
+        e2 (event/append-event! db (base-event sid {:prev/event-id (:event/id root)}))
+        e3 (event/append-event! db (base-event sid {:prev/event-id (:event/id e2)}))]
     (is (nil? (:prev-hash root)))
     (is (= (:event-hash root) (:prev-hash e2)))
     (is (= (:event-hash e2) (:prev-hash e3)))
@@ -334,21 +351,21 @@
     (dotimes [_ 5]
       (let [evs (event/events-for-session db sid)
             cause (:event/id (last evs))]
-        (event/append-event! db (base-event sid {:cause/event-id cause}))))
+        (event/append-event! db (base-event sid {:prev/event-id cause}))))
     (is (= {:valid? true :events 6} (event/verify-event-chain db sid)))))
 
 (deftest tampered-copied-row-fails-verification
   (let [db (fresh-db)
         sid (seed-session! db)
         root (event/append-event! db (base-event sid {:event/type :session/created}))
-        ev2 (event/append-event! db (base-event sid {:cause/event-id (:event/id root)}))
-        ev3 (event/append-event! db (base-event sid {:cause/event-id (:event/id ev2)}))
+        ev2 (event/append-event! db (base-event sid {:prev/event-id (:event/id root)}))
+        ev3 (event/append-event! db (base-event sid {:prev/event-id (:event/id ev2)}))
         rows (sqlite/query db ["SELECT * FROM events ORDER BY event_seq"])]
     (is (= 3 (count rows)))
     (testing "an untampered copy verifies"
       (let [db2 (fresh-db)
             _ (seed-session! db2 sid)
-            _ (doseq [r rows] (insert-row! db2 r))]
+            _ (doseq [r rows] (insert-row! db2 (assoc r :prev_event_id (:prev_event_id r) :cause_event_id (:prev_event_id r))))]
         (is (= {:valid? true :events 3} (event/verify-event-chain db2 sid)))))
     (testing "changing :event/type in a copied row breaks the hash"
       (let [db2 (fresh-db)
@@ -357,7 +374,7 @@
                               (assoc % :event_type ":node/started")
                               %)
                            rows)]
-        (doseq [r tampered] (insert-row! db2 r))
+        (doseq [r tampered] (insert-row! db2 (assoc r :prev_event_id (:prev_event_id r) :cause_event_id (:cause_event_id r))))
         (let [v (event/verify-event-chain db2 sid)]
           (is (false? (:valid? v)))
           (is (= :event/hash-mismatch (:reason v)))
@@ -369,7 +386,7 @@
                               (assoc % :payload_ref (str "sha256:" (apply str (repeat 64 "c"))))
                               %)
                            rows)]
-        (doseq [r tampered] (insert-row! db2 r))
+        (doseq [r tampered] (insert-row! db2 (assoc r :prev_event_id (:prev_event_id r) :cause_event_id (:cause_event_id r))))
         (let [v (event/verify-event-chain db2 sid)]
           (is (false? (:valid? v)))
           (is (= :event/hash-mismatch (:reason v))))))
@@ -380,7 +397,7 @@
                               (assoc % :prev_hash (str "sha256:" (apply str (repeat 64 "d"))))
                               %)
                            rows)]
-        (doseq [r tampered] (insert-row! db2 r))
+        (doseq [r tampered] (insert-row! db2 (assoc r :prev_event_id (:prev_event_id r) :cause_event_id (:cause_event_id r))))
         (let [v (event/verify-event-chain db2 sid)]
           (is (false? (:valid? v)))
           (is (= :event/prev-hash-mismatch (:reason v)))
@@ -391,8 +408,8 @@
         sid (seed-session! db)
         root (event/append-event! db (base-event sid {:event/type :session/created}))
         ev2 (event/append-event! db (base-event sid {:event/type :intent/completed
-                                                     :cause/event-id (:event/id root)}))
-        ev3 (event/append-event! db (base-event sid {:cause/event-id (:event/id ev2)}))
+                                                     :prev/event-id (:event/id root)}))
+        ev3 (event/append-event! db (base-event sid {:prev/event-id (:event/id ev2)}))
         rows (sqlite/query db ["SELECT * FROM events ORDER BY event_seq"])]
     (is (= 3 (count rows)))
     (testing "same-leaf cross-namespace swap (:intent/completed -> :node/completed) breaks the hash"
@@ -402,7 +419,7 @@
                               (assoc % :event_type ":node/completed")
                               %)
                            rows)]
-        (doseq [r tampered] (insert-row! db2 r))
+        (doseq [r tampered] (insert-row! db2 (assoc r :prev_event_id (:prev_event_id r) :cause_event_id (:cause_event_id r))))
         (let [v (event/verify-event-chain db2 sid)]
           (is (false? (:valid? v)))
           (is (= :event/hash-mismatch (:reason v)))
@@ -438,7 +455,7 @@
         ev2 (event/append-event!
              db
              (base-event sid
-                         {:cause/event-id (:event/id root)
+                         {:prev/event-id (:event/id root)
                           :metadata {:credentials {:api-key "sk-live-abc123"}}})
              specs)]
     (testing "pattern redaction replaced the embedded bearer token"
@@ -471,7 +488,7 @@
       (let [ev2 (event/append-event!
                  db
                  (base-event sid
-                             {:cause/event-id (:event/id ev)
+                             {:prev/event-id (:event/id ev)
                               :metadata {:already "[REDACTED]"
                                          :credentials {:api-key "sk-live-xyz"}}})
                  specs)]
@@ -517,7 +534,7 @@
     (testing "an explicit nil specs arity behaves identically"
       (let [ev2 (event/append-event!
                  db
-                 (base-event sid {:cause/event-id (:event/id e)
+                 (base-event sid {:prev/event-id (:event/id e)
                                   :metadata metadata})
                  nil)]
         (is (= metadata (:metadata ev2)))
@@ -525,3 +542,19 @@
     (testing "the chain verifies and hashes keep the canonical form"
       (is (= {:valid? true :events 2} (event/verify-event-chain db sid)))
       (is (re-matches #"^sha256:[0-9a-f]{64}$" (:event-hash e))))))
+
+(deftest subagent-result-via-causal-links
+  (let [db (fresh-db)
+        sid-parent (seed-session! db)
+        sid-child (seed-session! db)
+        root-p (event/append-event! db (base-event sid-parent {:event/type :session/created}))
+        root-c (event/append-event! db (base-event sid-child {:event/type :session/created}))
+        ;; child terminal
+        child-ev (event/append-event! db (base-event sid-child {:prev/event-id (:event/id root-c)}))
+        ;; parent result with prev linear and causal link to child terminal
+        parent-ev (event/append-event! db (base-event sid-parent {:prev/event-id (:event/id root-p)
+                                                                   :causal-links #{{:from (:event/id child-ev) :type :subagent/result}}}))]
+    (is (= (:event/id root-p) (:prev/event-id parent-ev)))
+    (is (= #{{:from (:event/id child-ev) :type :subagent/result}} (:causal-links parent-ev)))
+    (is (= {:valid? true :events 2} (event/verify-event-chain db sid-parent)))
+    (is (= {:valid? true :events 2} (event/verify-event-chain db sid-child)))))

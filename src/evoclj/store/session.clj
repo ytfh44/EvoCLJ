@@ -36,6 +36,7 @@
   evoclj.store.session-states (single canonical source).
   Fleet P5/F: genome/phenotype/resolution existence is enforced via
   VerifiedDigest and FK at rest (011)."
+;; E1: Event prev vs causal-links — session creation uses :prev/event-id nil + :causal-links #{}, no :cause.
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [malli.core :as m]
