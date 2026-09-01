@@ -90,15 +90,21 @@
         (broker/authorize {:intent intent :normalized-request normalized :leases [] :now (java.util.Date.) :registry {:bad/kind [{:source :request :action-from :request}]}})
         (catch clojure.lang.ExceptionInfo e
           (is (= :registry/invalid-kind (:error/type (ex-data e))))))))
-  (testing "sealed registry with allowed kind works"
+  (testing "C1: kind recognition comes from the Descriptor registry, not the :registry override"
     (let [session-id #uuid "11111111-1111-4111-8111-111111111111"
           phenotype "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           intent (intent/tool-call session-id phenotype :node/tool 42 {:tool/id :fixture/echo :args {:text "hi"}} {:wall-ms 1000})
-          normalized {:tool/id :fixture/echo :resource {:kind :tool :id :fixture/echo}}
           r (reg/make-registry {:tool [{:source :request :action-from :request}]})]
       (is (reg/registry? r))
-      (let [bad-norm {:tool/id :fixture/echo :resource {:kind :filesystem :path "/tmp/x"}}]
-        (is (= :capability/unknown-resource-kind (:reason (broker/authorize {:intent intent :normalized-request bad-norm :leases [] :now (java.util.Date.) :registry r}))))))))
+      ;; :filesystem is a registered built-in descriptor, so it is a KNOWN kind —
+      ;; with no granting lease the broker returns :capability/missing, not unknown.
+      (let [fs-norm {:tool/id :fixture/echo :resource {:kind :filesystem :path "/tmp/x"}}]
+        (is (= :capability/missing
+               (:reason (broker/authorize {:intent intent :normalized-request fs-norm :leases [] :now (java.util.Date.) :registry r})))))
+      ;; a kind that is NOT registered in the Descriptor registry is unknown, fail-closed.
+      (let [unknown-norm {:tool/id :fixture/echo :resource {:kind :no/such-kind :id :x}}]
+        (is (= :capability/unknown-resource-kind
+               (:reason (broker/authorize {:intent intent :normalized-request unknown-norm :leases [] :now (java.util.Date.) :registry r}))))))))
 
 ;; --- S5/S6 integration: definition > validation -------------------------------
 

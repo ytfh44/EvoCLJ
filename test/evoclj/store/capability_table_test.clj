@@ -154,16 +154,25 @@
 ;; Additional P7 invariants
 ;; ===========================================================================
 
-(deftest resource-kind-closed-set-enforced
+;; C1: the resource_kind vocabulary is OPEN — the DB CHECK was removed
+;; (definition lives in the ResourceKindDescriptor registry). An arbitrary
+;; kind persists and round-trips; authorization fail-closure is the broker's
+;; job (unknown kind -> deny), never the store's.
+(deftest resource-kind-open-vocabulary-not-closed-set
   (let [db (fresh-db)
         gid "gen-cap-4"
         sid "sess-cap-4"]
     (insert-generation! db gid)
     (insert-session! db sid gid)
-    (is (thrown? Exception
-                 (cap-store/insert-capability! db
-                                               (assoc (valid-cap "cap-bad-kind" sid)
-                                                      :resource-kind "unicorn"))))))
+    (testing "membership is enforced in the Descriptor registry, not the DB"
+      (let [row (cap-store/insert-capability! db
+                                               (assoc (valid-cap "cap-custom-kind" sid)
+                                                      :resource-kind "unicorn"
+                                                      :resource-id "horn-1"))
+            fetched (cap-store/fetch-capability db "cap-custom-kind")]
+        (is (some? row))
+        (is (= "unicorn" (:resource-kind fetched)))
+        (is (some? (:resource-edn fetched)))))))
 
 (deftest actions-non-empty-enforced
   (let [db (fresh-db)
@@ -176,16 +185,23 @@
                                                (assoc (valid-cap "cap-empty-actions" sid)
                                                       :actions []))))))
 
-(deftest foreign-key-to-sessions-enforced
+;; I2/C1: the capabilities table has no FK to sessions — the subject is a
+;; Principal tagged union (job/eval/operator need no session), so a lease for
+;; a non-existent session persists. Fail-closed authorization is decided at
+;; verify time, not by the store.
+(deftest capabilities-are-principal-scoped-not-fk-bound
   (let [db (fresh-db)
         gid "gen-cap-6"
         sid "sess-cap-6"]
     (insert-generation! db gid)
     (insert-session! db sid gid)
-    (is (thrown? Exception
-                 (cap-store/insert-capability! db
+    (testing "a lease with an unknown session principal persists (no FK)"
+      (let [row (cap-store/insert-capability! db
                                                (assoc (valid-cap "cap-fk" "no-such-session")
-                                                      :subject-session-id "no-such-session"))))))
+                                                      :subject-session-id "no-such-session"))]
+        (is (some? row))
+        (is (= "no-such-session" (:subject-session-id
+                                  (cap-store/fetch-capability db "cap-fk"))))))))
 
 (deftest indexes-exist
   (let [db (fresh-db)]
@@ -202,6 +218,7 @@
     (is (contains? cols "subject_phenotype_id"))
     (is (contains? cols "resource_kind"))
     (is (contains? cols "resource_id"))
+    (is (contains? cols "resource_edn"))
     (is (contains? cols "actions"))
     (is (contains? cols "constraints"))
     (is (contains? cols "issued_at"))

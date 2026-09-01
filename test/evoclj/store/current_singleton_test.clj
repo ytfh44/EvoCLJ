@@ -154,7 +154,7 @@
       (is (= 1 (-> (sqlite/query db ["SELECT current FROM generations WHERE id=?" g1]) first :current)))
       ;; migrate to 013 should create kernel_state and seed from existing current
       (let [result (migrate/migrate! db)]
-        (is (= 13 (:version result))))
+        (is (= 16 (:version result))))
       (is (= g1 (-> (sqlite/query db ["SELECT current_generation FROM kernel_state WHERE id=1"]) first :current_generation)))
       (is (= 1 (-> (sqlite/query db ["SELECT current FROM generations WHERE id=?" g1]) first :current)))
       (is (= 1 (count (sqlite/query db ["SELECT id FROM kernel_state"])))))))

@@ -69,6 +69,7 @@
   evoclj.capability.lease)."
   (:require [clojure.set :as set]
             [evoclj.capability.lease :as lease]
+            [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err]
             [malli.core :as m]))
@@ -95,16 +96,13 @@
    :intent/model-call :invoke
    :intent/memory-read :invoke
    :intent/memory-write :invoke})
-
+;; C1: derived from ResourceKindDescriptor registry (no hardcoded allowlist).
+;; Kept as a var for backward compat; prefer (rk/allowed-actions-by-kind).
 (def allowed-actions-by-kind
-  {:tool #{:invoke :read :write}
-   :memory #{:invoke}
-   :model #{:invoke}
-   :filesystem #{:read :list :stat :write :create :delete}
-   :filesystem/path #{:read :list :stat :write :create :delete}})
+  (rk/allowed-actions-by-kind))
 
 (def ^:private global-allowed-actions
-  (apply set/union (vals allowed-actions-by-kind)))
+  (apply set/union (vals (rk/allowed-actions-by-kind))))
 
 (defn intent-action
   [intent]

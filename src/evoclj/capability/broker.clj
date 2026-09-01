@@ -67,6 +67,7 @@
   (:require [clojure.set :as set]
             [evoclj.broker.registry :as reg]
             [evoclj.capability.policy :as policy]
+            [evoclj.capability.resource-kind :as rk]
             [evoclj.intent.schema :as intent-schema]
             [evoclj.kernel.error :as err]))
 
@@ -147,13 +148,12 @@
     (throw (err/error :capability/schema-invalid
                       "normalized request must carry a :resource map"
                       {:value (err/sanitize normalized-request)})))
-  (reg/assert-registry! registry)
-  (let [lease-reg (or lease-registry leases-registry revocation-registry)
-        revoked? (fn [lease] (when lease-reg (boolean (get-in @lease-reg [(:cap/id lease) :revoked?]))))
-        principal (policy/intent-principal intent)
-        reg-sealed (or registry default-resource-kind-registry)
-        kind (:kind (:resource normalized-request))
-        targets (reg/registry-get reg-sealed kind)]
+      (reg/assert-registry! registry)
+    (let [lease-reg (or lease-registry leases-registry revocation-registry)
+          revoked? (fn [lease] (when lease-reg (boolean (get-in @lease-reg [(:cap/id lease) :revoked?]))))
+          principal (policy/intent-principal intent)
+          kind (:kind (:resource normalized-request))
+          targets (rk/authorization-targets-for kind)]
     (if (nil? targets)
       {:decision :deny :reason :capability/unknown-resource-kind}
       (loop [remaining targets
@@ -161,10 +161,10 @@
         (if-let [t (first remaining)]
           (let [res (resolve-target-resource t normalized-request)
                 act (resolve-target-action t normalized-request intent)
-                ;; P6: fail-closed for unknown / non-allowlisted actions
+                ;; P6: fail-closed for unknown / non-allowlisted actions (C1: descriptor registry)
                 unknown-action? (or (nil? act)
                                    (not (keyword? act))
-                                   (not (contains? (apply set/union (vals reg/allowed-actions-by-kind)) act)))
+                                   (not (contains? (apply set/union (vals (rk/allowed-actions-by-kind))) act)))
                 all-leases (or leases [])
                 ;; partition leases into non-revoked and revoked for this registry
                 non-revoked (if lease-reg (remove revoked? all-leases) all-leases)

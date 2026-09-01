@@ -38,14 +38,14 @@
 
   Every scenario is fail-closed and typed: malformed kinds never
   silently grant."
-  (:require [clojure.test :refer [deftest is testing]]
-            [evoclj.broker.registry :as reg]
+  (:require [clojure.edn :as edn]
+            [clojure.test :refer [deftest is testing]]
             [evoclj.capability.broker :as broker]
+            [evoclj.capability.resource-kind :as rk]
             [evoclj.intent.core :as intent]
             [evoclj.provider.fixture :as fixture]
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]))
-
 ;; --- shared fixtures -------------------------------------------------------
 
 (def ^:private session-id #uuid "11111111-1111-4111-8111-111111111111")
@@ -193,31 +193,51 @@
 ;; BRANCH 2 — registry dispatches per kind uniformly / is extensible
 ;; ============================================================================
 
+;; C1: a NEW kind is added by registering a ResourceKindDescriptor — one file,
+;; no changes to lease/policy/broker/store. Before registration the kind is
+;; denied fail-closed; after registration it dispatches uniformly; after
+;; unregistration it is denied again.
+(def ^:private custom-bucket-descriptor
+  (reify rk/ResourceKindDescriptor
+    (kind [_] :custom/bucket)
+    (resource-schema [_] [:map {:closed false} [:kind [:= :custom/bucket]] [:bucket string?]])
+    (canonicalize [_ r] (when (map? r) (select-keys r [:kind :bucket])))
+    (covers? [_ granted requested _] (= (:bucket granted) (:bucket requested)))
+    (attenuates? [_ parent child] (= (:bucket parent) (:bucket child)))
+    (meet [_ a b] (when (= (:bucket a) (:bucket b)) a))
+    (serialize [_ r] (pr-str (select-keys r [:kind :bucket])))
+    (deserialize [_ s] (try (clojure.edn/read-string s) (catch Exception _ nil)))
+    (allowed-actions [_] #{:read})
+    (authorization-targets [_] [{:source :request :action-from :request}])))
+
 (deftest custom-registry-dispatches-uniformly-not-hardcoded
-  (testing "a CUSTOM resource-kind registry makes authorize dispatch
-            uniformly: the default :filesystem/path entry REQUIRES a tool
-            grant AND a resource grant (dual auth), but a custom registry
-            that lists ONLY the request target authorizes a
-            :filesystem/path request with a resource grant alone — proving
-            the dual auth is driven by the registry, not a hard-coded
-            branch. (Before M14 the dual branch was hard-coded, so this
-            request would have been denied even without a tool lease.)"
-    (let [request-only-registry
-          (reg/make-registry {:filesystem/path
-           [{:source :request :action-from :request}]})
-          normalized {:tool/id path-tool-id
-                      :resource {:kind :filesystem/path
-                                 :path "/work/secret"
-                                 :action :read}}
-          fs-read (fs-path-lease
-                   #uuid "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-                   #{:read} "/work/secret")]
-      ;; with the custom (request-only) registry, a resource grant alone
-      ;; authorizes the request — the tool grant is no longer required
-      (is (allow? (authorize normalized [fs-read] request-only-registry)))
-      ;; with the DEFAULT registry, the same inputs are denied (tool grant
-      ;; still required) — the two registries produce different behavior
-      (is (not (allow? (authorize normalized [fs-read])))))))
+  (testing "a custom ResourceKindDescriptor (registered, no lease/policy/
+            broker change) dispatches uniformly — a brand-new kind
+            authorizes via its own request target, fail-closed before and
+            after registration"
+    (let [normalized {:tool/id path-tool-id
+                      :resource {:kind :custom/bucket :bucket "prod" :action :read}}
+          bucket-lease {:cap/id #uuid "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+                        :principal {:principal/type :session :session/id session-id}
+                        :resource {:kind :custom/bucket :bucket "prod"}
+                        :actions #{:read}
+                        :constraints {:max-calls 10}
+                        :issued-at issued-at
+                        :expires-at expires-at}]
+      (testing "unregistered kind denied fail-closed"
+        (is (= :capability/unknown-resource-kind
+               (:reason (authorize normalized [bucket-lease])))))
+      (testing "registered descriptor authorizes via its request target alone"
+        (rk/register! custom-bucket-descriptor)
+        (try
+          (is (allow? (authorize normalized [bucket-lease])))
+          (is (not (allow? (authorize (assoc-in normalized [:resource :bucket] "other")
+                                      [bucket-lease]))))
+          (finally
+            (rk/unregister! :custom/bucket))))
+      (testing "unregistered again denied fail-closed"
+        (is (= :capability/unknown-resource-kind
+               (:reason (authorize normalized [bucket-lease]))))))))
 
 (deftest built-in-kinds-still-dispatch-through-registry
   (testing "tool, model, memory, and filesystem kinds each authorize via

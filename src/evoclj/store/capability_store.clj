@@ -1,26 +1,31 @@
 (ns evoclj.store.capability-store
-  "Store-backed CapabilityLease persistence (P7, I2).
+  "Store-backed CapabilityLease persistence (P7, I2, C1).
 
-  Durable table `capabilities` (migration 013/015) mirrors the sealed lease
-  shape: principal (tagged union), closed resource_kind, JSON actions,
-  positive window, revoked flag. Helpers are thin wrappers over
-  sqlite spec — no mandatory DB read in the hot verify path (the in-memory
-  LeaseRegistry remains authoritative); this is the additive persistence
-  layer.
+  Durable table `capabilities` (migration 013/015/016) mirrors the sealed lease
+  shape: principal (tagged union), open resource_kind + faithful resource_edn
+  (EDN, C1), JSON actions, positive window, revoked flag. Helpers are thin
+  wrappers over sqlite spec — no mandatory DB read in the hot verify path (the
+  in-memory LeaseRegistry remains authoritative); this is the additive
+  persistence layer.
 
   Actions are stored as JSON array strings; constraints as JSON string
-  (or nil). Timestamps are TEXT ISO-8601 UTC. The helpers validate
-  minimally with Malli but rely on DB CHECKs for the closed invariants."
+  (or nil). Resource identity is stored as `resource_edn` via the
+  ResourceKindDescriptor serializer (adding a kind is a single-file Descriptor
+  registration, never a schema change). `resource_kind` (no CHECK) and legacy
+  `resource_id` columns are kept for queryability and backward-compat reads.
+  Timestamps are TEXT ISO-8601 UTC. The helpers validate minimally with Malli
+  but rely on DB CHECKs for the closed invariants."
   (:require [cheshire.core :as json]
             [clojure.java.jdbc :as jdbc]
             [clojure.string :as str]
+            [evoclj.capability.resource-kind :as rk]
             [evoclj.store.sqlite :as sqlite]
             [malli.core :as m]))
 
 ;; --- Malli schemas (lightweight) -----------------------------------------
 
 (def ^:private allowed-resource-kinds
-  #{"tool" "model" "memory" "filesystem" "filesystem/path"})
+  (set (map name (rk/allowed-kinds))))
 
 (def CapabilityRowSchema
   "Minimal row schema for insert validation."
@@ -28,8 +33,9 @@
    [:id :string]
    [:principal-type :string]
    [:principal-id :string]
-   [:resource-kind [:and :string [:fn #(contains? allowed-resource-kinds %)]]]
-   [:resource-id :string]
+   [:resource-kind :string]
+   [:resource-edn :string]
+   [:resource-id {:optional true} :string]
    [:actions [:vector :string]]
    [:issued-at :string]
    [:expires-at :string]
@@ -56,6 +62,8 @@
    :subject-phenotype-id (:subject_phenotype_id row)
    :resource-kind (:resource_kind row)
    :resource-id (:resource_id row)
+   :resource-edn (:resource_edn row)
+   :resource (rk/deserialize-resource (:resource_edn row))
    :actions (or (when-let [a (:actions row)]
                   (try (json/parse-string a) (catch Exception _ [a])))
                 [])
@@ -70,8 +78,8 @@
 
 (defn fetch-capability
   "Fetch capability by `cap-id` (TEXT PRIMARY KEY), or nil when absent.
-  Returns a normalized map with parsed actions/constraints and
-  boolean :revoked."
+  Returns a normalized map with parsed actions/constraints, parsed
+  :resource (from resource_edn) and boolean :revoked."
   [db cap-id]
   (when cap-id
     (when-let [row (first (sqlite/query db ["SELECT * FROM capabilities WHERE id = ?" (str cap-id)]))]
@@ -83,13 +91,15 @@
   [lease]
   (let [id (or (:id lease) (:cap/id lease) (str (:capId lease)))
         ;; principal resolution: explicit flat, or nested :principal, or legacy :subject
-        ptype (or (:principal-type lease)
-                  (:principal_type lease)
-                  (get-in lease [:principal :principal/type])
-                  (get-in lease [:principal "principal/type"])
-                  (when-let [p (or (:principal lease) (:subject lease))]
-                    (name (:principal/type p)))
-                  "session")
+        ;; Coerced to a plain kind NAME ("session"), never ":session".
+        ptype (let [raw (or (:principal-type lease)
+                            (:principal_type lease)
+                            (get-in lease [:principal :principal/type])
+                            (get-in lease [:principal "principal/type"])
+                            (when-let [p (or (:principal lease) (:subject lease))]
+                              (name (:principal/type p)))
+                            "session")]
+                (if (keyword? raw) (name raw) (str raw)))
         pid (or (:principal-id lease)
                 (:principal_id lease)
                 (get-in lease [:principal :session/id])
@@ -100,15 +110,25 @@
                 (get-in lease [:subject "session/id"])
                 (:subject-session-id lease)
                 (:subject_session_id lease))
+        resource (or (:resource lease) (get-in lease [:resource "resource"]))
+        resource (cond
+                   resource resource
+                   (:resource_edn lease) (rk/deserialize-resource (:resource_edn lease))
+                   :else nil)
         rkind (or (:resource-kind lease)
                   (get-in lease [:resource :kind])
                   (get-in lease [:resource "kind"])
-                  (:resource_kind lease))
+                  (:resource_kind lease)
+                  (when resource (name (or (:kind resource) (keyword (:kind resource))))))
+        rkind-name (if (keyword? rkind) (name rkind) (str rkind))
+        resource-edn (or (:resource_edn lease)
+                         (when resource (rk/serialize-resource resource)))
         rid (or (:resource-id lease)
+                (:resource_id lease)
                 (get-in lease [:resource :id])
                 (get-in lease [:resource "id"])
-                (:resource_id lease)
-                (str rkind "-resource"))
+                (when resource (:id resource))
+                (str rkind-name "-resource"))
         actions (or (:actions lease) ["invoke"])
         constraints (:constraints lease)
         issued (or (:issued-at lease) (:issued_at lease) (str (java.time.Instant/now)))
@@ -120,7 +140,8 @@
      :principal_id (str pid)
      :subject_session_id (str pid)
      :subject_phenotype_id (str (or (:subject-phenotype-id lease) (:subject_phenotype_id lease) pid))
-     :resource_kind (str rkind)
+     :resource_kind rkind-name
+     :resource_edn (or resource-edn (pr-str {:kind (keyword rkind-name) :id (str rid)}))
      :resource_id (str rid)
      :actions (coerce-json actions)
      :constraints (coerce-json constraints)

@@ -37,69 +37,27 @@
   forms) is component (evoclj.provider). Unknown resource kinds fail
   closed: nothing is covered."
   (:require [clojure.string :as str]
+            [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err]
             [malli.core :as m]))
 
-;; --- pure path canonicalization --------------------------------------------
+;; --- pure path canonicalization (delegates to resource-kind, kept for compat) --------
 
 (defn canonicalize-path
-  "Resolve a path string to its canonical form by dropping empty and
-  \".\" segments and popping \"..\" segments. Operates on
-  \"/\"-separated paths (the canonical form used by the v0 filesystem
-  resource): \"/work/a/../secret\" -> \"/work/secret\". A \"..\" that
-  would climb above an absolute root is clamped to the root, so
-  \"/work/../../etc\" -> \"/etc\" and never escapes the filesystem
-  root. Returns nil for non-string input, so matching fails closed.
-  Windows drive/backslash canonicalization is provider-side
-  normalization (component); this helper is the pure segment-level
-  canonical form coverage is decided on."
-  [s]
-  (when (string? s)
-    (let [absolute? (.startsWith s "/")
-          segments (->> (str/split s #"/")
-                        (remove #{"" "."})
-                        (reduce (fn [acc seg]
-                                  (if (= seg "..")
-                                    (if (seq acc) (pop acc) acc)
-                                    (conj acc seg)))
-                                []))]
-      (str (when absolute? "/") (str/join "/" segments)))))
+  "Deprecated alias — delegates to evoclj.capability.resource-kind/canonicalize-path.
+  Kept for backward compat (lease tests call lease/canonicalize-path directly)."
+  [s] (rk/canonicalize-path s))
 
-(defn- path-inside?
-  "True when the canonical path p lies inside the canonical root r:
-  p equals r, or p is r plus one or more segments. The segment boundary
-  matters — root \"/work\" covers \"/work/secret\" but never
-  \"/workspace/x\". Root \"/\" covers every absolute path."
-  [root path]
-  (let [r (canonicalize-path root)
-        p (canonicalize-path path)]
-    (and r p
-         (or (= r "/") (= r p)
-             (.startsWith p (str r "/"))))))
-
-(defn- canonicalize-mount-path
-  "Mount-relative canonicalization for logical mount namespace (no leading /).
-  Resolves \".\" and \"..\"; empty or \".\" -> \"\"."
-  [s]
-  (when (string? s)
-    (let [clean (str/replace s "\\" "/")
-          segments (->> (str/split clean #"/")
-                        (remove #{ "" "."})
-                        (reduce (fn [acc seg]
-                                  (if (= seg "..")
-                                    (if (seq acc) (pop acc) acc)
-                                    (conj acc seg)))
-                                []))]
-      (str/join "/" segments))))
-
-(defn- mount-path-inside?
-  "True when mount-relative request path is inside grant path.
-  Empty grant covers whole mount (segment-boundary aware)."
-  [grant-path req-path]
-  (let [g (canonicalize-mount-path (or grant-path ""))
-        p (canonicalize-mount-path (or req-path ""))]
-    (or (= g "") (= g p) (str/starts-with? p (str g "/")))))
+;; Legacy private helpers retained for local use but now delegate; descriptor owns logic.
+(defn- path-inside? [root path]
+  (let [r (rk/canonicalize-path root) p (rk/canonicalize-path path)]
+    (and r p (or (= r "/") (= r p) (str/starts-with? p (str r "/"))))))
+(defn- canonicalize-mount-path [s] (when (string? s) (str/replace (or (rk/canonicalize-path (str "/" s)) "") #"^/" "")))
+(defn- mount-path-inside? [grant-path req-path]
+  (let [g (or (rk/canonicalize-path (str "/" (or grant-path ""))) "/")
+        p (or (rk/canonicalize-path (str "/" (or req-path ""))) "/")]
+    (or (= g "/") (= g p) (str/starts-with? p (str g "/")))))
 
 ;; --- shared input gate ------------------------------------------------------
 
@@ -152,15 +110,9 @@
   (principal-matches? lease principal))
 (defn resource-covers?
   "True when the lease's :resource grant covers the canonical
-  `normalized-resource` for `action`: the action must be in the
-  lease's :actions set AND the resource must match by kind. Tool
-  resources match by exact canonical id ({:kind :tool :id ...});
-  filesystem resources match by containment of canonical resolved
-  paths ({:kind :filesystem :path ...}); memory resources (feature R1)
-  match by exact key id ({:kind :memory :id <key>}, like :tool). Any
-  other kind, a kind mismatch, a missing id/path, or a missing action
-  fails closed. A malformed lease, resource, or action throws
-  :capability/schema-invalid."
+  `normalized-resource` for `action`: dispatches via ResourceKindDescriptor
+  (C1). The action must be in the lease's :actions set AND the descriptor's
+  covers? must be true. Unknown kinds fail closed."
   [lease normalized-resource action]
   (validate-input! lease)
   (when-not (and (map? normalized-resource) (keyword? action))
@@ -169,26 +121,14 @@
                       {:value (err/sanitize normalized-resource)
                        :action (err/sanitize action)})))
   (let [granted (:resource lease)
-        kind (:kind granted)]
+        gk (:kind granted)
+        rk-kind (:kind normalized-resource)]
     (and (contains? (:actions lease) action)
-         (= kind (:kind normalized-resource))
-         (case kind
-           :tool (and (keyword? (:id granted))
-                      (= (:id granted) (:id normalized-resource)))
-           :memory (and (keyword? (:id granted))
-                        (= (:id granted) (:id normalized-resource)))
-           :model (and (:id granted)
-                       (let [g (str (:id granted))
-                             n (str (:id normalized-resource))]
-                         (or (= g n)
-                             (and (str/ends-with? g "/*")
-                                  (str/starts-with? n (subs g 0 (dec (count g))))))))
-           :filesystem (path-inside? (:path granted) (:path normalized-resource))
-           :filesystem/path (if (contains? granted :mount/id)
-                              (and (= (:mount/id granted) (:mount/id normalized-resource))
-                                   (mount-path-inside? (:path granted) (:path normalized-resource)))
-                              (path-inside? (:path granted) (:path normalized-resource)))
-           false))))
+         (= gk rk-kind)
+         (boolean
+          (if-let [d (rk/get-descriptor gk)]
+            (rk/covers? d granted normalized-resource action)
+            false)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Generic LeaseRegistry helpers (P5) — unified for ANY kind
