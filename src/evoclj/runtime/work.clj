@@ -1,21 +1,36 @@
 (ns evoclj.runtime.work
-  "Work unified lifecycle — durable queued/running/waiting/succeeded/failed/cancelled/timed-out.
+  "Work unified lifecycle — durable queued/running/waiting/succeeded/failed/cancelled/timed-out (W2).
 
   W1 collapses the Session (8 states) × Command (6 states) = 48-state product
   into a single durable 7-state machine. Session becomes immutable context
   (pin: Genome/Resolution/CodeImage/Deployment/Generation), Work carries the
   lifecycle. Works replace commands + subagent_sessions portions.
 
+  W2: Work is the SOLE durable lifecycle. Bare Future no longer shadows Work
+  state. Work's :running IS execution; a future is only an internal await
+  handle for the thread that runs the Work's payload, never a second source
+  of truth. Cancel and timeout atomically drive Work state via compare-and-set
+  (the `works.state` CAS column) — the DB row is the truth, the future is
+  interrupted or left to observe the cancelled state. Succeeded equals
+  execution completed: the row moves to :succeeded only after the execution
+  payload has been persisted as a CAS artifact and the success handling has
+  committed. Recovery is idempotent and Work-based (queued stays queued for
+  redelivery, running/waiting -> failed via CAS).
+
+  No ::last-refresh-future is stored and no raw future is exposed as an API
+  — callers await Work by polling or by the scheduler's internal deref, not
+  by receiving a Future handle. This breaks compatibility with A6's
+  future+command dual track by design.
+
   States (7, closed):
 
     :queued      — durably queued, not yet dispatched
-    :running     — dispatched, actively executing
+    :running     — dispatched, actively executing (future await internal)
     :waiting     — paused waiting for input (subagent child, external signal)
-    :succeeded   — terminal success
+    :succeeded   — terminal success (execution completed)
     :failed      — terminal failure
-    :cancelled   — terminal cancellation
-    :timed-out   — terminal deadline exceeded
-
+    :cancelled   — terminal cancellation (CAS)
+    :timed-out   — terminal deadline exceeded (CAS)
   Transitions (closed, acyclic):
 
     :queued    -> #{:running :cancelled :failed}

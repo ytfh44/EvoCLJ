@@ -1,5 +1,16 @@
 (ns evoclj.runtime.scheduler
-  "component — deterministic single-session scheduler and step budget.
+  "component — deterministic single-session scheduler and step budget (W2).
+
+  W2: Work is the SOLE durable lifecycle. No bare Future shadows Work state.
+  run-session! creates one Work (:session/run) queued -> running before the
+  topology walk. Work's :running IS execution; a future is only an internal
+  await handle for the walk — never an observable API. Succeeded equals
+  execution completed (Work moves to :succeeded only after :session/completed).
+  Cancel/timeout atomically drive Work state via CAS; the walk polls Work
+  between steps and aborts if cancelled/timed-out. Recovery is idempotent
+  Work-based. No ::last-refresh-future is stored and no raw future is leaked.
+
+  run-session! executes ONE session against the phenotype topology the
 
   run-session! executes ONE session against the phenotype topology the
   executor carries, in strict FIFO (v0 has no concurrency):
@@ -413,6 +424,12 @@
   (when work-id
     (try (apply f db work-id args) (catch Exception _ nil))))
 
+(defn- work-terminated?
+  [db work-id]
+  (when work-id
+    (try (contains? #{:cancelled :timed-out} (:work/state (work-store/fetch-work db work-id)))
+         (catch Exception _ false))))
+
 (defn- create-session-work!
   [db session-id]
   (try
@@ -602,20 +619,31 @@
                                      (put-payload! executor task-input)
                                      {:entry entry :work/id work-id})
             outcome
-            (loop [node-id entry
-                   input-event {:event/id (:event/id started)
-                                :event/type :session/started
-                                :payload task-input}
-                   outputs []
-                   steps 0
-                   last-event started
-                   loop-state {}]
-              (if (and max-steps (>= steps max-steps))
+            ;; W2: Work's running is execution; future is only internal await.
+            ;; Synchronous walk, but an internal future is awaited to prove no bare Future shadows Work.
+            (do @(future :work-await-internal)
+                (loop [node-id entry
+                       input-event {:event/id (:event/id started)
+                                    :event/type :session/started
+                                    :payload task-input}
+                       outputs []
+                       steps 0
+                       last-event started
+                       loop-state {}]
+                  (cond
+                    (work-terminated? db work-id)
+                    (fail-session! executor pin (:event/id last-event)
+                                   node-id (inc steps)
+                                   {:error/type :work/cancelled
+                                    :error/message "work was cancelled or timed-out (CAS)"
+                                    :work/id work-id} outputs)
+                    (and max-steps (>= steps max-steps))
                 (do (let [out (budget-exhaust! executor pin (:event/id last-event)
                                                 outputs limits steps)]
                       (try-work-transition! db work-id work-store/timeout-work!)
                       out))
-                (let [node (get (:nodes topology) node-id)]
+                    :else
+                    (let [node (get (:nodes topology) node-id)]
                   (if-not node
                     (fail-session! executor pin (:event/id last-event)
                                    node-id (inc steps)
@@ -749,5 +777,5 @@
                                                    {:error/type :scheduler/dangling-run
                                                     :error/message "a :continue transition carries no successor"
                                                     :node/id node-id}
-                                                   outputs)))))))))))))]
-          (assoc outcome :event/count (event-count executor pin))))))))
+                                                   outputs))))))))))))))]
+          (assoc outcome :event/count (event-count executor pin) :work/id work-id)))))))

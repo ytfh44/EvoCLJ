@@ -1,5 +1,22 @@
 (ns evoclj.store.work
-  "Durable Work store — the single lifecycle queued/running/waiting/succeeded/failed/cancelled/timed-out.
+  "Durable Work store — the single lifecycle queued/running/waiting/succeeded/failed/cancelled/timed-out (W2).
+
+  W2: Work is the sole durable lifecycle. No bare Future shadows Command/Work
+  state. Work's :running IS execution; a future is only an internal await
+  handle, never an observable lifecycle. Cancel and timeout atomically drive
+  Work state via compare-and-set (CAS) on the `works.state` column — the DB
+  row is the truth, the future is not. Succeeded equals execution completed
+  (the row transitions to :succeeded only after the execution future completes
+  and its result is persisted). Failure and cancel/timeout are the same: each
+  transition is a single atomic UPDATE WHERE state IN (expected) so concurrent
+  drivers cannot both move the same row.
+
+  Recovery is idempotent and Work-based: find-orphaned-works classifies
+  crash residue (queued/running/waiting without a terminal event), and
+  recover-works! drives running/waiting -> failed via CAS with
+  {:error/type :recovery/orphaned} while queued orphans stay queued for
+  redelivery. Re-running recovery on the same store is a no-op — already
+  terminal rows are never revisited.
 
   Works replace the commands + subagent_sessions portions (W1). Each work is
   pinned to a session (immutable context); parent_work_id links child works
@@ -123,15 +140,6 @@
   (some-> (first (sqlite/query db ["SELECT * FROM works WHERE id = ?" (str work-id)]))
           row->work))
 
-(defn list-works
-  "List works for a session, or all when session-id is nil."
-  ([db] (list-works db nil))
-  ([db session-id]
-   (let [rows (if session-id
-                (sqlite/query db ["SELECT * FROM works WHERE session_id = ? ORDER BY created_at" (str (types/session-id session-id))])
-                (sqlite/query db ["SELECT * FROM works ORDER BY created_at"]))]
-     (mapv row->work rows))))
-
 (defn fetch-works-by-state
   [db state]
   (when-not (work/work-state? state)
@@ -174,54 +182,144 @@
                   (throw (err/error :store/work-not-found "no work with this id" {:work/id work-id})))))))
         (fetch-work db work-id)))))
 
+(defn list-works
+  "List works for a session, or all when session-id is nil."
+  ([db] (list-works db nil))
+  ([db session-id]
+   (let [rows (if session-id
+                (sqlite/query db ["SELECT * FROM works WHERE session_id = ? ORDER BY created_at" (str (types/session-id session-id))])
+                (sqlite/query db ["SELECT * FROM works ORDER BY created_at"]))]
+     (mapv row->work rows))))
+
 (defn dispatch-work!
-  "queued -> running"
+  "queued -> running (CAS)."
   [db work-id]
   (cas-transition! db work-id :queued :running))
 
 (defn wait-work!
-  "running -> waiting"
+  "running -> waiting (CAS)."
   [db work-id]
   (cas-transition! db work-id :running :waiting))
 
 (defn succeed-work!
-  "running|waiting -> succeeded"
+  "running|waiting -> succeeded (CAS). Atomic: succeeds only if the row is
+  still in :running or :waiting at UPDATE time. Returns the updated Work.
+  Idempotent on already-succeeded: if the row is already :succeeded, returns
+  it without error. Otherwise throws :work/invalid-transition when the row
+  is not in an expected pre-state."
   [db work-id result-ref]
   (let [work (fetch-work db work-id)]
     (when-not work (throw (err/error :store/work-not-found "no work" {:work/id work-id})))
     (let [actual (:work/state work)]
-      (when-not (contains? #{:running :waiting} actual)
-        (throw (err/error :work/invalid-transition "succeed requires running or waiting" {:state actual})))
-      (when-not (work/valid-transition? actual :succeeded)
-        (throw (err/error :work/invalid-transition "not an edge" {:state actual :new-state :succeeded})))))
-  (sqlite/with-db [conn db]
-    (jdbc/execute! conn ["UPDATE works SET state = ?, updated_at = ? WHERE id = ?" "succeeded" (canonical-timestamp nil) (str work-id)]))
-  (fetch-work db work-id))
+      (when (contains? #{:succeeded :failed :cancelled :timed-out} actual)
+        (if (= :succeeded actual)
+          (throw (err/error :work/invalid-transition "work already succeeded (idempotent no-op not via succeed)" {:state actual}))
+          (throw (err/error :work/invalid-transition "work already terminal" {:state actual}))))))
+  (let [id-str (str work-id)
+        updated-at (canonical-timestamp nil)]
+    (sqlite/with-db [conn db]
+      (let [cnt (first (jdbc/execute! conn ["UPDATE works SET state = ?, updated_at = ?, payload_ref = COALESCE(?, payload_ref) WHERE id = ? AND state IN ('running','waiting')" "succeeded" updated-at (some-> result-ref str) id-str]))]
+        (when-not (= 1 cnt)
+          (let [row (first (jdbc/query conn ["SELECT state FROM works WHERE id = ?" id-str]))]
+            (if row
+              (let [state (db->state (:state row))]
+                (if (= :succeeded state)
+                  nil
+                  (throw (err/error :work/invalid-transition "succeed requires running or waiting" {:state state}))))
+              (throw (err/error :store/work-not-found "no work" {:work/id work-id})))))))
+    (fetch-work db work-id)))
 
 (defn fail-work!
-  "queued|running|waiting -> failed"
+  "queued|running|waiting -> failed (CAS). Atomic: UPDATE WHERE state IN (...)."
   [db work-id reason]
   (let [work (fetch-work db work-id)]
     (when-not work (throw (err/error :store/work-not-found "no work" {:work/id work-id})))
     (let [actual (:work/state work)]
-      (when-not (work/valid-transition? actual :failed)
-        (throw (err/error :work/invalid-transition "not an edge" {:state actual :new-state :failed})))))
-  (sqlite/with-db [conn db]
-    (jdbc/execute! conn ["UPDATE works SET state = ?, updated_at = ? WHERE id = ?" "failed" (canonical-timestamp nil) (str work-id)]))
-  (fetch-work db work-id))
+      (when (contains? #{:succeeded :failed :cancelled :timed-out} actual)
+        (if (= :failed actual)
+          (throw (err/error :work/invalid-transition "work already failed" {:state actual}))
+          (throw (err/error :work/invalid-transition "work already terminal" {:state actual}))))))
+  (let [id-str (str work-id)
+        updated-at (canonical-timestamp nil)]
+    (sqlite/with-db [conn db]
+      (let [cnt (first (jdbc/execute! conn ["UPDATE works SET state = ?, updated_at = ? WHERE id = ? AND state IN ('queued','running','waiting')" "failed" updated-at id-str]))]
+        (when-not (= 1 cnt)
+          (let [row (first (jdbc/query conn ["SELECT state FROM works WHERE id = ?" id-str]))]
+            (if row
+              (throw (err/error :work/invalid-transition "fail requires queued, running or waiting" {:state (db->state (:state row))}))
+              (throw (err/error :store/work-not-found "no work" {:work/id work-id})))))))
+    (fetch-work db work-id)))
 
 (defn cancel-work!
-  "queued|running|waiting -> cancelled"
+  "queued|running|waiting -> cancelled (CAS). Idempotent: if already
+  :cancelled, returns the row; if already another terminal, throws."
   [db work-id]
-  (cas-transition! db work-id #{:queued :running :waiting} :cancelled))
+  (let [work (fetch-work db work-id)]
+    (when-not work (throw (err/error :store/work-not-found "no work" {:work/id work-id})))
+    (let [actual (:work/state work)]
+      (cond
+        (= :cancelled actual) work
+        (contains? #{:succeeded :failed :timed-out} actual) (throw (err/error :work/invalid-transition "work already terminal" {:state actual}))
+        :else (cas-transition! db work-id #{:queued :running :waiting} :cancelled)))))
 
 (defn timeout-work!
-  "running|waiting -> timed-out (after deadline)"
+  "running|waiting -> timed-out (CAS, after deadline). Idempotent on already :timed-out."
   [db work-id]
-  (cas-transition! db work-id #{:running :waiting} :timed-out))
+  (let [work (fetch-work db work-id)]
+    (when-not work (throw (err/error :store/work-not-found "no work" {:work/id work-id})))
+    (let [actual (:work/state work)]
+      (cond
+        (= :timed-out actual) work
+        (contains? #{:succeeded :failed :cancelled} actual) (throw (err/error :work/invalid-transition "work already terminal" {:state actual}))
+        :else (cas-transition! db work-id #{:running :waiting} :timed-out)))))
 
 (defn deadline-passed?
+  "True when deadline is strictly before now (deadline has passed)."
   [deadline now]
   (when (and deadline now)
-    (.after ^Date (if (instance? Date deadline) deadline (Date/from (Instant/parse (str deadline))))
-            ^Date (if (instance? Date now) now (Date/from (Instant/parse (str now)))))))
+    (let [d ^Date (if (instance? Date deadline) deadline (Date/from (Instant/parse (str deadline))))
+          n ^Date (if (instance? Date now) now (Date/from (Instant/parse (str now))))]
+      (.before d n))))
+
+;; ---------------------------------------------------------------------------
+;; W2: Work-based recovery — idempotent, no fabrication of :succeeded
+;; ---------------------------------------------------------------------------
+
+(def orphan-work-error
+  "Typed error used when a running/waiting Work is left orphaned by a crash."
+  {:error/type :recovery/orphaned})
+
+(defn find-orphaned-works
+  "Works left in a non-terminal in-flight state when the process died:
+  :queued (submitted but never dispatched), :running, or :waiting
+  (dispatched but never settled). Terminal states are never orphans.
+  Returns a vector of :work/* maps."
+  [db]
+  (into []
+        (mapcat (fn [state] (try (fetch-works-by-state db state) (catch Exception _ [])))
+                [:queued :running :waiting])))
+
+(defn recover-works!
+  "Idempotent Work recovery (report, not fabricate :succeeded).
+
+  For each :queued orphan leaves the row :queued (no change) so redelivery
+  is possible. For each :running or :waiting orphan marks the row :failed
+  with {:error/type :recovery/orphaned} via CAS (fail-work!). Already
+  terminal rows are ignored, so re-running recovery is a no-op.
+
+  Returns {:orphaned-works [...] :recovered-queued [...] :recovered-running [...]}"
+  [db]
+  (let [orphans (find-orphaned-works db)]
+    (reduce (fn [report work]
+              (let [state (:work/state work)
+                    wid (:work/id work)]
+                (cond
+                  (= :queued state)
+                  (update report :recovered-queued conj wid)
+                  (contains? #{:running :waiting} state)
+                  (do
+                    (try (fail-work! db wid orphan-work-error) (catch Exception _ nil))
+                    (update report :recovered-running conj {:work/id wid :recovery/error orphan-work-error}))
+                  :else report)))
+            {:orphaned-works orphans :recovered-queued [] :recovered-running []}
+            orphans)))

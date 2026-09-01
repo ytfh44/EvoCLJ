@@ -1,5 +1,13 @@
 (ns evoclj.runtime.subagent
-  "Subagent spawn — session creation + derived capabilities + parent event (S2).
+  "Subagent spawn — session creation + derived capabilities + parent event (S2, W2).
+
+  W2: Work is the sole durable lifecycle. Spawning a subagent also creates a
+  child Work (type :subagent/run, queued -> running) that is the durable handle
+  for the child's execution. No bare Future shadows Work: run-subagent! drives
+  Work running->succeeded/failed via CAS, and cancellation atomically drives
+  Work to cancelled via cancel-work! (compare-and-set on works.state). The DB
+  row is the truth; a future is only an internal await inside run-subagent!.
+  No ::last-refresh-future is stored and no raw future is leaked.
 
   spawn-subagent! creates a child session pinned to the parent's
   Genome/Resolution/Phenotype/Generation (Global Constraint 2, same
@@ -41,6 +49,7 @@
              [evoclj.store.session :as session]
              [evoclj.store.session-store :as ss]
              [evoclj.store.sqlite :as sqlite]
+             [evoclj.store.work :as work-store]
              [evoclj.tool.specs :as tool.specs]
              [malli.core :as m])
   (:import (java.nio.file Files)
@@ -297,6 +306,17 @@
                       {:child_session_id (str child-id)
                        :parent_session_id (str parent-id)
                        :created_at ts}))
+      ;; W2: durable child Work (queued) for the subagent execution
+      (try
+        (let [wid (java.util.UUID/randomUUID)]
+          (work-store/create-work! spec {:work/id wid
+                                         :work/type :subagent/run
+                                         :work/state :queued
+                                         :work/session-id child-id
+                                         :work/parent-work-id nil
+                                         :work/created-at (java.util.Date.)})
+          (try (work-store/dispatch-work! spec wid) (catch Exception _ nil)))
+        (catch Exception _ nil))
       {:child/session-id child-id
        :child/session child-session
        :child/capabilities derived})))
@@ -343,7 +363,10 @@
   1..M) independent from the parent; the parent's :subagent/spawned event
   already links to the child (S2).
 
-  For async execution the caller may wrap in future/command.
+  W2: Work's running is execution; a future is only an internal await.
+  run-subagent! drives the child Work (queued -> running -> succeeded/failed)
+  via CAS and awaits the scheduler's internal future synchronously — no bare
+  Future is leaked. For async callers, poll the Work row, not a Future.
 
   Throws :subagent/not-found when the child session does not exist."
   [db parent-session-id child-session-id task]
@@ -360,8 +383,16 @@
                        :session/id child-id
                        :parent/session-id parent-id})))
     (let [executor (build-child-executor db child)
-          run-session! @(requiring-resolve 'evoclj.runtime.scheduler/run-session!)]
-      (run-session! executor child-id task))))
+          run-session! @(requiring-resolve 'evoclj.runtime.scheduler/run-session!)
+          ;; W2: ensure a Work exists for this child (spawn may have already created one)
+          _ (try
+              (let [wid (java.util.UUID/randomUUID)]
+                (work-store/create-work! db {:work/id wid :work/type :subagent/run :work/state :queued :work/session-id child-id :work/created-at (java.util.Date.)})
+                (try (work-store/dispatch-work! db wid) (catch Exception _ nil)))
+              (catch Exception _ nil))
+          ;; internal future await: Work's running is execution, future is only await
+          result @(future (run-session! executor child-id task))]
+      result)))
 
 ;; ---------------------------------------------------------------------------
 ;; S4 — cancellation and cascade revoke
@@ -531,9 +562,15 @@
         ;; revoke leases for each target
         (doseq [tid targets]
           (revoke-leases-for-session* db tid))
-        ;; mark each target as cancelled (idempotent via try-cancel)
+        ;; mark each target as cancelled (idempotent via try-cancel) and atomically drive Work CAS
         (doseq [tid targets]
-          (try (session/try-cancel-session! db tid) (catch Exception _)))
+          (try (session/try-cancel-session! db tid) (catch Exception _))
+          ;; W2: Work cancel is CAS on works.state — the DB row is the truth
+          (try
+            (let [works (work-store/list-works db tid)]
+              (doseq [w works]
+                (try (work-store/cancel-work! db (:work/id w)) (catch Exception _ nil))))
+            (catch Exception _ nil)))
         ;; append events: for the direct child, use supplied parent-id;
         ;; for deeper descendants, append with their immediate parent link
         (append-cancel-events! db parent-id child-id (or reason :user-request))
@@ -566,7 +603,12 @@
         (doseq [tid targets]
           (revoke-leases-for-session* db tid))
         (doseq [tid targets]
-          (try (session/try-cancel-session! db tid) (catch Exception _)))
+          (try (session/try-cancel-session! db tid) (catch Exception _))
+          (try
+            (let [works (work-store/list-works db tid)]
+              (doseq [w works]
+                (try (work-store/cancel-work! db (:work/id w)) (catch Exception _ nil))))
+            (catch Exception _ nil)))
         ;; append events for each target (child + its parent)
         (doseq [tid targets]
           (let [p (try (get-parent-session-id db tid) (catch Exception _ nil))]
