@@ -1,9 +1,10 @@
 (ns evoclj.compiler.deployment-identity-test
-  "PLT6 tests for CodeId vs DeploymentId identity split."
+  "I1 tests for CodeImage / Deployment / Execution identity split."
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.compiler.core :as compiler-core]
             [evoclj.eval.snapshot :as snapshot]
             [evoclj.genome.load :as load]
+            [evoclj.genome.types :as types]
             [evoclj.provider.fixture :as fixture]
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.phenotype :as phenotype]
@@ -40,7 +41,7 @@
 (deftest code-id-vs-deployment-id-split
   (let [seed (seed-loaded-genome)
         compiled (compiler-core/compile-genome seed (fixture-catalog))
-        code-id (:compiled/code-id compiled)
+        code-id (:code/id compiled)
         reg (registry/create-registry)
         _ (registry/register! reg (fixture/echo-provider))
         sources (into {}
@@ -59,10 +60,14 @@
                 :bindings [[:skill "search" "sha256:2222222222222222222222222222222222222222222222222222222222222222"]]
                 :program-sources sources}
         ph-a (phenotype/instantiate compiled deps-a)
-        ph-b (phenotype/instantiate compiled deps-b)]
-    (testing "CompiledGenome exposes both :compiled/code-id and :compiled/phenotype-id"
-      (is (= code-id (:compiled/phenotype-id compiled)))
-      (is (re-matches #"^sha256:[0-9a-f]{64}$" code-id)))
+        ph-b (phenotype/instantiate compiled deps-b)
+        ph-a2 (phenotype/instantiate compiled deps-a)]
+    (testing "CompiledGenome exposes :code/id :deployment/id :execution/id (I1)"
+      (is (re-matches #"^sha256:[0-9a-f]{64}$" code-id))
+      (is (re-matches #"^sha256:[0-9a-f]{64}$" (:deployment/id compiled)))
+      (is (types/execution-id? (:execution/id compiled)))
+      (is (types/code-id? (:code/id compiled)) "code/id canonical")
+      (is (types/deployment-id? (:deployment/id compiled))))
     (testing "same compiled code instantiated across deployments shares CodeId"
       (is (= (:code/id ph-a) (:code/id ph-b)))
       (is (= code-id (:code/id ph-a))))
@@ -70,10 +75,18 @@
       (is (re-matches #"^sha256:[0-9a-f]{64}$" (:deployment/id ph-a)))
       (is (re-matches #"^sha256:[0-9a-f]{64}$" (:deployment/id ph-b)))
       (is (not= (:deployment/id ph-a) (:deployment/id ph-b))))
+    (testing "Two Execution with same CodeImage have same code/id but different execution/id (I1 acceptance)"
+      (is (= (:code/id ph-a) (:code/id ph-a2)) "same CodeImage => same code/id")
+      (is (not= (:execution/id ph-a) (:execution/id ph-a2)) "distinct Execution per activation")
+      (is (types/execution-id? (:execution/id ph-a)))
+      (is (types/execution-id? (:execution/id ph-a2))))
     (testing "eval snapshot exposes matching code-id and deployment-id helpers"
       (is (= code-id
-             (snapshot/code-id (:abi compiled) (:compiled/genome-id compiled) (:compiled/resolution-id compiled))))
+             (snapshot/code-id (:abi compiled) (:code/genome-id compiled) (:code/resolution-id compiled))))
       (is (= (:deployment/id ph-a)
              (compiler-core/deployment-id code-id
-                                         (get-in deps-a [:capabilities :leases])
-                                         (:bindings deps-a)))))))
+                                         (:bindings deps-a)
+                                         (get-in deps-a [:capabilities :leases])))))
+    (testing "compile output verifiable: code/id is H(abi, genome, resolution)"
+      (let [expected (snapshot/code-id (:abi compiled) (:code/genome-id compiled) (:code/resolution-id compiled))]
+        (is (= expected (:code/id compiled)) "code/id verifiable via snapshot helper")))))

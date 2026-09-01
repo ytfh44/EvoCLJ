@@ -104,8 +104,8 @@
     (throw (ex-info "resolution-id must be sha256" {:resolution-id resolution-id})))
   (hash/text-digest (str (pr-str (into (sorted-map) abi)) genome-id resolution-id)))
 
-(defn phenotype-id
-  "Legacy alias for code-id (pure code identity)."
+(defn code-image-id
+  "Alias for code-id — CodeImageId is H(kernel ABI, Genome, Resolution)."
   [abi genome-id resolution-id]
   (code-id abi genome-id resolution-id))
 
@@ -119,10 +119,21 @@
     :else v))
 
 (defn deployment-id
-  "Deployment identity binding code-id, leases, and durable bindings:
-  DeploymentId = SHA256(code-id || canonical(leases) || canonical(bindings))."
-  [code-id-str leases bindings]
+  "Deployment identity binding code-id, bindings, and authority:
+  DeploymentId = SHA256(code-id || canonical(bindings) || canonical(authority))."
+  [code-id-str bindings authority]
   (hash/text-digest
    (str (or code-id-str "")
-        (pr-str (canonical-edn-value (vec (sort-by pr-str (or leases [])))))
-        (pr-str (canonical-edn-value (vec (sort-by pr-str (or bindings []))))))))
+        (pr-str (canonical-edn-value (vec (sort-by pr-str (or bindings [])))))
+        (pr-str (canonical-edn-value (vec (sort-by pr-str (or authority []))))))))
+
+(defn execution-id
+  "Fresh ExecutionId UUID per activation (I1)."
+  []
+  (java.util.UUID/randomUUID))
+
+;; Legacy alias for backwards compat (deprecated, will be removed next wave)
+(defn phenotype-id
+  "Deprecated alias for code-id — retained for test compat, but I1 prefers code-id/code-image-id."
+  [abi genome-id resolution-id]
+  (code-id abi genome-id resolution-id))

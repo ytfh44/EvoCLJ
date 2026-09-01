@@ -39,10 +39,9 @@
 ;; --- fixture and helper functions -----------------------------------------
 
 (def ^:private contract-keys
-  "The normative CompiledGenome key set (Detailed Public Data
-  Contracts)."
-  #{:compiled/genome-id :compiled/resolution-id :compiled/code-id
-    :compiled/phenotype-id :abi :manifest :topology :effects
+  "The normative CompiledGenome key set (I1 Data Contracts)."
+  #{:code/id :code/genome-id :code/resolution-id :deployment/id :execution/id
+    :abi :manifest :topology :effects
     :programs :requested-capabilities :resolution})
 
 (defn- fixture-root
@@ -140,11 +139,13 @@
     (testing "the compiled key set is exactly the normative contract"
       (is (= contract-keys (set (keys c)))))
     (testing "all three ids are canonical content-addressed ids"
-      (is (types/genome-id? (:compiled/genome-id c)))
-      (is (types/resolution-id? (:compiled/resolution-id c)))
-      (is (re-matches #"^sha256:[0-9a-f]{64}$" (:compiled/phenotype-id c))))
+      (is (types/genome-id? (:code/genome-id c)))
+      (is (types/resolution-id? (:code/resolution-id c)))
+      (is (re-matches #"^sha256:[0-9a-f]{64}$" (:code/id c)))
+      (is (re-matches #"^sha256:[0-9a-f]{64}$" (:deployment/id c)))
+      (is (types/execution-id? (:execution/id c))))
     (testing "the genome id is the loaded genome's content address"
-      (is (= (:genome/id g) (:compiled/genome-id c))))
+      (is (= (:genome/id g) (:code/genome-id c))))
     (testing ":abi passes through from the manifest"
       (is (= {:kernel 1 :genome 1 :intent 1 :tool 1} (:abi c)))
       (is (= (:abi (:manifest g)) (:abi c))))
@@ -184,15 +185,16 @@
         c1 (core/compile-genome (seed-loaded-genome) catalog-v1)
         c2 (core/compile-genome (seed-loaded-genome) catalog-v2)]
     (testing "the genome id is untouched by resolution changes"
-      (is (= (:compiled/genome-id c1) (:compiled/genome-id c2))))
+      (is (= (:code/genome-id c1) (:code/genome-id c2))))
     (testing "the resolution id changes"
-      (is (not= (:compiled/resolution-id c1) (:compiled/resolution-id c2))))
-    (testing "the phenotype id changes with the resolution"
-      (is (not= (:compiled/phenotype-id c1) (:compiled/phenotype-id c2))))
-    (testing "the same catalog compiles to identical output and ids"
+      (is (not= (:code/resolution-id c1) (:code/resolution-id c2))))
+    (testing "the code id changes with the resolution"
+      (is (not= (:code/id c1) (:code/id c2))))
+    (testing "the same catalog compiles to same code id but distinct execution id"
       (let [c3 (core/compile-genome (seed-loaded-genome) catalog-v1)]
-        (is (= c1 c3))
-        (is (= (:compiled/phenotype-id c1) (:compiled/phenotype-id c3)))))))
+        (is (= (:code/id c1) (:code/id c3)) "same CodeImage yields same code/id")
+        (is (not= (:execution/id c1) (:execution/id c3)) "distinct Execution per compile")
+        (is (= (:deployment/id c1) (:deployment/id c3)) "same empty deployment")))))
 
 ;; --- EDN round-trip without source bytes ----------------------------------
 
@@ -216,15 +218,13 @@
         first-compiled (core/compile-genome (seed-loaded-genome) catalog)
         rest-compiled (vec (repeatedly 99
                                        #(core/compile-genome (seed-loaded-genome) catalog)))]
-    (testing "all 100 compilations are semantically identical"
-      (is (every? #(= first-compiled %) rest-compiled)))
-    (testing "all three ids are identical across iterations"
-      (is (every? #(= (:compiled/genome-id first-compiled)
-                      (:compiled/genome-id %)) rest-compiled))
-      (is (every? #(= (:compiled/resolution-id first-compiled)
-                      (:compiled/resolution-id %)) rest-compiled))
-      (is (every? #(= (:compiled/phenotype-id first-compiled)
-                      (:compiled/phenotype-id %)) rest-compiled)))))
+    (testing "all 100 compilations share same CodeImage but have distinct Execution ids (I1)"
+      (is (every? #(= (:code/id first-compiled) (:code/id %)) rest-compiled) "same CodeImage")
+      (is (every? #(= (:code/genome-id first-compiled) (:code/genome-id %)) rest-compiled))
+      (is (every? #(= (:code/resolution-id first-compiled) (:code/resolution-id %)) rest-compiled))
+      (is (every? #(= (:deployment/id first-compiled) (:deployment/id %)) rest-compiled) "same deployment for empty bindings")
+      (is (every? #(not= (:execution/id first-compiled) (:execution/id %)) (rest rest-compiled)) "distinct Execution per compile")
+      (is (= 100 (count (set (map :execution/id (cons first-compiled rest-compiled)))) ) "100 distinct execution ids"))))
 
 ;; --- orchestration boundaries ---------------------------------------------
 
@@ -232,8 +232,8 @@
   (let [c (core/compile-genome (inline-loaded-genome) (fixture-catalog))]
     (is (= {} (:programs c)))
     (is (= :node/finish (:entry (:topology c))))
-    (is (types/genome-id? (:compiled/genome-id c)))
-    (is (types/resolution-id? (:compiled/resolution-id c)))
+    (is (types/genome-id? (:code/genome-id c)))
+    (is (types/resolution-id? (:code/resolution-id c)))
     (is (= c (edn/read-string (pr-str c))))))
 
 (deftest topology-referenced-program-without-registry-fails-closed

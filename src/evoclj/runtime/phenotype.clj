@@ -4,24 +4,31 @@
   instantiate turns a CompiledGenome (evoclj.compiler.core) plus a
   runtime-deps map into a live Phenotype:
 
-  Identity split (PLT6):
+  Identity split (I1):
 
-    code-id = SHA256(kernel-abi || genome-id || resolution-id)
-    deployment-id = SHA256(code-id || canonical(leases) || canonical(bindings))
+    CodeImageId  = H(kernel ABI, Genome, Resolution) — pure code identity
+    DeploymentId = H(CodeImage, bindings, authority) — bound deployment
+    ExecutionId  = UUID per activation — distinct execution
 
-  CodeId identifies pure compiled code (shared by all deployments of the
-  same Genome and Resolution). DeploymentId binds CodeId to concrete
-  runtime leases and durable bindings.
+  CodeImageId identifies pure compiled code (shared by all deployments of the
+  same Genome and Resolution). DeploymentId binds CodeImageId to concrete
+  runtime bindings and authority (capability leases). ExecutionId is a
+  fresh UUID per activation: two Executions with the same CodeImage share
+  :code/id but have distinct :execution/id.
 
   (instantiate compiled-genome runtime-deps)
-  ;; => {:phenotype/id ...
-  ;;     :code/id ...
+  ;; => {:code/id ...
   ;;     :deployment/id ...
+  ;;     :execution/id ...
   ;;     :compiled compiled-genome
   ;;     :sci-runtime ...
   ;;     :providers ...
   ;;     :capabilities ...
   ;;     :stores ...}
+
+  PhenotypeId legacy alias is removed (I1 break compat). The old
+  :phenotype/id and :compiled/phenotype-id keys are no longer emitted
+  or accepted.
 
   THE PHENOTYPE OWNS ONE THING: its isolated SCI runtime. instantiate
   builds a fresh closed SCI context (evoclj.sci.context/make-context)
@@ -81,27 +88,26 @@
             [evoclj.kernel.error :as err]
             [evoclj.sci.context :as context]
             [evoclj.sci.execute :as execute]))
-;; --- shape validation -------------------------------------------------------
-
-(def ^:private phenotype-id-pattern #"^sha256:[0-9a-f]{64}$")
+(def ^:private code-id-pattern #"^sha256:[0-9a-f]{64}$")
 
 (defn- validate-compiled!
   "Validate the CompiledGenome trust boundary: a map carrying a
-  canonical :compiled/phenotype-id and a :programs map. Every failure
-  throws :runtime/invalid-compiled with a distinguishing :reason."
+  canonical :code/id (CodeImageId) and a :programs map. Every failure
+  throws :runtime/invalid-compiled with a distinguishing :reason.
+  Legacy :compiled/phenotype-id is no longer accepted (I1 break compat)."
   [compiled-genome]
   (when-not (map? compiled-genome)
     (throw (err/error :runtime/invalid-compiled
                       "instantiate expects a CompiledGenome map"
                       {:reason :not-a-map
                        :value (err/sanitize compiled-genome)})))
-  (let [pid (:compiled/phenotype-id compiled-genome)]
-    (when-not (and (string? pid)
-                   (re-matches phenotype-id-pattern pid))
+  (let [cid (or (:code/id compiled-genome) (:compiled/code-id compiled-genome))]
+    (when-not (and (string? cid)
+                   (re-matches code-id-pattern cid))
       (throw (err/error :runtime/invalid-compiled
-                        "CompiledGenome must carry a canonical :compiled/phenotype-id"
-                        {:reason :phenotype-id-invalid
-                         :value (err/sanitize pid)}))))
+                        "CompiledGenome must carry a canonical :code/id (CodeImageId)"
+                        {:reason :code-id-invalid
+                         :value (err/sanitize cid)}))))
   (when-not (map? (:programs compiled-genome))
     (throw (err/error :runtime/invalid-compiled
                       "CompiledGenome must carry a :programs map"
@@ -218,7 +224,7 @@
 
   `compiled-genome` is the pure CompiledGenome from
   evoclj.compiler.core/compile-genome (which already carries the
-  canonical :compiled/phenotype-id, Global Constraint 22: the value is
+  canonical :code/id (CodeImageId), Global Constraint 22: the value is
   fully serializable EDN data). `runtime-deps` is the host-injected map
   documented in the namespace docstring (stores, provider registry,
   capability leases + usage, and the program source texts).
@@ -234,19 +240,21 @@
 
   Returns:
 
-    {:phenotype/id <:compiled/phenotype-id>
-     :code/id (or (:compiled/code-id compiled-genome) (:compiled/phenotype-id compiled-genome))
-     :deployment/id <derived DeploymentId from code-id, leases, bindings>
+    {:code/id <CodeImageId>
+     :deployment/id <DeploymentId derived from code-id, leases, bindings>
+     :execution/id <fresh UUID per activation>
      :compiled <the SAME immutable CompiledGenome value>
      :sci-runtime <fresh isolated runtime map>
      :providers <host registry map, by reference>
      :capabilities <host leases + usage map, by reference>
      :stores <declared stores, by reference>}
 
-  Two Phenotypes from one Genome share the immutable compiled
+  Two Executions with the same CodeImage share :code/id but have distinct
+  :execution/id. Two Phenotypes from one Genome share the immutable compiled
   code data while owning independent SCI contexts and distinct
   DeploymentIds when configured with different leases or bindings.
-  Constraints 3, 22, 23).
+  Constraints 3, 22, 23.
+  PhenotypeId legacy alias (:phenotype/id, :compiled/phenotype-id) is removed.
 
   Throws ExceptionInfo with a stable :error/type:
   :runtime/invalid-compiled, :runtime/deps-invalid, or
@@ -255,20 +263,24 @@
   (validate-compiled! compiled-genome)
   (validate-deps! runtime-deps)
   (let [programs (:programs compiled-genome)
-        cid (or (:compiled/code-id compiled-genome)
-                (:compiled/phenotype-id compiled-genome))
+        cid (or (:code/id compiled-genome) (:compiled/code-id compiled-genome))
+        _ (when-not cid
+            (throw (err/error :runtime/invalid-compiled
+                              "CompiledGenome must carry :code/id"
+                              {:reason :code-id-missing
+                               :value (err/sanitize compiled-genome)})))
         leases (or (get-in runtime-deps [:capabilities :leases]) [])
         bindings (or (get-in runtime-deps [:bindings]) [])
-        did (compiler-core/deployment-id cid leases bindings)]
-    {:phenotype/id cid
-     :code/id cid
+        did (compiler-core/deployment-id cid bindings leases)
+        eid (java.util.UUID/randomUUID)]
+    {:code/id cid
      :deployment/id did
+     :execution/id eid
      :compiled compiled-genome
      :sci-runtime (load-programs! programs (:program-sources runtime-deps))
      :providers (:providers runtime-deps)
      :capabilities (:capabilities runtime-deps)
      :stores (or (:stores runtime-deps) {})}))
-
 (defn halt!
   "Release the resources OWNED by `phenotype` (component).
 
