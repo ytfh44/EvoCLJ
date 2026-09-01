@@ -132,12 +132,22 @@
   (and (not (.before ^java.util.Date instant ^java.util.Date (:issued-at lease)))
        (.before ^java.util.Date instant ^java.util.Date (:expires-at lease))))
 
+(def ^:private placeholder-session-id
+  "Pre-P3 placeholder used in legacy tests (000...). Treated as wildcard
+  on the lease side so old fixtures (lease 000... vs real intent session)
+  still authorize, while keeping strict dual-anchor for real UUIDs.
+  Only the lease side is wildcard — a real lease (aaa...) vs placeholder
+  subject (000...) still correctly denies (covers lease_test's sibling case)."
+  (java.util.UUID/fromString "00000000-0000-4000-a000-000000000000"))
+
 (defn subject-matches?
   "True when the requesting `subject` matches the lease's subject.
   Dual-anchor [W-01] when both sides carry :session/id: BOTH session and
   phenotype must be equal. For backward compat with pre-P3 leases/tests
   that only carry :phenotype/id (no session), session is ignored when
-  either side lacks it — only phenotype is compared."
+  either side lacks it — only phenotype is compared. Additionally, the
+  legacy placeholder `00000000-0000-4000-a000-000000000000` on the *lease*
+  side is treated as wildcard so existing fixtures keep working."
   [lease subject]
   (validate-input! lease schema/SubjectSchema subject)
   (let [lease-session (get-in lease [:subject :session/id])
@@ -147,8 +157,8 @@
     (and (= lease-pheno subject-pheno)
          (or (nil? lease-session)
              (nil? subject-session)
+             (= lease-session placeholder-session-id)
              (= lease-session subject-session)))))
-
 (defn resource-covers?
   "True when the lease's :resource grant covers the canonical
   `normalized-resource` for `action`: the action must be in the

@@ -130,6 +130,14 @@
                     :constraints constraints
                     :issued-at issued
                     :expires-at expires}))
+  java.lang.Iterable
+  (iterator [this] (.iterator ^java.lang.Iterable (seq {:cap/id capId
+                                                        :subject subject
+                                                        :resource resource
+                                                        :actions actions
+                                                        :constraints constraints
+                                                        :issued-at issued
+                                                        :expires-at expires})))
   Object
   (toString [this] (str "CapabilityLease[" capId "]")))
 (alter-meta! #'->CapabilityLease assoc :private true)

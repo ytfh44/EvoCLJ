@@ -92,9 +92,9 @@
   (testing "a subject with a malformed or missing phenotype/session id is rejected, never matched"
     (is-schema-invalid #(lease/subject-matches? (lease) {}))
     (is-schema-invalid #(lease/subject-matches? (lease) {:session/id session-a :phenotype/id "not-a-hash"}))
-    (is-schema-invalid #(lease/subject-matches? (lease) {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}))
+    (is (not (lease/subject-matches? (lease) {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}))
+        "sibling session with same phenotype is not a match (dual-anchor), not a schema error")
     (is-schema-invalid #(lease/subject-matches? (lease) {:session/id session-a}))))
-
 ;; ============================================================================
 ;; Step 2 — expiry boundaries and action mismatch
 ;; ============================================================================

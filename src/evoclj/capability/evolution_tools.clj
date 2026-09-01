@@ -345,20 +345,29 @@
   surface). Throws :capability/schema-invalid when :session/id is missing."
   [phenotype-id tool-id & [opts]]
   (let [registry (:registry opts)
-        session-id (or (:session/id opts) (:session-id opts) #uuid "00000000-0000-4000-a000-000000000000")
+        session-id (or (:session/id opts) (:session-id opts))
         cap-id-val (or (get opts (keyword "cap/id")) (:cap-id opts) (UUID/randomUUID))
         issued (or (:issued-at opts) (Date.))
         expires (or (:expires-at opts)
                     (Date/from (.plus (Instant/ofEpochMilli (.getTime ^Date issued))
                                       (Duration/ofHours 1))))]
-    (cap-mint/mint-lease! registry
-                          {:cap-id cap-id-val
-                           :subject {:session/id session-id :phenotype/id phenotype-id}
-                           :resource {:kind :tool :id tool-id}
-                           :actions #{:invoke}
-                           :constraints (or (:constraints opts) {})
-                           :issued-at issued
-                           :expires-at expires})))
+    (if session-id
+      (cap-mint/mint-lease! registry
+                           {:cap-id cap-id-val
+                            :subject {:session/id session-id :phenotype/id phenotype-id}
+                            :resource {:kind :tool :id tool-id}
+                            :actions #{:invoke}
+                            :constraints (or (:constraints opts) {})
+                            :issued-at issued
+                            :expires-at expires})
+      (cap-mint/mint-lease! registry
+                           {:cap-id cap-id-val
+                            :subject {:phenotype/id phenotype-id}
+                            :resource {:kind :tool :id tool-id}
+                            :actions #{:invoke}
+                            :constraints (or (:constraints opts) {})
+                            :issued-at issued
+                            :expires-at expires}))))
 
 
 (defn mutator-tool-leases
