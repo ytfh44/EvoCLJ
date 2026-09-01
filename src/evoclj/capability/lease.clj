@@ -37,6 +37,7 @@
   forms) is component (evoclj.provider). Unknown resource kinds fail
   closed: nothing is covered."
   (:require [clojure.string :as str]
+            [evoclj.capability.constraint :as cstr]
             [evoclj.capability.grant :as grant]
             [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.schema :as schema]
@@ -130,6 +131,53 @@
                        :action (err/sanitize action)})))
   (grant/covers? {:resource (:resource lease) :actions (:actions lease)}
                  {:resource normalized-resource :actions #{action}}))
+;; C3 — Lease full algebra: constraints via ConstraintDescriptor
+;; ---------------------------------------------------------------------------
+
+(defn constraints-le?
+  "True when child constraints ≤ parent constraints in every quota dimension.
+  Delegates to evoclj.capability.constraint/le-constraints? (C3 lattice)."
+  [parent-constraints child-constraints]
+  (cstr/le-constraints? parent-constraints child-constraints))
+
+(defn constraints-meet
+  "GLB of two constraint maps (per-dimension min). Delegates to constraint/meet-constraints.
+  Audit keys are not part of the quota lattice and are ignored."
+  [a b]
+  (cstr/meet-constraints a b))
+
+(defn lease-attenuates?
+  "True when child lease is attenuated by parent lease in the full product lattice:
+  Grant attenuates? × constraints le? × TimeWindow le? (issued ≥, expires ≤).
+  Principal is not part of the attenuates order (delegation may change principal)."
+  [parent child]
+  (let [grant-ok (grant/attenuates? {:resource (:resource parent) :actions (:actions parent)}
+                                    {:resource (:resource child) :actions (:actions child)})
+        quota-ok (constraints-le? (:constraints parent) (:constraints child))
+        time-ok (and (not (.before ^java.util.Date (:issued-at child) ^java.util.Date (:issued-at parent)))
+                     (not (.after ^java.util.Date (:expires-at child) ^java.util.Date (:expires-at parent))))]
+    (and grant-ok quota-ok time-ok)))
+
+(defn lease-meet
+  "Greatest lower bound of two leases in the product lattice, or nil when disjoint.
+  Grant meet via grant/meet, quota meet via constraints-meet, TimeWindow meet via
+  [max issued, min expires]; principal is not merged (nil). Returns a plain map
+  suitable for schema/make-lease (without :cap/id)."
+  [a b]
+  (when (and (map? a) (map? b))
+    (when-let [g (grant/meet {:resource (:resource a) :actions (:actions a)}
+                              {:resource (:resource b) :actions (:actions b)})]
+      (let [quota (constraints-meet (:constraints a) (:constraints b))
+            issued (if (.after ^java.util.Date (:issued-at a) ^java.util.Date (:issued-at b))
+                     (:issued-at a) (:issued-at b))
+            expires (if (.before ^java.util.Date (:expires-at a) ^java.util.Date (:expires-at b))
+                      (:expires-at a) (:expires-at b))]
+        (when (.before ^java.util.Date issued ^java.util.Date expires)
+          {:resource (:resource g)
+           :actions (:actions g)
+           :constraints quota
+           :issued-at issued
+           :expires-at expires})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Generic LeaseRegistry helpers (P5) — unified for ANY kind

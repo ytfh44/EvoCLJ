@@ -141,15 +141,30 @@
       (and (inst? issued) (inst? expires)
            (.before ^java.util.Date issued ^java.util.Date expires)))))
 
+(def ^:private constraints-schema
+  "Closed constraints map: only known quota keys plus audit chain keys.
+  Quota keys are registered ConstraintDescriptors (C3). Audit keys
+  :cap/attenuated-from and :attenuated-from are allowed for derivation chain.
+  Unknown keys fail closed — widening via passthrough is removed."
+  [:map {:closed true}
+   [:max-calls {:optional true} [:and :int [:fn (fn [x] (>= x 0))]]]
+   [:max-bytes {:optional true} [:and :int [:fn (fn [x] (>= x 0))]]]
+   [:cap/attenuated-from {:optional true} uuid?]
+   [:attenuated-from {:optional true} uuid?]])
+
 (def CapabilityLeaseSchema
   "The v0 CapabilityLease contract: a closed map of the seven normative
   fields. The top level is closed — no field may be missing, renamed,
   or extended. :principal is the tagged union Principal (I2);
   :actions is a set of keywords constrained to the closed
   allowlist #{:invoke :read :list :stat :write :create :delete} and
-  must be non-empty; :resource and :constraints are open maps whose
-  shapes are provider-defined. The grant must span a positive window
-  (:expires-at after :issued-at)."
+  must be non-empty; :resource is an open map (provider-defined);
+  :constraints is a CLOSED map of known quota dimensions (C3) —
+  only :max-calls, :max-bytes and audit keys are allowed, unknown
+  keys are rejected fail-closed; :resource and constraints together
+  with principal and TimeWindow form the full Lease algebra
+  Lease = Grant × Principal × TimeWindow × Quota. The grant must span
+  a positive window (:expires-at after :issued-at)."
   [:and
    [:map {:closed true}
     [:cap/id uuid?]
@@ -158,7 +173,7 @@
     [:actions [:and
                [:set [:enum :invoke :read :list :stat :write :create :delete]]
                [:fn seq]]]
-    [:constraints [:map {:closed false}]]
+    [:constraints constraints-schema]
     [:issued-at inst?]
     [:expires-at inst?]]
    [:fn positive-window?]])
@@ -243,12 +258,28 @@
     (map? s) {:principal/type :operator}
     :else nil))
 
-(defn- canonicalize-lease-map
-  "If map has legacy :subject and no :principal, convert to :principal and dissoc :subject."
+(defn- canonicalize-constraints
+  "C3: canonicalize :maxBytes -> :max-bytes for backward compat.
+  Both spellings are accepted on input; canonical form is :max-bytes."
   [m]
-  (if (and (map? m) (contains? m :subject) (not (contains? m :principal)))
-    (-> m (assoc :principal (subject->principal (:subject m))) (dissoc :subject))
+  (if (map? m)
+    (let [has-alias (contains? m :maxBytes)
+          has-canonical (contains? m :max-bytes)]
+      (cond
+        (and has-alias has-canonical) (dissoc m :maxBytes)
+        has-alias (-> m (assoc :max-bytes (:maxBytes m)) (dissoc :maxBytes))
+        :else m))
     m))
+
+(defn- canonicalize-lease-map
+  "If map has legacy :subject and no :principal, convert to :principal and dissoc :subject.
+  Also canonicalizes constraint alias :maxBytes -> :max-bytes (C3)."
+  [m]
+  (cond-> m
+    (and (map? m) (contains? m :subject) (not (contains? m :principal)))
+    (-> (assoc :principal (subject->principal (:subject m))) (dissoc :subject))
+    (and (map? m) (contains? m :constraints))
+    (update :constraints canonicalize-constraints)))
 
 (defn validate-lease
   "Validate x as a v0 CapabilityLease.

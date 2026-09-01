@@ -91,8 +91,7 @@
   "Extract args from the intent payload."
   [intent]
   (or (:args (:payload intent))
-    (:args intent)
-    (:args payload)))
+      (:args intent)))
 
 (defn- validate-args!
   "Validate args against descriptor's input-schema; throw on invalid."
@@ -207,8 +206,7 @@
                           :actions #{:invoke}
                           :constraints (or (:constraints opts) {})
                           :issued-at issued
-                          :expires-at expires}))
-
+                          :expires-at expires})))
 
 (defn mutator-tool-leases
   "The v0 grant set a host mints for the LLM mutator's principal: both

@@ -62,8 +62,12 @@
   [#{:invoke} #{:read} #{:invoke :read}])
 
 (def ^:private constraints-pool
-  [{} {:max-calls 1} {:max-calls 3} {:max-calls 5}])
-
+  "C3: closed quota dimensions — each is checked via ConstraintDescriptor le?/meet.
+  Includes :max-calls and :max-bytes (both nil = top). Unknown keys are rejected at mint,
+  so widening via passthrough is removed. The pool exercises narrow and wide cases."
+  [{} {:max-calls 1} {:max-calls 3} {:max-calls 5}
+   {:max-bytes 100} {:max-bytes 50} {:max-bytes 1000}
+   {:max-calls 3 :max-bytes 100} {:max-calls 1 :max-bytes 50}])
 ;; Window offset pairs from `now`, each keeping issued strictly before
 ;; expires (the schema's positive-window rule): valid at now / already
 ;; expired / not yet valid.

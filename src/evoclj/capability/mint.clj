@@ -12,6 +12,7 @@
   cli/session tool-lease/model-lease) must delegate here; grep for
   :cap/id in src/ should only hit this file (plus tests)."
   (:require [clojure.set :as set]
+            [evoclj.capability.constraint :as cstr]
             [evoclj.capability.grant :as grant]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err])
@@ -73,16 +74,21 @@
 (defn derive-lease!
   "Derive a narrowed child lease from a sealed parent lease (P4 attenuation).
 
-  Attenuation rule (Wolfram [W-08..W-11]): the child must be *narrower* than
-  the parent in every dimension — never wider:
+  Attenuation rule (C3 full algebra — Lease = Grant × Principal × TimeWindow × Quota):
+  the child must be *narrower* than the parent in every lattice dimension — never wider:
 
-    - actions  — child ⊆ parent  (ActionSet lattice, C2)
-    - max-calls — child max-calls <= parent max-calls (nil means unlimited)
-    - issued   — child issued >= parent issued
-    - expires  — child expires <= parent expires
-    - resource — child resource attenuated by parent (Grant attenuates?, C2)
-                 i.e. parent Grant covers child Grant via ResourceKindDescriptor
-                 (filesystem /work attenuates to /work/project-a; tool requires equality)
+    - Grant       — child Grant ≤ parent Grant  (grant/attenuates? via ResourceKindDescriptor)
+                  i.e. parent Grant covers child Grant (filesystem /work attenuates to /work/project-a;
+                  tool requires equality; ActionSet subset)
+    - Quota       — child constraints ≤ parent constraints per ConstraintDescriptor le?
+                  (each quota dimension: max-calls, max-bytes, etc. nil = top/unbounded)
+    - TimeWindow  — child issued ≥ parent issued  and  child expires ≤ parent expires
+                  (meet of windows is intersection)
+
+  Derive = meet in each dimension (product lattice GLB). Quota meet is per-dimension min;
+  Grant meet is via ResourceKindDescriptor/meet + ActionSet intersection;
+  TimeWindow meet is [max issued, min expires]. Unknown constraint keys are rejected
+  fail-closed (closed map, no passthrough) — widening via :max-bytes 100 -> 1000 is denied.
 
   The child is sealed via schema/make-lease, carries
   :cap/attenuated-from (and :attenuated-from) in its :constraints for audit,
@@ -92,10 +98,10 @@
   parent-lease — sealed CapabilityLease (schema/lease? true), not revoked
   opts — map with optional keys:
     :principal   override principal (for subagent delegation; must still be valid)
-    :resource    override resource (must be attenuated by parent, C2)
+    :resource    override resource (must be attenuated by parent, C2/C3)
     :actions     set of actions (default: parent actions)
-    :constraints map (default: {} merged with parent constraints, see below)
-    :issued-at   #inst (default: now)
+    :constraints map (default: inherit parent constraints; when supplied, must be ≤ parent per C3)
+    :issued-at   #inst (default: parent issued)
     :expires-at  #inst (default: parent expires)
     :cap-id / :cap/id  child cap id (default: fresh UUID)
 
@@ -124,71 +130,77 @@
         child-actions-raw (if (contains? (or opts {}) :actions) actions parent-actions)
         child-actions-set (when child-actions-raw
                             (if (set? child-actions-raw) child-actions-raw (set child-actions-raw)))
-        child-constraints-raw (or constraints (:constraints opts) parent-constraints)
+        ;; C3: constraints canonicalization + closed check via constraint registry.
+        ;; When :constraints not supplied, inherit parent (no widening). When supplied,
+        ;; even {} is explicit and checked for widening (strict atomic replacement).
+        child-constraints-raw (if (contains? opts :constraints)
+                                (:constraints opts)
+                                parent-constraints)
+        ;; Canonicalize alias :maxBytes -> :max-bytes before lattice ops
+        canon-parent-c (cstr/canonicalize-constraints (or parent-constraints {}))
+        canon-child-raw (cstr/canonicalize-constraints (or child-constraints-raw {}))
         child-issued (or issued-at (:issued-at opts) parent-issued)
         child-expires (or expires-at (:expires-at opts) parent-expires)
         cap-id-val (or (:cap/id opts) cap-id (UUID/randomUUID))]
-    (when-not (set/subset? (or child-actions-set #{}) (or parent-actions #{}))
-      (throw (err/error :capability/attenuation-invalid
-                        "derived actions must be subset of parent actions"
-                        {:parent-actions (err/sanitize parent-actions)
-                         :child-actions (err/sanitize child-actions-set)})))
+    ;; Grant lattice: single attenuates? covers both ResourceScope and ActionSet
     (when-not (grant/attenuates? {:resource parent-resource :actions (or parent-actions #{})}
                                   {:resource child-resource :actions (or child-actions-set #{})})
       (throw (err/error :capability/attenuation-invalid
-                        "derived lease resource must be attenuated by parent (Grant attenuates?)"
+                        "derived lease Grant must be attenuated by parent (Grant attenuates? — ResourceScope × ActionSet)"
                         {:parent-resource (err/sanitize parent-resource)
                          :child-resource (err/sanitize child-resource)
                          :parent-actions (err/sanitize parent-actions)
                          :child-actions (err/sanitize child-actions-set)})))
-    (let [parent-max (get parent-constraints :max-calls)
-          child-max (get child-constraints-raw :max-calls)]
-      (when (some? parent-max)
-        (when (nil? child-max)
-          (throw (err/error :capability/attenuation-invalid
-                            "derived lease must not widen max-calls: parent has finite max-calls but child is unlimited"
-                            {:parent-max-calls parent-max
-                             :child-max-calls child-max})))
-        (when (and (some? child-max) (> child-max parent-max))
-          (throw (err/error :capability/attenuation-invalid
-                            "derived max-calls must be <= parent max-calls"
-                            {:parent-max-calls parent-max
-                             :child-max-calls child-max}))))
-      (when (.before ^Date ^Date child-issued ^Date parent-issued)
-        (throw (err/error :capability/attenuation-invalid
-                          "derived issued-at must be >= parent issued-at"
-                          {:parent-issued-at parent-issued
-                           :child-issued-at child-issued})))
-      (when (.after ^Date ^Date child-expires ^Date parent-expires)
-        (throw (err/error :capability/attenuation-invalid
-                          "derived expires-at must be <= parent expires-at"
-                          {:parent-expires-at parent-expires
-                           :child-expires-at child-expires})))
-      (when-not (.before ^Date ^Date child-issued ^Date child-expires)
-        (throw (err/error :capability/schema-invalid
-                          "derived lease must span positive window: :expires-at after :issued-at"
-                          {:value (err/sanitize {:cap/id cap-id-val
-                                                 :principal child-principal
-                                                 :resource child-resource
-                                                 :actions child-actions-set
-                                                 :constraints child-constraints-raw
-                                                 :issued-at child-issued
-                                                 :expires-at child-expires})})))
-      (let [merged-constraints (assoc child-constraints-raw
-                                      :cap/attenuated-from parent-cap-id
-                                      :attenuated-from parent-cap-id)
-            lease-map {:cap/id cap-id-val
-                       :principal child-principal
-                       :resource child-resource
-                       :actions child-actions-set
-                       :constraints merged-constraints
-                       :issued-at child-issued
-                       :expires-at child-expires}
-            lease (schema/make-lease lease-map)]
-        (when registry
-          (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false}))
-        lease))))
-
+    ;; Quota lattice: C3 ConstraintDescriptor le?
+    (when-not (cstr/le-constraints? canon-parent-c canon-child-raw)
+      (throw (err/error :capability/attenuation-invalid
+                        "derived constraints must be ≤ parent constraints (C3 quota lattice: each dimension narrower)"
+                        {:parent-constraints (err/sanitize canon-parent-c)
+                         :child-constraints (err/sanitize canon-child-raw)})))
+    ;; TimeWindow lattice
+    (when (.before ^Date ^Date child-issued ^Date parent-issued)
+      (throw (err/error :capability/attenuation-invalid
+                        "derived issued-at must be >= parent issued-at"
+                        {:parent-issued-at parent-issued
+                         :child-issued-at child-issued})))
+    (when (.after ^Date ^Date child-expires ^Date parent-expires)
+      (throw (err/error :capability/attenuation-invalid
+                        "derived expires-at must be <= parent expires-at"
+                        {:parent-expires-at parent-expires
+                         :child-expires-at child-expires})))
+    (when-not (.before ^Date ^Date child-issued ^Date child-expires)
+      (throw (err/error :capability/schema-invalid
+                        "derived lease must span positive window: :expires-at after :issued-at"
+                        {:value (err/sanitize {:cap/id cap-id-val
+                                               :principal child-principal
+                                               :resource child-resource
+                                               :actions child-actions-set
+                                               :constraints canon-child-raw
+                                               :issued-at child-issued
+                                               :expires-at child-expires})})))
+    ;; Derive = meet in each dimension. For quota, meet is per-dimension min;
+    ;; when child ≤ parent, meet = child, but we compute explicitly for algebra.
+    (let [quota-meet (cstr/meet-constraints canon-parent-c canon-child-raw)
+          ;; quota-meet is canon-child-raw when le holds, but use meet for explicit product GLB.
+          ;; Preserve explicit child map's shape: if child was supplied, meet may fill missing parent keys;
+          ;; however le already ensured child is ≤ parent, so meet = child for supplied keys and
+          ;; for omitted keys (when child supplied) le would have failed, so we are not in that case.
+          ;; Use quota-meet as canonical final; when child not supplied (inherit), quota-meet = parent.
+          final-constraints-raw (if (contains? opts :constraints) quota-meet canon-parent-c)
+          merged-constraints (assoc final-constraints-raw
+                                    :cap/attenuated-from parent-cap-id
+                                    :attenuated-from parent-cap-id)
+          lease-map {:cap/id cap-id-val
+                     :principal child-principal
+                     :resource child-resource
+                     :actions child-actions-set
+                     :constraints merged-constraints
+                     :issued-at child-issued
+                     :expires-at child-expires}
+          lease (schema/make-lease lease-map)]
+      (when registry
+        (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false}))
+      lease)))
 ;; ---------------------------------------------------------------------------
 ;; Generic LeaseRegistry helpers (P5) — unified shape for ANY kind
 ;; (tool/model/memory/filesystem). This is the single definition; mount/filesystem

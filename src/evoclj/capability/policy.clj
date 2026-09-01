@@ -68,13 +68,13 @@
   never authorizes and never hides a caller bug (the same rule as
   evoclj.capability.lease)."
   (:require [clojure.set :as set]
+            [evoclj.capability.constraint :as cstr]
             [evoclj.capability.grant :as grant]
             [evoclj.capability.lease :as lease]
             [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err]
             [malli.core :as m]))
-
 ;; --- request derivation ----------------------------------------------------
 
 (defn intent-principal
@@ -162,15 +162,12 @@
                       "usage must be a map of :cap/id to non-negative int"
                       {:value (err/sanitize usage)}))))
 
-;; --- the decision ----------------------------------------------------------
-
 (defn within-call-budget?
+  "C3: true when lease's quotas are not exceeded given usage map.
+  Delegates to ConstraintDescriptor exceeded? for each quota dimension.
+  Both :max-calls and :max-bytes are checked; nil = unlimited."
   [lease usage]
-  (let [max-calls (get-in lease [:constraints :max-calls])
-        consumed (get (or usage {}) (:cap/id lease) 0)]
-    (or (nil? max-calls)
-        (< consumed max-calls))))
-
+  (cstr/within-budget? (:constraints lease) usage (:cap/id lease)))
 (defn- check-lease
   "Check a single lease against a request via Grant (C2) product order.
   ResourceScope × ActionSet: lease Grant must cover request Grant

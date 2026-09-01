@@ -173,3 +173,130 @@
     (let [parent (parent-lease)]
       (is (attenuation-invalid?
            #(mint/derive-lease! nil parent {:resource {:kind :tool :id :other/tool}}))))))
+
+;; --- C3: max-bytes quota lattice (ConstraintDescriptor) ---
+
+(deftest max-bytes-widen-fails-attenuation-invalid
+  (testing "child max-bytes > parent max-bytes fails (widening)"
+    (let [parent (mint/mint-lease! nil {:cap-id (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                                        :principal {:principal/type :session :session/id session-a}
+                                        :resource {:kind :filesystem :path "/work"}
+                                        :actions #{:read}
+                                        :constraints {:max-bytes 100}
+                                        :issued-at issued-at
+                                        :expires-at expires-at})]
+      (is (attenuation-invalid?
+           #(mint/derive-lease! nil parent {:constraints {:max-bytes 1000}}))
+          "1000 > parent 100 must be rejected")
+      (is (attenuation-invalid?
+           #(mint/derive-lease! nil parent {:constraints {:maxBytes 1000}}))
+          "camelCase :maxBytes also widening")))
+  (testing "child max-bytes < parent passes (narrowing)"
+    (let [parent (mint/mint-lease! nil {:cap-id (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                                        :principal {:principal/type :session :session/id session-a}
+                                        :resource {:kind :filesystem :path "/work"}
+                                        :actions #{:read}
+                                        :constraints {:max-bytes 100}
+                                        :issued-at issued-at
+                                        :expires-at expires-at})
+          child (mint/derive-lease! nil parent {:constraints {:max-bytes 50}})]
+      (is (schema/lease? child))
+      (is (= 50 (get-in child [:constraints :max-bytes])))))
+  (testing "child unlimited (nil) when parent finite fails"
+    (let [parent (mint/mint-lease! nil {:cap-id (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                                        :principal {:principal/type :session :session/id session-a}
+                                        :resource {:kind :filesystem :path "/work"}
+                                        :actions #{:read}
+                                        :constraints {:max-bytes 100}
+                                        :issued-at issued-at
+                                        :expires-at expires-at})]
+      (is (attenuation-invalid?
+           #(mint/derive-lease! nil parent {:constraints {}}))
+          "nil child max-bytes widens past finite parent")))
+  (testing "unknown constraint key is rejected fail-closed at schema boundary"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (mint/mint-lease! nil {:cap-id (UUID/randomUUID)
+                                        :principal {:principal/type :session :session/id session-a}
+                                        :resource {:kind :tool :id :fixture/echo}
+                                        :actions #{:invoke}
+                                        :constraints {:unknown-quota 1}
+                                        :issued-at issued-at
+                                        :expires-at expires-at}))))
+  (testing "max-calls and max-bytes together: narrowing both passes"
+    (let [parent (mint/mint-lease! nil {:cap-id (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                                        :principal {:principal/type :session :session/id session-a}
+                                        :resource {:kind :tool :id :fixture/echo}
+                                        :actions #{:invoke}
+                                        :constraints {:max-calls 10 :max-bytes 100}
+                                        :issued-at issued-at
+                                        :expires-at expires-at})
+          child (mint/derive-lease! nil parent {:constraints {:max-calls 5 :max-bytes 50}})]
+      (is (schema/lease? child))
+      (is (= 5 (get-in child [:constraints :max-calls])))
+      (is (= 50 (get-in child [:constraints :max-bytes])))))
+  (testing "max-calls and max-bytes together: widening one fails"
+    (let [parent (mint/mint-lease! nil {:cap-id (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                                        :principal {:principal/type :session :session/id session-a}
+                                        :resource {:kind :tool :id :fixture/echo}
+                                        :actions #{:invoke}
+                                        :constraints {:max-calls 10 :max-bytes 100}
+                                        :issued-at issued-at
+                                        :expires-at expires-at})]
+      (is (attenuation-invalid?
+           #(mint/derive-lease! nil parent {:constraints {:max-calls 5 :max-bytes 200}}))))))
+
+;; --- C3: filesystem path narrowing via ResourceKindDescriptor (Grant attenuates?) ---
+
+(deftest filesystem-path-narrowing-via-descriptor
+  (testing "filesystem path narrowing /work -> /work/project-a allows via ResourceKindDescriptor"
+    (let [parent (mint/mint-lease! nil {:cap-id (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                                        :principal {:principal/type :session :session/id session-a}
+                                        :resource {:kind :filesystem :path "/work"}
+                                        :actions #{:read :list}
+                                        :constraints {:max-calls 10}
+                                        :issued-at issued-at
+                                        :expires-at expires-at})
+          child (mint/derive-lease! nil parent {:resource {:kind :filesystem :path "/work/project-a"}
+                                                :actions #{:read}})]
+      (is (schema/lease? child))
+      (is (= {:kind :filesystem :path "/work/project-a"} (:resource child)))))
+  (testing "filesystem widening /work/project-a -> /work fails"
+    (let [parent (mint/mint-lease! nil {:cap-id (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                                        :principal {:principal/type :session :session/id session-a}
+                                        :resource {:kind :filesystem :path "/work/project-a"}
+                                        :actions #{:read}
+                                        :constraints {:max-calls 10}
+                                        :issued-at issued-at
+                                        :expires-at expires-at})]
+      (is (attenuation-invalid?
+           #(mint/derive-lease! nil parent {:resource {:kind :filesystem :path "/work"}})))))
+  (testing "filesystem sibling prefix not narrowing fails"
+    (let [parent (mint/mint-lease! nil {:cap-id (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                                        :principal {:principal/type :session :session/id session-a}
+                                        :resource {:kind :filesystem :path "/work"}
+                                        :actions #{:read}
+                                        :constraints {:max-calls 10}
+                                        :issued-at issued-at
+                                        :expires-at expires-at})]
+      (is (attenuation-invalid?
+           #(mint/derive-lease! nil parent {:resource {:kind :filesystem :path "/workspace/x"}})))))
+  (testing "C3 full algebra: narrow Grant + narrow Quota + narrow TimeWindow together passes (derive = meet)"
+    (let [parent (mint/mint-lease! nil {:cap-id (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                                        :principal {:principal/type :session :session/id session-a}
+                                        :resource {:kind :filesystem :path "/work"}
+                                        :actions #{:read :list :stat}
+                                        :constraints {:max-calls 10 :max-bytes 100}
+                                        :issued-at issued-at
+                                        :expires-at expires-at})
+          child (mint/derive-lease! nil parent {:resource {:kind :filesystem :path "/work/project-a"}
+                                                :actions #{:read}
+                                                :constraints {:max-calls 5 :max-bytes 50}
+                                                :issued-at later-issued
+                                                :expires-at earlier-expires})]
+      (is (schema/lease? child))
+      (is (= {:kind :filesystem :path "/work/project-a"} (:resource child)))
+      (is (= #{:read} (:actions child)))
+      (is (= 5 (get-in child [:constraints :max-calls])))
+      (is (= 50 (get-in child [:constraints :max-bytes])))
+      (is (= later-issued (:issued-at child)))
+      (is (= earlier-expires (:expires-at child))))))
