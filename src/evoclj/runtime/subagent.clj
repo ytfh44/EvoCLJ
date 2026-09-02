@@ -276,17 +276,18 @@
                       {:child_session_id (str child-id)
                        :parent_session_id (str parent-id)
                        :created_at ts}))
-      ;; W2: durable child Work (queued) for the subagent execution
-      (try
-        (let [wid (java.util.UUID/randomUUID)]
-          (work-store/create-work! spec {:work/id wid
-                                         :work/type :subagent/run
-                                         :work/state :queued
-                                         :work/session-id child-id
-                                         :work/parent-work-id nil
-                                         :work/created-at (java.util.Date.)})
-          (try (work-store/dispatch-work! spec wid) (catch Exception _ nil)))
-        (catch Exception _ nil))
+      ;; W2: durable child Work (queued) — the SOLE execution identity for
+      ;; this child. parent-work-id points at the parent's latest Work (nil
+      ;; only for the root session, which has no parent Work).
+      (let [parent-work-id (some-> (last (work-store/list-works spec parent-id)) :work/id)
+            wid (java.util.UUID/randomUUID)]
+        (work-store/create-work! spec {:work/id wid
+                                       :work/type :subagent/run
+                                       :work/state :queued
+                                       :work/session-id child-id
+                                       :work/parent-work-id parent-work-id
+                                       :work/created-at (java.util.Date.)})
+        wid)
       {:child/session-id child-id
        :child/session child-session
        :child/capabilities derived})))
@@ -353,14 +354,14 @@
                        :parent/session-id parent-id})))
     (let [executor (build-child-executor db child)
           run-session! @(requiring-resolve 'evoclj.runtime.scheduler/run-session!)
-          ;; W2: ensure a Work exists for this child (spawn may have already created one)
-          _ (try
-              (let [wid (java.util.UUID/randomUUID)]
-                (work-store/create-work! db {:work/id wid :work/type :subagent/run :work/state :queued :work/session-id child-id :work/created-at (java.util.Date.)})
-                (try (work-store/dispatch-work! db wid) (catch Exception _ nil)))
-              (catch Exception _ nil))
+          ;; W2: reuse the Work the spawn created — never mint a second one.
+          ;; The child's sole execution identity is the :subagent/run Work
+          ;; spawn-subagent! persisted (queued); scheduler dispatches it to
+          ;; :running. Only when the child was never spawned (bare run) does
+          ;; the scheduler create its own :session/run Work (work-id nil).
+          child-work-id (some-> (last (work-store/list-works db child-id)) :work/id)
           ;; internal future await: Work's running is execution, future is only await
-          result @(future (run-session! executor child-id task))]
+          result @(future (run-session! executor child-id task child-work-id))]
       result)))
 
 ;; ---------------------------------------------------------------------------

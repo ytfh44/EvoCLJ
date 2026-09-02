@@ -431,16 +431,17 @@
          (catch Exception _ false))))
 
 (defn- create-session-work!
+  "Create the session's sole execution Work (:session/run, queued). Mandatory:
+  a failed INSERT aborts the run (typed) — Work is the execution identity, not
+  a best-effort sidecar (W2). Returns the new work-id."
   [db session-id]
-  (try
-    (let [wid (java.util.UUID/randomUUID)]
-      (work-store/create-work! db {:work/id wid
-                                   :work/type :session/run
-                                   :work/state :queued
-                                   :work/session-id session-id
-                                   :work/created-at (java.util.Date.)})
-      wid)
-    (catch Exception _ nil)))
+  (let [wid (java.util.UUID/randomUUID)]
+    (work-store/create-work! db {:work/id wid
+                                 :work/type :session/run
+                                 :work/state :queued
+                                 :work/session-id session-id
+                                 :work/created-at (java.util.Date.)})
+    wid))
 
 ;; --- terminal session outcomes ----------------------------------------------
 
@@ -536,15 +537,16 @@
   result map, and the error contract (:scheduler/executor-invalid,
   :scheduler/session-invalid, :scheduler/pin-mismatch,
   :scheduler/task-input-invalid)."
-  [executor session-id task-input]
-  (validate-executor! executor)
-  (when-not (boundary/edn-safe? task-input)
-    (throw (err/error :scheduler/task-input-invalid
-                      "task-input must be plain EDN-safe data (Global Constraint 22)"
-                      {:reason :not-edn-safe
+  ([executor session-id task-input] (run-session! executor session-id task-input nil))
+  ([executor session-id task-input work-id]
+   (validate-executor! executor)
+   (when-not (boundary/edn-safe? task-input)
+     (throw (err/error :scheduler/task-input-invalid
+                       "task-input must be plain EDN-safe data (Global Constraint 22)"
+                       {:reason :not-edn-safe
                        :value (err/sanitize task-input)})))
-  (let [db (:sqlite (:stores executor))
-        pin (session/get-session db session-id)]
+   (let [db (:sqlite (:stores executor))
+         pin (session/get-session db session-id)]
     (when-not pin
       (throw (err/error :scheduler/session-invalid
                         "no session with this id"
@@ -611,7 +613,13 @@
       ;; :created (see restore-session-runtime! for the failure
       ;; discipline — verdicts abort typed, infrastructure degrades).
       (restore-session-runtime! executor pin root)
-      (let [work-id (create-session-work! db (:session/id pin))
+      (let [work-id (if work-id
+                      (do (when-not (work-store/fetch-work db work-id)
+                            (throw (err/error :scheduler/work-not-found
+                                              "provided work-id does not exist"
+                                              {:work/id work-id})))
+                          work-id)
+                      (create-session-work! db (:session/id pin)))
             _work-running (try-work-transition! db work-id work-store/dispatch-work!)]
         (session/transition-session! db (:session/id pin) :created :resolving nil)
         (session/transition-session! db (:session/id pin) :resolving :running nil)
@@ -778,4 +786,4 @@
                                                     :error/message "a :continue transition carries no successor"
                                                     :node/id node-id}
                                                    outputs))))))))))))))]
-          (assoc outcome :event/count (event-count executor pin) :work/id work-id)))))))
+          (assoc outcome :event/count (event-count executor pin) :work/id work-id))))))))
