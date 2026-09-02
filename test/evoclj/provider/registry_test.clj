@@ -80,7 +80,7 @@
   (tool or filesystem) to phenotype-id."
   [resource]
   {:cap/id #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-   :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-id}
+   :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
    :resource resource
    :actions #{:invoke}
    :constraints {:max-calls 10}

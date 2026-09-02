@@ -93,8 +93,7 @@
 
 (defn principal-matches?
   "True when the requesting `principal` equals the lease's principal (I2).
-  No wildcard, no nil, no placeholder — exact equality on the tagged union.
-  Legacy :subject maps are canonicalized to Principal for compat (filesystem tests)."
+  No wildcard, no nil, no placeholder — exact equality on the tagged union."
   [lease principal]
   (let [canonical-principal (cond
                               (and (map? principal) (:principal/type principal)) principal
@@ -103,7 +102,7 @@
                               (and (map? principal) (:eval/id principal) (not (contains? principal :principal/type))) {:principal/type :eval :eval/id (:eval/id principal)}
                               :else principal)]
     (validate-input! lease schema/PrincipalSchema canonical-principal)
-    (let [raw (or (:principal lease) (:subject lease))
+    (let [raw (:principal lease)
           lp (if (and (map? raw) (:principal/type raw))
                raw
                (cond
@@ -111,11 +110,6 @@
                  (map? raw) {:principal/type :operator}
                  :else raw))]
       (= lp canonical-principal))))
-
-(defn subject-matches?
-  "Deprecated alias for principal-matches? — use principal-matches?."
-  [lease principal]
-  (principal-matches? lease principal))
 (defn resource-covers?
   "True when the lease's :resource grant covers the canonical
   `normalized-resource` for `action`: Grant covers? (C2) product order.

@@ -149,9 +149,9 @@
 (def ^:private lease-now (java.util.Date.))
 
 (defn- fs-subject
-  "The requesting :subject for a filesystem lease (B4 forces it at access time)."
+  "The requesting :principal for a filesystem lease (B4 forces it at access time)."
   []
-  {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype})
+  {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"})
 
 (defn- lease-for
   "Build a valid v0 CapabilityLease granting `actions` on `mount-id` for the
@@ -160,7 +160,7 @@
   mount/filesystem provider validates before covering an action."
   [mount-id actions]
   {:cap/id (random-uuid)
-   :subject (fs-subject)
+   :principal (fs-subject)
    :resource {:kind :filesystem/path :mount/id mount-id :path ""}
    :actions (set actions)
    :constraints {}
@@ -169,10 +169,10 @@
 
 (defn- fs-opts
   "Provider access opts for a read/list/stat lease: the mount/functions
-  provider FORCES the requesting :subject and the access :now at enforcement."
+  provider FORCES the requesting :principal and the access :now at enforcement."
   [mount-id actions]
   {:leases [(lease-for mount-id actions)]
-   :subject (fs-subject)
+   :principal (fs-subject)
    :now lease-now})
 
 ;; ---------------------------------------------------------------------------
@@ -441,14 +441,14 @@
           mount-id (:mount/id mount)
           ;; even a lease that claims to grant write should still fail because surface max is RO (fail closed)
           rw-lease (lease-for mount-id #{:read :list :stat :write :create :delete})
-          rw-opts {:leases [rw-lease] :subject (fs-subject) :now lease-now}]
+          rw-opts {:leases [rw-lease] :principal (fs-subject) :now lease-now}]
       (is (= #{:read :list :stat} (:access/max mount)))
       (is (thrown? clojure.lang.ExceptionInfo (mount-fs/provider-write provider mount-id "SKILL.md" (.getBytes "hacked" StandardCharsets/UTF_8) rw-opts)))
       (is (thrown? clojure.lang.ExceptionInfo (mount-fs/provider-create provider mount-id "scripts/evil.sh" (.getBytes "evil" StandardCharsets/UTF_8) rw-opts)))
       (is (thrown? clojure.lang.ExceptionInfo (mount-fs/provider-delete provider mount-id "scripts/run.sh" rw-opts)))
       ;; read still works
       (let [ro-lease (lease-for mount-id #{:read :list :stat})
-            ba (mount-fs/provider-read provider mount-id "scripts/run.sh" {:leases [ro-lease] :subject (fs-subject) :now lease-now})]
+            ba (mount-fs/provider-read provider mount-id "scripts/run.sh" {:leases [ro-lease] :principal (fs-subject) :now lease-now})]
         (is (bytes? ba))
         (is (str/includes? (String. ^bytes ba StandardCharsets/UTF_8) "echo hi"))))))
 

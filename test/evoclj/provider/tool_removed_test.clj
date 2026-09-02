@@ -54,7 +54,7 @@
 (defn- lease-for
   [tool-id]
   {:cap/id (random-uuid)
-   :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype}
+   :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
    :resource {:kind :tool :id tool-id}
    :actions #{:invoke}
    :constraints {:max-calls 10}

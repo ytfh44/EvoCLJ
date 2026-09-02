@@ -54,7 +54,7 @@
   (testing "tool lease revoked -> broker deny with :capability/revoked (P5)"
     (let [registry (mint/create-lease-registry)
           lease (mint/mint-lease! registry
-                                  {:subject subject-a
+                                  {:principal subject-a
                                    :resource {:kind :tool :id :fixture/echo}
                                    :actions #{:invoke}
                                    :issued-at issued-at
@@ -87,13 +87,13 @@
     (let [registry (fs/create-lease-registry)
           mount-id [:workspace "test-ws"]
           fs-lease (fs/issue-fs-lease registry
-                                      {:subject subject-a
+                                      {:principal subject-a
                                        :mount-id mount-id
                                        :path ""
                                        :actions #{:read :list}
                                        :issued-at issued-at
                                        :expires-at expires-at})
-          tool-lease (mint/mint-lease! registry {:subject subject-a :resource {:kind :tool :id :filesystem/generic} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})]
+          tool-lease (mint/mint-lease! registry {:principal subject-a :resource {:kind :tool :id :filesystem/generic} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})]
       (is (= fs-lease (fs/get-lease registry (:cap/id fs-lease))))
       (is (= fs-lease (mint/get-lease registry (:cap/id fs-lease))))
       (let [d (broker/authorize {:intent (fs-intent session-a phenotype-p1 mount-id "")
@@ -103,7 +103,7 @@
                                  :now in-window
                                  :lease-registry registry})]
         (is (= :allow (:decision d)) "non-revoked fs lease should allow via broker (both tool + fs)"))
-      (is (identical? fs-lease (fs/verify-fs-lease! fs-lease {:now in-window :subject subject-a :registry registry})))
+      (is (identical? fs-lease (fs/verify-fs-lease! fs-lease {:now in-window :principal subject-a :registry registry})))
       (fs/revoke-lease! registry (:cap/id fs-lease))
       (is (fs/lease-revoked? registry (:cap/id fs-lease)))
       (is (mint/revoked? registry (:cap/id fs-lease)))
@@ -115,7 +115,7 @@
                                   :lease-registry registry})]
         (is (= :deny (:decision d2)))
         (is (= :capability/revoked (:reason d2))))
-      (is (throws-type? #(fs/verify-fs-lease! fs-lease {:now in-window :subject subject-a :registry registry})
+      (is (throws-type? #(fs/verify-fs-lease! fs-lease {:now in-window :principal subject-a :registry registry})
                         :capability/revoked)))))
 
 (deftest model-lease-revoked-deny
@@ -123,7 +123,7 @@
     (let [registry (mint/create-lease-registry)
           model-id "deepseek/deepseek-v4-flash"
           lease (mint/mint-lease! registry
-                                  {:subject subject-a
+                                  {:principal subject-a
                                    :resource {:kind :model :id model-id}
                                    :actions #{:invoke}
                                    :issued-at issued-at
@@ -150,7 +150,7 @@
   (testing "revoke is idempotent (double revoke same result) (P5)"
     (let [registry (mint/create-lease-registry)
           lease (mint/mint-lease! registry
-                                  {:subject subject-a
+                                  {:principal subject-a
                                    :resource {:kind :tool :id :fixture/echo}
                                    :actions #{:invoke}
                                    :issued-at issued-at
@@ -179,7 +179,7 @@
           (is (= :capability/revoked (:reason d2)))))
       (let [fs-reg (fs/create-lease-registry)
             mnt [:workspace "idem-ws"]
-            fs-lease (fs/issue-fs-lease fs-reg {:subject subject-a :mount-id mnt :path "a/b" :actions #{:read} :issued-at issued-at :expires-at expires-at})
+            fs-lease (fs/issue-fs-lease fs-reg {:principal subject-a :mount-id mnt :path "a/b" :actions #{:read} :issued-at issued-at :expires-at expires-at})
             fid (:cap/id fs-lease)]
         (fs/revoke-lease! fs-reg fid)
         (fs/revoke-lease! fs-reg fid)
@@ -190,13 +190,13 @@
     (let [tool-reg (mint/create-lease-registry)
           fs-reg (fs/create-lease-registry)
           model-reg (mint/create-lease-registry)
-          tool-lease (mint/mint-lease! tool-reg {:subject subject-a :resource {:kind :tool :id :fixture/echo} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})
+          tool-lease (mint/mint-lease! tool-reg {:principal subject-a :resource {:kind :tool :id :fixture/echo} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})
           mount-id [:workspace "allow-ws"]
-          fs-tool-lease (mint/mint-lease! fs-reg {:subject subject-a :resource {:kind :tool :id :filesystem/generic} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})
-          fs-lease (fs/issue-fs-lease fs-reg {:subject subject-a :mount-id mount-id :path "" :actions #{:read} :issued-at issued-at :expires-at expires-at})
+          fs-tool-lease (mint/mint-lease! fs-reg {:principal subject-a :resource {:kind :tool :id :filesystem/generic} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})
+          fs-lease (fs/issue-fs-lease fs-reg {:principal subject-a :mount-id mount-id :path "" :actions #{:read} :issued-at issued-at :expires-at expires-at})
           model-id "deepseek/deepseek-v4-flash"
-          model-lease (mint/mint-lease! model-reg {:subject subject-a :resource {:kind :model :id model-id} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})
-          mem-lease (mint/mint-lease! tool-reg {:subject subject-a :resource {:kind :memory :id :mem/key} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})]
+          model-lease (mint/mint-lease! model-reg {:principal subject-a :resource {:kind :model :id model-id} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})
+          mem-lease (mint/mint-lease! tool-reg {:principal subject-a :resource {:kind :memory :id :mem/key} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})]
       (is (= :allow (:decision (broker/authorize {:intent (tool-intent session-a phenotype-p1 :fixture/echo)
                                                   :normalized-request (tool-normalized :fixture/echo)
                                                   :leases [tool-lease]

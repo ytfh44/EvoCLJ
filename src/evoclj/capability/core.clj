@@ -28,7 +28,6 @@
     (case k
       :handle/id handle-id
       :principal principal
-      :subject principal
       :resource resource
       :action action
       :lease-id lease-id
@@ -58,8 +57,8 @@
     present; throws :capability/handle-invalid on malformed input.
     This is the ONLY public way to obtain a handle — callers cannot
     synthesize a handle via map or fn."
-    [{:keys [handle-id principal subject resource action lease-id]}]
-    (let [p (or principal subject)]
+    [{:keys [handle-id principal resource action lease-id]}]
+    (let [p principal]
       (when-not (uuid? handle-id)
         (throw (err/error :capability/handle-invalid "handle-id must be uuid" {:value handle-id})))
       (when-not (uuid? lease-id)
@@ -82,12 +81,8 @@
     "Extract principal from a sealed handle, or nil if not a handle."
     [h]
     (when (capability-handle? h)
-      (.-principal ^CapabilityHandle h)))
+      (.-principal ^CapabilityHandle h))))
 
-  (defn handle->subject
-    "Deprecated alias for handle->principal."
-    [h]
-    (handle->principal h)))
 
 (defn assert-capability-handle!
   "Fail-closed guard: throw :capability/handle-invalid when h is not a

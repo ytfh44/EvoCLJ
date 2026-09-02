@@ -44,8 +44,7 @@
 (deftest principal-equality-is-identity
   (testing "same principal matches"
     (let [lease (mint/mint-lease! nil (base-lease-opts principal-a))]
-      (is (lease/principal-matches? lease principal-a))
-      (is (lease/subject-matches? lease principal-a) "alias")))
+      (is (lease/principal-matches? lease principal-a))))
   (testing "different session principals do not match"
     (let [lease (mint/mint-lease! nil (base-lease-opts principal-a))]
       (is (not (lease/principal-matches? lease principal-b)))))

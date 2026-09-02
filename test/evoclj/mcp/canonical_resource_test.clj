@@ -56,7 +56,7 @@
                     :budget {:wall-ms 1000} :metadata {}}
             normalized (proto/normalize-request provider intent)
             tool-lease {:cap/id #uuid "00000000-0000-0000-0000-000000000010"
-                        :subject {:session/id #uuid "00000000-0000-0000-0000-000000000002" :phenotype/id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+                        :principal {:principal/type :session :session/id #uuid "00000000-0000-0000-0000-000000000002"}
                         :resource {:kind :tool :id :mcp/read_file}
                         :actions #{:invoke} :constraints {}
                         :issued-at #inst "2020-01-01" :expires-at #inst "2030-01-01"}

@@ -138,7 +138,7 @@
       (is (= 2 (count caps)) "one derived per parent lease")
       (doseq [cl caps]
         (is (schema/lease? cl) "child lease is sealed")
-        (is (= {:principal/type :session :session/id child-id} (:subject cl)) "subject is child"))
+        (is (= {:principal/type :session :session/id child-id} (:principal cl)) "subject is child"))
       (let [parent-actions (set (mapcat :actions [pl1 pl2]))
             child-actions (set (mapcat :actions caps))]
         (is (set/subset? child-actions parent-actions) "child actions subset of parent union"))

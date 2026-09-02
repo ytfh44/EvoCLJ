@@ -52,8 +52,7 @@
 ;; Step 1 — exact principal matching (I2)
 (deftest exact-principal-matching
   (testing "the lease's own principal is authorized"
-    (is (lease/principal-matches? (lease) principal-a))
-    (is (lease/subject-matches? (lease) principal-a) "alias works"))
+    (is (lease/principal-matches? (lease) principal-a)))
   (testing "different session principal never matches"
     (is (not (lease/principal-matches? (lease) principal-b))))
   (testing "different principal types never match even with same id string"

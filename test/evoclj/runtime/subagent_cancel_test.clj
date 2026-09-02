@@ -58,7 +58,7 @@
 (defn- tool-intent [session-id phenotype-id]
   (icore/tool-call session-id phenotype-id :node/test 1 {:tool/id :fixture/echo :args {:text "hi"}} {:wall-ms 1000}))
 (defn- authorize-with-lease [lease]
-  (let [pr (or (:principal lease) (:subject lease))
+  (let [pr (:principal lease)
         sid (:session/id pr)
         pid (or (:phenotype/id pr) phenotype)
         it (tool-intent sid pid)

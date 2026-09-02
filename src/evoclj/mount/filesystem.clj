@@ -120,7 +120,6 @@
     :constraints optional map (default {} — no call limit).
     :cap-id      optional #uuid (default fresh, alias cap/id also accepted).
 
-  Legacy :subject alias accepted for :principal.
 
   When `lease-registry` is supplied the lease is recorded (verifiable and
   revocable). Returns the sealed lease. Throws typed errors:
@@ -132,10 +131,10 @@
   rejected by the access path (B4: principal/expiry are forced). Delegates
   to evoclj.capability.mint/mint-lease! (P2 single issuance surface)."
   [lease-registry
-   {:keys [principal subject mount-id path actions issued-at expires-at constraints]
+   {:keys [principal mount-id path actions issued-at expires-at constraints]
     :as opts}]
   (let [cap-id (or (get opts (keyword "cap/id")) (:cap-id opts))
-        princ (or principal subject (:principal opts) (:subject opts))]
+        princ (or principal (:principal opts))]
     (when-not (principal-valid? princ)
       (throw (err/error :capability/schema-invalid
                         "fs lease principal must be a valid Principal tagged union"
@@ -181,7 +180,7 @@
   Returns the lease when valid. `:now` defaults to the access clock (expiry
   is FORCED — never optional). Uses evoclj.capability.lease for the expiry
   and principal judgements (single implementation, INV-05)."
-  [lease {:keys [now principal subject registry]}]
+  [lease {:keys [now principal registry]}]
   (cap-schema/validate-lease lease)
   (when (some? registry)
     (let [rec (get @registry (:cap/id lease))]
@@ -196,12 +195,12 @@
                         {:cap/id (:cap/id lease)
                          :expires-at (:expires-at lease)
                          :now t}))))
-  (let [req-princ (or principal subject)]
+  (let [req-princ principal]
     (when (and req-princ (not (lease/principal-matches? lease req-princ)))
       (throw (err/error :capability/principal-mismatch
                         "lease belongs to a different principal"
                         {:cap/id (:cap/id lease)
-                         :lease-principal (or (:principal lease) (:subject lease))
+                         :lease-principal (:principal lease)
                          :request-principal (err/sanitize req-princ)})))
     lease))
 ;; denies. Coverage is delegated to evoclj.capability.lease (INV-05 — one
@@ -216,16 +215,16 @@
   lease that DOES cover it but is expired, revoked, or bound to a
   different principal throws the precise typed error (:capability/expired /
   :capability/revoked / :capability/principal-mismatch). The requesting
-  principal comes from opts :principal (or legacy :subject) (required for a covering lease); the
+  principal comes from opts :principal (required for a covering lease); the
   instant from opts :now (defaults to the access clock); revocation /
   recording from opts :registry (when supplied)."
-  [lease mount-id req-path action {:keys [now principal subject registry] :as opts}]
+  [lease mount-id req-path action {:keys [now principal registry] :as opts}]
   (cap-schema/validate-lease lease)
   (if (lease/resource-covers? lease
                               {:kind :filesystem/path :mount/id mount-id :path req-path}
                               action)
     (do
-      (let [princ (or principal subject)]
+      (let [princ principal]
         (when-not princ
           (throw (err/error :filesystem/lease-principal-required
                             "filesystem access requires a requesting :principal to enforce the lease principal binding"
@@ -361,9 +360,7 @@
           ;; responsible), and never skip expiry (default to the access clock).
           opts {:leases leases
                 :principal (or (:principal authorized-request)
-                               (:subject authorized-request)
-                               (some-> (first (or leases [])) :principal)
-                               (some-> (first (or leases [])) :subject))
+                               (some-> (first (or leases [])) :principal))
                 :now (or (:now authorized-request) (java.util.Date.))}]
       (case op
         :read (provider-read this id path opts)

@@ -99,7 +99,7 @@
                             (:principal_type lease)
                             (get-in lease [:principal :principal/type])
                             (get-in lease [:principal "principal/type"])
-                            (when-let [p (or (:principal lease) (:subject lease))]
+                            (when-let [p (:principal lease)]
                               (name (:principal/type p)))
                             "session")]
                 (if (keyword? raw) (name raw) (str raw)))
@@ -107,10 +107,7 @@
                 (:principal_id lease)
                 (get-in lease [:principal :session/id])
                 (get-in lease [:principal :job/id])
-                (get-in lease [:principal :eval/id])
                 (when (= ptype "operator") "operator")
-                (get-in lease [:subject :session/id])
-                (get-in lease [:subject "session/id"])
                 (:subject-session-id lease)
                 (:subject_session_id lease))
         resource (or (:resource lease) (get-in lease [:resource "resource"]))

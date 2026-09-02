@@ -192,7 +192,6 @@
     (case k
       :cap/id capId
       :principal principal
-      :subject principal
       :resource resource
       :actions actions
       :constraints constraints
@@ -249,15 +248,6 @@
 
 ;; --- validation entry point ------------------------------------------------
 
-(defn- subject->principal
-  "Convert legacy :subject map to Principal tagged union for compat.
-  If subject has :session/id -> SessionPrincipal, else -> OperatorPrincipal."
-  [s]
-  (cond
-    (and (map? s) (:session/id s)) {:principal/type :session :session/id (:session/id s)}
-    (map? s) {:principal/type :operator}
-    :else nil))
-
 (defn- canonicalize-constraints
   "C3: canonicalize :maxBytes -> :max-bytes for backward compat.
   Both spellings are accepted on input; canonical form is :max-bytes."
@@ -272,12 +262,9 @@
     m))
 
 (defn- canonicalize-lease-map
-  "If map has legacy :subject and no :principal, convert to :principal and dissoc :subject.
-  Also canonicalizes constraint alias :maxBytes -> :max-bytes (C3)."
+  "Canonicalize the constraint alias :maxBytes -> :max-bytes (C3)."
   [m]
   (cond-> m
-    (and (map? m) (contains? m :subject) (not (contains? m :principal)))
-    (-> (assoc :principal (subject->principal (:subject m))) (dissoc :subject))
     (and (map? m) (contains? m :constraints))
     (update :constraints canonicalize-constraints)))
 
@@ -287,10 +274,6 @@
   Accepts both a plain EDN map and a sealed CapabilityLease instance
   (INV-05: single implementation). For a sealed instance, projects via
   lease->map then validates the map; for a map, validates directly.
-
-  Legacy :subject maps are canonicalized to :principal for compat (I2
-  migration): {:principal/type :session :session/id sid} -> SessionPrincipal(sid),
-  bare phenotype -> OperatorPrincipal. Validation never coerces otherwise.
 
   First the EDN-safe boundary gate (Global Constraint 22): the map
   must be plain, fully realized EDN data — raw Java objects, lazy
@@ -322,8 +305,7 @@
   and asserts issued < expires (positive window); on failure throws
   :capability/schema-invalid (never :capability/not-edn-safe for window
   or allowlist violations). Returns a sealed CapabilityLease instance
-  on success — construct-time validated.
-  Legacy :subject maps are accepted and canonicalized to :principal."
+  on success — construct-time validated."
   [m]
   (let [m (canonicalize-lease-map m)
         validated (validate-lease m)]
@@ -336,7 +318,7 @@
                         "capability lease must span positive window: :expires-at after :issued-at"
                         {:value (err/sanitize m)
                          :explanation (err/sanitize (m/explain CapabilityLeaseSchema m))})))
-    (let [p (or (:principal validated) (:subject validated) (:principal m) (subject->principal (:subject m)))]
+    (let [p (:principal validated)]
       (CapabilityLease. (:cap/id validated)
                         p
                         (:resource validated)

@@ -155,7 +155,7 @@
                                         :issued-at now
                                         :expires-at later})]
       (is (uuid? (:cap/id lease)))
-      (is (= {:principal/type :session :session/id sid1} (:subject lease)))
+      (is (= {:principal/type :session :session/id sid1} (:principal lease)))
       (is (= {:kind :filesystem/path :mount/id (:mount-id workspace) :path ""} (:resource lease)))
       (is (= #{:read :list :stat} (:actions lease)))
       (is (inst? (:issued-at lease)))

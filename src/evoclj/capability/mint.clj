@@ -53,7 +53,7 @@
   Arity [db registry opts] — P1 durable: INSERT INTO capabilities BEFORE swap! cache.
   Arity [registry opts] with map containing :db — also durable when :db present.
 
-  opts keys: :principal (I2 tagged union, required, alias :subject), :resource, :actions,
+  opts keys: :principal (I2 tagged union, required), :resource, :actions,
   :constraints, :issued-at, :expires-at, :cap-id/:cap/id.
 
   When registry supplied, the sealed lease is stored as {:lease lease :revoked? false}
@@ -61,13 +61,13 @@
   exception propagates."
   ([registry opts]
    (mint-lease! nil registry opts))
-  ([db registry {:keys [principal subject resource actions constraints issued-at expires-at cap-id] :as opts}]
+   ([db registry {:keys [principal resource actions constraints issued-at expires-at cap-id] :as opts}]
    (let [db (or db (:db opts))
          cap-id-val (or (:cap/id opts) cap-id (UUID/randomUUID))
          issued (or issued-at (Date.))
          expires (or expires-at (Date. (+ (.getTime ^Date issued) 3600000)))
          constraints-val (or constraints (:constraints opts) {})
-         principal-val (or principal subject (:principal opts) (:subject opts))
+         principal-val (or principal (:principal opts))
          actions-val (cond
                        (nil? actions) (:actions opts)
                        :else actions)
@@ -110,7 +110,7 @@
   on failure cache is not mutated. Parent revocation is checked before attenuation."
   ([registry parent-lease opts]
    (derive-lease! nil registry parent-lease opts))
-  ([db registry parent-lease {:keys [principal subject resource actions constraints issued-at expires-at cap-id] :as opts}]
+  ([db registry parent-lease {:keys [principal resource actions constraints issued-at expires-at cap-id] :as opts}]
    (let [db (or db (:db opts))]
      (when-not (schema/lease? parent-lease)
        (throw (err/error :capability/attenuation-invalid
@@ -120,14 +120,14 @@
        (throw (err/error :capability/attenuation-invalid
                          "cannot derive from a revoked parent lease"
                          {:parent-cap-id (:cap/id parent-lease)})))
-     (let [parent-principal (or (:principal parent-lease) (:subject parent-lease))
+     (let [parent-principal (:principal parent-lease)
            parent-resource (:resource parent-lease)
            parent-actions (:actions parent-lease)
            parent-constraints (:constraints parent-lease)
            parent-issued (:issued-at parent-lease)
            parent-expires (:expires-at parent-lease)
            parent-cap-id (:cap/id parent-lease)
-           child-principal (or principal subject (:principal opts) (:subject opts) parent-principal)
+           child-principal (or principal (:principal opts) parent-principal)
            child-resource (if (contains? (or opts {}) :resource) (:resource opts) parent-resource)
            child-actions-raw (if (contains? (or opts {}) :actions) actions parent-actions)
            child-actions-set (when child-actions-raw
@@ -289,7 +289,7 @@
          vals
          (keep :lease)
          (filterv (fn [l]
-                    (let [p (or (:principal l) (:subject l))]
+                    (let [p (:principal l)]
                       (and (= :session (:principal/type p))
                            (= sid (str (:session/id p))))))))))
 
@@ -299,7 +299,7 @@
   (->> @registry
        vals
        (keep :lease)
-       (filterv (fn [l] (= principal (or (:principal l) (:subject l)))))))
+       (filterv (fn [l] (= principal (:principal l))))))
 
 (defn registry-version
   "Return monotonic version of registry (0 if uninitialized)."

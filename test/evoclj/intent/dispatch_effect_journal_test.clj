@@ -56,7 +56,7 @@
 (defn- lease
   [& kvs]
   (let [base {:cap/id echo-cap-id
-              :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}
+              :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
               :resource {:kind :tool :id :fixture/echo}
               :actions #{:invoke}
               :constraints {:max-calls 10}
@@ -110,7 +110,7 @@
 
 (defn- ambiguous-lease []
   {:cap/id ambiguous-cap-id
-   :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}
+   :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
    :resource {:kind :tool :id :fixture/ambiguous}
    :actions #{:invoke}
    :constraints {:max-calls 10}

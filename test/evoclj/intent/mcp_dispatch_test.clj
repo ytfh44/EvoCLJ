@@ -39,7 +39,7 @@
 (defn- lease
   [& kvs]
   (let [base {:cap/id #uuid "33333333-3333-4333-8333-333333333333"
-              :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-p1}
+              :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
               :resource {:kind :tool :id :mcp/sequential-thinking}
               :actions #{:invoke}
               :constraints {:max-calls 10}

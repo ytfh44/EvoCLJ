@@ -91,7 +91,7 @@
   (testing "exact and prefix model grants"
     (let [lease-fn (fn [id]
                      {:cap/id (java.util.UUID/randomUUID)
-                      :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id (phenotype-id)}
+                      :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
                       :resource {:kind :model :id id}
                       :actions #{:invoke}
                       :constraints {}
@@ -122,7 +122,7 @@
                {:registry reg
                 :model-registry model-reg
                 :leases [{:cap/id (java.util.UUID/randomUUID)
-                          :subject {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id (phenotype-id)}
+                          :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
                           :resource {:kind :model :id "deepseek/*"}
                           :actions #{:invoke}
                           :constraints {}
