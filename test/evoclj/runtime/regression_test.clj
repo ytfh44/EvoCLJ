@@ -159,7 +159,7 @@
                         :generation/id gen
                         :phenotype/id phenotype
                         :event/type :session/created
-                        :cause/event-id nil
+                        :prev/event-id nil
                         :payload-ref nil
                         :metadata {}}))
 
@@ -322,7 +322,7 @@
         (is (= (inc before-count) (count events)))
         (let [audit (last events)]
           (is (= :monitor/regression-alert (:event/type audit)))
-          (is (= (:event/id root) (:cause/event-id audit)))
+          (is (= (:event/id root) (:prev/event-id audit)))
           (is (= :utility/drop (get-in audit [:metadata :monitor/metric-name])))
           (is (= 7.0 (get-in audit [:metadata :monitor/drop])))
           (is (= :monitor/regression (get-in audit [:metadata :monitor/rule-name])))
@@ -430,7 +430,7 @@
                             :generation/id child-generation
                             :phenotype/id phenotype
                             :event/type :session/created
-                            :cause/event-id nil
+                            :prev/event-id nil
                             :payload-ref nil
                             :metadata {}})
       {:db db

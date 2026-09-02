@@ -119,7 +119,7 @@
   (seed-generation! db)
   (let [s (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id pid1 :generation/id gen})
         sid (:session/id s)
-        _ (event/append-event! db {:session/id sid :generation/id gen :phenotype/id pid1 :event/type :session/created :cause/event-id nil :payload-ref nil :metadata {}})]
+        _ (event/append-event! db {:session/id sid :generation/id gen :phenotype/id pid1 :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})]
     sid))
 
 (defn- make-skill-bundle

@@ -259,7 +259,7 @@
   "The audit-event anchor for `session-key`: the session's pinned
   :generation/id, :phenotype/id, and :resolution/id (the rollback
   promotion-system needs a valid resolution; the alert event ignores
-  it) and the id of its newest event as the causal :cause/event-id —
+  it) and the id of its newest event as the linear :prev/event-id —
   mirroring the promotion event-anchoring pattern. Throws
   :store/session-not-found for an unknown session."
   [store session-key]
@@ -276,7 +276,7 @@
     {:generation/id (:generation_id sess)
      :phenotype/id (:phenotype_id sess)
      :resolution/id (:resolution_id sess)
-     :cause/event-id (:id newest)}))
+     :prev/event-id (:id newest)}))
 
 (defn- alert-handler
   "The :monitor/alert-regression handler: append ONE audit event
@@ -296,7 +296,7 @@
                             :generation/id (:generation/id anchor)
                             :phenotype/id (:phenotype/id anchor)
                             :event/type alert-event-type
-                            :cause/event-id (:cause/event-id anchor)
+                            :prev/event-id (:prev/event-id anchor)
                             :payload-ref nil
                             :metadata {:monitor/rule-id (str (:trigger/id fired))
                                        :monitor/rule-name (:trigger/name fired)

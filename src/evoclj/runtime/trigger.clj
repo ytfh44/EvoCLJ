@@ -383,14 +383,14 @@
 (defn- audit-anchor
   "The anchor for one audit event: the session's pinned
   :generation/id and :phenotype/id and the id of its newest event as
-  the causal :cause/event-id (the promotion event-anchoring pattern).
+  the linear :prev/event-id (the promotion event-anchoring pattern).
   nil when the session has no events yet (or does not exist)."
   [store session-id]
   (let [events (event/events-for-session store session-id)]
     (when-let [newest (last events)]
       {:generation/id (:generation/id newest)
        :phenotype/id (:phenotype/id newest)
-       :cause/event-id (:event/id newest)})))
+       :prev/event-id (:event/id newest)})))
 
 (defn- append-audit!
   "Append ONE audit event for a fired action to the audit context's
@@ -419,7 +419,7 @@
                    :event/type (if (= :denied status)
                                  :action/denied
                                  :action/executed)
-                   :cause/event-id (:cause/event-id anchor)
+                   :prev/event-id (:prev/event-id anchor)
                    :payload-ref nil
                    :metadata (merge {:action/id action-id
                                      :action/subject subject

@@ -65,7 +65,7 @@
                              :generation/id gen
                              :phenotype/id phenotype
                              :event/type :session/created
-                             :cause/event-id nil
+                             :prev/event-id nil
                              :payload-ref nil
                              :metadata {}})
     sess))
@@ -122,9 +122,9 @@
       (let [seqs (mapv :event/seq child-events)]
         (is (= (vec (range 1 (inc (count child-events)))) seqs) "child seq is 1..M"))
       ;; cause chain: each event's cause is previous event's id, except root
-      (is (nil? (:cause/event-id (first child-events))) "child root has no cause")
+      (is (nil? (:prev/event-id (first child-events))) "child root has no cause")
       (doseq [[prev cur] (partition 2 1 child-events)]
-        (is (= (:event/id prev) (:cause/event-id cur))
+        (is (= (:event/id prev) (:prev/event-id cur))
             (str "child cause link broken at seq " (:event/seq cur))))
       ;; verify hash chain
       (is (:valid? (event/verify-event-chain db child-id)) "child hash chain valid")

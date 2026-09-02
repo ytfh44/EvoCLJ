@@ -342,7 +342,7 @@
                           {:session/id session-key})))
       {:generation/id (:generation_id sess)
        :phenotype/id (:phenotype_id sess)
-       :cause/event-id (:id newest)})))
+       :prev/event-id (:id newest)})))
 
 (defn- cancel-session!
   "The :cancel profile action for ONE already-running candidate
@@ -434,7 +434,7 @@
                                          :generation/id (:generation/id anchor)
                                          :phenotype/id (:phenotype/id anchor)
                                          :event/type :promotion/canary-stopped
-                                         :cause/event-id (:cause/event-id anchor)
+                                         :prev/event-id (:prev/event-id anchor)
                                          :payload-ref artifact-id
                                          :metadata {:canary/generation canary-gen
                                                     :reason reason
@@ -553,7 +553,7 @@
                                                     :generation/id (:generation/id anchor)
                                                     :phenotype/id (:phenotype/id anchor)
                                                     :event/type :promotion/canary-advanced
-                                                    :cause/event-id (:cause/event-id anchor)
+                                                    :prev/event-id (:prev/event-id anchor)
                                                     :payload-ref artifact-id
                                                     :metadata {:canary/generation canary-gen
                                                                :allocation new-allocation

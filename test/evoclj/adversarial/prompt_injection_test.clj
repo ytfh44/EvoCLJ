@@ -214,7 +214,7 @@
                                 :generation/id generation-id
                                 :phenotype/id phenotype-id
                                 :event/type :session/created
-                                :cause/event-id nil
+                                :prev/event-id nil
                                 :payload-ref nil
                                 :metadata {}})
         ;; The PLT5 preflight rejects a declared tool effect when no

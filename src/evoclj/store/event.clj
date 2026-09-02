@@ -20,9 +20,8 @@
     sessions, e.g. child terminal -> parent result. Stored in the
     `causal_links` table (from_event, to_event, type). Validated only
     for existence of the `from` event; cross-session is allowed.
-    The old overloaded `:cause/event-id` is retained as a deprecated
-    alias for `:prev/event-id` when the latter is absent (same-session
-    only), so legacy callers keep working until they migrate.
+    The old overloaded `:cause/event-id` is REMOVED; `:prev/event-id`
+    is the sole linear-predecessor key.
 
   Sequence allocation: append-event! allocates the per-session
   monotonic :event/seq inside a single BEGIN IMMEDIATE transaction, so
@@ -34,7 +33,7 @@
       session
       seq
       type (full namespaced keyword string)
-      prev (or legacy cause)
+      prev
       payload-ref
       prev-hash
       created-at
@@ -152,12 +151,12 @@
 
 (defn- canonical-header
   "Deterministic header hashed for :event-hash. E1 uses :prev/event-id
-  (fallback to legacy :cause/event-id) in the 4th line."
+  in the 4th line."
   [h]
   (str (:session/id h) "\n"
        (:event/seq h) "\n"
        (type->db (:event/type h)) "\n"
-       (or (:prev/event-id h) (:cause/event-id h) "") "\n"
+       (or (:prev/event-id h) "") "\n"
        (or (:payload-ref h) "") "\n"
        (or (:prev-hash h) "") "\n"
        (:created-at h)))
@@ -217,7 +216,6 @@
    :event/seq (:event_seq row)
    :event/type (keyword (:event_type row))
    :prev/event-id (or (:prev_event_id row) (:cause_event_id row))
-   :cause/event-id (or (:prev_event_id row) (:cause_event_id row))
    :payload-ref (:payload_ref row)
    :prev-hash (:prev_hash row)
    :created-at (:created_at row)})
@@ -235,7 +233,6 @@
       :phenotype/id (:phenotype_id row)
       :event/type (keyword (:event_type row))
       :prev/event-id prev-id
-      :cause/event-id prev-id
       :causal-links (or links #{})
       :payload-ref (:payload_ref row)
       :prev-hash (:prev_hash row)
@@ -254,8 +251,8 @@
   immediate predecessor seq = new-seq -1). `:causal-links` is a set of
   {:from <event-id> :type <keyword>} that MAY cross sessions.
 
-  Legacy `:cause/event-id` is accepted as a deprecated alias for prev
-  when `:prev/event-id` is absent; new code must use `:prev/event-id`.
+  The legacy `:cause/event-id` alias is REMOVED; callers must send
+  `:prev/event-id` directly.
 
   Optional third argument `redaction-specs` (F7): when non-nil,
   evoclj.security.redact/redact-event is applied BEFORE any hash is
@@ -269,13 +266,7 @@
   ([store event]
    (append-event! store event nil))
   ([store event redaction-specs]
-   ;; normalize deprecated alias before schema validation so legacy callers
-   ;; that still use :cause/event-id pass validation for :prev/event-id
-   (let [event (cond-> event
-                 (and (contains? event :cause/event-id)
-                      (not (contains? event :prev/event-id)))
-                 (assoc :prev/event-id (:cause/event-id event)))
-         event (update event :causal-links #(or % #{}))
+   (let [event (update event :causal-links #(or % #{}))
          event (update event :metadata #(or % {}))
          event (update event :payload-ref #(or % nil))]
      (es/validate-append-request event)
@@ -287,8 +278,7 @@
          (let [session-id (types/session-id (:session/id event))
                session-key (str session-id)
                type (:event/type event)
-               ;; prev is the linear predecessor; accept deprecated alias
-               prev-id (or (:prev/event-id event) (:cause/event-id event))
+               prev-id (:prev/event-id event)
                causal-links (or (:causal-links event) #{})
                root? (root-event? type)
                sess (first (raw-query conn "SELECT generation_id FROM sessions WHERE id = ?"
@@ -364,7 +354,6 @@
                        :event/seq new-seq
                        :event/type type
                        :prev/event-id prev-id
-                       :cause/event-id prev-id
                        :payload-ref (:payload-ref event)
                        :prev-hash prev-hash
                        :created-at ts}
@@ -394,7 +383,7 @@
                             [from new-id (type->db type) ts]))
              (let [links (fetch-causal-links conn new-id)
                    ev (row->event row links)]
-               (es/validate-event (assoc ev :cause/event-id (:prev/event-id ev)))
+               (es/validate-event ev)
                ev))))))))
 
 ;; --- read/verify queries (no update, no delete — by design) -----------------
@@ -402,7 +391,7 @@
 (defn events-for-session
   "All events of `session-id` in ascending :event/seq order, as a
   vector of public Event maps (never lazy). Each event includes
-  :prev/event-id (and deprecated :cause/event-id) and :causal-links set."
+  :prev/event-id and :causal-links set."
   [store session-id]
   (let [rows (sqlite/query store
                            ["SELECT * FROM events WHERE session_id = ? ORDER BY event_seq ASC"

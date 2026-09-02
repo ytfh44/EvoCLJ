@@ -294,7 +294,7 @@
                           :generation/id generation-id
                           :phenotype/id (:compiled/phenotype-id compiled)
                           :event/type :session/created
-                          :cause/event-id nil
+                          :prev/event-id nil
                           :payload-ref nil
                           :metadata {}})
     sid))
@@ -597,7 +597,7 @@
                                    :generation/id generation-id
                                    :phenotype/id (:compiled/phenotype-id compiled)
                                    :event/type :session/created
-                                   :cause/event-id nil
+                                   :prev/event-id nil
                                    :payload-ref nil
                                    :metadata {}})
         n 200
@@ -610,7 +610,7 @@
                                         :generation/id generation-id
                                         :phenotype/id (:compiled/phenotype-id compiled)
                                         :event/type :intent/proposed
-                                        :cause/event-id cause
+                                        :prev/event-id cause
                                         :payload-ref nil
                                         :metadata {:i i}})]
                                 (recur (inc i) (:event/id e)))))))

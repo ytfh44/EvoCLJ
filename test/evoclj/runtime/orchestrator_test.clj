@@ -44,7 +44,7 @@
 (defn- fresh-cas [] (cas/->cas (temp-cas-dir)))
 (defn- create-pinned-session [db]
   (let [sid (:session/id (session/create-session! db {:genome/id genome-id :resolution/id resolution-id :phenotype/id phenotype-id :generation/id generation-id}))]
-    (event/append-event! db {:session/id sid :generation/id generation-id :phenotype/id phenotype-id :event/type :session/created :cause/event-id nil :payload-ref nil :metadata {}})
+    (event/append-event! db {:session/id sid :generation/id generation-id :phenotype/id phenotype-id :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
     sid))
 
 (deftest four-round-behavior-default-is-4
@@ -107,7 +107,7 @@
                   :payload {:base/messages [{:role :user :content "hi"}] :messages [{:role :user :content "hi"}] :tools [{:name "echo_tool" :tool :echo-tool}] :requested-tools [{:tool/id :echo-tool :name "echo_tool"}] :model/id "fake/model" :options {:max-tool-rounds 2}}}
           _ (do (session/transition-session! db sid :created :resolving nil)
                 (session/transition-session! db sid :resolving :running nil)
-                (event/append-event! db {:session/id sid :generation/id generation-id :phenotype/id phenotype-id :event/type :session/started :cause/event-id (:event/id (first (event/events-for-session db sid))) :payload-ref nil :metadata {}}))
+                (event/append-event! db {:session/id sid :generation/id generation-id :phenotype/id phenotype-id :event/type :session/started :prev/event-id (:event/id (first (event/events-for-session db sid))) :payload-ref nil :metadata {}}))
           pin2 (session/get-session db sid)
           cause-id (:event/id (last (event/events-for-session db sid)))
           orch (sut/->TraditionalOrchestrator)]

@@ -600,7 +600,7 @@
                           :generation/id generation-id
                           :phenotype/id (:phenotype/id identity)
                           :event/type :session/created
-                          :cause/event-id nil
+                          :prev/event-id nil
                           :payload-ref nil
                           :metadata {}})
     sid))
@@ -821,7 +821,7 @@
                               :generation/id (:generation/id generation)
                               :phenotype/id phenotype-id
                               :event/type :session/created
-                              :cause/event-id nil
+                              :prev/event-id nil
                               :payload-ref nil
                               :metadata {}})
         (let [result (scheduler/run-session! executor sid task)
@@ -876,19 +876,19 @@
 (defn event-tree
   "The session's causal trace as a NESTED tree (feature O1): each
   event becomes {:event/seq :event/type :children [<nested> ...]}
-  where :children holds the events whose :cause/event-id points at
+  where :children holds the events whose :prev/event-id points at
   this event. The root event (nil cause) is the tree root; orphaned
   events (a cause pointing at an unknown seq) are collected under
   :orphans. Pure data — the trace is never mutated."
   [events]
   (let [by-id (into {} (map (fn [e] [(:event/seq e) e])) events)
-        roots (filter #(nil? (:cause/event-id %)) events)
+        roots (filter #(nil? (:prev/event-id %)) events)
         children-of (fn [seq-id]
-                      (filter #(= seq-id (:cause/event-id %)) events))
+                      (filter #(= seq-id (:prev/event-id %)) events))
         known (set (keys by-id))
         orphans (filter (fn [e]
-                         (and (:cause/event-id e)
-                              (not (contains? known (:cause/event-id e)))))
+                         (and (:prev/event-id e)
+                              (not (contains? known (:prev/event-id e)))))
                        events)
         node (fn node [e]
                {:event/seq (:event/seq e)
@@ -898,7 +898,7 @@
      :orphans (mapv (fn [e]
                      {:event/seq (:event/seq e)
                       :event/type (:event/type e)
-                      :cause/event-id (:cause/event-id e)})
+                      :prev/event-id (:prev/event-id e)})
                    orphans)}))
 
 (defn events!
@@ -925,7 +925,7 @@
        :tree (event-tree events)}
       {:session/id sid
        :events (mapv (fn [e]
-                       (select-keys e [:event/seq :event/type :cause/event-id
+                       (select-keys e [:event/seq :event/type :prev/event-id
                                        :payload-ref :metadata]))
                      events)})))
 

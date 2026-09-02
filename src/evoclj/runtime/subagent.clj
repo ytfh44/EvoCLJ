@@ -17,7 +17,7 @@
   Child capabilities are derived leases via mint/derive-lease! attenuated
   from the parent's leases (actions ⊆ parent, [W-08..W-11]).  A
   :subagent/spawned event is appended to the parent's causal chain
-  (GC-20) with :cause/event-id = parent's latest event id and
+  (GC-20) with :prev/event-id = parent's latest event id and
   :metadata {:child/session-id child-id}.
 
   Parent link is stored in the `subagent_links` helper table
@@ -241,7 +241,7 @@
                                   :generation/id (:generation/id parent)
                                   :phenotype/id (:phenotype/id parent)
                                   :event/type :session/created
-                                  :cause/event-id nil
+                                  :prev/event-id nil
                                   :payload-ref nil
                                   :metadata {}})
           ;; P1: derive child leases durably — DB INSERT before cache (attenuated)
@@ -264,7 +264,7 @@
                                   :generation/id (:generation/id parent)
                                   :phenotype/id (:phenotype/id parent)
                                   :event/type :subagent/spawned
-                                  :cause/event-id cause-id
+                                  :prev/event-id cause-id
                                   :payload-ref nil
                                   :metadata {:child/session-id child-id
                                              :child/spec child-spec}})
@@ -441,7 +441,7 @@
                                 :generation/id (:generation/id (first child-events))
                                 :phenotype/id (:phenotype/id (first child-events))
                                 :event/type :session/cancelled
-                                :cause/event-id cause
+                                :prev/event-id cause
                                 :payload-ref nil
                                 :metadata {:reason reason}})
           (catch Exception _))))
@@ -458,7 +458,7 @@
                                   :generation/id (:generation/id (first parent-events))
                                   :phenotype/id (:phenotype/id (first parent-events))
                                   :event/type :subagent/cancelled
-                                  :cause/event-id cause
+                                  :prev/event-id cause
                                   :payload-ref nil
                                   :metadata {:child/session-id child-id
                                              :reason reason}})

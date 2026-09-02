@@ -5,7 +5,7 @@
             [evoclj.cli.session :as session]))
 
 (defn- ev [seq-id type cause]
-  {:event/seq seq-id :event/type type :cause/event-id cause})
+  {:event/seq seq-id :event/type type :prev/event-id cause})
 
 (deftest event-tree-nests-causal-chains
   (testing "children are the events chained to their cause"

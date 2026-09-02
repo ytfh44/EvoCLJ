@@ -268,7 +268,7 @@
                           :generation/id generation-id
                           :phenotype/id (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                           :event/type :session/created
-                          :cause/event-id nil
+                          :prev/event-id nil
                           :payload-ref nil
                           :metadata {}})
     sid))

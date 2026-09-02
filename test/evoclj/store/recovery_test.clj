@@ -145,7 +145,7 @@
           :generation/id gen
           :phenotype/id phenotype
           :event/type :intent/proposed
-          :cause/event-id nil
+          :prev/event-id nil
           :payload-ref nil
           :metadata {:source :recovery-test}}
          overrides))
@@ -241,7 +241,7 @@
         _ (session/transition-session! db sid :created :resolving {})
         _ (session/transition-session! db sid :resolving :running {})
         _ (event/append-event! db (base-event sid {:event/type :session/started
-                                                   :cause/event-id (:event/id created)}))
+                                                   :prev/event-id (:event/id created)}))
         report (recovery/scan-recovery-state db root)]
     (testing "the crash-interrupted session is classified as orphaned, not completed"
       (is (= [sid] (mapv :session/id (:orphaned-sessions report))))
@@ -265,13 +265,13 @@
         done (:session/id (session/create-session! db (session-request genome-id)))
         created (event/append-event! db (base-event done {:event/type :session/created}))
         _ (event/append-event! db (base-event done {:event/type :session/started
-                                                    :cause/event-id (:event/id created)}))
+                                                    :prev/event-id (:event/id created)}))
         _ (session/transition-session! db done :created :resolving {})
         _ (session/transition-session! db done :resolving :running {})
         _ (session/transition-session! db done :running :waiting {})
         _ (session/transition-session! db done :waiting :completed {})
         _ (event/append-event! db (base-event done {:event/type :session/completed
-                                                    :cause/event-id (:event/id created)}))]
+                                                    :prev/event-id (:event/id created)}))]
     (is (= [] (:orphaned-sessions (recovery/scan-recovery-state db root))))))
 
 ;; ============================================================================
@@ -288,7 +288,7 @@
         ghost (str "sha256:" (apply str (repeat 64 "f")))
         _ (event/append-event! db (base-event sid {:event/type :intent/proposed
                                                    :payload-ref ghost
-                                                   :cause/event-id (:event/id created)}))
+                                                   :prev/event-id (:event/id created)}))
         report (recovery/scan-recovery-state db root)]
     (testing "the unresolved content reference is reported with its event"
       (is (= [{:session/id sid
@@ -300,7 +300,7 @@
       (let [present (:artifact/id (put! root "request body"))
             _ (event/append-event! db (base-event sid {:event/type :intent/normalized
                                                        :payload-ref present
-                                                       :cause/event-id (:event/id created)}))]
+                                                       :prev/event-id (:event/id created)}))]
         (is (= [ghost] (mapv :payload-ref (:missing-artifacts
                                            (recovery/scan-recovery-state db root)))))))))
 
@@ -314,7 +314,7 @@
         ghost (str "sha256:" (apply str (repeat 64 "f")))
         _ (event/append-event! db (base-event sid {:event/type :intent/proposed
                                                    :payload-ref ghost
-                                                   :cause/event-id (:event/id created)}))]
+                                                   :prev/event-id (:event/id created)}))]
     (testing "the production default (strict) refuses to start"
       (let [e (scan-error #(recovery/startup-integrity-scan db root))]
         (is (some? e))
@@ -338,7 +338,7 @@
         sid (:session/id (session/create-session! db (session-request genome-id)))
         created (event/append-event! db (base-event sid {:event/type :session/created}))
         _ (event/append-event! db (base-event sid {:event/type :intent/proposed
-                                                   :cause/event-id (:event/id created)}))]
+                                                   :prev/event-id (:event/id created)}))]
     (testing "before tampering the chain verifies"
       (is (true? (:valid? (event/verify-event-chain db sid)))))
     (testing "a same-leaf cross-namespace type swap is detected at the recovery level"
@@ -498,30 +498,30 @@
         _ (session/transition-session! db sid :created :resolving {})
         _ (session/transition-session! db sid :resolving :running {})
         started (event/append-event! db (base-event sid {:event/type :session/started
-                                                         :cause/event-id (:event/id created)}))
+                                                         :prev/event-id (:event/id created)}))
         ;; intent -> provider call -> result
         request-id (:artifact/id (put! cas-dir "normalized request body"))
         proposed (event/append-event! db (base-event sid {:event/type :intent/proposed
                                                           :payload-ref request-id
-                                                          :cause/event-id (:event/id started)}))
+                                                          :prev/event-id (:event/id started)}))
         normalized (event/append-event! db (base-event sid {:event/type :intent/normalized
-                                                            :cause/event-id (:event/id proposed)}))
+                                                            :prev/event-id (:event/id proposed)}))
         authorized (event/append-event! db (base-event sid {:event/type :intent/authorized
-                                                            :cause/event-id (:event/id normalized)}))
+                                                            :prev/event-id (:event/id normalized)}))
         call-started (event/append-event! db (base-event sid {:event/type :provider/call-started
-                                                              :cause/event-id (:event/id authorized)}))
+                                                              :prev/event-id (:event/id authorized)}))
         result-id (:artifact/id (put! cas-dir "normalized result body"))
         call-completed (event/append-event! db (base-event sid {:event/type :provider/call-completed
                                                                 :payload-ref result-id
-                                                                :cause/event-id (:event/id call-started)}))
+                                                                :prev/event-id (:event/id call-started)}))
         intent-completed (event/append-event! db (base-event sid {:event/type :intent/completed
-                                                                  :cause/event-id (:event/id call-completed)}))
+                                                                  :prev/event-id (:event/id call-completed)}))
         ;; session waits then completes
         waiting (event/append-event! db (base-event sid {:event/type :session/waiting
-                                                         :cause/event-id (:event/id intent-completed)}))
+                                                         :prev/event-id (:event/id intent-completed)}))
         _ (session/transition-session! db sid :running :waiting {})
         _ (event/append-event! db (base-event sid {:event/type :session/completed
-                                                   :cause/event-id (:event/id waiting)}))
+                                                   :prev/event-id (:event/id waiting)}))
         _ (session/transition-session! db sid :waiting :completed {})]
     ;; "terminate the process": drop every connection and any in-memory
     ;; state; reopen the SAME db file and CAS root from disk only.

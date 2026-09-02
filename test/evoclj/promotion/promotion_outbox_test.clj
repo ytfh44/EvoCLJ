@@ -111,7 +111,7 @@
 
 (defn- operator-session! [db]
   (let [sid (:session/id (session/create-session! db {:genome/id parent-genome :resolution/id parent-resolution :phenotype/id phenotype :generation/id seed-gen}))]
-    (event/append-event! db {:session/id sid :generation/id seed-gen :phenotype/id phenotype :event/type :session/created :cause/event-id nil :payload-ref nil :metadata {}})
+    (event/append-event! db {:session/id sid :generation/id seed-gen :phenotype/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
     sid))
 
 (defn- promotion-fixture

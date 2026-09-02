@@ -184,7 +184,7 @@
                         :generation/id gen
                         :phenotype/id phenotype
                         :event/type :session/created
-                        :cause/event-id nil
+                        :prev/event-id nil
                         :payload-ref nil
                         :metadata {}}))
 
@@ -559,7 +559,7 @@
       (is (= (inc before) (count (event/events-for-session db sid))))
       (let [audit (last (event/events-for-session db sid))]
         (is (= :action/executed (:event/type audit)))
-        (is (= (:event/id root) (:cause/event-id audit)))
+        (is (= (:event/id root) (:prev/event-id audit)))
         (is (= :alarm (get-in audit [:metadata :action/id])))
         (is (= :ops/operator (get-in audit [:metadata :action/subject])))
         (is (= :scope/alert (get-in audit [:metadata :action/subject-scope])))

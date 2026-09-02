@@ -71,7 +71,7 @@
       (let [created (event/append-event!
                      db {:session/id sid :generation/id gen
                          :phenotype/id phenotype :event/type :session/created
-                         :cause/event-id nil :payload-ref nil :metadata {}})]
+                         :prev/event-id nil :payload-ref nil :metadata {}})]
         {:db db :session/id sid :created-event-id (:event/id created)
          :path path}))))
 
@@ -88,7 +88,7 @@
   (fn [] {:session/id (:session/id store-info)
           :generation/id gen
           :phenotype/id phenotype
-          :cause/event-id (:created-event-id store-info)}))
+          :prev/event-id (:created-event-id store-info)}))
 
 ;; ---------------------------------------------------------------------------
 ;; 1. happy path: subscribe + publish! fans out to the subscriber via manager

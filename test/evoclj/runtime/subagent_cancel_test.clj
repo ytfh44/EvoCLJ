@@ -53,7 +53,7 @@
 (defn- create-parent-session! [db]
   (let [sess (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen})
         sid (:session/id sess)]
-    (event/append-event! db {:session/id sid :generation/id gen :phenotype/id phenotype :event/type :session/created :cause/event-id nil :payload-ref nil :metadata {}})
+    (event/append-event! db {:session/id sid :generation/id gen :phenotype/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
     sess))
 (defn- tool-intent [session-id phenotype-id]
   (icore/tool-call session-id phenotype-id :node/test 1 {:tool/id :fixture/echo :args {:text "hi"}} {:wall-ms 1000}))

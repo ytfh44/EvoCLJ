@@ -91,7 +91,7 @@
                                    :generation/id gen
                                    :phenotype/id phenotype
                                    :event/type :session/created
-                                   :cause/event-id nil
+                                   :prev/event-id nil
                                    :payload-ref nil
                                    :metadata {}})]
     sid))

@@ -204,7 +204,7 @@
                           :generation/id seed-gen
                           :phenotype/id phenotype
                           :event/type :session/created
-                          :cause/event-id nil
+                          :prev/event-id nil
                           :payload-ref nil
                           :metadata {}})
     sid))
@@ -260,7 +260,7 @@
                                     :generation/id seed-gen
                                     :phenotype/id phenotype
                                     :event/type :intent/proposed
-                                    :cause/event-id (:event/id created)
+                                    :prev/event-id (:event/id created)
                                     :payload-ref id
                                     :metadata {}})
             report (recovery/scan-recovery-state db root)]
@@ -437,7 +437,7 @@
                                         :generation/id seed-gen
                                         :phenotype/id phenotype
                                         :event/type :intent/proposed
-                                        :cause/event-id (:event/id created)
+                                        :prev/event-id (:event/id created)
                                         :payload-ref request-id
                                         :metadata {:intent/id (str (:intent/id intent))}})
         normalized (event/append-event! db
@@ -445,7 +445,7 @@
                                          :generation/id seed-gen
                                          :phenotype/id phenotype
                                          :event/type :intent/normalized
-                                         :cause/event-id (:event/id proposed)
+                                         :prev/event-id (:event/id proposed)
                                          :payload-ref request-id
                                          :metadata {:intent/id (str (:intent/id intent))}})
         authorized (event/append-event! db
@@ -453,7 +453,7 @@
                                          :generation/id seed-gen
                                          :phenotype/id phenotype
                                          :event/type :intent/authorized
-                                         :cause/event-id (:event/id normalized)
+                                         :prev/event-id (:event/id normalized)
                                          :payload-ref nil
                                          :metadata {:intent/id (str (:intent/id intent))}})
         started (event/append-event! db
@@ -461,14 +461,14 @@
                                       :generation/id seed-gen
                                       :phenotype/id phenotype
                                       :event/type :provider/call-started
-                                      :cause/event-id (:event/id authorized)
+                                      :prev/event-id (:event/id authorized)
                                       :payload-ref nil
                                       :metadata {:intent/id (str (:intent/id intent))
                                                  :tool/id :fixture/non-idempotent
                                                  :idempotency/key "ambig-call-1"}})
         ;; perform the EXTERNAL EFFECT through the REAL dispatcher
         result (dispatch/dispatch! broker (assoc intent
-                                                 :cause/event-id (:event/id started)))]
+                                                 :prev/event-id (:event/id started)))]
     (is (= :ok (:result/status result)))
     (is (= 1 @execution-count)
         "the irreversible external effect really happened once")

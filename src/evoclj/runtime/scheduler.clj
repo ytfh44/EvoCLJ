@@ -62,7 +62,7 @@
   a root). run-session! requires that the FIRST stored event is
   :session/created and chains :session/started to it; every subsequent
   event chains to the event appended immediately before it, so the log
-  is a single linear causal chain (each event's :cause/event-id is the
+  is a single linear causal chain (each event's :prev/event-id is the
   previous event's :event/id) and every step's events are persisted
   BEFORE the scheduler advances to the next node (component Step 3).
 
@@ -266,7 +266,7 @@
     :generation/id (:generation/id pin)
     :phenotype/id (:phenotype/id pin)
     :event/type type
-    :cause/event-id cause-event-id
+    :prev/event-id cause-event-id
     :payload-ref payload-ref
     :metadata metadata}))
 

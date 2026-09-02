@@ -900,7 +900,7 @@
    store is wired via :event-store and :event-store-ctx, the event is also
    persisted to evoclj.store.event/append-event! (fail-closed: a persistence
    failure throws). The :event-store-ctx fn supplies the session pin and a
-   valid :cause/event-id.
+   valid :prev/event-id.
 
    progress-event is a plain EDN map; it becomes the persisted event metadata."
   [mgr-atom progress-event]
@@ -918,7 +918,7 @@
         :generation/id (:generation/id ctx)
         :phenotype/id (:phenotype/id ctx)
         :event/type :mcp/progress
-        :cause/event-id (:cause/event-id ctx)
+        :prev/event-id (:prev/event-id ctx)
         :payload-ref nil
         :metadata (or progress-event {})}))))
 ;; # ponytail: global-lock ceiling — per-key locking would reduce contention but single atom swap! is sufficient for current scale

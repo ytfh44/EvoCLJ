@@ -69,7 +69,7 @@
                              :generation/id gen
                              :phenotype/id phenotype
                              :event/type :session/created
-                             :cause/event-id nil
+                             :prev/event-id nil
                              :payload-ref nil
                              :metadata {}})
     sess))
@@ -116,7 +116,7 @@
           spawned (last after)]
       (is (= (inc (count before)) (count after)) "one event appended")
       (is (= :subagent/spawned (:event/type spawned)) "type is :subagent/spawned")
-      (is (= latest-before (:cause/event-id spawned)) "cause is parent's previous latest")
+      (is (= latest-before (:prev/event-id spawned)) "cause is parent's previous latest")
       (is (= child-id (get-in spawned [:metadata :child/session-id])) "metadata carries child id")
       (is (:valid? (event/verify-event-chain db parent-id)) "parent chain hash still valid")
       (is (:valid? (event/verify-event-chain db child-id)) "child chain hash valid"))))

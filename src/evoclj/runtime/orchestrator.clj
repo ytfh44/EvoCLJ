@@ -45,7 +45,7 @@
     :generation/id (:generation/id pin)
     :phenotype/id (:phenotype/id pin)
     :event/type type
-    :cause/event-id cause-event-id
+    :prev/event-id cause-event-id
     :payload-ref payload-ref
     :metadata metadata}))
 

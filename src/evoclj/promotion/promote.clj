@@ -318,7 +318,7 @@
   (str (:session/id h) "\n"
        (:event/seq h) "\n"
        (type->db (:event/type h)) "\n"
-       (or (:cause/event-id h) "") "\n"
+       (or (:prev/event-id h) "") "\n"
        (or (:payload-ref h) "") "\n"
        (or (:prev-hash h) "") "\n"
        (:created-at h)))
@@ -364,7 +364,7 @@
         header {:session/id session-key
                 :event/seq new-seq
                 :event/type event-type
-                :cause/event-id (str cause-id)
+                :prev/event-id (str cause-id)
                 :payload-ref nil
                 :prev-hash prev-hash
                 :created-at ts}

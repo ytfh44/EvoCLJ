@@ -15,16 +15,14 @@
     event.
 
   `AppendRequestSchema` validates what callers may hand to
-  `evoclj.store.event/append-event!`. Legacy `:cause/event-id` is
-  still accepted as a deprecated alias for `:prev/event-id` when the
-  latter is absent (same-session only, for backward compat during the
-  wave), but new code must use `:prev/event-id` + `:causal-links`.
+  `evoclj.store.event/append-event!`. `:prev/event-id` is the ONLY
+  linear-predecessor key; the legacy `:cause/event-id` alias is
+  REMOVED — callers must send `:prev/event-id` + `:causal-links`.
 
   `EventSchema` validates the persisted event returned by the store:
   includes `:prev/event-id`, `:causal-links` (set, possibly empty),
-  `:prev-hash`, `:event-hash`, etc. Deprecated `:cause/event-id` is
-  tolerated as an optional mirror of `:prev/event-id` for compat but
-  not required.
+  `:prev-hash`, `:event-hash`, etc. `:cause/event-id` is gone;
+  `:prev/event-id` is the sole predecessor field.
 
   Both validators throw `:store/event-invalid` carrying a humanized
   Malli explanation."
@@ -55,7 +53,6 @@
    [:event/type keyword?]
    [:prev/event-id [:maybe pos-int?]]
    [:causal-links {:optional true} [:set CausalLinkSchema]]
-   [:cause/event-id {:optional true} [:maybe pos-int?]]
    [:payload-ref [:maybe [:fn types/artifact-id?]]]
    [:prev-hash [:maybe [:and string? [:re event-hash-re]]]]
    [:event-hash [:and string? [:re event-hash-re]]]
@@ -71,7 +68,6 @@
    [:event/type keyword?]
    [:prev/event-id {:optional true} [:maybe pos-int?]]
    [:causal-links {:optional true} [:set CausalLinkSchema]]
-   [:cause/event-id {:optional true} [:maybe pos-int?]]
    [:payload-ref {:optional true} [:maybe [:fn types/artifact-id?]]]
    [:metadata {:optional true} :map]
    [:created-at {:optional true} [:fn inst?]]])

@@ -204,7 +204,7 @@
                           :generation/id generation-id
                           :phenotype/id phenotype-id
                           :event/type :session/created
-                          :cause/event-id nil
+                          :prev/event-id nil
                           :payload-ref nil
                           :metadata {}})
     sid))
@@ -362,7 +362,7 @@
             (is (every? #(= phenotype-id (:phenotype/id %)) evs)
                 (str "every event of " sid " carries the pinned phenotype"))
             (is (every? (fn [e]
-                          (let [c (:cause/event-id e)]
+                          (let [c (:prev/event-id e)]
                             (or (nil? c) (contains? own-ids c))))
                         evs)
                 (str "every cause of " sid " resolves inside " sid))))))

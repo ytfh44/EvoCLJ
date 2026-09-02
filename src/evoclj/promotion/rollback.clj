@@ -356,7 +356,7 @@
                           :generation/id (:generation_id sess)
                           :phenotype/id (:phenotype_id sess)
                           :event/type :promotion/rollback
-                          :cause/event-id (:id newest)
+                          :prev/event-id (:id newest)
                           :payload-ref nil
                           :metadata {:from (:from result)
                                      :to (:to result)

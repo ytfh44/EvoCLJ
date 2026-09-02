@@ -270,7 +270,7 @@
                           :generation/id generation-id
                           :phenotype/id phenotype-id
                           :event/type :session/created
-                          :cause/event-id nil
+                          :prev/event-id nil
                           :payload-ref nil
                           :metadata {}})
     sid))
@@ -383,7 +383,7 @@
         seqs (fn [type] (mapv :event/seq (filter #(= type (:event/type %)) events)))]
     (testing "every event is causally chained to the previous one (a linear, append-before-advance log)"
       (doseq [[prev cur] (partition 2 1 events)]
-        (is (= (:event/id prev) (:cause/event-id cur))
+        (is (= (:event/id prev) (:prev/event-id cur))
             (str "event " (:event/seq cur) " must cause " (:event/seq prev)))))
     (testing "each step's full block of events strictly precedes the next step's :node/started"
       ;; step 1 block = seqs 3-8, step 2 block = seqs 9-14, step 3 block = seqs 15-16

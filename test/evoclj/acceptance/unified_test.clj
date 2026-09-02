@@ -302,7 +302,7 @@
               (when-not (first (clojure.java.jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
                 (clojure.java.jdbc/insert! conn :generations {:id gen :genome_id genome :resolution_id resolution :parent_id nil :state "active" :current 0 :created_at "2025-01-01T00:00:00Z"})))
           sid (:session/id (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen}))
-          _ (event/append-event! db {:session/id sid :generation/id gen :phenotype/id phenotype :event/type :session/created :cause/event-id nil :payload-ref nil :metadata {}})
+          _ (event/append-event! db {:session/id sid :generation/id gen :phenotype/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
           cas-root (Files/createTempDirectory "evoclj-unified-cas-" (make-array FileAttribute 0))
           cas-handle (cas/->cas (str cas-root))
           registry (reg/create-registry)
@@ -325,7 +325,7 @@
           before-rev (:revision/id before)
           ;; second session for new activation test
           sid2 (:session/id (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen}))
-          _ (event/append-event! db {:session/id sid2 :generation/id gen :phenotype/id phenotype :event/type :session/created :cause/event-id nil :payload-ref nil :metadata {}})
+          _ (event/append-event! db {:session/id sid2 :generation/id gen :phenotype/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
           ;; refresh catalog to v2
           _ (fake/set-payload! source "skill v2")
           refresh-res (reg/refresh! registry)

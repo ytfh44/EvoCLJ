@@ -327,7 +327,7 @@
              :generation/id generation_id
              :phenotype/id phenotype_id
              :event/type event-type
-             :cause/event-id cause
+             :prev/event-id cause
              :payload-ref nil
              :metadata (or metadata {})}]
     (if (nil? cause)
