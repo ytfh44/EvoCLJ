@@ -1,7 +1,7 @@
 (ns evoclj.context.residue-test
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.context.residue :as r]
-            [evoclj.context.error :as err]))
+            [evoclj.context.compression.error :as err]))
 
 ;; ----------------------------------------------------------------------
 ;; residue-kind?

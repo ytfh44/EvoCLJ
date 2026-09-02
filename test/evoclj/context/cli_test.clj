@@ -1,8 +1,8 @@
 (ns evoclj.context.cli-test
   (:require [clojure.test :as t]
             [clojure.string :as str]
-            [evoclj.context.cli :as cli]
-            [evoclj.context.envelope :as envelope]))
+            [evoclj.context.compression.cli :as cli]
+            [evoclj.context.compression.envelope :as envelope]))
 
 ;; ---------------------------------------------------------------------------
 ;; print-envelope

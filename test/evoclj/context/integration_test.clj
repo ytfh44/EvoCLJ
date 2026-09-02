@@ -1,12 +1,12 @@
 (ns evoclj.context.integration-test
   (:require [clojure.test :as t]
             [clojure.string :as str]
-            [evoclj.context.compacter :as compacter]
-            [evoclj.context.apply :as apply]
-            [evoclj.context.envelope :as envelope]
+            [evoclj.context.compression.compacter :as compacter]
+            [evoclj.context.compression.apply :as apply]
+            [evoclj.context.compression.envelope :as envelope]
             [evoclj.context.loop :as loop]
-            [evoclj.context.eval :as eval]
-            [evoclj.context.archivers :as archivers]
+            [evoclj.context.compression.eval :as eval]
+            [evoclj.context.compression.archivers :as archivers]
             [evoclj.context.registry :as registry]
             [evoclj.context.token-estimator :as token-estimator]
             [evoclj.context.trigger :as trigger]))

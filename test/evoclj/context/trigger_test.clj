@@ -1,7 +1,7 @@
 (ns evoclj.context.trigger-test
   (:require [clojure.test :as t]
             [evoclj.context.trigger :as trig]
-            [evoclj.context.error :as err]))
+            [evoclj.context.compression.error :as err]))
 
 ;; ---------------------------------------------------------------------------
 ;; helpers

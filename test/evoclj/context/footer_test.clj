@@ -1,8 +1,8 @@
 (ns evoclj.context.footer-test
   (:require [clojure.test :as t]
             [clojure.string :as str]
-            [evoclj.context.envelope :as envelope]
-            [evoclj.context.footer :as footer]))
+            [evoclj.context.compression.envelope :as envelope]
+            [evoclj.context.compression.footer :as footer]))
 
 ;; ---------------------------------------------------------------------------
 ;; Fixtures

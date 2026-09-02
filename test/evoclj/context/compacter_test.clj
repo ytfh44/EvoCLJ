@@ -1,12 +1,12 @@
 (ns evoclj.context.compacter-test
   (:require [clojure.test :as t]
             [clojure.string :as str]
-            [evoclj.context.compacter :as compacter]
-            [evoclj.context.envelope :as envelope]
+            [evoclj.context.compression.compacter :as compacter]
+            [evoclj.context.compression.envelope :as envelope]
             [evoclj.context.registry :as registry]
-            [evoclj.context.footer :as footer]
-            [evoclj.context.crosscheck :as crosscheck]
-            [evoclj.context.eval :as eval]))
+            [evoclj.context.compression.footer :as footer]
+            [evoclj.context.compression.crosscheck :as crosscheck]
+            [evoclj.context.compression.eval :as eval]))
 
 ;; ---------------------------------------------------------------------------
 ;; Fixtures
@@ -19,7 +19,7 @@
                        :residue/source "user"
                        :residue/at "2026-08-17T00:00:00Z"}]
            :evidence [{:evidence/id 1 :evidence/kind :observation
-                        :evidence/text "src/evoclj/context/compacter.clj"
+                        :evidence/text "src/evoclj/context/compression/compacter.clj"
                         :evidence/at "2026-08-17T00:00:00Z"}]}))
 
 (defn mock-call-with-residue [_]

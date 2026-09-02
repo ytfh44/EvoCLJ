@@ -1,7 +1,7 @@
 (ns evoclj.context.envelope-test
   (:require [clojure.test :as t]
-            [evoclj.context.envelope :as env]
-            [evoclj.context.error :as err]))
+            [evoclj.context.compression.envelope :as env]
+            [evoclj.context.compression.error :as err]))
 
 ;; --------------------------------------------------------------------
 ;; Helpers

@@ -1,8 +1,8 @@
 (ns evoclj.context.idempotency-test
   (:require [clojure.test :as t]
-            [evoclj.context.idempotency :as idemp]
-            [evoclj.context.envelope :as envelope]
-            [evoclj.context.error :as err]))
+            [evoclj.context.compression.idempotency :as idemp]
+            [evoclj.context.compression.envelope :as envelope]
+            [evoclj.context.compression.error :as err]))
 
 ;; ---------------------------------------------------------------------------
 ;; envelope helpers

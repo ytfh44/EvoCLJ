@@ -2,10 +2,10 @@
   (:require [clojure.test :as t]
             [clojure.string :as str]
             [evoclj.context.loop :as loop]
-            [evoclj.context.envelope :as envelope]
-            [evoclj.context.compacter :as compacter]
-            [evoclj.context.apply :as apply]
-            [evoclj.context.idempotency :as idempotency]
+            [evoclj.context.compression.envelope :as envelope]
+            [evoclj.context.compression.compacter :as compacter]
+            [evoclj.context.compression.apply :as apply]
+            [evoclj.context.compression.idempotency :as idempotency]
             [evoclj.context.registry :as registry]))
 
 ;; ---------------------------------------------------------------------------

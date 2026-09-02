@@ -1,6 +1,6 @@
 (ns evoclj.context.error-test
   (:require [clojure.test :as t]
-            [evoclj.context.error :as e]))
+            [evoclj.context.compression.error :as e]))
 
 (t/deftest error-overrides-caller-supplied-type
   (let [err (e/error :context/compression-invalid "msg" {:error/type :some/other-type})]

@@ -1,8 +1,8 @@
 (ns evoclj.context.compressor-test
   (:require [clojure.test :as t]
-            [evoclj.context.compressor :as comp]
-            [evoclj.context.envelope :as envelope]
-            [evoclj.context.error :as err]))
+            [evoclj.context.compression.compressor :as comp]
+            [evoclj.context.compression.envelope :as envelope]
+            [evoclj.context.compression.error :as err]))
 
 ;; ---------------------------------------------------------------------------
 ;; test data
@@ -16,7 +16,7 @@
               :residue/text "must not break X" :residue/source "user"
               :residue/at "2026-08-17T00:00:00Z"}]
    :evidence [{:evidence/id 1 :evidence/kind :observation
-               :evidence/text "src/evoclj/context/compressor.clj"
+               :evidence/text "src/evoclj/context/compression/compressor.clj"
                :evidence/at "2026-08-17T00:00:00Z"}]})
 
 (defn- canned-response [summary]
@@ -138,7 +138,7 @@
                                     :residue/source "user"
                                     :residue/at "2026-08-17T00:00:00Z"}]
                                :evidence [{:evidence/id 1 :evidence/kind :observation
-                                            :evidence/text "src/evoclj/context/compressor.clj"
+                                            :evidence/text "src/evoclj/context/compression/compressor.clj"
                                             :evidence/at "2026-08-17T00:00:00Z"}]}
         result (comp/compress-structured (sample-summary)
                                          "raw context"

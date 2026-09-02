@@ -1,8 +1,8 @@
 (ns evoclj.context.apply-test
   (:require [clojure.test :as t]
-            [evoclj.context.apply :as apply]
-            [evoclj.context.envelope :as envelope]
-            [evoclj.context.error :as err]))
+            [evoclj.context.compression.apply :as apply]
+            [evoclj.context.compression.envelope :as envelope]
+            [evoclj.context.compression.error :as err]))
 
 ;; ---------------------------------------------------------------------------
 ;; envelope helper

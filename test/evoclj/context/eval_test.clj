@@ -1,7 +1,7 @@
 (ns evoclj.context.eval-test
   (:require [clojure.test :as t]
-            [evoclj.context.eval :as ev]
-            [evoclj.context.envelope :as envelope]))
+            [evoclj.context.compression.eval :as ev]
+            [evoclj.context.compression.envelope :as envelope]))
 
 ;; ---------------------------------------------------------------------------
 ;; envelope helper
