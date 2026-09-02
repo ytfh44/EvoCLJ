@@ -14,15 +14,27 @@
   Id authentication (Global Constraint 2 / I1):
     execution.code_image_id == pin.code_image_id else throw
     (typed :hydrate/pin-mismatch). The same check covers the Deployment
-  binding when a deployment row is present.
+    binding when a deployment row is present.
 
   Bindings are materialized through the scheduler's durable store
   (evoclj.store.binding/restore!) — a missing table degrades to [] and
   is recorded as a degradation event, never a silent swallow.
 
+  Real-genome load path (H1):
+    When the store carries a registered genome bundle (evoclj.store.genome/
+    register-loaded-genome!), hydrate loads the persisted :manifest,
+    :files, and :programs, re-compiles via evoclj.compiler.core/
+    compile-genome, and produces a real CompiledGenome with real topology
+    (not the fallback echo). The resulting :code/id must equal the pin's
+    :code/id, and :compiled/genome-id/:compiled/resolution-id must match
+    the pin. A mismatch throws :hydrate/pin-mismatch.
+    For fake-id scenarios (no bundle registered), hydrate falls back to
+    the synthetic topology/programs so existing tests continue to work.
+
   The factory owns no global mutable state; every call creates fresh
   SCI, fresh usage atom, fresh CAS temp dir, and a fresh broker context."
   (:require [clojure.string :as str]
+            [evoclj.compiler.core :as compiler]
             [evoclj.compiler.topology :as topology]
             [evoclj.genome.types :as types]
             [evoclj.intent.dispatch :as dispatch]
@@ -31,12 +43,13 @@
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.store.cas :as cas]
+            [evoclj.store.genome :as store-genome]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite])
-  (:import (java.nio.file Files)
+  (:import (java.nio.charset StandardCharsets)
+           (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)
            (java.util Date UUID)))
-
 ;; ---------------------------------------------------------------------------
 ;; db helpers
 ;; ---------------------------------------------------------------------------
@@ -50,6 +63,14 @@
     (and (map? db) (contains? db :subprotocol)) db
     (and (map? db) (contains? db :subname)) db
     :else (try (.-db ^Object db) (catch Exception _ db))))
+
+(defn- cas-of
+  "Extract the CAS handle from the db argument if it is a stores map
+  {:sqlite spec :cas cas}. Returns nil when db is a bare sqlite spec
+  (the common call-site convention)."
+  [db]
+  (when (and (map? db) (contains? db :cas))
+    (:cas db)))
 
 (defn- fetch-session-row
   "Raw sessions row (map with string keys) for id, or nil."
@@ -201,7 +222,6 @@
   []
   {:program/route "(ns test.route) (defn run [x] x)"
    :program/boom  "(ns test.boom) (defn run [x] (throw (ex-info \"boom\" {:error/type :test/boom})))"})
-
 ;; ---------------------------------------------------------------------------
 ;; Leases
 ;; ---------------------------------------------------------------------------
@@ -212,7 +232,7 @@
   [db sid]
   (try
     (let [cap-store (requiring-resolve 'evoclj.store.capability-store/list-active-capabilities)
-          rows (@cap-store db {:principal-type "session" :principal-id (str sid)})]
+          rows (@cap-store (db-spec db) {:principal-type "session" :principal-id (str sid)})]
       (when (seq rows)
         (mapv (fn [row]
                 (or (:lease row)
@@ -232,9 +252,54 @@
     (catch Exception _ nil)))
 
 ;; ---------------------------------------------------------------------------
-;; Public factory
+;; Real genome load path
 ;; ---------------------------------------------------------------------------
 
+(defn- real-program-sources
+  "Decode every compiled program's source text from the loaded bundle :files
+  (the CompiledGenome carries only :source/digest references, Global Constraint 22).
+  Mirrors evoclj.cli.session/program-sources."
+  [loaded compiled]
+  (into {}
+        (map (fn [[program-id descriptor]]
+               [program-id
+                (String. ^bytes (byte-array
+                                 (get-in loaded [:files (:file descriptor) :bytes]))
+                         StandardCharsets/UTF_8)]))
+        (:programs compiled)))
+
+(defn- load-real-compiled
+  "Load a real CompiledGenome from a persisted genome bundle.
+  
+  Returns {:compiled <CompiledGenome> :program-sources <map>} when a bundle
+  is registered for the pin's genome-id, otherwise nil.
+  
+  When a bundle is present, re-compiles via evoclj.compiler.core/compile-genome
+  using the stored provider catalog, then asserts that the resulting identity
+  matches the pin (:code/genome-id, :code/resolution-id, :code/id).
+  A mismatch throws :hydrate/pin-mismatch (typed)."
+  [cas-store db pin]
+  (when-let [gid (:genome/id pin)]
+    (when-let [{:keys [catalog loaded]} (store-genome/loaded-genome cas-store (db-spec db) gid)]
+      (let [compiled (compiler/compile-genome loaded catalog)
+            ;; Assert identity matches the pin — this is the H1 pin validation
+            cid (:code/id pin)
+            rid (:resolution/id pin)]
+        (when (or (not= (:code/genome-id compiled) gid)
+                  (not= (:code/resolution-id compiled) rid)
+                  (not= (:code/id compiled) cid))
+          (throw (err/error :hydrate/pin-mismatch
+                            "compiled genome identity disagrees with session pin"
+                            {:pin pin
+                             :code/genome-id (:code/genome-id compiled)
+                             :code/resolution-id (:code/resolution-id compiled)
+                             :code/id (:code/id compiled)})))
+        {:compiled compiled
+         :program-sources (real-program-sources loaded compiled)}))))
+
+;; ---------------------------------------------------------------------------
+;; Public factory
+;; ---------------------------------------------------------------------------
 (defn hydrate
   "Build a fresh ExecutionHandle for the pinned session `pin`.
 
@@ -273,7 +338,7 @@
       (throw (err/error :hydrate/invalid-pin "pin missing :session/id" {:pin pin})))
     ;; verify existence of session row
     (let [sid (:session/id norm)
-          sess (try (session/get-session db sid) (catch Exception _ nil))
+          sess (try (session/get-session (db-spec db) sid) (catch Exception _ nil))
           pin' (if sess
                  (merge norm
                         {:genome/id (or (:genome/id norm) (:genome/id sess))
@@ -282,11 +347,12 @@
                          :generation/id (or (:generation/id norm) (:generation/id sess))})
                  norm)]
       (authenticate! db pin')
-      (let [cid (:code/id pin')
-            gid (:genome/id pin')
-            rid (:resolution/id pin')
-            compiled (fallback-compiled pin')
-            program-sources (fallback-program-sources)
+      ;; Attempt real genome load (H1): if a bundle is registered, load and
+      ;; re-compile. If not, fall back to synthetic topology/programs.
+      (let [cas-store (cas-of db)
+            real (load-real-compiled cas-store db pin')
+            compiled (or (:compiled real) (fallback-compiled pin'))
+            program-sources (or (:program-sources real) (fallback-program-sources))
             reg (registry/create-registry)
             _ (registry/register! reg (fixture/echo-provider {}))
             persisted (load-persisted-leases db sid)
