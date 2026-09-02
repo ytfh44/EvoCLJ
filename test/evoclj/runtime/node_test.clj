@@ -313,7 +313,7 @@
         (is (= :node/unknown-type (:error/type (ex-data e))) (pr-str t))))))
 
 (deftest registry-covers-exactly-the-compiler-node-type-set
-  (is (= topology/supported-node-types
+  (is (= topology/syntax-node-types
          (into node/known-unimplemented-types
                (keys node/node-handler-registry)))))
 

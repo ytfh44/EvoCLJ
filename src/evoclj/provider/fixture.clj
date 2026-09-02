@@ -28,7 +28,7 @@
     never rebased under the protected root; a \"..\" that would climb
     above the filesystem root is clamped at \"/\". The canonical
     segment resolution reuses
-    evoclj.capability.lease/canonicalize-path, the single source of
+    evoclj.capability.resource-kind/canonicalize-path, the single source of
     truth for canonical path forms in the v0 capability model.
 
   Both providers follow the secrets rule: constructor config (roots,
@@ -41,7 +41,7 @@
   returns a plain result VALUE, which the broker validates against
   :output-schema (component)."
   (:require [clojure.string :as str]
-            [evoclj.capability.lease :as lease]
+            [evoclj.capability.resource-kind :as rk]
             [evoclj.kernel.error :as err]
             [evoclj.provider.protocol :as proto]
             [evoclj.sci.boundary :as boundary]
@@ -229,7 +229,7 @@
   stays absolute and is never rebased under the root, so a
   user-supplied \"/etc/passwd\" or \"C:/x\" can never be re-rooted
   into the protected tree. The joined form is then canonicalized with
-  the v0 segment resolver (evoclj.capability.lease/canonicalize-path):
+  the v0 segment resolver (evoclj.capability.resource-kind/canonicalize-path):
   \".\" and \"..\" segments collapse (\"/protected/work/a/../secret\"
   -> \"/protected/work/secret\"), and a \"..\" that would climb above
   the filesystem root is clamped at \"/\"."
@@ -238,7 +238,7 @@
         absolute? (or (.startsWith raw "/") (windows-drive? raw))
         joined (if absolute? raw (str root "/" raw))
         joined (if (windows-drive? joined) (str "/" joined) joined)]
-    (lease/canonicalize-path joined)))
+    (rk/canonicalize-path joined)))
 
 (def ^:private path-resolve-descriptor
   {:tool/id :fixture/path-resolve

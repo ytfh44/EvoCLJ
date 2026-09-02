@@ -85,7 +85,7 @@
                           :generation/id gen-id
                           :phenotype/id phenotype-id
                           :event/type :session/created
-                          :cause/event-id nil
+                          :prev/event-id nil
                           :payload-ref nil
                           :metadata {}
                           :created-at (java.util.Date/from (java.time.Instant/parse now))})

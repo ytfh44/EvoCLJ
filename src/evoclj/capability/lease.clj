@@ -44,13 +44,6 @@
             [evoclj.kernel.error :as err]
             [malli.core :as m]))
 
-;; --- pure path canonicalization (delegates to resource-kind, kept for compat) --------
-
-(defn canonicalize-path
-  "Deprecated alias — delegates to evoclj.capability.resource-kind/canonicalize-path.
-  Kept for backward compat (lease tests call lease/canonicalize-path directly)."
-  [s] (rk/canonicalize-path s))
-
 ;; Legacy private helpers retained for local use but now delegate; descriptor owns logic.
 (defn- path-inside? [root path]
   (let [r (rk/canonicalize-path root) p (rk/canonicalize-path path)]

@@ -162,12 +162,6 @@
   from handler-for if it somehow reaches the runtime."
   #{:llm :sci :tool :loop :emit :memory/read :memory/write})
 
-(def supported-node-types
-  "Legacy alias for syntax-node-types. Prefer syntax-node-types /
-  executable-node-types. Kept for compatibility; new code should use
-  the split. A test asserts compiler and runtime syntax sets stay
-  equal."
-  syntax-node-types)
 
 ;; --- the shared transition schema ------------------------------------------
 

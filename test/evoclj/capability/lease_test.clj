@@ -10,6 +10,7 @@
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [evoclj.capability.lease :as lease]
+            [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err]))
 
@@ -92,14 +93,14 @@
                                 :invoke))))
 
 (deftest canonicalize-path-resolves-dot-segments
-  (is (= "/work" (lease/canonicalize-path "/work")))
-  (is (= "/work" (lease/canonicalize-path "/work/")))
-  (is (= "/work/secret" (lease/canonicalize-path "/work/a/../secret")))
-  (is (= "/work/a" (lease/canonicalize-path "/work/./a")))
-  (is (= "/etc" (lease/canonicalize-path "/work/../../etc")))
-  (is (= "/" (lease/canonicalize-path "/")))
-  (is (nil? (lease/canonicalize-path nil)))
-  (is (nil? (lease/canonicalize-path 42))))
+  (is (= "/work" (rk/canonicalize-path "/work")))
+  (is (= "/work" (rk/canonicalize-path "/work/")))
+  (is (= "/work/secret" (rk/canonicalize-path "/work/a/../secret")))
+  (is (= "/work/a" (rk/canonicalize-path "/work/./a")))
+  (is (= "/etc" (rk/canonicalize-path "/work/../../etc")))
+  (is (= "/" (rk/canonicalize-path "/")))
+  (is (nil? (rk/canonicalize-path nil)))
+  (is (nil? (rk/canonicalize-path 42))))
 
 (deftest filesystem-scope-on-canonical-paths
   (let [fs-lease (lease :resource {:kind :filesystem :path "/work"})]

@@ -17,9 +17,7 @@
 (defprotocol TokenEstimator
   (estimate-tokens [this s]
     "Estimate the number of tokens in string `s`. Returns a non-negative
-    integer. The estimate should be consistent for the same input.")
-  (token-count [this s]
-    "Alias for `estimate-tokens` kept for backward compatibility."))
+    integer. The estimate should be consistent for the same input."))
 
 ;; ---------------------------------------------------------------------------
 ;; Default implementation: character-count proxy
@@ -32,9 +30,7 @@
       (throw (err/error :context/trigger-invalid
                         "input must be a string"
                         {:value (err/sanitize s)})))
-    (int (Math/ceil (/ (count s) (:chars-per-token this)))))
-  (token-count [this s]
-    (estimate-tokens this s)))
+    (int (Math/ceil (/ (count s) (:chars-per-token this))))))
 
 (def default-char-count-estimator
   "Default estimator using ~4 characters per token, suitable for mixed
@@ -58,9 +54,7 @@
                      (str/split #"[\s\n\r\t]+")
                      seq
                      (->> (remove str/blank?)))]
-      (count tokens)))
-  (token-count [this s]
-    (estimate-tokens this s)))
+      (count tokens))))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers
@@ -85,9 +79,7 @@
   (estimate-tokens [_ _]
     (if (pos? (:output-tokens usage-map 0))
       (:output-tokens usage-map)
-      (:input-tokens usage-map 0)))
-  (token-count [_ s]
-    (estimate-tokens _ s)))
+      (:input-tokens usage-map 0))))
 
 (defn model-usage-estimator
   "Create a ModelUsageEstimator from a usage map shaped

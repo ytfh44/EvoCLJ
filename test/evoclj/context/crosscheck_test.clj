@@ -1,8 +1,8 @@
 (ns evoclj.context.crosscheck-test
   (:require [clojure.test :as t]
-            [evoclj.context.crosscheck :as cc]
-            [evoclj.context.envelope :as envelope]
-            [evoclj.context.error :as err]))
+            [evoclj.context.compression.crosscheck :as cc]
+            [evoclj.context.compression.envelope :as envelope]
+            [evoclj.context.compression.error :as err]))
 
 (defn- base-envelope [task subgoals]
   {:envelope/version 1
@@ -31,7 +31,7 @@
         sg (subgoal "sg1" :pending "step one" "t1")
         envelope (base-envelope t [sg])
         source (todo [t] [sg])
-        result (cc/crosscheck envelope source)]
+        result (cc/crosscheck* envelope source)]
     (t/is (true? (:crosscheck/valid? result)))
     (t/is (= t (:envelope/task (:crosscheck/envelope result))))
     (t/is (= [sg] (:envelope/subgoals (:crosscheck/envelope result))))))
@@ -41,7 +41,7 @@
         t-todo (task "t1" :in-progress "do the thing")
         envelope (base-envelope t-envelope [])
         source (todo [t-todo] [])
-        result (cc/crosscheck envelope source)]
+        result (cc/crosscheck* envelope source)]
     (t/is (true? (:crosscheck/valid? result)))
     (t/is (= :in-progress (:task/status (:envelope/task (:crosscheck/envelope result)))))))
 
@@ -50,7 +50,7 @@
         sg-todo (subgoal "sg1" :completed "step one" "t1")
         envelope (base-envelope (task "t1" :pending "parent") [sg-envelope])
         source (todo [(task "t1" :in-progress "parent")] [sg-todo])
-        result (cc/crosscheck envelope source)]
+        result (cc/crosscheck* envelope source)]
     (t/is (true? (:crosscheck/valid? result)))
     (t/is (= :completed (:subgoal/status (first (:envelope/subgoals (:crosscheck/envelope result))))))))
 
@@ -58,7 +58,7 @@
   (let [t-envelope (task "t1" :pending "do the thing")
         envelope (base-envelope t-envelope [])
         source (todo [] [])
-        result (cc/crosscheck envelope source)]
+        result (cc/crosscheck* envelope source)]
     (t/is (false? (:crosscheck/valid? result)))
     (t/is (= 1 (count (:crosscheck/mismatches result))))
     (t/is (= :task (:crosscheck/kind (first (:crosscheck/mismatches result)))))
@@ -68,7 +68,7 @@
   (let [sg-envelope (subgoal "sg1" :pending "step one" "t1")
         envelope (base-envelope (task "t1" :pending "parent") [sg-envelope])
         source (todo [(task "t1" :pending "parent")] [])
-        result (cc/crosscheck envelope source)]
+        result (cc/crosscheck* envelope source)]
     (t/is (false? (:crosscheck/valid? result)))
     (t/is (= 1 (count (:crosscheck/mismatches result))))
     (t/is (= :subgoal (:crosscheck/kind (first (:crosscheck/mismatches result)))))))
@@ -78,7 +78,7 @@
         t-todo (task "t1" :pending "do the thing")
         envelope (base-envelope t-envelope [])
         source (todo [t-todo] [])
-        result (cc/crosscheck envelope source)]
+        result (cc/crosscheck* envelope source)]
     (t/is (false? (:crosscheck/valid? result)))
     (t/is (= 1 (count (:crosscheck/mismatches result))))
     (t/is (= :task/description (:crosscheck/field (first (:crosscheck/mismatches result)))))))
@@ -87,7 +87,7 @@
   (let [bad {:envelope/version 1}
         source (todo [] [])]
     (try
-      (cc/crosscheck bad source)
+      (cc/crosscheck* bad source)
       (t/is false "should have thrown")
       (catch Exception e
         (t/is (= :context/compression-invalid (:error/type (ex-data e))))))))
@@ -96,7 +96,7 @@
   (let [t (task "t1" :pending "do the thing")
         envelope (base-envelope t [])]
     (try
-      (cc/crosscheck envelope "not a map")
+      (cc/crosscheck* envelope "not a map")
       (t/is false "should have thrown")
       (catch Exception e
         (t/is (= :context/crosscheck-mismatch (:error/type (ex-data e))))))))
@@ -120,7 +120,7 @@
                   :residue/at "2026-08-17T00:00:00Z"}]
         envelope (assoc (base-envelope t []) :envelope/residue residue)
         source (todo [t] [])
-        result (cc/crosscheck envelope source)]
+        result (cc/crosscheck* envelope source)]
     (t/is (= residue (:envelope/residue (:crosscheck/envelope result))))))
 
 (t/run-tests)

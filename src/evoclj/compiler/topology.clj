@@ -78,12 +78,6 @@
   unless the caller provides an expanded runtime feature set that includes it."
   #{:llm :sci :tool :loop :emit :memory/read :memory/write})
 
-(def supported-node-types
-  "Legacy alias for syntax-node-types. Prefer syntax-node-types / executable-node-types.
-  Kept for compatibility; new code should use executable-node-types for the runtime feature set
-  and syntax-node-types for the full syntactic set."
-  syntax-node-types)
-
 (def ^:private required-keys
   "Per-type keys a node must declare. A :loop carries an explicit
   Region/Loop shape: :body is the iterated node id, :exit is the normal

@@ -23,17 +23,10 @@
        nil
        (catch clojure.lang.ExceptionInfo e e)))
 
-;; --- supported v0 node types ----------------------------------------------
-
-(deftest supported-v0-node-types
-  (is (= #{:llm :sci :tool :route :loop :emit :memory/read :memory/write}
-         topology/supported-node-types)))
-
 (deftest syntax-vs-executable-split
   (testing "syntax is the full v0 syntactic set including :route"
     (is (= #{:llm :sci :tool :route :loop :emit :memory/read :memory/write}
-           topology/syntax-node-types))
-    (is (= topology/syntax-node-types topology/supported-node-types)))
+           topology/syntax-node-types)))
   (testing "executable is the runtime feature set (handler exists)"
     (is (= #{:llm :sci :tool :loop :emit :memory/read :memory/write}
            topology/executable-node-types))

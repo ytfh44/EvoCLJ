@@ -22,10 +22,6 @@
    produce. This keeps the module pure and testable without a host
    dependency.
 
-   Backward compatibility: the old `crosscheck` signature
-   `[envelope todo]` is retained as a deprecated wrapper. New code
-   should call `crosscheck*` with `[envelope structured-sections]`.
-
    `structured-sections` shape:
      {:tasks [{:task/id <string>
                :task/status <keyword>
@@ -169,21 +165,8 @@
      :crosscheck/valid? (empty? mismatches)}))
 
 ;; ---------------------------------------------------------------------------
-;; Backward-compatible deprecated wrappers
+;; Convenience wrappers
 ;; ---------------------------------------------------------------------------
-
-(defn crosscheck
-  "Cross-validate `envelope`'s structured fields against `structured-sections`.
-
-   DEPRECATED: use `crosscheck*` instead. This wrapper is retained for
-   backward compatibility and will be removed in a future version.
-
-   `structured-sections` should be a map with :tasks and :subgoals
-   keys (the shape produced by todo/goal tools).
-
-   Returns the same map as `crosscheck*`."
-  [envelope structured-sections]
-  (crosscheck* envelope structured-sections))
 
 (defn crosscheck-valid?
   "True when `envelope` cross-checks cleanly against `structured-sections`.

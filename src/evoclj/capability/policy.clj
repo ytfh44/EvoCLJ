@@ -87,20 +87,11 @@
     {:principal/type :session :session/id sid}
     {:principal/type :operator}))
 
-(defn intent-subject
-  "Deprecated alias for intent-principal."
-  [intent]
-  (intent-principal intent))
-
 (def ^:private v0-actions
   {:intent/tool-call :invoke
    :intent/model-call :invoke
    :intent/memory-read :invoke
    :intent/memory-write :invoke})
-;; C1: derived from ResourceKindDescriptor registry (no hardcoded allowlist).
-;; Kept as a var for backward compat; prefer (rk/allowed-actions-by-kind).
-(def allowed-actions-by-kind
-  (rk/allowed-actions-by-kind))
 
 (def ^:private global-allowed-actions
   (apply set/union (vals (rk/allowed-actions-by-kind))))
