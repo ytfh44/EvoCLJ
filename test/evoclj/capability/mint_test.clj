@@ -4,6 +4,7 @@
   Mirrors P1 sealed-lease invariants but through the mint facade."
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.capability.mint :as mint]
+            [evoclj.capability.authority-store :as authority]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err]
             [evoclj.mount.filesystem :as fs]
@@ -82,3 +83,41 @@
       (is (not= (:cap/id b) (:cap/id c)))
       (is (not= (:cap/id a) (:cap/id c)))
       (is (= 3 (count (set [(:cap/id a) (:cap/id b) (:cap/id c)])))))))
+
+;; --- 5. fail-closed: authority whose durable write fails must not update cache ---
+
+(defn- failing-authority
+  "A purpose-built AuthorityStore whose insert-lease! always throws a typed
+  :capability/authority-unavailable (simulating an unavailable DB)."
+  []
+  (reify authority/AuthorityStore
+    (insert-lease! [_ _lease]
+      (throw (err/error :capability/authority-unavailable "durable write failed" {})))
+    (revoke! [_ _cap-id] nil)
+    (hydrate! [_ _registry] 0)
+    (active-by-principal [_ _principal] [])))
+
+(deftest mint-fails-closed-on-authority-failure
+  (testing "a failing durable authority throws and the memory cache is NOT updated"
+    (let [registry (mint/create-lease-registry)
+          cap-id #uuid "33333333-3333-4333-8333-333333333333"
+          opts (assoc (base-opts) :cap-id cap-id)]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (mint/mint-lease! (failing-authority) registry opts)))
+      (is (nil? (mint/get-lease registry cap-id))
+          "cache must NOT contain the lease after a failed durable write")
+      (is (= 0 (mint/registry-version registry))
+          "registry version must be unchanged after a failed durable write"))))
+
+(deftest derive-fails-closed-on-authority-failure
+  (testing "derive with a failing authority throws and the child is NOT cached"
+    (let [registry (mint/create-lease-registry)
+          parent (mint/mint-lease! registry (base-opts))
+          child-cap-id #uuid "44444444-4444-4444-8444-444444444444"]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (mint/derive-lease! (failing-authority) registry parent
+                                       {:actions #{:invoke} :cap-id child-cap-id})))
+      (is (nil? (mint/get-lease registry child-cap-id))
+          "child lease must NOT be cached after a failed durable write")
+      (is (= 1 (mint/registry-version registry))
+          "only the parent mint bumped the version; failed derive must not"))))

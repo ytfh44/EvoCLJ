@@ -12,6 +12,7 @@
   Best-effort try/catch dual writes are removed; synthetic fallback on DB miss
   is deny."
   (:require [clojure.set :as set]
+            [evoclj.capability.authority-store :as authority]
             [evoclj.capability.constraint :as cstr]
             [evoclj.capability.grant :as grant]
             [evoclj.capability.schema :as schema]
@@ -25,26 +26,40 @@
   [registry]
   (swap! registry update registry-version-key (fnil inc 0))
   (get @registry registry-version-key))
+(defn normalize-authority
+  "Normalize a durable-authority argument into an explicit AuthorityStore,
+  or nil for the legacy memory-only path.
 
-(defn- durable-insert!
-  "Insert lease durably into capabilities table via capability-store.
-  Throws if DB unavailable or CHECK fails; caller must NOT update cache on failure."
-  [db lease]
-  (when db
-    (let [insert! (try (requiring-resolve 'evoclj.store.capability-store/insert-capability!)
-                       (catch Exception _ nil))]
-      (when insert!
-        (@insert! db lease)))))
+  `db` may be:
+    - an AuthorityStore (passes through unchanged),
+    - a raw sqlite spec/handle (wrapped in a ProductionAuthorityStore),
+    - nil, in which case :authority or :db in `opts` is consulted.
 
-(defn- durable-revoke!
-  "Durably revoke cap-id in DB (UPDATE WHERE revoked=0). Returns row or nil.
-  Throws on DB error. Caller must then tombstone cache."
-  [db cap-id]
-  (when db
-    (let [revoke! (try (requiring-resolve 'evoclj.store.capability-store/revoke-capability!)
-                       (catch Exception _ nil))]
-      (when revoke!
-        (@revoke! db cap-id)))))
+  A supplied-but-unusable authority throws `:capability/authority-unavailable`
+  from the store itself; this fn only FAILS CLOSED by never returning a
+  half-formed authority."
+  [db opts]
+  (let [candidate (or (:authority opts) db (:db opts))]
+    (cond
+      (nil? candidate) nil
+      (satisfies? authority/AuthorityStore candidate) candidate
+      :else (authority/production-store candidate))))
+
+(defn mint*
+  "Core minting surface: seal `lease-map` into a CapabilityLease, durably
+  commit via `authority` (fail-closed — the in-memory registry is updated
+  ONLY after the durable write succeeds), then record in `registry`.
+
+  `authority` is an AuthorityStore (durable) or nil (pure memory); `registry`
+  is a LeaseRegistry atom or nil. Returns the sealed lease."
+  [authority registry lease-map]
+  (let [lease (schema/make-lease lease-map)]
+    (when authority
+      (authority/insert-lease! authority lease))
+    (when registry
+      (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false})
+      (bump-version! registry))
+    lease))
 
 (defn mint-lease!
   "Mint one sealed CapabilityLease and durably record it when DB is supplied.
@@ -62,7 +77,7 @@
   ([registry opts]
    (mint-lease! nil registry opts))
    ([db registry {:keys [principal resource actions constraints issued-at expires-at cap-id] :as opts}]
-   (let [db (or db (:db opts))
+   (let [authority (normalize-authority db opts)
          cap-id-val (or (:cap/id opts) cap-id (UUID/randomUUID))
          issued (or issued-at (Date.))
          expires (or expires-at (Date. (+ (.getTime ^Date issued) 3600000)))
@@ -85,14 +100,7 @@
        (throw (err/error :capability/schema-invalid
                          "capability lease must span positive window: :expires-at after :issued-at"
                          {:value (err/sanitize lease-map)})))
-     (let [lease (schema/make-lease lease-map)]
-       ;; P1 durable-commit before cache
-       (when db
-         (durable-insert! db lease))
-       (when registry
-         (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false})
-         (bump-version! registry))
-       lease))))
+     (mint* authority registry lease-map))))
 
 (declare lease-revoked?)
 
@@ -111,7 +119,7 @@
   ([registry parent-lease opts]
    (derive-lease! nil registry parent-lease opts))
   ([db registry parent-lease {:keys [principal resource actions constraints issued-at expires-at cap-id] :as opts}]
-   (let [db (or db (:db opts))]
+   (let [authority (normalize-authority db opts)]
      (when-not (schema/lease? parent-lease)
        (throw (err/error :capability/attenuation-invalid
                          "derive-lease! requires a sealed CapabilityLease as parent"
@@ -184,14 +192,8 @@
                         :actions child-actions-set
                         :constraints merged-constraints
                         :issued-at child-issued
-                        :expires-at child-expires}
-             lease (schema/make-lease lease-map)]
-         (when db
-           (durable-insert! db lease))
-         (when registry
-           (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false})
-           (bump-version! registry))
-         lease)))))
+                        :expires-at child-expires}]
+         (mint* authority registry lease-map))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Generic LeaseRegistry helpers — P1 versioned cache (DB truth, memory versioned)
@@ -235,15 +237,16 @@
      (bump-version! registry))
    nil)
   ([db registry cap-id]
-   (if (true? (get-in @registry [cap-id :revoked?]))
-     (when db (durable-revoke! db cap-id))
-     (do
-       (when db (durable-revoke! db cap-id))
-       (swap! registry update cap-id (fn [rec]
-                                       (cond-> (or rec {:lease nil :revoked? true})
-                                         true (assoc :revoked? true))))
-       (bump-version! registry)))
-   nil))
+   (let [authority (normalize-authority db nil)]
+     (if (true? (get-in @registry [cap-id :revoked?]))
+       (when authority (authority/revoke! authority cap-id))
+       (do
+         (when authority (authority/revoke! authority cap-id))
+         (swap! registry update cap-id (fn [rec]
+                                         (cond-> (or rec {:lease nil :revoked? true})
+                                           true (assoc :revoked? true))))
+         (bump-version! registry)))
+     nil)))
 
 (defn register-lease!
   "Validate `lease` as a proper CapabilityLease and record it in `registry`,
@@ -255,12 +258,12 @@
   ([registry lease]
    (register-lease! nil registry lease))
   ([db registry lease]
-   (schema/validate-lease lease)
-   (when db
-     (durable-insert! db lease))
-   (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false})
-   (bump-version! registry)
-   lease))
+   (let [authority (normalize-authority db nil)]
+     (when authority
+       (authority/insert-lease! authority lease))
+     (swap! registry assoc (:cap/id lease) {:lease lease :revoked? false})
+     (bump-version! registry)
+     lease)))
 
 (defn revoke-leases!
   "Revoke each lease in `leases` (a collection of CapabilityLease) in
@@ -275,9 +278,7 @@
    (when (and registry (seq leases))
      (doseq [l leases]
        (when-let [cap-id (:cap/id l)]
-         (if db
-           (revoke-lease! db registry cap-id)
-           (revoke-lease! registry cap-id)))))
+         (revoke-lease! db registry cap-id))))
    nil))
 
 (defn leases-for-session
@@ -309,10 +310,11 @@
 (defn hydrate-registry!
   "Restart hydration: load all active (revoked=0) capabilities from DB into `registry`
   as versioned cache entries. DB is truth; cache is replaced (except version bump).
-  Returns count of hydrated entries. Requires db handle."
-  [db registry]
-  (let [hydrate! (try (requiring-resolve 'evoclj.store.capability-store/hydrate-registry!)
-                      (catch Exception _ nil))]
-    (if hydrate!
-      (@hydrate! db registry)
-      0)))
+  Returns count of hydrated entries. Requires an AuthorityStore (or a raw db
+  spec/handle). A missing/invalid authority returns 0 for the legacy memory-only
+  path; a supplied-but-unusable authority throws (fail-closed)."
+  ([db registry]
+   (let [authority (normalize-authority db nil)]
+     (if authority
+       (authority/hydrate! authority registry)
+       0))))
