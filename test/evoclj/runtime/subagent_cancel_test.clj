@@ -8,6 +8,7 @@
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
+            [evoclj.store.work :as work-store]
             [evoclj.store.sqlite :as sqlite]
             [evoclj.intent.core :as icore])
   (:import (java.util Date UUID)))
@@ -43,6 +44,9 @@
         (try (jdbc/insert! conn :genomes {:id genome :created_at now}) (catch Exception _))
         (try (jdbc/insert! conn :generations {:id gen :genome_id genome :resolution_id resolution :parent_id nil :state "active" :current 1 :created_at now}) (catch Exception _))))
     db))
+
+(defn- session-work-state [db sid]
+  (some-> (last (work-store/list-works db sid)) :work/state))
 (defn- parent-lease [session-id phenotype-id actions]
   (mint/mint-lease! nil {:principal {:principal/type :session :session/id session-id}
                          :resource {:kind :tool :id :fixture/echo}
@@ -80,8 +84,7 @@
       (let [res (subagent/cancel-subagent! db parent-id child-id :user-request)]
         (is (some? res) "cancel returns result")
         (is (contains? (set (:cancelled res)) child-id) "cancelled includes child"))
-      (let [sess (session/get-session db child-id)]
-        (is (= :cancelled (:state sess)) "child session is :cancelled"))
+      (is (= :cancelled (session-work-state db child-id)) "child Work is :cancelled (Work owns the lifecycle)")
       (let [evts (event/events-for-session db parent-id)
             types (set (map :event/type evts))]
         (is (contains? types :subagent/cancelled) "parent has :subagent/cancelled"))
@@ -118,9 +121,9 @@
       (is (= :capability/revoked (:reason (authorize-with-lease l1-lease))) "L1 revoked after cascade")
       (is (= :capability/revoked (:reason (authorize-with-lease l2-lease))) "L2 revoked after cascade")
       (is (= :capability/revoked (:reason (authorize-with-lease l3-lease))) "L3 revoked after cascade")
-      (is (= :cancelled (:state (session/get-session db l1-id))) "L1 cancelled")
-      (is (= :cancelled (:state (session/get-session db l2-id))) "L2 cancelled")
-      (is (= :cancelled (:state (session/get-session db l3-id))) "L3 cancelled")
+      (is (= :cancelled (session-work-state db l1-id)) "L1 Work cancelled")
+      (is (= :cancelled (session-work-state db l2-id)) "L2 Work cancelled")
+      (is (= :cancelled (session-work-state db l3-id)) "L3 Work cancelled")
       (let [db2 (fresh-db)
             parent2 (create-parent-session! db2)
             pid2 (:session/id parent2)
@@ -149,11 +152,11 @@
           child-lease (first capabilities)]
       (let [r1 (subagent/cancel-subagent! db parent-id child-id :user-request)]
         (is (false? (:already-cancelled? r1)) "first cancel not already-cancelled")
-        (is (= :cancelled (:state (session/get-session db child-id))) "after first, cancelled"))
+        (is (= :cancelled (session-work-state db child-id)) "after first, Work cancelled"))
       (let [before-evts (count (event/events-for-session db child-id))
             r2 (subagent/cancel-subagent! db parent-id child-id :user-request)]
         (is (true? (:already-cancelled? r2)) "second cancel reports already-cancelled")
-        (is (= :cancelled (:state (session/get-session db child-id))) "still cancelled")
+        (is (= :cancelled (session-work-state db child-id)) "still cancelled")
         (let [after-evts (count (event/events-for-session db child-id))]
           (is (= before-evts after-evts) "no duplicate :session/cancelled event on idempotent retry"))
         (is (= :capability/revoked (:reason (authorize-with-lease child-lease))) "still revoked after second cancel")

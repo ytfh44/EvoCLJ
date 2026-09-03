@@ -466,11 +466,19 @@
       (catch Exception _)))
   nil)
 
+(defn- session-work-state
+  "The session's sole execution Work state, or nil when it has no Work yet
+  (W2: Work is the sole durable lifecycle — a Session carries no runtime
+  state of its own)."
+  [db session-id]
+  (some-> (last (work-store/list-works db session-id)) :work/state))
+
 (defn cancel-subagent!
   "Cancel a single child subagent session `child-session-id` spawned from
   `parent-session-id`. Cascade: also cancels all transitive descendants
-  of the child (BFS via subagent_links), so revoking a mid-tree node
-  revokes its entire subtree.
+  - drive each target session's Work to :cancelled (CAS on works.state —
+    idempotent: already :cancelled is a no-op, other terminal Work states
+    are left as-is);
 
   Effects per target session in the subtree:
   - revoke all its leases via capability/mint revoke-lease! (fail-closed:
@@ -505,7 +513,7 @@
                       {:error/type :store/session-not-found
                        :session/id parent-id})))
     ;; idempotent: if child already cancelled, no-op (still return)
-    (if (= :cancelled (:state child))
+    (if (= :cancelled (session-work-state db child-id))
       {:cancelled [] :already-cancelled? true :child/session-id child-id}
       (let [;; collect subtree: child plus all its descendants
             descendants (list-descendants db child-id)
@@ -513,9 +521,10 @@
         ;; revoke leases for each target
         (doseq [tid targets]
           (revoke-leases-for-session* db tid))
-        ;; mark each target as cancelled (idempotent via try-cancel) and atomically drive Work CAS
+        ;; Work is the sole graceful-cancel authority: atomically drive each
+        ;; target's Work to :cancelled (CAS on works.state — the DB row is the
+        ;; truth). No Session transition is written.
         (doseq [tid targets]
-          (try (session/try-cancel-session! db tid) (catch Exception _))
           ;; W2: Work cancel is CAS on works.state — the DB row is the truth
           (try
             (let [works (work-store/list-works db tid)]
@@ -547,14 +556,13 @@
       (throw (ex-info (str "root session not found: " root-id)
                       {:error/type :store/session-not-found
                        :session/id root-id})))
-    (if (= :cancelled (:state root))
+    (if (= :cancelled (session-work-state db root-id))
       {:cancelled [] :already-cancelled? true :root/session-id root-id}
       (let [descendants (list-descendants db root-id)
             targets (into [root-id] descendants)]
         (doseq [tid targets]
           (revoke-leases-for-session* db tid))
         (doseq [tid targets]
-          (try (session/try-cancel-session! db tid) (catch Exception _))
           (try
             (let [works (work-store/list-works db tid)]
               (doseq [w works]
@@ -606,11 +614,11 @@
         (throw (ex-info (str "child session not found: " child-id)
                         {:error/type :subagent/not-found
                          :session/id child-id})))
-      (when-not (= :completed (:state child))
-        (throw (ex-info (str "child not completed: " child-id " state=" (:state child))
+      (when-not (= :succeeded (session-work-state db child-id))
+        (throw (ex-info (str "child not completed: " child-id " work=" (session-work-state db child-id))
                         {:error/type :subagent/not-completed
                          :session/id child-id
-                         :state (:state child)})))
+                         :work/state (session-work-state db child-id)})))
       (let [parent (session/get-session db parent-id)]
         (when-not parent
           (throw (ex-info (str "parent session not found: " parent-id)
@@ -661,11 +669,11 @@
         (throw (ex-info (str "child session not found: " child-id)
                         {:error/type :subagent/not-found
                          :session/id child-id})))
-      (when-not (= :failed (:state child))
-        (throw (ex-info (str "child not failed: " child-id " state=" (:state child))
+      (when-not (= :failed (session-work-state db child-id))
+        (throw (ex-info (str "child not failed: " child-id " work=" (session-work-state db child-id))
                         {:error/type :subagent/not-failed
                          :session/id child-id
-                         :state (:state child)})))
+                         :work/state (session-work-state db child-id)})))
       (let [parent (session/get-session db parent-id)]
         (when-not parent
           (throw (ex-info (str "parent session not found: " parent-id)
@@ -878,7 +886,7 @@
           {:found false :reason :session-not-found :session/id sid}
           {:found true
            :session/id (:session/id sess)
-           :state (:state sess)
+           :state (session-work-state db (:session/id sess))
            :phenotype/id (:phenotype/id sess)
            :depth (try (subagent-depth db sid) (catch Exception _ nil))
            :children (try (child-session-ids db sid) (catch Exception _ []))})))))

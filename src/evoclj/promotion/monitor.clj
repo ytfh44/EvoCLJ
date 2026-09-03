@@ -59,11 +59,12 @@
      the artifact reference. Already-running candidate sessions are
      then handled per profile:
 
-         :cancel — each running candidate session is transitioned
-             :running → :cancelled via evoclj.store.session's
-             compare-and-set (component); a session that is no longer
-             :running is recorded :skipped with its actual state, so a
-             single stop cannot be aborted by a racing worker.
+         :cancel — each running candidate session's Work is driven to
+             :cancelled via evoclj.store.work's compare-and-set (W2: Work
+             is the sole durable lifecycle — the session row is never
+             transitioned); a session with no active (queued/running/
+             waiting) Work is recorded :skipped with its terminal Work
+             state, so a single stop cannot be aborted by a racing worker.
          :finish — running candidate sessions are left running.
 
      The per-session outcome is returned so the caller can audit what
@@ -86,6 +87,7 @@
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.session :as session]
+            [evoclj.store.work :as work-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)))
 
@@ -345,27 +347,25 @@
        :prev/event-id (:id newest)})))
 
 (defn- cancel-session!
-  "The :cancel profile action for ONE already-running candidate
-  session: a compare-and-set :running → :cancelled through the store
-  (component) carrying the stop reason as transition data. A session
-  that a racing worker already moved out of :running is recorded
-  :skipped with its actual state (never an aborted stop); a missing
-  session is recorded :missing."
+  "The :cancel profile action for ONE already-running candidate session:
+  drive its active Work (queued/running/waiting) to :cancelled via
+  evoclj.store.work/cancel-work! (W2 — Work is the sole durable lifecycle;
+  the session row is never transitioned). A session whose Work already
+  reached another terminal state is recorded :skipped with that Work state
+  (never an aborted stop); a missing session is recorded :missing."
   [db session-id reason]
   (let [sid (types/session-id session-id)]
-    (try
-      (session/transition-session! db sid :running :cancelled
-                                   {:stop/reason reason})
-      {:session/id sid :action :cancelled}
-      (catch clojure.lang.ExceptionInfo e
-        (let [data (ex-data e)
-              t (:error/type data)]
-          (cond
-            (= :session/invalid-transition t)
-            {:session/id sid :action :skipped :actual-state (:actual-state data)}
-            (= :store/session-not-found t)
-            {:session/id sid :action :missing}
-            :else (throw e)))))))
+    (if-not (session/get-session db sid)
+      {:session/id sid :action :missing}
+      (let [works (work-store/list-works db sid)
+            active (filter #(contains? #{:queued :running :waiting} (:work/state %)) works)]
+        (if (seq active)
+          (do (doseq [w active]
+                (try (work-store/cancel-work! db (:work/id w))
+                     (catch Exception _ nil)))
+              {:session/id sid :action :cancelled})
+          {:session/id sid :action :skipped
+           :actual-state (some-> (last works) :work/state)})))))
 
 (defn stop-canary!
   "Record the stop of the canary generation as promotion evidence and

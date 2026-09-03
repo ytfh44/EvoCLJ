@@ -56,7 +56,7 @@
     :behavior/tool-seq     every tool id seen (:metadata :tool/id or
                            :resource/id, stringified) in event order,
                            keeping every invocation (no dedup).
-    :behavior/status       from :metadata :session/state or :status
+    :behavior/status       from :metadata :status or :work/state
                            when present (string or keyword
                            \"completed\"/\"failed\"/\"budget-exhausted\"
                            map to keywords; other values -> :unknown);
@@ -210,20 +210,30 @@
   (or (:session/id event)
       (:session/id (:metadata event))))
 
+(def ^:private work->status
+  "Work terminal state -> the canonical behavioral status keyword
+  (W2: a run's status is read from its terminal Work, never a Session state)."
+  {:succeeded :completed
+   :failed :failed
+   :cancelled :cancelled
+   :timed-out :budget-exhausted})
+
 (def ^:private status-mapping
-  "String form -> canonical session status keyword."
+  "String/keyword name -> canonical status keyword."
   {"completed" :completed
    "failed" :failed
-   "budget-exhausted" :budget-exhausted})
+   "budget-exhausted" :budget-exhausted
+   "cancelled" :cancelled})
 
 (defn- status-of
-  "The explicit session status encoded in an event's :metadata
-  :session/state or :status (string or keyword), mapped to a canonical
-  keyword. Returns nil when no explicit status is present, or
-  :unknown when the value is not one of the three terminal statuses."
+  "The explicit run status encoded in an event's :metadata :status, or
+  derived from the event's :work/state (Work terminal state), mapped to a
+  canonical keyword. Returns nil when neither is present, or :unknown when
+  the value is not one of the terminal statuses."
   [event]
-  (let [v (or (:session/state (:metadata event))
-              (:status (:metadata event)))]
+  (let [m (:metadata event)
+        v (or (:status m)
+              (get work->status (:work/state m)))]
     (when-not (nil? v)
       (get status-mapping (str/lower-case (if (keyword? v) (name v) (str v)))
            :unknown))))

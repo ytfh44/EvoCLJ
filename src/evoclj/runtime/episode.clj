@@ -64,6 +64,7 @@
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.session :as session]
+            [evoclj.store.work :as work-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
            (java.time.format DateTimeFormatter)
@@ -156,6 +157,23 @@
 
 ;; --- the materialization ------------------------------------------------------
 
+(def ^:private work-terminal-state->outcome
+  "Work terminal state -> the Episode :outcome :status keyword
+  (W2: the episode's outcome is derived from the session's terminal Work,
+  never from a Session transition)."
+  {:succeeded :completed
+   :failed :failed
+   :cancelled :cancelled
+   :timed-out :budget-exhausted})
+
+(defn- session-terminal-work
+  "The session's terminal Work, or nil when no Work has reached a terminal
+  state (W2: a terminal Work is the sole durable proof the session has run
+  to a conclusion)."
+  [db session-id]
+  (some #(when (contains? (set (keys work-terminal-state->outcome)) (:work/state %)) %)
+        (work-store/list-works db session-id)))
+
 (defn materialize-episode!
   "Materialize the immutable Episode record for a TERMINAL session
   (component) and return the Episode contract map.
@@ -170,12 +188,13 @@
   Constraint 21). The task artifact is verified to resolve in the CAS
   before the row commits.
 
-  Terminal sessions only: :created/:resolving/:running/:waiting
-  sessions are rejected with :episode/not-terminal. :completed,
-  :failed, and :budget-exhausted all become episodes — failures are
-  evidence, not discarded traces. Materializing the same session
-  twice is idempotent: the existing episode is returned and no row is
-  duplicated.
+  Terminal sessions only: a session with no terminal Work is rejected
+  with :episode/not-terminal (W2: Work terminal state is the sole durable
+  proof of completion). A terminal Work becomes an episode — its :outcome
+  :status maps :succeeded→:completed, :failed→:failed, :cancelled→:cancelled,
+  :timed-out→:budget-exhausted; failures are evidence, not discarded traces.
+  Materializing the same session twice is idempotent: the existing episode
+  is returned and no row is duplicated.
 
   Typed errors: :episode/store-invalid, :episode/session-not-found,
   :episode/not-terminal, :episode/task-ref-missing,
@@ -184,16 +203,17 @@
   (validate-store! store)
   (let [db (:sqlite store)
         sid (types/session-id session-id)
-        s (session/get-session db sid)]
+        s (session/get-session db sid)
+        tw (session-terminal-work db sid)]
     (when-not s
       (throw (episode-error :episode/session-not-found
                             "no session with this id"
                             {:session/id sid})))
-    (when-not (contains? session/terminal-states (:state s))
+    (when-not tw
       (throw (episode-error :episode/not-terminal
                             "only terminal sessions become episodes"
                             {:session/id sid
-                             :session/state (:state s)})))
+                             :work/state nil})))
     (let [existing (first (sqlite/query db
                                         ["SELECT * FROM episodes WHERE session_id = ?"
                                          (str sid)]))]
@@ -219,7 +239,7 @@
                                   "the session's task artifact is missing from the CAS"
                                   {:session/id sid :task-ref task-ref})))
           (let [eid (UUID/randomUUID)
-                outcome {:status (:state s) :score nil}
+                outcome {:status (get work-terminal-state->outcome (:work/state tw)) :score nil}
                 ts (canonical-timestamp nil)]
             (sqlite/with-db [conn db]
               (jdbc/insert! conn :episodes

@@ -45,16 +45,14 @@
   against the wrong phenotype (the session's pinned identity is the
   store's contract, not the executor's claim).
 
-  SESSION STATE MACHINE: the store's normative machine (component) is
-  authoritative. The task text abbreviates the scheduler's transitions
-  as :created → :running → :completed | :failed | :budget-exhausted;
-  the store has no :created → :running edge and no :running →
-  :completed edge (component: :created → :resolving → :running ↔
-  :waiting → :completed), so run-session! walks :created → :resolving
-  → :running, then :running → :failed | :budget-exhausted directly, or
-  :running → :waiting → :completed for a successful run (two
-  compare-and-set hops). Only sessions in :created are accepted;
-  anything else is :scheduler/session-invalid :reason :not-created.
+  LIFECYCLE: Work is the sole durable lifecycle (W2). Sessions are
+  immutable identity pins (pinned genome/resolution/phenotype/generation)
+  with no runtime state machine — the runtime no longer drives any Session
+  transition. run-session! accepts a session with no terminal Work and
+  drives its ONE Work (:session/run) queued → running → (waiting →)
+  succeeded | failed | timed-out; the run's :status is read back from the
+  Work terminal state. A session whose Work is already terminal is rejected
+  with :scheduler/session-invalid :reason :already-terminal.
 
   CAUSAL ANCHORING: every session's causal chain opens with a
   :session/created root event appended by the host at creation time
@@ -445,22 +443,41 @@
 
 ;; --- terminal session outcomes ----------------------------------------------
 
+(defn- session-work-id
+  "The session's sole execution Work id (W2: one mandatory Work per run,
+  resolved from the store — Work is the durable execution identity). nil
+  when the session has not yet minted a Work."
+  [db session-id]
+  (some-> (last (work-store/list-works db session-id)) :work/id))
+
+(defn- terminal-work-for
+  "The session's first terminal Work (:succeeded/:failed/:cancelled/:timed-out),
+  or nil when the session has no terminal Work yet (W2: a terminal Work is
+  the durable proof the session has already run to a conclusion)."
+  [db session-id]
+  (some #(when (work/terminal? (:work/state %)) %)
+        (work-store/list-works db session-id)))
+
 (defn- fail-session!
-  "Fail the session (component Step 4): store the serializable error
-  payload as a CAS artifact, append :node/failed (chained to `cause`,
-  :payload-ref = the artifact), transition the session to :failed, and
-  append :session/failed carrying the artifact ref in its metadata
-  (:error/artifact-ref). Returns the run result map."
+  "Fail the run: store the serializable error payload as a CAS artifact,
+  append :node/failed (chained to `cause`, :payload-ref = the artifact),
+  drive the session's Work to :failed (the SOLE durable lifecycle — the
+  Work terminal state IS the failure truth), and append :session/failed
+  carrying the artifact ref in its metadata (:error/artifact-ref). Returns
+  the run result map (its :status is derived from the Work :failed terminal
+  state, never a Session transition)."
   [executor pin cause node-id step error-data outputs]
-  (let [error-ref (put-payload! executor error-data)
+  (let [db (:sqlite (:stores executor))
+        error-ref (put-payload! executor error-data)
         node-failed (append-event! executor pin cause :node/failed error-ref
                                    {:node/id node-id
                                     :step step
                                     :error/type (:error/type error-data)})]
-    (session/transition-session! (:sqlite (:stores executor))
-                                 (:session/id pin) :running :failed nil)
+    (try-work-transition! db (session-work-id db (:session/id pin))
+                          work-store/fail-work! nil)
     (append-event! executor pin (:event/id node-failed) :session/failed error-ref
-                   {:error/artifact-ref error-ref
+                   {:status :failed
+                    :error/artifact-ref error-ref
                     :error/type (:error/type error-data)})
     {:status :failed
      :session/id (:session/id pin)
@@ -470,16 +487,20 @@
 
 (defn- budget-exhaust!
   "Halt the run when the topology's :max-steps budget is consumed
-  (component Step 2): transition the session to :budget-exhausted and
-  append :session/budget-exhausted carrying the limit, the steps
-  consumed, and the accumulated outputs as a CAS artifact. Returns the
-  run result map."
+  (component Step 2): drive the session's Work to :timed-out (the SOLE
+  durable lifecycle — a consumed step/loop budget is a Work timeout, not a
+  Session transition) and append :session/budget-exhausted carrying the
+  limit, the steps consumed, and the accumulated outputs as a CAS artifact.
+  Returns the run result map (its :status is derived from the Work
+  :timed-out terminal state)."
   [executor pin cause outputs limits steps]
-  (let [out-ref (outputs-ref executor outputs)]
-    (session/transition-session! (:sqlite (:stores executor))
-                                 (:session/id pin) :running :budget-exhausted nil)
+  (let [db (:sqlite (:stores executor))
+        out-ref (outputs-ref executor outputs)]
+    (try-work-transition! db (session-work-id db (:session/id pin))
+                          work-store/timeout-work!)
     (append-event! executor pin cause :session/budget-exhausted out-ref
-                   {:limits limits :steps steps :output/ref out-ref})
+                   {:status :budget-exhausted
+                    :limits limits :steps steps :output/ref out-ref})
     {:status :budget-exhausted
      :session/id (:session/id pin)
      :output-ref out-ref
@@ -521,17 +542,18 @@
   (never assumes the pin), walks the compiled topology from :entry,
   steps each node's handler, dispatches every emitted intent through
   evoclj.intent.dispatch! (the broker), feeds the provider results
-  back into the accumulated :outputs, and persists EVERY transition
-  via evoclj.store.event/append-event! (node/started, node/completed,
+  back into the accumulated :outputs, and persists EVERY event via
+  evoclj.store.event/append-event! (node/started, node/completed,
   intent/proposed, intent/authorized | intent/denied,
-  provider/call-started, provider/call-completed, ...) and
-  evoclj.store.session/transition-session! (:created → :resolving →
-  :running → :waiting → :completed | :failed | :budget-exhausted —
-  the store's normative state machine). The topology's :limits
-  {:max-steps N}
-  halts overlong runs as :budget-exhausted; an unhandled node failure
-  fails the session with the error payload preserved as a CAS artifact
-  ref in the :session/failed event metadata.
+  provider/call-started, provider/call-completed, ...). Work is the sole
+  durable lifecycle: the run drives ONE Work (:session/run) queued →
+  running → (waiting →) succeeded | failed | timed-out — the run result's
+  :status (:completed | :failed | :budget-exhausted) is derived from that
+  Work terminal state, never a Session transition. The topology's :limits
+  {:max-steps N} halts overlong runs as :budget-exhausted (Work
+  :timed-out); an unhandled node failure fails the session (Work :failed)
+  with the error payload preserved as a CAS artifact ref in the
+  :session/failed event metadata.
 
   See the namespace docstring for the executor map shape, the returned
   result map, and the error contract (:scheduler/executor-invalid,
@@ -552,12 +574,13 @@
                         "no session with this id"
                         {:reason :not-found
                          :session/id session-id})))
-    (when-not (= :created (:state pin))
+    (when-let [tw (terminal-work-for db session-id)]
       (throw (err/error :scheduler/session-invalid
-                        "run-session! starts only sessions in :created"
-                        {:reason :not-created
+                        "run-session! refuses a session whose Work is already terminal"
+                        {:reason :already-terminal
                          :session/id (:session/id pin)
-                         :state (:state pin)})))
+                         :work/id (:work/id tw)
+                         :work/state (:work/state tw)})))
     ;; pin verification: the session's pinned identity IS the store's
     ;; contract — the executor must agree with it, never the reverse
     (let [compiled (:compiled (:phenotype executor))]
@@ -606,8 +629,6 @@
                            :session/id (:session/id pin)
                            :first-event (:event/type root)})))
 
-      ;; the store's state machine has no :created → :running edge;
-      ;; the :resolving hop is the normative path (component)
       ;; WO-B1 production wiring: restore the session's durable bindings
       ;; into the executor's runtime registries BEFORE the session leaves
       ;; :created (see restore-session-runtime! for the failure
@@ -621,8 +642,6 @@
                           work-id)
                       (create-session-work! db (:session/id pin)))
             _work-running (try-work-transition! db work-id work-store/dispatch-work!)]
-        (session/transition-session! db (:session/id pin) :created :resolving nil)
-        (session/transition-session! db (:session/id pin) :resolving :running nil)
         (let [started (append-event! executor pin (:event/id root) :session/started
                                      (put-payload! executor task-input)
                                      {:entry entry :work/id work-id})
@@ -646,10 +665,8 @@
                                     :error/message "work was cancelled or timed-out (CAS)"
                                     :work/id work-id} outputs)
                     (and max-steps (>= steps max-steps))
-                (do (let [out (budget-exhaust! executor pin (:event/id last-event)
-                                                outputs limits steps)]
-                      (try-work-transition! db work-id work-store/timeout-work!)
-                      out))
+                    (budget-exhaust! executor pin (:event/id last-event)
+                                     outputs limits steps)
                     :else
                     (let [node (get (:nodes topology) node-id)]
                   (if-not node
@@ -712,16 +729,9 @@
                                              {:node/id node-id
                                               :step (inc steps)
                                               :transition/status :complete})]
-                              ;; the store's state machine has no
-                              ;; :running → :completed edge (component:
-                              ;; :running ↔ :waiting → :completed), so
-                              ;; completion walks :running → :waiting →
-                              ;; :completed
-                              (session/transition-session! db (:session/id pin)
-                                                           :running :waiting nil)
-                              (session/transition-session! db (:session/id pin)
-                                                           :waiting :completed nil)
-                              ;; W1 Work mirror: running -> waiting -> succeeded (acyclic)
+                              ;; W2 Work mirror: running -> waiting -> succeeded
+                              ;; (acyclic). Work's :succeeded IS the run's
+                              ;; completion truth — no Session transition.
                               (try-work-transition! db work-id work-store/wait-work!)
                               (try-work-transition! db work-id work-store/succeed-work! out-ref)
                               (append-event! executor pin (:event/id completed)

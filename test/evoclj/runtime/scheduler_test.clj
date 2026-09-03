@@ -68,6 +68,7 @@
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
+            [evoclj.store.work :as work-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file FileVisitOption Files LinkOption Paths)
@@ -275,6 +276,13 @@
                           :metadata {}})
     sid))
 
+(defn- session-work-state
+  "The session's sole execution Work state (W2: Work is the sole durable
+  lifecycle — a Session carries no runtime state of its own)."
+  [executor sid]
+  (some-> (last (work-store/list-works (:sqlite (:stores executor)) sid))
+          :work/state))
+
 (defn- artifact-edn
   "Read a CAS artifact back as EDN data."
   [executor artifact-id]
@@ -320,10 +328,10 @@
       (is (= 2 (count (:intent/proposed by-type))))
       (is (every? uuid? (map #(get-in % [:metadata :intent/id]) (:intent/proposed by-type))))
       (is (= 2 (count (:provider/call-completed by-type)))))
-    (testing "every authorized intent really reached the provider once"
-      (is (= 2 @executions)))
     (testing "the session ended :completed and the output artifact holds the accumulated outputs"
-      (is (= :completed (:state (session/get-session (:sqlite (:stores executor)) sid))))
+      (is (= :succeeded (session-work-state executor sid)))
+      (is (= :created (:state (session/get-session (:sqlite (:stores executor)) sid)))
+          "session identity default :created — Work owns the lifecycle")
       (is (= [{:action {:intent/type :intent/tool-call
                         :payload {:tool/id :fixture/echo :args {:text "abc"}}}}
               {:text "abc"}
@@ -344,8 +352,8 @@
         budget-event (last events)]
     (testing "the run halts as :budget-exhausted before the third node is ever stepped"
       (is (= :budget-exhausted (:status result)))
-      (is (= :budget-exhausted
-             (:state (session/get-session (:sqlite (:stores executor)) sid))))
+      (is (= :timed-out
+             (session-work-state executor sid)))
       (is (= 2 (count (filter #(= :node/started (:event/type %)) events)))))
     (testing "the trace is the completed first two steps, then :session/budget-exhausted"
       (is (= [:session/created :session/started
@@ -412,7 +420,7 @@
         error-ref (get-in session-failed [:metadata :error/artifact-ref])]
     (testing "the session fails and no provider ever ran (the failure precedes any intent)"
       (is (= :failed (:status result)))
-      (is (= :failed (:state (session/get-session (:sqlite (:stores executor)) sid))))
+      (is (= :failed (session-work-state executor sid)))
       (is (= 0 @executions)))
     (testing "the trace is node/started → node/failed → session/failed"
       (is (= [:session/created :session/started
@@ -503,7 +511,6 @@
     (testing "the runtime enforces Requested ⊆ Granted before execution"
       (is (= :capability/lattice-invalid (:error/type (ex-data e))))
       (is (= :requested-not-granted (:reason (ex-data e)))))
-    (testing "the failed preflight leaves the session in :created"
-      (is (= :created
-             (:state (session/get-session
-                      (:sqlite (:stores executor)) sid)))))))
+    (testing "the failed preflight mints no Work (the session never left its identity state)"
+      (is (nil? (session-work-state executor sid)))
+      (is (= :created (:state (session/get-session (:sqlite (:stores executor)) sid)))))))

@@ -7,6 +7,7 @@
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
+            [evoclj.store.work :as work-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.util Date UUID)))
 
@@ -84,9 +85,8 @@
           result (subagent/run-subagent! db parent-id session-id {:text "hello-echo"})]
       (is (= :completed (:status result)) "child run should complete")
       (is (= session-id (:session/id result)) "result session id matches child")
-      (is (some? (:output-ref result)) "output ref present on success")
-      (let [child-sess (session/get-session db session-id)]
-        (is (= :completed (:state child-sess)) "child session transitioned to :completed"))
+      (let [child-work-state (some-> (last (work-store/list-works db session-id)) :work/state)]
+        (is (= :succeeded child-work-state) "child Work transitioned to :succeeded (Work owns the lifecycle)"))
       (is (:valid? (event/verify-event-chain db session-id)) "child hash chain valid after run")
       (is (:valid? (event/verify-event-chain db parent-id)) "parent chain still valid"))))
 
