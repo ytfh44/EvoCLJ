@@ -14,6 +14,7 @@
   boundary (closed map) — widening via unknown-field passthrough is
   removed."
   (:require [clojure.set :as set]
+            [evoclj.capability.registry :as reg]
             [evoclj.kernel.error :as err]))
 
 ;; ---------------------------------------------------------------------------
@@ -93,35 +94,64 @@
       (and (some? max-bytes) (>= consumed max-bytes)))))
 
 ;; ---------------------------------------------------------------------------
-;; Registry — closed installation, modular definition
+;; Registry — sealed closed installation, modular definition (C3)
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private registry-atom
-  (atom {}))
+(def ^:private builtin-descriptors
+  "The built-in Constraint descriptors installed at boot (definition)."
+  [(->MaxCallsDescriptor)
+   (->MaxBytesDescriptor)])
 
-(defn register!
-  "Register a ConstraintDescriptor. Closed installation — idempotent."
-  [descriptor]
-  (let [k (ckey descriptor)]
-    (swap! registry-atom assoc k descriptor)
-    descriptor))
+(defn- descriptor-key
+  "Registry key for a descriptor: its (ckey)."
+  [d] (ckey d))
 
-(defn unregister!
-  "Remove descriptor for k (test only)."
-  [k]
-  (swap! registry-atom dissoc k) nil)
+(defn- validate-descriptor
+  "Throw :capability/invalid-descriptor unless d satisfies the protocol and
+  keys to a keyword."
+  [d]
+  (when-not (satisfies? ConstraintDescriptor d)
+    (throw (err/error :capability/invalid-descriptor
+                      "descriptor must satisfy ConstraintDescriptor"
+                      {:value (try (str (type d)) (catch Exception _ "unknown"))})))
+  (let [k (ckey d)]
+    (when-not (keyword? k)
+      (throw (err/error :capability/invalid-descriptor
+                        "descriptor key must be a keyword"
+                        {:key k})))))
+
+(defn build-registry
+  "Build an UNSEALED registry seeded with `descriptors` (each validated and
+  keyed by this namespace's rule). This is the support/test entry point for
+  constructing a SEPARATE registry holding custom descriptors — to be threaded
+  via `binding` *registry* — without mutating the sealed global. Grow it with
+  evoclj.capability.registry/add!, freeze it with seal-registry!."
+  [descriptors]
+  (reg/build-registry descriptor-key validate-descriptor descriptors))
+
+(defonce ^{:dynamic true
+           :doc "The sealed global Constraint registry (boot -> build -> seal at load).
+
+  Lattice and budget decisions (le?/meet/exceeded?) read this sealed registry:
+  once sealed, no constraint descriptor can be added or removed, so a lease's
+  quota semantics cannot change for the execution lifetime. Tests that need a
+  custom descriptor build a SEPARATE registry via
+  evoclj.capability.registry/build-registry and `binding` it here."}
+  *registry*
+  (reg/seal-registry!
+   (reg/build-registry descriptor-key validate-descriptor builtin-descriptors)))
 
 (defn get-descriptor
-  "Get descriptor for constraint key, or nil."
-  [k] (get @registry-atom k))
+  "Get descriptor for constraint key, or nil (from the active registry)."
+  [k] (reg/get-descriptor *registry* k))
 
 (defn all-descriptors
-  "Map of key -> descriptor."
-  [] @registry-atom)
+  "Map of key -> descriptor (from the active registry)."
+  [] (reg/all-descriptors *registry*))
 
 (defn allowed-keys
-  "Set of registered constraint keywords."
-  [] (set (keys @registry-atom)))
+  "Set of registered constraint keywords (from the active registry)."
+  [] (reg/allowed-keys *registry*))
 
 ;; Canonicalization: :maxBytes -> :max-bytes
 (defn canonicalize-constraints
@@ -234,9 +264,3 @@
   "Legacy helper — not used. Kept for symmetry."
   [m] m)
 
-;; ---------------------------------------------------------------------------
-;; Install built-ins
-;; ---------------------------------------------------------------------------
-
-(doseq [d [(->MaxCallsDescriptor) (->MaxBytesDescriptor)]]
-  (register! d))

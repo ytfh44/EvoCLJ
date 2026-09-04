@@ -41,6 +41,7 @@
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [evoclj.capability.broker :as broker]
+            [evoclj.capability.registry :as reg]
             [evoclj.capability.resource-kind :as rk]
             [evoclj.intent.core :as intent]
             [evoclj.provider.fixture :as fixture]
@@ -209,12 +210,11 @@
     (deserialize [_ s] (try (clojure.edn/read-string s) (catch Exception _ nil)))
     (allowed-actions [_] #{:read})
     (authorization-targets [_] [{:source :request :action-from :request}])))
-
 (deftest custom-registry-dispatches-uniformly-not-hardcoded
-  (testing "a custom ResourceKindDescriptor (registered, no lease/policy/
-            broker change) dispatches uniformly — a brand-new kind
-            authorizes via its own request target, fail-closed before and
-            after registration"
+  (testing "a custom ResourceKindDescriptor (built via build-registry, no
+            lease/policy/broker change) dispatches uniformly — a brand-new
+            kind authorizes via its own request target, fail-closed before and
+            after the custom registry scope"
     (let [normalized {:tool/id path-tool-id
                       :resource {:kind :custom/bucket :bucket "prod" :action :read}}
           bucket-lease {:cap/id #uuid "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -223,21 +223,36 @@
                         :actions #{:read}
                         :constraints {:max-calls 10}
                         :issued-at issued-at
-                        :expires-at expires-at}]
+                        :expires-at expires-at}
+          ;; a SEPARATE registry holding the custom descriptor — built via the
+          ;; support entry point, never by mutating the sealed global registry.
+          custom-registry (rk/build-registry [custom-bucket-descriptor])]
       (testing "unregistered kind denied fail-closed"
         (is (= :capability/unknown-resource-kind
                (:reason (authorize normalized [bucket-lease])))))
-      (testing "registered descriptor authorizes via its request target alone"
-        (rk/register! custom-bucket-descriptor)
-        (try
+      (testing "separate registry authorizes via its request target alone"
+        (binding [rk/*registry* custom-registry]
           (is (allow? (authorize normalized [bucket-lease])))
           (is (not (allow? (authorize (assoc-in normalized [:resource :bucket] "other")
-                                      [bucket-lease]))))
-          (finally
-            (rk/unregister! :custom/bucket))))
+                                      [bucket-lease]))))))
       (testing "unregistered again denied fail-closed"
         (is (= :capability/unknown-resource-kind
                (:reason (authorize normalized [bucket-lease]))))))))
+
+(deftest global-registry-is-sealed-and-immutable
+  (testing "the global ResourceKind registry is sealed at boot and cannot be
+            mutated — register/unregister on it throw :capability/registry-sealed
+            and its descriptor set is unchanged"
+    (let [before (set (rk/allowed-kinds))]
+      (is (reg/sealed? rk/*registry*) "global registry is sealed")
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (reg/add! rk/*registry* custom-bucket-descriptor))
+          "adding to the sealed global throws")
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (reg/remove! rk/*registry* :tool))
+          "removing from the sealed global throws")
+      (is (= (set (rk/allowed-kinds)) before)
+          "descriptor set unchanged after rejected mutation"))))
 
 (deftest built-in-kinds-still-dispatch-through-registry
   (testing "tool, model, memory, and filesystem kinds each authorize via

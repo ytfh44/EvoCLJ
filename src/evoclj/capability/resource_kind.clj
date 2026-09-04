@@ -23,6 +23,7 @@
   owned here, not in lease, so lease dispatches uniformly."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
+            [evoclj.capability.registry :as reg]
             [evoclj.kernel.error :as err]))
 
 ;; ---------------------------------------------------------------------------
@@ -214,53 +215,73 @@
   (allowed-actions [_] #{:invoke :read :list :stat :write :create :delete})
   (authorization-targets [_] [{:source :tool :action-from :intent}
                                {:source :request :action-from :request}]))
-
 ;; ---------------------------------------------------------------------------
-;; Registry — closed installation, modular definition
+;; Registry — sealed closed installation, modular definition (C1)
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private registry-atom
-  ;; Closed installation registry: kind keyword -> descriptor.
-  ;; Populated with built-ins at load; additional kinds are added by defining
-  ;; a descriptor and calling register! — no changes to lease/policy/broker/store.
-  (atom {}))
+(def ^:private builtin-descriptors
+  "The built-in ResourceKind descriptors installed at boot (definition)."
+  [(map->ToolDescriptor {})
+   (map->MemoryDescriptor {})
+   (map->ModelDescriptor {})
+   (map->FilesystemDescriptor {})
+   (map->FilesystemPathDescriptor {})])
 
-(defn register!
-  "Register a ResourceKindDescriptor. The descriptor's (kind) is its key.
-  Throws if descriptor does not satisfy the protocol or kind is not a keyword."
-  [descriptor]
-  (when-not (satisfies? ResourceKindDescriptor descriptor)
+(defn- descriptor-key
+  "Registry key for a descriptor: its (kind)."
+  [d] (kind d))
+
+(defn- validate-descriptor
+  "Throw :capability/invalid-descriptor unless d satisfies the protocol and
+  keys to a keyword."
+  [d]
+  (when-not (satisfies? ResourceKindDescriptor d)
     (throw (err/error :capability/invalid-descriptor
                       "descriptor must satisfy ResourceKindDescriptor"
-                      {:value (try (str (type descriptor)) (catch Exception _ "unknown"))})))
-  (let [k (kind descriptor)]
+                      {:value (try (str (type d)) (catch Exception _ "unknown"))})))
+  (let [k (kind d)]
     (when-not (keyword? k)
       (throw (err/error :capability/invalid-descriptor
                         "descriptor kind must be a keyword"
-                        {:kind k})))
-    (swap! registry-atom assoc k descriptor)
-    descriptor))
+                        {:kind k})))))
 
-(defn unregister!
-  "Remove a descriptor for kind (test helper)."
-  [k]
-  (swap! registry-atom dissoc k) nil)
+(defn build-registry
+  "Build an UNSEALED registry seeded with `descriptors` (each validated and
+  keyed by this namespace's rule). This is the support/test entry point for
+  constructing a SEPARATE registry holding custom descriptors — to be threaded
+  via `binding` *registry* — without mutating the sealed global. Grow it with
+  evoclj.capability.registry/add!, freeze it with seal-registry!."
+  [descriptors]
+  (reg/build-registry descriptor-key validate-descriptor descriptors))
+
+(defonce ^{:dynamic true
+           :doc "The sealed global ResourceKind registry (boot -> build -> seal at load).
+
+  Production decisions read this sealed registry: once sealed, no descriptor
+  can be added or removed, so an already-issued lease's meaning is stable for
+  the whole execution lifetime. Tests that need a custom descriptor build a
+  SEPARATE registry via evoclj.capability.registry/build-registry and
+  `binding` it here, never mutating the global."}
+  *registry*
+  (reg/seal-registry!
+   (reg/build-registry descriptor-key validate-descriptor builtin-descriptors)))
 
 (defn get-descriptor
-  "Get descriptor for kind keyword, or nil."
-  [k] (get @registry-atom k))
+  "Get descriptor for kind keyword, or nil (from the active registry)."
+  [k] (reg/get-descriptor *registry* k))
 
 (defn all-descriptors
-  "Return map of kind -> descriptor."
-  [] @registry-atom)
+  "Return map of kind -> descriptor (from the active registry)."
+  [] (reg/all-descriptors *registry*))
 
 (defn allowed-kinds
-  "Set of registered kind keywords."
-  [] (set (keys @registry-atom)))
+  "Set of registered kind keywords (from the active registry)."
+  [] (reg/allowed-keys *registry*))
 
 (defn allowed-actions-by-kind
   "Map of kind -> allowed-actions set derived from descriptors."
-  [] (into {} (map (fn [[k d]] [k (allowed-actions d)]) @registry-atom)))
+  [] (into {} (map (fn [[k d]] [k (allowed-actions d)])
+                   (reg/all-descriptors *registry*))))
 
 (defn authorization-targets-for
   "Vector of broker targets for kind, or nil when unknown."
@@ -308,13 +329,3 @@
           (or (try (deserialize (get-descriptor (:kind m)) s) (catch Exception _ nil)) m))
         m))))
 
-;; ---------------------------------------------------------------------------
-;; Install built-ins
-;; ---------------------------------------------------------------------------
-
-(doseq [d [(map->ToolDescriptor {})
-           (map->MemoryDescriptor {})
-           (map->ModelDescriptor {})
-           (map->FilesystemDescriptor {})
-           (map->FilesystemPathDescriptor {})]]
-  (register! d))
