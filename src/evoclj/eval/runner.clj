@@ -59,6 +59,7 @@
       present; defaults to {:kind :model :id \"*/*\"}."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
+            [evoclj.capability.constraint :as constraint]
             [evoclj.compiler.core :as compiler]
             [evoclj.genome.load :as load]
             [evoclj.genome.path :as genome-path]
@@ -309,8 +310,9 @@
   value (each output from a model dispatch carries :usage and/or
   :model-cost-units/:provider-reported-cost — scanned with
   usage-from-output and combined with runtime.usage/add), plus (b)
-  :provider-calls (the total broker call count from the usage atom,
-  which maps :cap/id -> count) and (c) :steps / :wall-ms when the
+  :provider-calls (the total broker CALL count — the sum of the :calls
+  counter across every lease in the usage atom) and (c) :steps /
+  :wall-ms when the
   scheduler result reports them (v0's scheduler result does not, so
   they are absent unless a future scheduler emits them).
 
@@ -325,7 +327,7 @@
                           acc))
                       usage/empty-usage
                       (or outputs []))
-        calls (reduce + 0 (vals @usage-atom))
+        calls (constraint/total-calls @usage-atom)
         sample (cond-> model
                  (contains? run :steps) (assoc :steps (:steps run))
                  (contains? run :wall-ms) (assoc :wall-ms (:wall-ms run)))

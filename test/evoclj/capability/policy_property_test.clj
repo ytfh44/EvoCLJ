@@ -128,16 +128,19 @@
 
 (defn- usage-gen
   "Generator of a usage map for `leases`: each lease's :cap/id is
-  either absent from usage or carries 0-6 calls already consumed."
+  either absent or carries an entry {:calls c :bytes b} with independent
+  0-6 counters, so both the :max-calls and :max-bytes dimensions are
+  exercised by the properties."
   [leases]
   (gen/fmap
-   (fn [counts]
+   (fn [entries]
      (into {}
            (keep-indexed (fn [i l]
-                           (when-let [c (nth counts i)]
-                             [(:cap/id l) c]))
+                           (when-let [[calls bytes] (nth entries i)]
+                             [(:cap/id l) {:calls calls :bytes bytes}]))
                          leases)))
-   (gen/vector (gen/one-of [(gen/return nil) (gen/choose 0 6)])
+   (gen/vector (gen/one-of [(gen/return nil)
+                            (gen/tuple (gen/choose 0 6) (gen/choose 0 6))])
                (count leases))))
 
 (defn- dedupe-by-id

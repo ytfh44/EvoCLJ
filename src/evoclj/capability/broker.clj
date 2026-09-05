@@ -38,11 +38,12 @@
   - :leases             a collection of CapabilityLease values
                         (evoclj.capability.schema; validated by the
                         policy). nil means no grant at all.
-  - :usage              per-lease call usage: a map from :cap/id to
-                        the number of calls already consumed under
-                        that lease, so :constraints {:max-calls N}
-                        is enforced by the policy. nil means no usage
-                        consumed.
+  - :usage              per-lease usage: a map from :cap/id to an entry
+                        {:calls N :bytes B} with the calls and bytes
+                        already consumed under that lease, so
+                        :constraints {:max-calls N} / {:max-bytes B}
+                        are enforced on their OWN dimensions by the
+                        policy. nil means no usage consumed.
   - :now                the decision instant, an #inst value.
   - :registry           (optional) a sealed ResourceKindRegistry from
                         evoclj.broker.registry overriding the built-in

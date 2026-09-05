@@ -222,15 +222,15 @@
            (:reason (decision [(lease :resource {:kind :tool :id :fixture/other})])))))
   (testing "an exhausted :max-calls denies with :capability/budget-exceeded"
     (is (= :capability/budget-exceeded
-           (:reason (decision [(lease :constraints {:max-calls 2})] {echo-cap-id 2})))))
+           (:reason (decision [(lease :constraints {:max-calls 2})] {echo-cap-id {:calls 2 :bytes 0}})))))
   (testing "the call-budget boundary is exact: consumed < max-calls allows"
-    (is (allow-decision? (decision [(lease :constraints {:max-calls 2})] {echo-cap-id 1})))
-    (is (allow-decision? (decision [(lease :constraints {:max-calls 2})] {echo-cap-id 0})))
-    (is (allow-decision? (decision [(lease :constraints {:max-calls 10})] {echo-cap-id 9})))
+    (is (allow-decision? (decision [(lease :constraints {:max-calls 2})] {echo-cap-id {:calls 1 :bytes 0}})))
+    (is (allow-decision? (decision [(lease :constraints {:max-calls 2})] {echo-cap-id {:calls 0 :bytes 0}})))
+    (is (allow-decision? (decision [(lease :constraints {:max-calls 10})] {echo-cap-id {:calls 9 :bytes 0}})))
     (is (= :capability/budget-exceeded
-           (:reason (decision [(lease :constraints {:max-calls 10})] {echo-cap-id 10})))))
+           (:reason (decision [(lease :constraints {:max-calls 10})] {echo-cap-id {:calls 10 :bytes 0}})))))
   (testing "an absent :max-calls is unlimited"
-    (is (allow-decision? (decision [(lease :constraints {})] {echo-cap-id 999}))))
+    (is (allow-decision? (decision [(lease :constraints {})] {echo-cap-id {:calls 999 :bytes 0}}))))
   (testing "the window boundaries hold at the broker level"
     (is (allow-decision? (decision [(lease)] {} issued-at)))
     (is (= :capability/expired (:reason (decision [(lease)] {} expires-at))))))
@@ -296,7 +296,7 @@
   (testing "malformed usage, instant, and lease are rejected"
     (is (schema-invalid?
          #(broker/authorize {:intent echo-intent :normalized-request echo-request
-                             :leases [(lease)] :usage {echo-cap-id -1} :now in-window})))
+                             :leases [(lease)] :usage {echo-cap-id {:calls -1 :bytes 0}} :now in-window})))
     (is (schema-invalid?
          #(broker/authorize {:intent echo-intent :normalized-request echo-request
                              :leases [(lease)] :usage {} :now 1700001800000})))
@@ -432,17 +432,17 @@
 
 (deftest call-budget-edge-exactly-at-max
   (testing "the tool lease admits the call AT max-1 and denies AT max with :capability/budget-exceeded"
-    (is (allow-decision? (decision [(lease :constraints {:max-calls 2})] {echo-cap-id 1})))
+    (is (allow-decision? (decision [(lease :constraints {:max-calls 2})] {echo-cap-id {:calls 1 :bytes 0}})))
     (is (= :capability/budget-exceeded
-           (:reason (decision [(lease :constraints {:max-calls 2})] {echo-cap-id 2}))))
+           (:reason (decision [(lease :constraints {:max-calls 2})] {echo-cap-id {:calls 2 :bytes 0}}))))
     (is (= :capability/budget-exceeded
-           (:reason (decision [(lease :constraints {:max-calls 2})] {echo-cap-id 3})))))
+           (:reason (decision [(lease :constraints {:max-calls 2})] {echo-cap-id {:calls 3 :bytes 0}})))))
   (testing "the model lease has the same exact edge"
     (is (allow-decision? (model-decision [(model-lease :constraints {:max-calls 2})]
-                                         model-a-id {model-cap-id 1})))
+                                         model-a-id {model-cap-id {:calls 1 :bytes 0}})))
     (is (= :capability/budget-exceeded
            (:reason (model-decision [(model-lease :constraints {:max-calls 2})]
-                                    model-a-id {model-cap-id 2}))))
+                                    model-a-id {model-cap-id {:calls 2 :bytes 0}}))))
     (is (= :capability/budget-exceeded
            (:reason (model-decision [(model-lease :constraints {:max-calls 2})]
-                                    model-a-id {model-cap-id 3}))))))
+                                    model-a-id {model-cap-id {:calls 3 :bytes 0}}))))))

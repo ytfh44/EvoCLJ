@@ -35,13 +35,15 @@
   host-side bugs throw typed ExceptionInfo."
   (:require [evoclj.binding.call :as binding]
             [evoclj.capability.broker :as broker]
+            [evoclj.capability.constraint :as constraint]
             [evoclj.intent.schema :as intent-schema]
             [evoclj.kernel.error :as err]
             [evoclj.provider.model-registry :as model-registry]
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]
             [evoclj.sci.boundary :as boundary]
-            [malli.core :as m]))
+            [malli.core :as m])
+  (:import (java.nio.charset StandardCharsets)))
 
 ;; --- shared error classification (INV-05: single implementation) -----------
 ;;
@@ -84,7 +86,73 @@
   "Return true when error-type is the ambiguous family."
   [error-type]
   (= provider-ambiguous-type error-type))
-;; --- helpers (single implementation, INV-05) -------------------------------
+;; --- byte accounting (C3: :max-bytes measures bytes, not calls) -----------
+;;
+;; Per-provider-kind derivation rule (documented here, implemented in
+;; value-bytes below):
+;;   - model providers (anthropic/openai/modelsdev): the execute-request!
+;;     value is {:model/output {...} :usage {:model-input-tokens N
+;;     :model-output-tokens M ...} ...} — token counters times
+;;     bytes-per-token (4 UTF-8 bytes/token avg) is the consumed-byte
+;;     estimate. Values carrying a token map under :model/usage, or bare
+;;     :input-tokens/:output-tokens-style counters at the top level, use
+;;     the same estimate.
+;;   - string values (a provider echoing raw text): the UTF-8 byte length
+;;     of the string itself.
+;;   - byte arrays: alength (raw byte count).
+;;   - everything else (fixture echo {:text ...}, memory KV, MCP
+;;     {:value ... :audit ...}, or a model value with no token counters):
+;;     the UTF-8 byte count of the pr-str serialization — the actual
+;;     serialized size that crossed the provider boundary.
+
+(def ^:private bytes-per-token
+  "Concrete byte estimate for one model token (UTF-8 avg). Used to turn
+  token counters into a byte quota the :max-bytes descriptor can compare."
+  4)
+
+(def ^:private model-token-keys
+  "The token counters recognized on a provider result :usage map. Summing
+  all present counters (times bytes-per-token) is the consumed-byte
+  estimate for a model call."
+  [:input-tokens :output-tokens :reasoning-tokens
+   :model-input-tokens :model-output-tokens :model-reasoning-tokens
+   :prompt-tokens :completion-tokens])
+
+(defn- token-source-maps
+  "Candidate token-counter maps on a provider result value, in priority
+  order: the :usage map (model providers), :model/usage (alt key), then
+  the value itself (bare top-level counters like :output-tokens)."
+  [value]
+  (when (map? value)
+    (filter map? [(:usage value) (:model/usage value) value])))
+
+(defn- model-token-count
+  "Sum of the recognized token counters on a value's token maps; nil when
+  the value carries no recognized numeric counter (so non-model values
+  fall back to byte-serialization rather than miscounting)."
+  [value]
+  (let [counters (mapcat (fn [m]
+                           (keep (fn [k] (when (number? (get m k)) (get m k)))
+                                 model-token-keys))
+                         (token-source-maps value))]
+    (when (seq counters) (reduce + 0 counters))))
+
+(defn value-bytes
+  "The consumed-byte estimate for ONE provider result value (see the
+  per-provider-kind rule above): strings measure UTF-8 length, byte
+  arrays measure alength, token-carrying maps measure tokens times
+  bytes-per-token, everything else measures the UTF-8 bytes of pr-str."
+  [value]
+  (cond
+    (string? value)
+    (long (count (.getBytes ^String value StandardCharsets/UTF_8)))
+    (bytes? value)
+    (long (alength ^bytes value))
+    :else
+    (if-let [tokens (model-token-count value)]
+      (long (* bytes-per-token tokens))
+      (long (count (.getBytes (pr-str value) StandardCharsets/UTF_8))))))
+
 
 (defn- attach-binding-audit
   [result binding]
@@ -163,7 +231,7 @@
         usage-atom (:usage broker-context)
         lease-id (:lease-id decision)]
     (loop [attempt 1]
-      (swap! usage-atom update lease-id (fnil inc 0))
+      (swap! usage-atom constraint/bump-calls lease-id)
       (let [outcome (try
                       {:value (proto/execute-request! provider normalized)}
                       (catch clojure.lang.ExceptionInfo e
@@ -175,7 +243,13 @@
                         {:failed t}))]
         (cond
           (contains? outcome :value)
-          {:ok (:value outcome)}
+          (let [value (:value outcome)]
+            ;; Bytes accumulate ONLY on a successful provider return: each
+            ;; yielded value's serialized/token size is added to the :bytes
+            ;; counter. Calls (above) accumulate on EVERY attempt, retries
+            ;; included. The two dimensions are independent.
+            (swap! usage-atom constraint/add-bytes lease-id (value-bytes value))
+            {:ok value})
 
           (contains? outcome :ambiguous)
           {:error-type :effect/ambiguous

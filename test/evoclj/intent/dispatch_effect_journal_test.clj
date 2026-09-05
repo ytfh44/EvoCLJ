@@ -56,7 +56,7 @@
 (defn- lease
   [& kvs]
   (let [base {:cap/id echo-cap-id
-              :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+              :principal {:principal/type :session :session/id session-id}
               :resource {:kind :tool :id :fixture/echo}
               :actions #{:invoke}
               :constraints {:max-calls 10}
@@ -110,7 +110,7 @@
 
 (defn- ambiguous-lease []
   {:cap/id ambiguous-cap-id
-   :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+   :principal {:principal/type :session :session/id session-id}
    :resource {:kind :tool :id :fixture/ambiguous}
    :actions #{:invoke}
    :constraints {:max-calls 10}
@@ -163,8 +163,10 @@
           "the journal finalizes as ambiguous, never as committed/rejected")
       (is (uuid? (get-in j [:effect/call-started :binding/id]))
           "call-started is recorded before the ambiguous outcome")
-      (is (= {ambiguous-cap-id 1} (:usage r))
-          "a single attempt consumes a single lease slot")))
+      (is (= 1 (get-in (:usage r) [ambiguous-cap-id :calls]))
+          "a single attempt consumes a single lease slot")
+      (is (= 0 (get-in (:usage r) [ambiguous-cap-id :bytes]))
+          "an ambiguous outcome yields no value, so no bytes accumulate")))
   (testing "an idempotent :retry {:safe? true} provider still retries TRANSIENT errors"
     ;; Regression: the fail-closed ambiguous path must not disable the
     ;; legitimate transient retry for declared-safe pure providers.
@@ -176,7 +178,10 @@
       (is (= :ok (:result/status r)))
       (is (= 2 @counter)
           "the transient retry still happens for a safe provider")
-      (is (= {echo-cap-id 2} (:usage r))))))
+      (is (= 2 (get-in (:usage r) [echo-cap-id :calls]))
+          "two attempts consume two lease slots")
+      (is (= 12 (get-in (:usage r) [echo-cap-id :bytes]))
+          "one successful value {:text \"hi\"} -> 12 bytes"))))
 
 ;; --- RED 3: the duplicate dead-code effect journal is gone -----------------
 

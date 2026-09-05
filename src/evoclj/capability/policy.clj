@@ -55,11 +55,13 @@
     independent input, so a covering lease cannot be invalidated by
     adding others).
 
-  :usage maps a lease's :cap/id to the number of calls ALREADY
-  consumed under it. A :constraints {:max-calls N} lease allows the
-  next call iff consumed < N — the decision counts the CURRENT call,
-  so a :max-calls 2 lease allows the first two calls and denies the
-  third — and an absent :max-calls means no call limit.
+  :usage maps a lease's :cap/id to an entry {:calls N :bytes B} with the
+  calls and bytes ALREADY consumed under it (a legacy flat number entry
+  reads as {:calls <n> :bytes 0}). A :constraints {:max-calls N} lease
+  allows the next call iff calls < N, and {:max-bytes B} iff bytes < B —
+  the decision counts the CURRENT call, so a :max-calls 2 lease allows
+  the first two calls and denies the third — and an absent quota means
+  no limit in that dimension.
 
   Fail-closed and schema-gated: every decision input is validated
   before any judgment is made; malformed input throws
@@ -121,8 +123,15 @@
 (def ^:private NonNegIntSchema
   [:and :int [:fn (fn [x] (not (neg? x)))]])
 
+(def ^:private UsageEntrySchema
+  "One usage-map entry: the lease's independent call and byte counters."
+  [:map [:calls NonNegIntSchema] [:bytes NonNegIntSchema]])
+
 (def ^:private UsageSchema
-  [:map-of uuid? NonNegIntSchema])
+  "Usage map: lease-id -> entry. Each entry is the C3 map shape
+  {:calls int :bytes int} or a legacy flat non-negative int (read as
+  {:calls <n> :bytes 0})."
+  [:map-of uuid? [:or NonNegIntSchema UsageEntrySchema]])
 
 (defn- validate-input!
   [leases principal resource action now usage]
@@ -150,7 +159,7 @@
                       {:value (err/sanitize now)})))
   (when-not (m/validate UsageSchema (or usage {}))
     (throw (err/error :capability/schema-invalid
-                      "usage must be a map of :cap/id to non-negative int"
+                      "usage must be a map of :cap/id to {:calls int :bytes int}"
                       {:value (err/sanitize usage)}))))
 
 (defn within-call-budget?

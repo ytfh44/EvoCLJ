@@ -46,13 +46,14 @@
   garbage never authorizes and never hides a caller bug (the same
   contract as evoclj.capability.broker).
 
-  Usage accounting: :usage is an atom mapping a lease's :cap/id to the
-  number of calls already consumed under it, exactly the shape the
-  pure policy consumes. Authorization reads the atom once; each
-  execute-request! ATTEMPT consumes one call under the authorizing
-  lease BEFORE the provider runs (provider-call-started, Transaction
-  Boundaries step 5), so a retried attempt consumes budget too and
-  the reported :usage is the post-dispatch snapshot.
+  Usage accounting: :usage is an atom mapping a lease's :cap/id to an
+  entry {:calls N :bytes B} — the calls and bytes already consumed
+  under it, exactly the shape the pure policy consumes. Authorization
+  reads the atom once; each execute-request! ATTEMPT consumes one call
+  under the authorizing lease BEFORE the provider runs (provider-call-started,
+  Transaction Boundaries step 5), and each successful provider return
+  adds its value's byte size to :bytes. A retried attempt consumes call
+  budget too, and the reported :usage is the post-dispatch snapshot.
 
   The effect protocol of the Transaction Boundaries section is the
   natural extension point: the pipeline state (validated intent,
@@ -104,11 +105,11 @@
                   evoclj.provider.registry/create-registry.
   - :leases       the collection of CapabilityLease values granted to
                   the dispatched phenotype (default [] — nothing is
-                  granted).
-  - :usage        an atom mapping a lease's :cap/id to calls already
-                  consumed (default a fresh (atom {})). This is the
-                  usage atom that keeps authorization pure while the
-                  dispatcher records call counts.
+  - :usage        an atom mapping a lease's :cap/id to an entry
+                  {:calls N :bytes B} already consumed (default a fresh
+                  (atom {})). This is the usage atom that keeps
+                  authorization pure while the dispatcher records both
+                  call and byte counters.
   - :now          a zero-argument fn returning the #inst decision
                   instant (default (fn [] (java.util.Date.))), so a
                   test can pin the clock with (constantly t).
@@ -152,7 +153,7 @@
     (validate-lease-collection! leases)
     (when-not (instance? clojure.lang.Atom usage)
       (throw (err/error :broker/context-invalid
-                        "usage must be an atom mapping :cap/id to call counts"
+                        "usage must be an atom mapping :cap/id to {:calls int :bytes int}"
                         {:value (err/sanitize usage)})))
     (when-not (fn? now)
       (throw (err/error :broker/context-invalid

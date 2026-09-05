@@ -68,7 +68,7 @@
   assoc-style overrides."
   [& kvs]
   (let [base {:cap/id echo-cap-id
-              :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+              :principal {:principal/type :session :session/id session-id}
               :resource {:kind :tool :id :fixture/echo}
               :actions #{:invoke}
               :constraints {:max-calls 10}
@@ -147,8 +147,10 @@
         (is (= (:intent/id echo-intent) (:intent/id r)))
         (is (= {:text "hi"} (:value r)))
         (is (= {:decision :allow :lease-id echo-cap-id} (:authorization r)))
-        (is (= {echo-cap-id 1} (:usage r))
+        (is (= 1 (get-in (:usage r) [echo-cap-id :calls]))
             "one authorized call consumes one slot of the lease budget")
+        (is (= 12 (get-in (:usage r) [echo-cap-id :bytes]))
+            "the echo value {:text \"hi\"} serializes to 12 bytes")
         (is (= 1 @counter) "the provider really ran once"))
       (testing "results are plain serializable EDN (Global Constraint 22)"
         (let [r (dispatch/dispatch! ctx echo-intent)]
@@ -196,7 +198,7 @@
 (defn- non-idempotent-lease
   []
   {:cap/id non-idempotent-cap-id
-   :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+   :principal {:principal/type :session :session/id session-id}
    :resource {:kind :tool :id :fixture/non-idempotent}
    :actions #{:invoke}
    :constraints {:max-calls 10}
@@ -215,8 +217,10 @@
             "the retried attempt returns the real provider value")
         (is (= 2 @counter)
             "the first attempt failed transiently and the retry succeeded")
-        (is (= {echo-cap-id 2} (:usage r))
-            "each provider attempt consumes one slot of the lease budget"))))
+        (is (= 2 (get-in (:usage r) [echo-cap-id :calls]))
+            "each provider attempt consumes one slot of the lease budget")
+        (is (= 12 (get-in (:usage r) [echo-cap-id :bytes]))
+            "only the successful attempt yields a value -> 12 bytes; the transient attempt yields none"))))
   (testing "a provider with NO :retry {:safe? true} is never retried"
     (let [counter (atom 0)
           ctx (broker-context
@@ -229,7 +233,9 @@
         (is (= 1 @counter)
             "exactly one attempt: a non-idempotent action is never
             blindly retried (Transaction Boundaries protocol)")
-        (is (= {non-idempotent-cap-id 1} (:usage r)))
+        (is (= 1 (get-in (:usage r) [non-idempotent-cap-id :calls])))
+        (is (= 0 (get-in (:usage r) [non-idempotent-cap-id :bytes]))
+            "a transient failure yields no value, so no bytes accumulate")
         (is (= r (edn/read-string (pr-str r)))))))
   (testing "a safe provider retries only up to max-attempts, then reports
             the transient failure as a typed error result"
@@ -248,7 +254,9 @@
         (is (= :error (:result/status r)))
         (is (= :provider/transient-error (:error/type r)))
         (is (= 3 @counter) "three attempts, then the transient failure is reported")
-        (is (= {echo-cap-id 3} (:usage r)))))))
+        (is (= 3 (get-in (:usage r) [echo-cap-id :calls])))
+        (is (= 0 (get-in (:usage r) [echo-cap-id :bytes]))
+            "three failed attempts -> three calls, zero bytes")))))
 
 ;; ============================================================================
 ;; Step 4 — malformed provider output is :provider/output-invalid
@@ -264,7 +272,7 @@
 (defn- broken-lease
   []
   {:cap/id broken-cap-id
-   :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+   :principal {:principal/type :session :session/id session-id}
    :resource {:kind :tool :id :fixture/broken-echo}
    :actions #{:invoke}
    :constraints {:max-calls 10}
@@ -297,7 +305,7 @@
 (defn- write-lease
   []
   {:cap/id write-cap-id
-   :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+   :principal {:principal/type :session :session/id session-id}
    :resource {:kind :tool :id :fixture/write}
    :actions #{:invoke}
    :constraints {:max-calls 10}
@@ -329,7 +337,9 @@
         (is (= :ok (:result/status r)))
         (is (= {:text "x"} (:value r)))
         (is (= 1 @counter))
-        (is (= {write-cap-id 1} (:usage r)))))))
+        (is (= 1 (get-in (:usage r) [write-cap-id :calls])))
+        (is (= 11 (get-in (:usage r) [write-cap-id :bytes]))
+            "the write value {:text \"x\"} serializes to 11 bytes")))))
 
 ;; ============================================================================
 ;; Milestone 4 exit test — SCI constructs the Intent, the host broker
@@ -381,3 +391,87 @@
             (is (= :error (:result/status r)))
             (is (= :capability/denied (:error/type r)))
             (is (= 0 @counter))))))))
+
+;; ============================================================================
+;; C3 — :max-bytes measures bytes, :max-calls measures calls (distinct)
+;; ============================================================================
+
+(def ^:private sized-cap-id #uuid "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+
+(defn- sized-string-provider
+  "A provider echoing its :text arg as a raw STRING, so value-bytes is the
+  exact UTF-8 length — controlled byte sizes for the C3 distinction proof."
+  [counter]
+  (reify proto/Provider
+    (describe [_]
+      {:tool/id :fixture/sized
+       :effect :pure
+       :input-schema [:map [:text :string]]
+       :output-schema :string
+       :required-action :invoke})
+    (normalize-request [_ intent]
+      {:tool/id :fixture/sized
+       :resource {:kind :tool :id :fixture/sized}
+       :args (get-in intent [:payload :args])})
+    (execute-request! [_ request]
+      (swap! counter inc)
+      (get-in request [:args :text]))))
+
+(defn- sized-lease
+  [& kvs]
+  (let [base {:cap/id sized-cap-id
+              :principal {:principal/type :session :session/id session-id}
+              :resource {:kind :tool :id :fixture/sized}
+              :actions #{:invoke}
+              :constraints {:max-bytes 100}
+              :issued-at issued-at
+              :expires-at expires-at}]
+    (if (seq kvs) (apply assoc base kvs) base)))
+
+(defn- sized-intent
+  [n]
+  (intent/tool-call session-id phenotype-p1 :node/tool cause-event-id
+                    {:tool/id :fixture/sized :args {:text (apply str (repeat n "x"))}}
+                    budget))
+
+(deftest max-bytes-counts-bytes-and-max-calls-counts-calls
+  (testing ":max-bytes 100 with 40-byte yields does NOT trip after 2 calls (80 bytes)"
+    (let [counter (atom 0)
+          ctx (broker-context [(sized-string-provider counter)] [(sized-lease)])]
+      (let [r1 (dispatch/dispatch! ctx (sized-intent 40))]
+        (is (= :ok (:result/status r1)))
+        (is (= 40 (count (:value r1)))))
+      (let [r2 (dispatch/dispatch! ctx (sized-intent 40))]
+        (is (= :ok (:result/status r2))
+            "2 calls / 80 bytes is under a 100-byte quota")
+        (is (= 2 (get-in (:usage r2) [sized-cap-id :calls])))
+        (is (= 80 (get-in (:usage r2) [sized-cap-id :bytes]))))
+      (let [r3 (dispatch/dispatch! ctx (sized-intent 40))]
+        (is (= :ok (:result/status r3))
+            "80 bytes is still under quota, so the 3rd call is allowed"))
+      (let [r4 (dispatch/dispatch! ctx (sized-intent 40))]
+        (is (= :error (:result/status r4)))
+        (is (= :capability/denied (:error/type r4)))
+        (is (= :capability/budget-exceeded (get-in r4 [:authorization :reason]))
+            "120 accumulated bytes trip :max-bytes 100 after only 3 calls"))))
+  (testing "a single 150-byte yield trips :max-bytes 100 on the NEXT call"
+    (let [counter (atom 0)
+          ctx (broker-context [(sized-string-provider counter)] [(sized-lease)])]
+      (let [r1 (dispatch/dispatch! ctx (sized-intent 150))]
+        (is (= :ok (:result/status r1)))
+        (is (= 150 (get-in (:usage r1) [sized-cap-id :bytes]))))
+      (let [r2 (dispatch/dispatch! ctx (sized-intent 1))]
+        (is (= :error (:result/status r2)))
+        (is (= :capability/budget-exceeded (get-in r2 [:authorization :reason]))
+            "150 bytes >= 100 trips the byte quota after a single call"))))
+  (testing ":max-calls 1 trips on the 2nd call even when bytes are tiny"
+    (let [counter (atom 0)
+          ctx (broker-context [(sized-string-provider counter)]
+                              [(sized-lease :constraints {:max-calls 1})])]
+      (let [r1 (dispatch/dispatch! ctx (sized-intent 1))]
+        (is (= :ok (:result/status r1)))
+        (is (= 1 (get-in (:usage r1) [sized-cap-id :bytes]))))
+      (let [r2 (dispatch/dispatch! ctx (sized-intent 1))]
+        (is (= :error (:result/status r2)))
+        (is (= :capability/budget-exceeded (get-in r2 [:authorization :reason]))
+            "1 tiny byte still trips :max-calls 1 on the 2nd call")))))

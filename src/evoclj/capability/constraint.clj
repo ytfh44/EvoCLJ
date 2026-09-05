@@ -50,6 +50,89 @@
     :else (min parent child)))
 
 ;; ---------------------------------------------------------------------------
+;; Usage-map accessors (C3: calls vs bytes are DISTINCT dimensions)
+;;
+;; The usage map is shaped {lease-id {:calls N :bytes B}}: each entry
+;; carries the lease's independent call counter and byte counter. A
+;; MaxCallsDescriptor reads ONLY :calls; a MaxBytesDescriptor reads ONLY
+;; :bytes — the accumulated counters never cross-contaminate.
+;;
+;; Legacy fallback: reads tolerate a flat {lease-id count} number entry
+;; (pre-C3 shape), treating it as {:calls <n> :bytes 0}. Writers always
+;; produce the map shape, so the flat form disappears on next write.
+;; ---------------------------------------------------------------------------
+
+(defn- entry-calls
+  "Calls carried by one usage-map entry: a number entry is a legacy flat
+  call count; a map entry reads :calls; anything else is 0."
+  [entry]
+  (cond (number? entry) (long entry)
+        (map? entry) (long (get entry :calls 0))
+        :else 0))
+
+(defn- entry-bytes
+  "Bytes carried by one usage-map entry: a legacy flat number entry
+  carried no byte accounting, so it reads 0; a map entry reads :bytes."
+  [entry]
+  (if (map? entry) (long (get entry :bytes 0)) 0))
+
+(defn used-calls
+  "Calls already consumed under `lease-id` in the usage map. A missing
+  entry (or a missing :calls field) counts 0. A legacy flat number
+  entry counts as its call count."
+  [usage lease-id]
+  (entry-calls (get (or usage {}) lease-id)))
+
+(defn used-bytes
+  "Bytes already consumed under `lease-id` in the usage map. A missing
+  entry (or a missing :bytes field) counts 0. A legacy flat number
+  entry counts 0 bytes."
+  [usage lease-id]
+  (entry-bytes (get (or usage {}) lease-id)))
+
+(defn total-calls
+  "Sum of the :calls counter across every lease in the usage map. This is
+  the ONLY correct way to total call counts once the map entries carry
+  both :calls and :bytes (a bare `reduce +` over vals would add maps).
+  Legacy flat number entries contribute their call count."
+  [usage]
+  (reduce + 0 (map entry-calls (vals (or usage {})))))
+
+(defn total-bytes
+  "Sum of the :bytes counter across every lease in the usage map.
+  Legacy flat number entries contribute 0 bytes."
+  [usage]
+  (reduce + 0 (map entry-bytes (vals (or usage {})))))
+
+(defn bump-calls
+  "Increment the :calls counter for `lease-id` in a usage map. Pure; the
+  caller swaps it into the usage atom. A legacy flat number entry is
+  first normalized to {:calls <n> :bytes 0} so the flat form disappears
+  on next write. Every written entry carries BOTH :calls and :bytes, so
+  the map always satisfies the usage schema (a {:calls 1}-without-:bytes
+  entry would fail validation on the next authorization)."
+  [usage lease-id]
+  (let [entry (get (or usage {}) lease-id)]
+    (if (number? entry)
+      (assoc (or usage {}) lease-id {:calls (inc (long entry)) :bytes 0})
+      (-> (or usage {})
+          (update-in [lease-id :calls] (fnil inc 0))
+          (update-in [lease-id :bytes] #(or % 0))))))
+
+(defn add-bytes
+  "Add `n` to the :bytes counter for `lease-id` in a usage map. Pure;
+  the caller swaps it into the usage atom. A legacy flat number entry
+  is first normalized to {:calls <n> :bytes 0} before adding. The :calls
+  key is defaulted to 0 when absent, preserving the both-keys invariant."
+  [usage lease-id n]
+  (let [entry (get (or usage {}) lease-id)]
+    (if (number? entry)
+      (assoc (or usage {}) lease-id {:calls (long entry) :bytes (long n)})
+      (-> (or usage {})
+          (update-in [lease-id :bytes] (fnil + 0) (long n))
+          (update-in [lease-id :calls] #(or % 0))))))
+
+;; ---------------------------------------------------------------------------
 ;; Built-in descriptors
 ;; ---------------------------------------------------------------------------
 
@@ -62,7 +145,7 @@
   (consumption-key [_] :max-calls)
   (exceeded? [_ constraints usage lease-id]
     (let [max-calls (get constraints :max-calls)
-          consumed (get (or usage {}) lease-id 0)]
+          consumed (used-calls usage lease-id)]
       (and (some? max-calls) (>= consumed max-calls)))))
 
 (defrecord MaxBytesDescriptor []
@@ -73,10 +156,11 @@
   (meet [_ p c] (numeric-meet p c))
   (consumption-key [_] :max-bytes)
   (exceeded? [_ constraints usage lease-id]
-    ;; usage for bytes would be keyed differently in practice; we reuse same usage map
-    ;; but with lease-id -> bytes consumed. For now use same numeric check.
+    ;; Bytes are their OWN dimension: read the accumulated :bytes counter,
+    ;; never the :calls counter. A lease under :max-bytes trips only when
+    ;; its accumulated BYTES reach the quota, independent of call count.
     (let [max-bytes (get constraints :max-bytes)
-          consumed (get (or usage {}) lease-id 0)]
+          consumed (used-bytes usage lease-id)]
       (and (some? max-bytes) (>= consumed max-bytes)))))
 
 ;; Alias descriptor for camelCase :maxBytes -> same lattice as :max-bytes
@@ -90,7 +174,7 @@
   (consumption-key [_] :maxBytes)
   (exceeded? [_ constraints usage lease-id]
     (let [max-bytes (get constraints :maxBytes)
-          consumed (get (or usage {}) lease-id 0)]
+          consumed (used-bytes usage lease-id)]
       (and (some? max-bytes) (>= consumed max-bytes)))))
 
 ;; ---------------------------------------------------------------------------
