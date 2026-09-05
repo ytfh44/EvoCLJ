@@ -5,7 +5,9 @@ content-addressed **Genomes** compile into isolated **Phenotypes**;
 phenotypes execute tasks through typed **Intents** that cross a
 kernel-owned capability broker; evolution proposes structured
 successor mutations, evaluates them in isolation, and promotes the
-winners through an atomic compare-and-set.
+candidates that pass evaluation under the active profile through
+an atomic compare-and-set (evidence of passing experiment E under
+profile P — never a global improvement proof).
 
 ## Document map
 

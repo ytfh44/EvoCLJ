@@ -26,7 +26,14 @@
 
   Step 5: this namespace performs the comparison only. It never calls
   Promotion code — no evoclj.promotion.* require exists or is
-  permitted here (Promotion is Milestone 9's boundary)."
+  permitted here (Promotion is Milestone 9's boundary).
+
+  EPISTEMIC SCOPE (claim boundary): an eligibility decision proves
+  only 'candidate passed experiment E under profile P' — never that
+  the candidate is globally better. See claim-boundary and
+  report-caveats: every eval report MUST state the sample size, the
+  profile thresholds applied, the non-frozen dimensions, and the
+  exact boundary sentence."
   (:require [evoclj.eval.metrics :as metrics]
             [evoclj.eval.profile :as profile]))
 
@@ -95,7 +102,10 @@
   Returns {:eligible? <bool> :reasons [<reason maps>]}; :reasons is
   empty exactly when :eligible? is true. The profile must satisfy the
   component contract (evoclj.eval.profile/validate-profile!) and the
-  summary the component contract (metrics/validate-summary!)."
+  summary the component contract (metrics/validate-summary!).
+  CLAIM BOUNDARY: {:eligible? true} proves only 'candidate passed
+  experiment E under profile P' — never global betterness (see
+  claim-boundary / report-caveats)."
   [summary profile]
   (profile/validate-profile! profile)
   (metrics/validate-summary! summary)
@@ -125,3 +135,53 @@
                 (if (seq cx)
                   {:eligible? false :reasons cx}
                   {:eligible? true :reasons []})))))))))
+
+;; --- eval-report caveats (claim boundary) ----------------------------------------
+
+(def claim-boundary
+  "The exact boundary sentence every eval report MUST state: an
+  eligibility decision proves only that the candidate passed THIS
+  experiment under THIS profile — never that the candidate is
+  globally better than its parent."
+  "This decision proves only that the candidate passed this experiment under this profile; it is not a global improvement proof.")
+
+(def non-frozen-dimensions
+  "Dimensions the EnvironmentSnapshot does NOT freeze
+  (source-id→revision-id only): SaaS model weights, sampling
+  randomness, provider load, server implementation, network behavior,
+  wall-clock time, and external services. A rerun may observe
+  different values along these dimensions even for an identical
+  Genome and Resolution — pair with the observed-at-execution
+  provenance recorded on the ExecutionEnvironment instead of
+  assuming reproducibility."
+  [:saas-model-weights
+   :sampling-randomness
+   :provider-load
+   :server-implementation
+   :network-behavior
+   :wall-clock-time
+   :external-services])
+
+(defn report-caveats
+  "The eval-report caveats map every report MUST carry (pure): sample
+  size, the profile thresholds applied, the paired counts when
+  known, the non-frozen dimensions, the claim-boundary sentence, and
+  the judge-as-instrument label with the judging model identity.
+
+  `opts` keys: :sample-size (number, or nil when unstated),
+  :profile/id, :thresholds (the effective promotion thresholds map),
+  :paired-counts (optional {:wins :losses :ties :both-failed} tally),
+  :judge/model-id (optional string — REQUIRED whenever an LLM
+  judge contributed verdicts, so the reading stays attributable to
+  the instrument that produced it)."
+  [{:keys [sample-size thresholds paired-counts]
+    profile-id :profile/id
+    judge-model-id :judge/model-id}]
+  {:sample-size sample-size
+   :profile/id profile-id
+   :thresholds (into {} thresholds)
+   :paired-counts (when paired-counts (into {} paired-counts))
+   :non-frozen-dimensions non-frozen-dimensions
+   :claim-boundary claim-boundary
+   :judge-as-instrument {:label "judge-as-instrument"
+                         :judge/model-id judge-model-id}})

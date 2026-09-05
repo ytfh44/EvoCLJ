@@ -219,3 +219,35 @@
   (testing "evoclj.eval.compare requires no evoclj.promotion.* alias"
     (is (not-any? #(str/starts-with? (str (ns-name %)) "evoclj.promotion")
                   (vals (ns-aliases 'evoclj.eval.compare))))))
+
+;; --- report caveats: the eval report states its evidence boundary -----------------
+
+(deftest report-caveats-states-sample-profile-nonfrozen-and-boundary
+  (testing "the caveats map carries sample size, profile, thresholds,
+            paired counts, the non-frozen dimensions, the boundary
+            sentence, and the judge-as-instrument label with model id"
+    (let [c (compare/report-caveats
+               {:sample-size 12
+                :profile/id :default-v1
+                :thresholds {:min-delta 0.05 :max-cost-regression 1.10}
+                :paired-counts {:wins 7 :losses 3 :ties 2 :both-failed 0}
+                :judge/model-id "lmstudio/fake"})]
+      (is (= 12 (:sample-size c)))
+      (is (= :default-v1 (:profile/id c)))
+      (is (= 0.05 (:min-delta (:thresholds c))))
+      (is (= {:wins 7 :losses 3 :ties 2 :both-failed 0} (:paired-counts c)))
+      (is (= [:saas-model-weights :sampling-randomness :provider-load
+              :server-implementation :network-behavior :wall-clock-time
+              :external-services]
+             (:non-frozen-dimensions c)))
+      (is (string? (:claim-boundary c)))
+      (is (= "judge-as-instrument" (get-in c [:judge-as-instrument :label])))
+      (is (= "lmstudio/fake" (get-in c [:judge-as-instrument :judge/model-id])))))
+  (testing "paired counts and the judge model are optional, but the
+            boundary sentence is always the exact claim-boundary"
+    (let [c (compare/report-caveats {:sample-size nil
+                                     :profile/id :default-v1
+                                     :thresholds {}})]
+      (is (nil? (:paired-counts c)))
+      (is (nil? (get-in c [:judge-as-instrument :judge/model-id])))
+      (is (= compare/claim-boundary (:claim-boundary c))))))

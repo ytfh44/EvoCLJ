@@ -60,6 +60,20 @@
                                   OR the model text was not usable
                                   (non-JSON / invalid / missing :equivalent).
 
+  JUDGE AS INSTRUMENT (epistemic scope): the judge is a measurement
+  instrument, not an oracle. Each verdict records one per-case
+  measurement — whether this side's outputs match the case
+  expectation under the case's equivalence predicate. The verdict
+  keywords (:win/:loss/:equiv/:both-failed in the aggregation
+  below) are STABLE and mean only 'won/lost THIS paired comparison
+  under THIS profile and case set' — never that the candidate is
+  globally better. An evaluation proves 'candidate passed experiment
+  E under profile P', never global betterness. LLM verdicts are
+  judge-as-instrument readings: the judging model identity
+  (:model/id) SHOULD be recorded alongside the verdict (see
+  verdict-record) so every reading stays attributable to the
+  instrument that produced it.
+
   component (Foundation F3): this namespace also owns the judge-verdict
   enrichment adapter. Per-case judge verdicts persist as versioned
   enrichment records attached to the :evaluation entity (entity-kind
@@ -257,7 +271,11 @@
   any judgement failure (thrown call, non-ok dispatch, non-JSON
   response, missing/invalid :equivalent) throws :eval/judge-failed —
   the judge never silently returns false, so an outage surfaces in the
-  evaluation instead of flipping every score to zero."
+  evaluation instead of flipping every score to zero. JUDGE AS
+  INSTRUMENT: the returned fn is one measurement instrument — its
+  boolean answers are per-case readings attributable to :model/id,
+  not verdicts of global betterness (record the model id on
+  verdict-record so each reading stays attributable)."
   [config]
   (let [v (validate-config config)
         model-call (:model-call v)
@@ -310,28 +328,43 @@
 
 (defn verdict-record
   "ONE per-case judge verdict as a plain EDN map — the pure
-  verdict→enrichment mapping (component):
+  verdict→enrichment mapping (component), and a judge-as-instrument
+  reading (see the ns docstring): one measurement of whether this
+  side's outputs match the case expectation on this case and
+  repetition — never a global betterness claim.
 
       {:case/id <keyword>            ; the selection case id
        :repetition <pos-int>         ; the 1-based repetition
        :pair/seed <string>           ; the pair's derived fixture seed
-       :expected-output <EDN>        ; the case oracle (kernel-side audit)
+       :expected-output <EDN>        ; the case expectation (the reference
+       ;   output this case compares against — a measurement fixture,
+       ;   not a proof oracle; kernel-side audit)
        :outputs <vector EDN>         ; the judged side's actual outputs
        :equivalent <boolean>         ; the judge's decision
-       :score <1.0|0.0>}             ; derived: 1.0 iff equivalent
+       :score <1.0|0.0>              ; derived: 1.0 iff equivalent
+       :judge/model-id <string>?}    ; optional: the judging model
+       ;   identity for LLM verdicts, so the reading stays attributable
+       ;   to the instrument that produced it
 
   Pure and deterministic: identical inputs always yield identical
   records, so a verdict batch round-trips byte-identically through the
   enrichment CAS (the payload body is pr-str EDN, Global Constraint
-  21)."
-  [case-id repetition pair-seed expected-output outputs equivalent]
-  {:case/id case-id
-   :repetition repetition
-   :pair/seed pair-seed
-   :expected-output expected-output
-   :outputs (vec outputs)
-   :equivalent (boolean equivalent)
-   :score (if equivalent 1.0 0.0)})
+  21). The 6-arity form omits :judge/model-id; the 7-arity form
+  records it when non-nil."
+  ([case-id repetition pair-seed expected-output outputs equivalent]
+   {:case/id case-id
+    :repetition repetition
+    :pair/seed pair-seed
+    :expected-output expected-output
+    :outputs (vec outputs)
+    :equivalent (boolean equivalent)
+    :score (if equivalent 1.0 0.0)})
+  ([case-id repetition pair-seed expected-output outputs equivalent judge-model-id]
+   (let [record (verdict-record case-id repetition pair-seed
+                                expected-output outputs equivalent)]
+     (if (some? judge-model-id)
+       (assoc record :judge/model-id judge-model-id)
+       record))))
 
 (defn verdict-payload
   "The component enrichment :payload for a verdict batch: a plain EDN map
@@ -467,13 +500,15 @@
 
 (defn- pair-outcome
   "The win/loss/equiv outcome of ONE paired verdict, in the paired
-  runner's own vocabulary: :win when the candidate is strictly better
-  (it delivered while the parent did not — paired :candidate-wins),
-  :loss when the parent is strictly better (paired :parent-wins),
-  :equiv when BOTH sides are equivalent (the paired :tie), and
-  :both-failed when NEITHER side is equivalent (the paired
-  :both-failed — a shared failure, never counted as a win or as an
-  equiv of success)."
+  runner's scoped vocabulary — every outcome is scoped to THIS paired
+  comparison under THIS profile and case set, never a global
+  betterness claim: :win when the candidate scored higher on this
+  pair (it matched the case expectation while the parent did not —
+  paired :candidate-wins), :loss when the parent scored higher on
+  this pair (paired :parent-wins), :equiv when BOTH sides matched
+  the case expectation (the paired :tie), and :both-failed when
+  NEITHER side matched it (the paired :both-failed — a shared
+  failure, never counted as a win or as an equiv of success)."
   [{:keys [parent candidate]}]
   (let [pe (:equivalent parent)
         ce (:equivalent candidate)]
@@ -509,16 +544,21 @@
   Input: a sequential collection of paired verdict maps built with
   verdict-pair — one per (case, repetition), each carrying the parent
   and candidate sides' boolean :equivalent. The summary counts, in
-  the paired runner's own vocabulary:
+  the paired runner's scoped vocabulary (tallies of THIS paired
+  comparison under THIS profile and case set — never a global
+  betterness claim):
 
-    :win         — the candidate is strictly better (candidate
-                   equivalent, parent not) — paired :candidate-wins.
-    :loss        — the parent is strictly better (parent equivalent,
-                   candidate not) — paired :parent-wins.
-    :equiv       — BOTH sides equivalent — the paired :tie.
-    :both-failed — BOTH sides NOT equivalent — the paired
-                   :both-failed; a shared failure is never counted as
-                   a win or as an equiv of success.
+    :win         — the candidate scored higher on the pair
+                   (candidate matched the case expectation, parent
+                   not) — paired :candidate-wins.
+    :loss        — the parent scored higher on the pair (parent
+                   matched the case expectation, candidate not) —
+                   paired :parent-wins.
+    :equiv       — BOTH sides matched the case expectation — the
+                   paired :tie.
+    :both-failed — BOTH sides did NOT match the case expectation —
+                   the paired :both-failed; a shared failure is never
+                   counted as a win or as an equiv of success.
     :total       — win + loss + equiv + both-failed (= the input
                    length); every input pair is accounted for exactly
                    once, so the counts always sum to the total.

@@ -328,14 +328,14 @@
                         [:output] equivalent))
 
 (defn- win-pair
-  "A paired verdict where the candidate is strictly better: the parent
-  failed the oracle, the candidate delivered."
+  "A paired verdict where the candidate scored higher on THIS pair:
+  the parent missed the case expectation, the candidate matched it."
   [case-id repetition]
   (judge/verdict-pair (side-verdict case-id repetition "seed" false)
                       (side-verdict case-id repetition "seed" true)))
 
 (defn- loss-pair
-  "A paired verdict where the parent is strictly better."
+  "A paired verdict where the parent scored higher on THIS pair."
   [case-id repetition]
   (judge/verdict-pair (side-verdict case-id repetition "seed" true)
                       (side-verdict case-id repetition "seed" false)))
@@ -559,3 +559,46 @@
   (testing "a non-map paired outcome fails loud"
     (is (= :eval/judge-summary-invalid
            (thrown-error-type #(judge/join-utility-summary :nope {}))))))
+
+;; --- judge as instrument: scoped language, stable keys, attributable readings ---
+
+(deftest verdict-keywords-are-stable-and-scoped-to-this-comparison
+  (testing "the aggregation keywords are unchanged — callers depend on
+            :win/:loss/:equiv/:both-failed/:total — and they tally THIS
+            paired comparison only, never global betterness"
+    (let [pairs [(win-pair :sel/c1 1)
+                 (loss-pair :sel/c1 2)
+                 (equiv-pair :sel/c2 1)
+                 (both-failed-pair :sel/c2 2)]
+          s (judge/aggregate-verdicts pairs)]
+      (is (= #{:win :loss :equiv :both-failed :total :by-category} (set (keys s))))
+      (is (= 1 (:win s)))
+      (is (= 1 (:loss s)))
+      (is (= 1 (:equiv s)))
+      (is (= 1 (:both-failed s)))
+      (is (= 4 (:total s))))))
+
+(deftest judge-model-identity-is-recorded-on-the-verdict
+  (testing "the 7-arity verdict-record carries :judge/model-id so an LLM
+            reading stays attributable to the instrument that produced it"
+    (let [v (judge/verdict-record :sel/c1 1 "seed-1" {:text "expected"}
+                                  [{:text "actual"}] true "lmstudio/fake")]
+      (is (= "lmstudio/fake" (:judge/model-id v)))
+      (is (true? (:equivalent v)))
+      (is (= 1.0 (:score v)))
+      (is (= v (edn/read-string (pr-str v))))))
+  (testing "the 6-arity form omits :judge/model-id; a nil model id adds nothing"
+    (is (not (contains? (judge/verdict-record :sel/c1 1 "s" 1 [2] false)
+                        :judge/model-id)))
+    (is (not (contains? (judge/verdict-record :sel/c1 1 "s" 1 [2] true nil)
+                        :judge/model-id)))))
+
+(deftest verdict-with-model-identity-still-pairs-and-aggregates
+  (testing "the optional :judge/model-id key never breaks
+            verdict-pair or aggregate-verdicts"
+    (let [parent (judge/verdict-record :sel/c1 1 "s" :expected [:out] false "m")
+          candidate (judge/verdict-record :sel/c1 1 "s" :expected [:out] true "m")
+          pair (judge/verdict-pair parent candidate)
+          s (judge/aggregate-verdicts [pair])]
+      (is (= 1 (:win s)))
+      (is (= 1 (:total s))))))

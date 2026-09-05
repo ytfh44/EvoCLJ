@@ -29,6 +29,17 @@
   side's genome root). Scheduler/compiler/phenotype/store errors
   propagate as their own typed errors.
 
+  EVIDENCE CAVEAT (claim boundary): side results are raw
+  observations, not verdicts — a side that 'won' did so only on
+  THIS pair under THIS profile and case set. Any report built from
+  these results MUST carry evoclj.eval.compare/report-caveats
+  (sample size, profile thresholds applied, paired counts, the
+  non-frozen dimensions — SaaS weights, sampling randomness,
+  provider load, server implementation, network, wall clock,
+  external services — and the exact boundary sentence), and any
+  LLM-judge verdict MUST be labeled judge-as-instrument with the
+  judging model identity recorded.
+
   component (Foundation F4): candidate-batch-tasks builds the run-batch!
   task maps for a batch of candidate ids — the eval layer's task
   contract for the worker pool (evoclj.eval.workers), consumed by

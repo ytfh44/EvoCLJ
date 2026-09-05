@@ -181,8 +181,10 @@ the demo is reproducible run after run.
   ever persisted.
 - **Evaluation is paired and hidden** (Global Constraints 11, 13): the
   parent and the candidate run the same hidden selection cases; a
-  candidate is promoted only when it honestly beats the parent
-  (hard gates first, then utility).
+  candidate is promoted only when it passes this experiment under
+  this profile (hard gates first, then utility) — evidence of
+  passing experiment E under profile P, not a global improvement
+  proof.
 - **Atomic promotion** (Global Constraint 15): `CURRENT` moves only
   through the CAS compare-and-set; a re-run can never clobber it.
 

@@ -29,8 +29,10 @@
   Fresh temp databases are migrated from the classpath migrations and
   deleted after every test; each fixture candidate gets its own CAS
   genome body, finalized evaluation, and operator session."
-  (:require [clojure.java.jdbc :as jdbc]
+  (:require [clojure.edn :as edn]
+            [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.eval.compare :as compare]
             [evoclj.promotion.current :as current]
             [evoclj.promotion.promote :as promote]
             [evoclj.store.cas :as cas]
@@ -183,24 +185,29 @@
                      :state "eligible"
                      :created_at now})))
   candidate-id)
-
 (defn- add-evaluation!
   "Insert a FINALIZED eval_runs row carrying `eligibility` (the stored
-  judgment promote! must consume verbatim); returns the evaluation id."
-  [db evaluation-id candidate-id parent-generation-id eligibility]
-  (sqlite/with-db [conn db]
-    (jdbc/insert! conn :eval_runs
-                  {:id (str evaluation-id)
-                   :candidate_id (str candidate-id)
-                   :parent_generation_id parent-generation-id
-                   :profile_id ":default"
-                   :gates (pr-str [])
-                   :paired_results_ref nil
-                   :summary (pr-str {:hard {} :utility {} :cost {} :complexity {}})
-                   :eligibility (pr-str eligibility)
-                   :status "finalized"
-                   :created_at now}))
-  evaluation-id)
+  judgment promote! must consume verbatim); returns the evaluation id.
+  The 5-arity form stores `summary` (the evaluation summary EDN) so
+  evidence-basis tests can fixture paired counts."
+  ([db evaluation-id candidate-id parent-generation-id eligibility]
+   (add-evaluation! db evaluation-id candidate-id parent-generation-id
+                    eligibility
+                    {:hard {} :utility {} :cost {} :complexity {}}))
+  ([db evaluation-id candidate-id parent-generation-id eligibility summary]
+   (sqlite/with-db [conn db]
+     (jdbc/insert! conn :eval_runs
+                   {:id (str evaluation-id)
+                    :candidate_id (str candidate-id)
+                    :parent_generation_id parent-generation-id
+                    :profile_id ":default"
+                    :gates (pr-str [])
+                    :paired_results_ref nil
+                    :summary (pr-str summary)
+                    :eligibility (pr-str eligibility)
+                    :status "finalized"
+                    :created_at now}))
+   evaluation-id))
 
 (defn- operator-session!
   "Create an operator session pinned to the seed generation and append
@@ -231,13 +238,14 @@
       :n-candidates     n        ; each candidate gets its own CAS genome,
                                   ; finalized evaluation, and operator session
       :eligibility      <map>    ; overrides the stored final judgment
+      :summary          <map>    ; overrides the stored summary (paired
+      ;   counts fixtures for evidence-basis tests)
       :parent-generation <id>    ; a RETIRED non-current generation the
-                                  ; candidate is a child of (CAS-loser fixtures)
 
   The single-candidate convenience keys (:candidate/id :evaluation/id
   :candidate/genome-id :event/session-id) point at the first candidate."
   ([] (promotion-fixture {}))
-  ([{:keys [n-candidates eligibility parent-generation genome-body]}]
+  ([{:keys [n-candidates eligibility parent-generation genome-body summary]}]
    (let [db (fresh-db)
          cas-root (temp-cas-root)
          cas (cas/->cas cas-root)
@@ -260,7 +268,9 @@
                                          {}))
                              sid (operator-session! db)]
                          (add-candidate! db candidate-id parent-gen-id genome-id)
-                         (add-evaluation! db evaluation-id candidate-id parent-gen-id elig)
+                         (if summary
+                           (add-evaluation! db evaluation-id candidate-id parent-gen-id elig summary)
+                           (add-evaluation! db evaluation-id candidate-id parent-gen-id elig))
                          {:candidate/id candidate-id
                           :evaluation/id evaluation-id
                           :candidate/genome-id genome-id
@@ -619,3 +629,79 @@
       (is (= :promoted (:status result)))
       (is (= (:generation/id fx) (:from result)))
       (is (string? (:to result))))))
+
+;; ============================================================================
+;; Evidence basis: every promotion decision carries passed-E-under-P evidence
+;; ============================================================================
+
+(def ^:private evidence-summary
+  "An evaluation summary carrying judge-aggregate paired counts, as
+  joined under :utility/summary by evoclj.eval.judge."
+  {:hard {} :utility {} :cost {} :complexity {}
+   :utility/summary {:win 2 :loss 0 :equiv 1 :both-failed 0 :total 3
+                     :by-category {}}})
+
+(deftest promotion-decision-record-carries-its-evidence-basis
+  (let [fx (promotion-fixture {:summary evidence-summary})
+        db (:db fx)
+        result (promote/promote! (promotion-system fx) (promote-request fx))]
+    (testing "the promotion went through"
+      (is (= :promoted (:status result))))
+    (testing "the promotions row reason carries the evidence basis:
+              evaluation id, profile id, paired counts, claim boundary"
+      (let [row (first (promotion-rows db))
+            reason (edn/read-string (:reason row))
+            basis (:evidence-basis reason)]
+        (is (= (str (:evaluation/id fx)) (:evaluation/id basis)))
+        (is (= (str (:candidate/id fx)) (:candidate/id basis)))
+        (is (= ":default" (:profile/id basis)))
+        (is (= 2 (:wins (:paired-counts basis))))
+        (is (= 0 (:losses (:paired-counts basis))))
+        (is (= 3 (:sample-size (:paired-counts basis))))
+        (is (= :judge-aggregate (:source (:paired-counts basis))))
+        (is (map? (:runtime-refs basis)))
+        (is (= compare/claim-boundary (:claim-boundary basis)))))
+    (testing "the :promotion/promoted event metadata mirrors the same basis"
+      (let [events (event/events-by-type db (:event/session-id fx) :promotion/promoted)
+            basis (get-in (first events) [:metadata :evidence-basis])]
+        (is (= 1 (count events)))
+        (is (= (str (:evaluation/id fx)) (:evaluation/id basis)))
+        (is (= compare/claim-boundary (:claim-boundary basis)))))))
+
+(deftest decision-without-evidence-is-rejected
+  (testing "validate-evidence-basis! rejects every deficient basis shape"
+    (let [full {:evidence/name "promotion-evidence-basis"
+                :evaluation/id "E"
+                :candidate/id "C"
+                :profile/id ":default"
+                :paired-results-ref nil
+                :paired-counts {:wins 1 :losses 0 :ties 0 :both-failed 0
+                                :sample-size 1 :source :judge-aggregate}
+                :eligibility {:eligible? true :reasons []}
+                :runtime-refs {:source :paired-results-artifact}
+                :claim-boundary compare/claim-boundary}]
+      (is (= full (promote/validate-evidence-basis! full)))
+      (doseq [bad [nil
+                   {}
+                   (dissoc full :evaluation/id)
+                   (dissoc full :profile/id)
+                   (dissoc full :paired-counts)
+                   (assoc full :paired-counts {:wins 1})
+                   (dissoc full :eligibility)
+                   (dissoc full :runtime-refs)
+                   (dissoc full :claim-boundary)
+                   (assoc full :claim-boundary "the candidate is globally better")]]
+        (is (= :promotion/evidence-basis-invalid
+               (:error/type (ex-data (tx-error (fn [] (promote/validate-evidence-basis! bad))))))
+            (str "rejected: " (pr-str bad))))))
+  (testing "a promotion whose evaluation summary carries no counts still
+            records an explicit honest marker — never silent zeroes"
+    (let [fx (promotion-fixture)
+          db (:db fx)
+          result (promote/promote! (promotion-system fx) (promote-request fx))
+          basis (:evidence-basis
+                 (edn/read-string (:reason (first (promotion-rows db)))))]
+      (is (= :promoted (:status result)))
+      (is (= :not-recorded-in-evaluation-summary
+             (:source (:paired-counts basis))))
+      (is (= compare/claim-boundary (:claim-boundary basis))))))

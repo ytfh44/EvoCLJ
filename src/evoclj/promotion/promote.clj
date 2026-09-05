@@ -81,6 +81,23 @@
   event — validated INSIDE the transaction so a promotion can never commit
   without an appendable anchor.
 
+  EVIDENCE BASIS (claim boundary): every promotion decision carries
+  its evidence basis — at minimum the evaluation id, the profile
+  id, the paired win/loss/tie counts plus sample size, the
+  RuntimeImageId/ExecutionEnvironment references, and the exact
+  claim-boundary sentence ('passed E under P; not a global
+  improvement proof', evoclj.eval.compare/claim-boundary). SCHEMA
+  CHOICE (documented): the promotions.reason EDN map carries the
+  basis (no migration — the row schema is frozen, and reason is
+  already an EDN map); the :promotion/promoted event metadata
+  mirrors it for the audit trail. RuntimeImageId and
+  ExecutionEnvironment are LINKED via the evaluation's
+  :paired-results-ref (observed-at-execution provenance recorded by
+  the fresh ExecutionEnvironment work) — never recomputed here.
+  insert-promotion-row! validates the basis and rejects a decision
+  without evidence (:promotion/evidence-basis-invalid), so an
+  evidence-free decision is unrepresentable at the write boundary.
+
   INTERFACE (normative, component):
 
       (promote! promotion-system
@@ -136,6 +153,7 @@
             [clojure.string :as str]
             [malli.core :as m]
             [malli.error :as me]
+            [evoclj.eval.compare :as compare]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.load :as load]
             [evoclj.genome.types :as types]
@@ -574,13 +592,133 @@
                         "the losing candidate is not :evaluated anymore"
                         {:candidate/id key})))))
 
+;; --- decision evidence basis (claim boundary) --------------------------------------
+
+(defn paired-counts-from-summary
+  "Normalize the paired win/loss/tie counts plus sample size out of
+  an evaluation summary EDN map (pure). Recognizes the judge
+  aggregate shape ({:win :loss :equiv :both-failed :total}, as
+  produced by evoclj.eval.judge/aggregate-verdicts and joined under
+  :utility/summary) and the paired-run aggregate shape
+  ({:candidate-wins :parent-wins :ties ... :pairs n}) — at the
+  summary top level or one level nested. Counts are tallies of THIS
+  paired comparison under THIS profile and case set, never a global
+  betterness claim. When the summary carries no recognizable counts,
+  the counts are EXPLICITLY marked :not-recorded-in-evaluation-summary
+  (with the :paired-results-ref pointer when available) — never
+  silently zeroed or fabricated."
+  [summary]
+  (let [shapes (filter map? (cons summary (vals (if (map? summary) summary {}))))
+        judge (some (fn [m] (when (and (contains? m :win) (contains? m :total)) m))
+                    shapes)
+        paired (some (fn [m] (when (contains? m :candidate-wins) m)) shapes)]
+    (cond
+      judge
+      {:wins (:win judge) :losses (:loss judge)
+       :ties (:equiv judge 0) :both-failed (:both-failed judge 0)
+       :sample-size (:total judge) :source :judge-aggregate}
+      paired
+      {:wins (:candidate-wins paired) :losses (:parent-wins paired)
+       :ties (:ties paired 0) :both-failed (:both-failed paired 0)
+       :sample-size (or (:pairs paired) (:total paired))
+       :source :paired-aggregate}
+      :else
+      {:wins nil :losses nil :ties nil :both-failed nil :sample-size nil
+       :source :not-recorded-in-evaluation-summary})))
+
+(defn- runtime-refs-from-summary
+  "Collect the RuntimeImageId / ExecutionEnvironment references
+  carried inside an evaluation summary EDN map (pure): every
+  :side/runtime-image-id and :side/execution-environment value found
+  anywhere in the summary tree. Summaries built by
+  evoclj.eval.core/build-summary do NOT embed them — they live on
+  the paired side results reachable via :paired-results-ref — so the
+  normal result is empty and the basis LINKS the artifact instead of
+  recomputing anything."
+  [summary]
+  (let [nodes (filter map? (tree-seq coll? seq (if (coll? summary) summary {})))
+        image-ids (into [] (comp (map :side/runtime-image-id)
+                                 (remove nil?)
+                                 (distinct))
+                        nodes)
+        exec-envs (into [] (comp (map :side/execution-environment)
+                                 (remove nil?)
+                                 (distinct))
+                        nodes)]
+    {:runtime/image-ids image-ids
+     :execution-environment-refs exec-envs}))
+
+(defn evidence-basis
+  "Build the promotion decision's evidence basis from the finalized
+  evaluation row (pure): the evaluation id, the candidate id, the
+  profile id, the paired-results artifact link, the paired
+  win/loss/tie counts plus sample size (paired-counts-from-summary),
+  the eligibility judgment verbatim, the RuntimeImageId /
+  ExecutionEnvironment references (runtime-refs-from-summary — linked
+  via :paired-results-ref, never recomputed; the EnvironmentSnapshot
+  freezes source-id→revision-id only, so SaaS weights, sampling
+  randomness, provider load, server implementation, network,
+  wall-clock, and external services are NOT frozen), and the exact
+  claim-boundary sentence (evoclj.eval.compare/claim-boundary:
+  passed E under P, not a global improvement proof)."
+  [evaluation-row]
+  (let [summary (try (edn/read-string (:summary evaluation-row))
+                     (catch Exception _ nil))
+        eligibility (try (edn/read-string (:eligibility evaluation-row))
+                         (catch Exception _ nil))
+        paired-ref (:paired_results_ref evaluation-row)
+        counts (cond-> (paired-counts-from-summary summary)
+                 paired-ref (assoc :paired-results-ref paired-ref))]
+    {:evidence/name "promotion-evidence-basis"
+     :evaluation/id (str (:id evaluation-row))
+     :candidate/id (str (:candidate_id evaluation-row))
+     :profile/id (str (:profile_id evaluation-row))
+     :paired-results-ref paired-ref
+     :paired-counts counts
+     :eligibility eligibility
+     :runtime-refs (assoc (runtime-refs-from-summary summary)
+                          :source :paired-results-artifact
+                          :paired-results-ref paired-ref
+                          :note "RuntimeImageId/ExecutionEnvironment are linked via :paired-results-ref (observed-at-execution provenance) — never recomputed here. The snapshot freezes source-id→revision-id only; SaaS weights, sampling randomness, provider load, server impl, network, wall-clock, and external services are NOT frozen.")
+     :claim-boundary compare/claim-boundary}))
+
+(defn validate-evidence-basis!
+  "Validate a promotion decision's evidence basis (pure): the basis
+  must carry the evaluation id, candidate id, profile id, the
+  paired-counts map (with an explicit :source — including
+  :not-recorded-in-evaluation-summary, which is an honest marker,
+  not a silent gap), the eligibility judgment, the runtime-refs map,
+  and the EXACT claim-boundary sentence. A deficient basis throws
+  :promotion/evidence-basis-invalid — a decision without evidence
+  is rejected at the write boundary."
+  [basis]
+  (let [bad (cond
+              (not (map? basis)) :basis-not-a-map
+              (str/blank? (str (:evaluation/id basis))) :evaluation-id-missing
+              (str/blank? (str (:candidate/id basis))) :candidate-id-missing
+              (str/blank? (str (:profile/id basis))) :profile-id-missing
+              (not (map? (:paired-counts basis))) :paired-counts-missing
+              (not (keyword? (:source (:paired-counts basis)))) :paired-counts-source-missing
+              (not (map? (:eligibility basis))) :eligibility-missing
+              (not (map? (:runtime-refs basis))) :runtime-refs-missing
+              (not= compare/claim-boundary (:claim-boundary basis)) :claim-boundary-missing)]
+    (when bad
+      (throw (err/error :promotion/evidence-basis-invalid
+                        "the promotion decision lacks its evidence basis"
+                        {:reason bad}))))
+  basis)
+
 ;; --- the promoted path -----------------------------------------------------------
 
 (defn- insert-promotion-row!
   "Record the promotion decision (Database Invariant 5): one row
   referencing exactly this candidate and this finalized evaluation,
-  naming the generation pair the pointer moved between."
+  naming the generation pair the pointer moved between. The `reason`
+  map MUST carry the decision's :evidence-basis (see evidence-basis)
+  — validated here, so a decision without evidence is rejected
+  (:promotion/evidence-basis-invalid) before any write."
   [conn promotion-id candidate-row evaluation-row from-gen to-gen reason ts]
+  (validate-evidence-basis! (:evidence-basis reason))
   (raw-update! conn
                "INSERT INTO promotions
                   (id, candidate_id, evaluation_id, from_generation_id,
@@ -710,10 +848,12 @@
             :else
             (let [new-gen (new-generation-id (:genome_id candidate)
                                              resolution-id)
+                  basis (evidence-basis evaluation)
                   reason {:expected-parent expected-parent
                           :candidate-state :evaluated
                           :eligibility eligibility
-                          :to-generation new-gen}
+                          :to-generation new-gen
+                          :evidence-basis basis}
                   promotion-id (str (UUID/randomUUID))]
               ;; Database Invariant 7: the Genome identity is verified
               ;; against CAS; when the host supplies the candidate bundle,
@@ -752,7 +892,11 @@
                                     {:expected-parent expected-parent
                                      :to-generation new-gen})))
                 ;; append promotion event + outbox ATOMICALLY in same txn
-                (let [metadata {:from expected-parent :to new-gen}
+                ;; (the event metadata mirrors the decision's evidence
+                ;; basis for the audit trail — same map as the
+                ;; promotions.reason :evidence-basis)
+                (let [metadata {:from expected-parent :to new-gen
+                                :evidence-basis basis}
                       ev (insert-event-in-tx! conn session-key :promotion/promoted metadata ts)
                       _ (insert-outbox-in-tx! conn promotion-id session-key (:event/id ev) :promotion/promoted (:event/seq ev) ts)
                       result {:status :promoted :from expected-parent :to new-gen}]
