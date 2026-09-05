@@ -436,3 +436,113 @@
                                  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
                             :genome/trust-anchor-invalid))
       (finally (delete-recursively! dir)))))
+
+;; --- canonical execution bytes (Genome ID binds the executed bytes) ---------
+;; file-value stores LF-canonical bytes as :bytes and digests exactly
+;; those bytes; raw on-disk bytes survive only as :provenance provenance
+;; ({:had-crlf :original-sha}), which no execution path reads.
+
+(defn- write-minimal-bundle-with-line-ending!
+  "Write the minimal bundle to `dir` with every LF in the module sources
+  replaced by `ending` (\"\\n\", \"\\r\\n\", or \"\\r\"). The manifest is
+  pr-str output without line breaks, so it is byte-identical in every
+  variant and exercises the already-normalized path."
+  [dir ending]
+  (let [with-ending (fn [s] (str/replace s "\n" ending))]
+    (write-manifest! dir default-modules)
+    (write-module! dir "topology.edn" (with-ending "{:graph/id :graph/main}\n"))
+    (write-module! dir "models.edn" (with-ending "{:models {}}\n"))
+    (write-module! dir "memory.edn" (with-ending "{:memory {}}\n"))
+    (write-module! dir "evolution.edn" (with-ending "{:evolution {}}\n"))))
+
+(defn- loaded-source
+  "Decode the stored (canonical execution) :bytes of `rel` as UTF-8."
+  [genome rel]
+  (String. ^bytes (byte-array (get-in genome [:files rel :bytes]))
+           StandardCharsets/UTF_8))
+
+(deftest line-ending-variants-share-genome-id-and-executed-bytes
+  (let [dir-lf (temp-dir!)
+        dir-crlf (temp-dir!)
+        dir-cr (temp-dir!)]
+    (try
+      (write-minimal-bundle-with-line-ending! dir-lf "\n")
+      (write-minimal-bundle-with-line-ending! dir-crlf "\r\n")
+      (write-minimal-bundle-with-line-ending! dir-cr "\r")
+      (let [genome-lf (load/load-genome dir-lf)
+            genome-crlf (load/load-genome dir-crlf)
+            genome-cr (load/load-genome dir-cr)]
+        (testing "LF, CRLF, and CR bundles share one Genome ID"
+          (is (= (:genome/id genome-lf) (:genome/id genome-crlf)))
+          (is (= (:genome/id genome-lf) (:genome/id genome-cr))))
+        (testing "executed :bytes are byte-identical across line-ending variants"
+          (is (= (keys (:files genome-lf)) (keys (:files genome-crlf)) (keys (:files genome-cr))))
+          (doseq [rel (keys (:files genome-lf))]
+            (is (= (get-in genome-lf [:files rel :bytes])
+                   (get-in genome-crlf [:files rel :bytes])
+                   (get-in genome-cr [:files rel :bytes]))
+                (str "executed bytes differ for " rel))
+            (is (= (get-in genome-lf [:files rel :digest])
+                   (get-in genome-crlf [:files rel :digest])
+                   (get-in genome-cr [:files rel :digest]))
+                (str "digest differs for " rel))))
+        (testing "stored execution bytes contain no carriage returns"
+          (doseq [g [genome-lf genome-crlf genome-cr]
+                  [rel {:keys [bytes kind]}] (:files g)]
+            (when (not= kind :binary)
+              (is (not (some #(= % 13) bytes))
+                  (str "CR byte survives in executed bytes of " rel)))))
+        (testing "each stored digest is computed over exactly the stored bytes"
+          (doseq [g [genome-lf genome-crlf genome-cr]
+                  [rel {:keys [bytes digest]}] (:files g)]
+            (is (= digest (hash/file-digest (byte-array bytes)))
+                (str "digest does not bind executed bytes of " rel))))
+        (testing "LF-only digests keep the pre-existing text-digest value"
+          (is (= (hash/text-digest "{:graph/id :graph/main}\n")
+                 (get-in genome-lf [:files "topology.edn" :digest]))))
+        (testing "provenance records the raw line endings without affecting execution"
+          (doseq [rel ["topology.edn" "models.edn" "memory.edn" "evolution.edn"]]
+            (is (false? (get-in genome-lf [:files rel :provenance :had-crlf]))
+                (str "LF variant misflagged for " rel))
+            (is (true? (get-in genome-crlf [:files rel :provenance :had-crlf]))
+                (str "CRLF variant unflagged for " rel))
+            (is (true? (get-in genome-cr [:files rel :provenance :had-crlf]))
+                (str "CR variant unflagged for " rel)))
+          (is (false? (get-in genome-crlf [:files "manifest.edn" :provenance :had-crlf]))
+              "the break-free manifest is provenance-clean in every variant")
+          (is (= "{:graph/id :graph/main}\n"
+                 (loaded-source genome-crlf "topology.edn")
+                 (loaded-source genome-cr "topology.edn"))
+              "execution sees LF text regardless of on-disk endings")))
+      (finally
+        (delete-recursively! dir-lf)
+        (delete-recursively! dir-crlf)
+        (delete-recursively! dir-cr)))))
+
+(deftest noncanonical-executed-bytes-fail-digest-verification
+  (let [dir (temp-dir!)]
+    (try
+      (write-minimal-bundle-with-line-ending! dir "\n")
+      (let [genome (load/load-genome dir)
+            genome-id (:genome/id genome)
+            anchors {genome-id genome-id}
+            raw-crlf (.getBytes "{:graph/id :graph/main}\r\n" StandardCharsets/UTF_8)
+            stored-digest (get-in genome [:files "topology.edn" :digest])]
+        (testing "canonical stored bytes verify against the pinned per-file digest"
+          (is (= stored-digest
+                 (hash/file-digest
+                  (byte-array (get-in genome [:files "topology.edn" :bytes]))))))
+        (testing "non-canonical (raw CRLF) bytes do not verify against the digest"
+          (is (not= stored-digest (hash/file-digest raw-crlf))))
+        (testing "a tree built on non-canonical bytes leaves the trust anchor"
+          (let [tampered-id (hash/tree-digest
+                             (mapv (fn [[rel {:keys [digest]}]]
+                                     {:path rel
+                                      :digest (if (= rel "topology.edn")
+                                                (hash/file-digest raw-crlf)
+                                                digest)})
+                                   (:files genome)))]
+            (is (not= genome-id tampered-id))
+            (is (nil? (get anchors tampered-id))
+                "the tampered tree id is not a pinned seed"))))
+      (finally (delete-recursively! dir)))))

@@ -165,3 +165,18 @@
   (let [entries [{:path "manifest.edn" :digest (hash/text-digest "{:genome/format 1}\n")}
                  {:path "skills/route.edn" :digest (hash/text-digest "{:priority 3}\n")}]]
     (is (apply = (repeatedly 100 #(hash/tree-digest entries))))))
+
+(deftest canonical-text-bytes-match-text-digest
+  (testing "canonical bytes hash (raw) to the same digest as the normalized text"
+    (doseq [s ["a\nb" "a\r\nb" "a\rb" "x\r\ny" "plain"]]
+      (let [ba (.getBytes ^String s StandardCharsets/UTF_8)]
+        (is (= (hash/text-digest s)
+               (hash/file-digest (hash/canonical-text-bytes ba)))
+            (str "digest mismatch for " (pr-str s))))))
+  (testing "LF-only input canonicalizes byte-identically (idempotent)"
+    (let [ba (.getBytes "a\nb\n" StandardCharsets/UTF_8)]
+      (is (= (vec ba) (vec (hash/canonical-text-bytes ba))))))
+  (testing "CRLF input carries no carriage returns after canonicalization"
+    (let [canonical (hash/canonical-text-bytes
+                     (.getBytes "a\r\nb\r\n" StandardCharsets/UTF_8))]
+      (is (not (some #(= % 13) canonical))))))

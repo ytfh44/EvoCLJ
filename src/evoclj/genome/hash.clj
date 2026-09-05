@@ -48,11 +48,22 @@
   [s]
   (str/replace s #"\r\n|\r" "\n"))
 
-(defn text-digest
-  "Return \"sha256:<64 lowercase hex>\" of the UTF-8 bytes of `s` with
-  CRLF/CR line endings normalized to LF (rules 1 and 2)."
-  [s]
-  (file-digest (.getBytes (normalize-line-endings s) StandardCharsets/UTF_8)))
+(defn canonical-text-bytes
+  "Return the canonical execution bytes for raw bundle bytes `ba`:
+  decode as UTF-8, normalize CRLF/CR to LF (rules 1 and 2), re-encode
+  as UTF-8. `file-digest` of the result always equals `text-digest` of
+  the decoded string, so hashing the canonical bytes never changes an
+  existing digest. For LF-only input the result is byte-identical to
+  the input (normalization is idempotent)."
+  ^bytes [^bytes ba]
+  (.getBytes (normalize-line-endings (String. ba StandardCharsets/UTF_8))
+             StandardCharsets/UTF_8))
+
+ (defn text-digest
+   "Return \"sha256:<64 lowercase hex>\" of the UTF-8 bytes of `s` with
+   CRLF/CR line endings normalized to LF (rules 1 and 2)."
+   [s]
+   (file-digest (.getBytes (normalize-line-endings s) StandardCharsets/UTF_8)))
 
 (defn- entry->index-line
   "One canonical index line: path + NUL + digest + LF (rule 6)."

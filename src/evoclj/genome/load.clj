@@ -30,12 +30,26 @@
     module, and unreadable entries reject with stable :error/type
     keywords (:genome/duplicate-path, :genome/manifest-missing,
     :genome/module-missing, :genome/unreadable).
-  - File payloads carry immutable vectors of bytes (:bytes), never a
-    mutable Java byte array; the digest is the canonical
-    CRLF-normalized text digest for textual kinds (:edn :text :clj) and
-    the raw byte digest for :binary. :genome/root may hold the
-    java.nio.file.Path anchor per the task contract, but it never
-    participates in hashing and never appears in :files.
+  - File payloads carry immutable vectors of CANONICAL EXECUTION bytes
+    (:bytes), never a mutable Java byte array and never raw on-disk
+    bytes: textual kinds (:edn :text :clj) are UTF-8 decoded,
+    CRLF/CR-normalized to LF, and re-encoded, so :bytes is exactly what
+    downstream paths compile and execute. The digest is computed over
+    exactly those stored bytes (raw byte digest for :binary), which for
+    textual kinds equals the normative CRLF-normalized text digest
+    (rules 1 and 2) — the Genome ID binds the executed bytes.
+    Hash-rule stability note: normalization is idempotent, and the
+    per-file digest was ALWAYS computed over the normalized form, so
+    this change alters no digest and no Genome ID for ANY bundle —
+    LF-only files are stored bit-identically to before, and even
+    CR/CRLF files keep their existing digests (only their stored
+    :bytes become LF-canonical). Existing CAS artifacts, trust anchors,
+    and IDs are therefore unaffected. Raw on-disk bytes survive only
+    as :provenance {:had-crlf :original-sha} provenance, which no
+    execution, compilation, hashing, or store path may read.
+    :genome/root may hold the java.nio.file.Path anchor per the task
+    contract, but it never participates in hashing and never appears in
+    :files.
   - Every file is read with Files/readAllBytes; no stream is opened or
     retained by this function, and no lazy sequence escapes.
   - Seed trust anchors (component, T2c): with anchors in force (an
@@ -282,17 +296,29 @@
       :else :text)))
 
 (defn- file-value
-  "Immutable {:digest :bytes :kind} payload for one bundle file. :bytes
-  is an immutable vector of bytes (never a mutable Java byte array);
-  the digest is the canonical CRLF-normalized text digest for textual
-  kinds and the raw byte digest for :binary (normative hashing rules 1
-  and 2)."
+  "Immutable {:digest :bytes :kind [:provenance]} payload for one bundle file.
+  :bytes is an immutable vector of the CANONICAL EXECUTION bytes (never a
+  mutable Java byte array): for textual kinds (:edn :text :clj) the raw
+  bytes are decoded as UTF-8, CRLF/CR line endings are normalized to LF,
+  and the normalized text is re-encoded to UTF-8, so the stored bytes
+  are exactly what downstream compiler/eval paths execute. The digest is
+  computed over exactly those stored bytes (raw byte digest for
+  :binary), which for textual kinds equals the normative CRLF-normalized
+  text digest (rules 1 and 2) — the Genome ID therefore binds the
+  executed bytes. The on-disk raw bytes survive ONLY as provenance in
+  :provenance {:had-crlf <bool> :original-sha <sha256 of raw bytes>},
+  which no execution, compilation, hashing, or store round-trip path may
+  read (textual files only; :binary carries no provenance entry)."
   [^String rel ^bytes ba]
-  (let [kind (kind-of rel ba)
-        digest (if (= kind :binary)
-                 (hash/file-digest ba)
-                 (hash/text-digest (String. ba StandardCharsets/UTF_8)))]
-    {:digest digest :bytes (vec ba) :kind kind}))
+  (let [kind (kind-of rel ba)]
+    (if (= kind :binary)
+      {:digest (hash/file-digest ba) :bytes (vec ba) :kind kind}
+      (let [canonical (hash/canonical-text-bytes ba)]
+        {:digest (hash/file-digest canonical)
+         :bytes (vec canonical)
+         :kind kind
+         :provenance {:had-crlf (not= (vec ba) (vec canonical))
+                      :original-sha (hash/file-digest ba)}}))))
 
 (defn- declared-parse-paths
   "Canonical paths of the four declared EDN modules that must parse as
