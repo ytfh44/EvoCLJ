@@ -26,8 +26,11 @@
       not in host-surface
 
   No other namespace defines an allow list; context and the compiler
-  both delegate here, satisfying GC-07 (no ambient authority) and
-  INV-05 (single implementation).
+  both delegate here (GC-07 scoped: the DEFAULT surface carries no
+  ambient host authority; an EXTENDED surface carries exactly the
+  caller-granted host authority, recorded on the value — see
+  resolve-trust and :computation/trust) and INV-05 (single
+  implementation).
 
   Execution reuses the existing interrupt and boundary machinery with
   no new runtime (SCI-Clojure only, no Python/JS):
@@ -144,6 +147,116 @@
   (contains? host-allowed-namespaces ns-sym))
 
 ;; ---------------------------------------------------------------------------
+;; Trust provenance + explicit acknowledgment gate (single implementation)
+;; ---------------------------------------------------------------------------
+;; evoclj.sci.context delegates here (INV-05): every context/computation
+;; value records the host authority it was granted, ON the value.
+;; Shape:
+;;
+;;   {:trust/kind :default-pure | :extended-host
+;;    :trust/granted #{<fully qualified syms granted by the caller>}
+;;    :trust/provenance <sanitized caller :trust-provenance or nil>}
+;;
+;; :default-pure — no caller :api-namespaces were supplied, so the only
+;; host surface is the pure default (core allowlist + pure
+;; evo.api.intent data constructors): no ambient host authority.
+;; :extended-host — the caller supplied a non-empty :api-namespaces map,
+;; acknowledged explicitly with :trust-host-surface? true. The value
+;; then carries exactly that granted host authority — no more — in
+;; :trust/granted, plus the caller's stated provenance (who granted,
+;; why) in :trust/provenance.
+
+(defn validate-api-namespaces!
+  "Validate the caller :api-namespaces shape and return it ({} for nil).
+  Every failure throws :sci/context-invalid with a :reason. The single
+  shape check for both make-computation and (via delegation)
+  evoclj.sci.context/make-context; only keys and structure are checked
+  here — the host VALUES are caller-trusted code, which is why a
+  non-empty map additionally requires the resolve-trust acknowledgment
+  gate. Never coerces."
+  [api]
+  (let [api (or api {})]
+    (when-not (map? api)
+      (throw (err/error :sci/context-invalid
+                        ":api-namespaces must be a map of namespace symbol to var map"
+                        {:reason :invalid-api-namespaces
+                         :value (err/sanitize api)})))
+    (doseq [[ns-sym varmap] api]
+      (when-not (and (symbol? ns-sym) (map? varmap)
+                     (every? symbol? (keys varmap)))
+        (throw (err/error :sci/context-invalid
+                          "each api-namespaces entry must map a namespace symbol to a map of simple var symbols"
+                          {:reason :invalid-api-namespaces
+                           :namespace ns-sym
+                           :value (err/sanitize varmap)}))))
+    api))
+
+(defn caller-granted-symbols
+  "The exact extra host authority a caller map asks to expose: the fully
+  qualified symbols of every var in the CALLER's :api-namespaces map
+  (defaults excluded). Recorded verbatim in the trust record, so an
+  extended value names precisely what it was granted — including a
+  caller entry that shadows a default var, which still counts as
+  granted because its host value is caller-supplied."
+  [caller-api]
+  (exposed-symbols (or caller-api {})))
+
+(defn resolve-trust
+  "Resolve the trust provenance record for a make-context/make-computation
+  `config` map (single gate implementation; context delegates here).
+  Validates :api-namespaces shape via validate-api-namespaces!, then:
+  - empty/nil caller map → {:trust/kind :default-pure
+    :trust/granted #{} :trust/provenance <sanitized :trust-provenance or nil>};
+  - non-empty caller map → REQUIRES :trust-host-surface? exactly true,
+    else fails closed with :sci/untrusted-host-surface carrying :reason
+    :missing-trust-acknowledgment and the :granted set that was refused.
+    With acknowledgment returns {:trust/kind :extended-host
+    :trust/granted <caller-granted-symbols> :trust/provenance <sanitized
+    caller :trust-provenance or nil>}.
+  :trust-provenance is the caller's free-form provenance (who granted
+  this surface, why — a string or map); any other type is
+  :sci/context-invalid (:reason :invalid-trust-provenance).
+  :trust-host-surface? when present must be a boolean; a non-boolean is
+  :sci/context-invalid (:reason :invalid-trust-acknowledgment). An
+  acknowledgment on a default-pure value is accepted and ignored for
+  the kind (the record stays :default-pure with an empty granted set)."
+  [config]
+  (let [caller-api (validate-api-namespaces! (:api-namespaces config))
+        ack (:trust-host-surface? config)
+        provenance (:trust-provenance config)]
+    (when (and (some? ack) (not (boolean? ack)))
+      (throw (err/error :sci/context-invalid
+                        ":trust-host-surface? must be a boolean"
+                        {:reason :invalid-trust-acknowledgment
+                         :value (err/sanitize ack)})))
+    (when (and (some? provenance)
+               (not (or (string? provenance) (map? provenance))))
+      (throw (err/error :sci/context-invalid
+                        ":trust-provenance must be a string or map describing who granted the surface and why"
+                        {:reason :invalid-trust-provenance
+                         :value (err/sanitize provenance)})))
+    (if (empty? caller-api)
+      {:trust/kind :default-pure
+       :trust/granted #{}
+       :trust/provenance (when (some? provenance) (err/sanitize provenance))}
+      (do
+        (when-not (true? ack)
+          (throw (err/error :sci/untrusted-host-surface
+                            "non-empty :api-namespaces requires explicit :trust-host-surface? true; refused to expose an unacknowledged host surface"
+                            {:reason :missing-trust-acknowledgment
+                             :granted (vec (sort (caller-granted-symbols caller-api)))})))
+        {:trust/kind :extended-host
+         :trust/granted (caller-granted-symbols caller-api)
+         :trust/provenance (when (some? provenance) (err/sanitize provenance))}))))
+
+(defn trust-provenance
+  "Return the trust provenance record recorded on a Computation value
+  built by make-computation (nil for values built before the trust
+  record existed). See the trust section above for the shape."
+  [computation]
+  (:computation/trust computation))
+
+;; ---------------------------------------------------------------------------
 ;; Computation value object
 ;; ---------------------------------------------------------------------------
 
@@ -172,8 +285,20 @@
   "Create a Computation value object.
 
   Config keys (all optional, validated):
-    :api-namespaces - map of ns symbol to var map (extends expose/api-namespaces)
-    :limits         - {:wall-ms :max-steps :max-output-nodes :max-tool-calls}
+    :api-namespaces - map of ns symbol to var map (extends expose/api-namespaces).
+      A NON-EMPTY map additionally requires :trust-host-surface? exactly
+      true (explicit acknowledgment gate — see resolve-trust), else the
+      build fails closed with :sci/untrusted-host-surface.
+    :trust-host-surface? - boolean acknowledgment that the caller accepts
+      the exact host authority in :api-namespaces (required when that
+      map is non-empty; accepted and ignored for the kind otherwise).
+    :trust-provenance - optional string or map stating who granted the
+      extended surface and why; recorded verbatim (sanitized) on the value.
+    :limits         - {:wall-ms :max-steps :max-output-nodes :max-tool-calls}.
+      :wall-ms is a COOPERATIVE, interpreter-bound deadline: it fires at
+      interpreted fn/loop entries on the executing thread and does NOT
+      preempt a running host fn, so on an extended surface it must not
+      be relied on as isolation (see evoclj.sci.limits).
     :boundary       - {:max-depth :max-size}
     :programs       - initial program registry (for compatibility)
 
@@ -183,19 +308,24 @@
      :computation/limits         validated effective limits
      :computation/boundary       validated boundary opts
      :computation/programs       {program-id {:source :entry}}
+     :computation/trust          trust provenance record (see resolve-trust:
+                                 :default-pure carries no ambient host authority;
+                                 :extended-host carries exactly :trust/granted)
      :computation/interrupt-state (atom host fn) }
 
-  The last two are host-side mutable state owned by the value and never
-  cross an EDN boundary. Uses context semantics via sci/init with the
-  single host-surface allow set, limits/make-interrupt-fn for per-run
-  checks, and boundary/materialize-edn for output materialization."
+  The context and interrupt-state are host-side mutable state owned by
+  the value and never cross an EDN boundary. Uses context semantics via
+  sci/init with the single host-surface allow set,
+  limits/make-interrupt-fn for per-run checks, and
+  boundary/materialize-edn for output materialization."
   ([] (make-computation {}))
   ([config]
    (when-not (map? config)
      (throw (err/error :sci/context-invalid
                        "computation config must be a map"
                        {:reason :invalid-config :value (err/sanitize config)})))
-   (let [api-namespaces (merge expose/api-namespaces (:api-namespaces config))
+   (let [trust (resolve-trust config)
+         api-namespaces (merge expose/api-namespaces (:api-namespaces config))
          limits (limits/validate-limits! (:limits config))
          ;; :max-tool-calls is an additional budget handled similarly to max-steps
          ;; but not enforced by the SCI interrupt; validated here for completeness
@@ -217,6 +347,7 @@
       :computation/limits limits
       :computation/boundary boundary
       :computation/programs programs
+      :computation/trust trust
       :computation/interrupt-state (atom (limits/make-interrupt-fn (atom 0) limits/default-limits))})))
 
 (defn computation?

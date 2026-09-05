@@ -33,6 +33,7 @@
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
             [evoclj.compiler.program :as program]
+            [evoclj.genome.hash :as hash]
             [evoclj.genome.load :as load]
             [evoclj.sci.context :as context]
             [evoclj.sci.execute :as execute])
@@ -156,8 +157,8 @@
       (execute/invoke! runtime :program/route {:op :echo :text "x"}))
     (testing "the compiled descriptor's :source/digest still equals the Genome file digest"
       (is (= (:digest bundle-file) (:source/digest compiled))))
-    (testing "the source bytes held by the Genome are unchanged"
-      (is (= (vec (.getBytes source StandardCharsets/UTF_8))
+    (testing "the source bytes held by the Genome are the canonical bytes of the on-disk source (hash-what-you-execute: CRLF/CR normalize to LF at load, so the comparison canonicalizes too)"
+      (is (= (vec (hash/canonical-text-bytes (.getBytes ^String source StandardCharsets/UTF_8)))
              (:bytes bundle-file))))
     (testing "a fresh load of the same bundle is the identical immutable Genome"
       (let [reloaded (minimal-valid-genome)]

@@ -280,3 +280,26 @@
           (str "100 interrupted runs completed in " elapsed "ms"))
       (is (<= after (+ before 3))
           (str "no leaked worker threads: before " before ", after " after)))))
+
+;; ============================================================================
+;; Cooperative deadline — :wall-ms does not preempt a running host fn
+;; ============================================================================
+
+(deftest wall-clock-deadline-does-not-preempt-a-running-host-fn
+  (testing "an extended surface's host fn that sleeps past :wall-ms still completes: the deadline fires at interpreted fn/loop entries only"
+    ;; The sleeper is caller-granted host authority on an explicitly
+    ;; acknowledged extended surface (provenance states the test-only
+    ;; grant); the 50ms deadline expires mid-sleep, yet execution
+    ;; succeeds — pinning the documented cooperative semantics. A
+    ;; preemptive (OS-level) deadline would yield :sci/limit-exceeded.
+    (let [ctx (context/make-context
+               {:api-namespaces {'evo.api.fixture {'sleeper (fn [_] (Thread/sleep 250) :woke)}}
+                :trust-host-surface? true
+                :trust-provenance "limits-test: documents the cooperative deadline; sleeper is test-only"})
+          source "(ns fixture.sleeper)\n(defn run [x] (evo.api.fixture/sleeper x))"
+          result (execute/execute-program {:context ctx :programs {}}
+                                          {:source source :entry 'fixture.sleeper/run}
+                                          {}
+                                          {:wall-ms 50 :max-steps 1000000 :max-output-nodes 100000})]
+      (is (= :ok (:status result)) "host fn overruns the cooperative deadline and still returns")
+      (is (= :woke (:value result))))))

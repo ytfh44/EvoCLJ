@@ -86,13 +86,61 @@
         (is (= tool (edn/read-string (pr-str tool))))
         (is (= done (edn/read-string (pr-str done))))))))
 
-(deftest api-namespaces-can-be-extended-explicitly
-  (testing "a caller can expose additional pure namespaces via :api-namespaces"
+(deftest api-namespaces-can-be-extended-with-explicit-acknowledgment
+  (testing "a caller can expose additional pure namespaces via :api-namespaces with :trust-host-surface? true"
+    ;; Migrated caller: this test deliberately extends the surface with a
+    ;; pure fixture fn (constantly 42 — no effects possible) to prove the
+    ;; extension path; provenance states the test-only grant.
     (let [ctx (context/make-context
-               {:api-namespaces {'evo.api.fixture {'answer (constantly 42)}}})]
+               {:api-namespaces {'evo.api.fixture {'answer (constantly 42)}}
+                :trust-host-surface? true
+                :trust-provenance "context-test: pure fixture fn for the extension-path test"})]
       (is (= 42 (sci/eval-string* ctx "(evo.api.fixture/answer)")))
       (testing "host vars of other namespaces stay unreachable"
         (is (denied? "(clojure.string/upper-case \"x\")"))))))
+
+(defn- error-type-of
+  "Evaluate (thunk) and return the :error/type of the thrown
+  ExceptionInfo, or nil when nothing throws."
+  [thunk]
+  (try
+    (thunk)
+    nil
+    (catch clojure.lang.ExceptionInfo e
+      (:error/type (ex-data e)))))
+
+(deftest extended-surface-without-acknowledgment-fails-closed
+  (testing "non-empty :api-namespaces without :trust-host-surface? true throws typed :sci/untrusted-host-surface"
+    (is (= :sci/untrusted-host-surface
+           (error-type-of #(context/make-context
+                            {:api-namespaces {'evo.api.fixture {'answer (constantly 42)}}}))))
+    (testing "an explicit false acknowledgment also fails closed"
+      (is (= :sci/untrusted-host-surface
+             (error-type-of #(context/make-context
+                              {:api-namespaces {'evo.api.fixture {'answer (constantly 42)}}
+                               :trust-host-surface? false})))))))
+
+(deftest extended-surface-with-acknowledgment-records-granted-set
+  (testing "an acknowledged extended surface builds and records exactly the granted host set"
+    (let [ctx (context/make-context
+               {:api-namespaces {'evo.api.fixture {'answer (constantly 42)}}
+                :trust-host-surface? true
+                :trust-provenance "context-test: granted-set recording proof"})]
+      (is (= {:trust/kind :extended-host
+              :trust/granted '#{evo.api.fixture/answer}
+              :trust/provenance "context-test: granted-set recording proof"}
+             (context/trust-provenance ctx))))))
+
+(deftest default-surface-records-default-pure-provenance
+  (testing "a default build records :default-pure with an empty granted set"
+    (is (= {:trust/kind :default-pure
+            :trust/granted #{}
+            :trust/provenance nil}
+           (context/trust-provenance (context/make-context {}))))
+    (testing "an explicit empty map needs no acknowledgment and is still default-pure"
+      (is (= :default-pure
+             (:trust/kind (context/trust-provenance
+                           (context/make-context {:api-namespaces {}}))))))))
 
 (deftest run-form-evaluates-the-route-fixture-end-to-end
   (let [ctx (context/make-context {:programs [] :limits {}})

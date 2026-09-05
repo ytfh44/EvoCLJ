@@ -3,7 +3,8 @@
 
   Execution limits are three non-negative integer budgets:
 
-  - :wall-ms — wall-clock deadline, checked with System/nanoTime;
+  - :wall-ms — COOPERATIVE, interpreter-bound wall-clock deadline,
+    checked with System/nanoTime (NOT an OS-level hard deadline);
   - :max-steps — step budget; one step is one SCI :interrupt-fn
     invocation, i.e. one interpreted fn or loop entry;
   - :max-output-nodes — output size cap, applied when the result is
@@ -19,6 +20,17 @@
   :sci/limit-exceeded and a :limit key identifying which budget fired.
   Because the check runs on the executing thread, an infinite
   loop/recur is interrupted in place and no thread is left behind.
+  Because the check runs ONLY at interpreted fn/loop entries, it does
+  NOT preempt a running host fn: while an exposed host fn executes, no
+  interrupt-fn invocation occurs and the deadline cannot fire until
+  the host fn returns control to the interpreter. On the default-pure
+  surface this cooperativeness is sufficient — only pure core vars and
+  pure data constructors are reachable, so nothing can block — but on
+  an extended surface carrying caller-granted host fns the deadline
+  must not be relied on as isolation: a long-running host fn overruns
+  it. No thread-free mechanism can preempt a running host fn, and
+  watchdog threads are rejected by design, so the deadline stays
+  documented as cooperative (no code change; docs only).
 
   All values are plain serializable Clojure data (Global Constraint
   22). Errors follow evoclj.kernel.error conventions; malformed limits
@@ -78,7 +90,11 @@
   throws sci.interrupt/interrupt! — the typed interrupt sandboxed code
   cannot catch — with :error/type :sci/limit-exceeded when the step
   budget is exceeded (:limit :max-steps) or the wall-clock deadline
-  has passed (:limit :wall-ms). The fn is a plain host fn closed over
+  has passed (:limit :wall-ms). The check is COOPERATIVE and
+  interpreter-bound: SCI invokes it only at interpreted fn/loop
+  entries on the executing thread, so it does NOT preempt a running
+  host fn — while an exposed host fn executes, the deadline cannot
+  fire until that fn returns. The fn is a plain host fn closed over
   its own per-run state; no threads are created, and each run's check
   is independent even when the same SCI context is reused across
   calls."
