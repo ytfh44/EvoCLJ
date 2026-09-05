@@ -27,6 +27,7 @@
             [evoclj.genome.hash :as hash]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
+            [evoclj.sci.boundary :as boundary]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
            (java.time.format DateTimeFormatter)
@@ -547,10 +548,12 @@
   (hash/text-digest (canonical-header h)))
 
 (defn- edn-safe-metadata?
+  "True when m is a map of plain EDN-safe data (Global Constraint 22).
+  Recursive pre-materialization check via evoclj.sci.boundary/edn-safe?:
+  lazy seqs, records, functions and other non-data are rejected WITHOUT
+  being realized or serialized."
   [m]
-  (try
-    (map? (edn/read-string (pr-str m)))
-    (catch Exception _ false)))
+  (and (map? m) (boundary/edn-safe? m)))
 
 (defn- insert-event-in-tx!
   "Insert a :command/submitted (or caller-supplied) event inside the

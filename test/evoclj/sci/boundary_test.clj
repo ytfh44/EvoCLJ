@@ -282,3 +282,41 @@
           ;; class literal in a require-loaded namespace
           c (class probe)]
       (is (= {:x 8} (boundary/materialize-edn probe {:allowed-records #{c}}))))))
+
+;; ============================================================================
+;; GC-22 audit: regexes, insts and queues are plain data; validation
+;; never realizes anything
+;; ============================================================================
+
+(deftest edn-safe?-accepts-regex-instant-and-queue-data
+  (testing "regexes are plain data"
+    (is (boundary/edn-safe? #"Bearer\s+[A-Za-z0-9]+"))
+    (is (boundary/edn-safe? {:auth {:pattern #"^sha256:[0-9a-f]{64}$"}})))
+  (testing "insts are plain data: java.util.Date and java.time.Instant"
+    (is (boundary/edn-safe? (java.util.Date. 0)))
+    (is (boundary/edn-safe? (java.time.Instant/parse "2020-01-01T00:00:00Z")))
+    (is (boundary/edn-safe? {:at (java.time.Instant/parse "2020-01-01T00:00:00Z")})))
+  (testing "persistent queues are plain data with recursively valid contents"
+    (is (boundary/edn-safe? clojure.lang.PersistentQueue/EMPTY))
+    (is (boundary/edn-safe? (into clojure.lang.PersistentQueue/EMPTY [1 {:a #{2}} "three"])))
+    (is (false? (boundary/edn-safe? (conj clojure.lang.PersistentQueue/EMPTY (fn [] :boom))))
+        "a queue carrying a function is rejected"))
+  (testing "other java.time types stay rejected"
+    (is (false? (boundary/edn-safe? (java.time.LocalDate/parse "2020-01-01"))))))
+
+(deftest edn-safe?-never-realizes-non-data
+  (testing "an unrealized lazy seq is rejected without being realized"
+    (let [touched (atom false)
+          poison (map (fn [x] (reset! touched true) x) (range 5))]
+      (is (false? (boundary/edn-safe? {:items poison})))
+      (is (false? (realized? poison)))
+      (is (false? @touched))))
+  (testing "a pending delay is rejected without being forced"
+    (let [touched (atom false)
+          pending (delay (reset! touched true) :value)]
+      (is (false? (boundary/edn-safe? {:later pending})))
+      (is (false? (realized? pending)))
+      (is (false? @touched))))
+  (testing "an infinite seq is rejected without hanging"
+    (is (false? (boundary/edn-safe? (range))))
+    (is (false? (boundary/edn-safe? {:all (repeat :x)})))))

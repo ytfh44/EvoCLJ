@@ -161,6 +161,7 @@
             [evoclj.promotion.current :as current]
             [evoclj.promotion.state :as state]
             [evoclj.promotion.activation :as activation]
+            [evoclj.sci.boundary :as boundary]
             [evoclj.security.sci-recheck :as recheck]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -347,11 +348,12 @@
   (hash/text-digest (canonical-header h)))
 
 (defn- edn-safe-metadata?
-  "Metadata must round-trip through pr-str / edn read-string."
+  "True when m is a map of plain EDN-safe data (Global Constraint 22).
+  Recursive pre-materialization check via evoclj.sci.boundary/edn-safe?:
+  lazy seqs, records, functions and other non-data are rejected WITHOUT
+  being realized or serialized."
   [m]
-  (try
-    (map? (edn/read-string (pr-str m)))
-    (catch Exception _ false)))
+  (and (map? m) (boundary/edn-safe? m)))
 
 (defn- insert-event-in-tx!
   "Append one :promotion/* event INSIDE the caller's open promotion

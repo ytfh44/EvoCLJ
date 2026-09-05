@@ -295,6 +295,29 @@
     (testing "nil and plain maps are accepted"
       (is (= :resolving (:state (session/transition-session! db sid :created :resolving nil)))))))
 
+(deftest transition-data-with-lazy-seq-is-rejected-unrealized
+  (let [db (fresh-db)
+        _ (seed-generation! db)
+        sid (:session/id (session/create-session! db (session-request)))
+        touched (atom false)
+        poison (map (fn [x] (reset! touched true) x) (range 5))]
+    (testing "a lazy seq in transition data is rejected with the typed error"
+      (is (= :store/session-invalid
+             (-> (tx-error #(session/transition-session! db sid :created :resolving {:items poison}))
+                 ex-data :error/type))))
+    (testing "validation never realized the seq"
+      (is (false? (realized? poison)))
+      (is (false? @touched)))
+    (testing "the rejected transition wrote nothing: the session is still :created"
+      (is (= :created (:state (session/get-session db sid)))))
+    (testing "a large valid nested map still transitions"
+      (let [data {:reason :scale-check
+                  :attempt 7
+                  :scores [1 2 {:bonus #{3}}]
+                  :trail '(noted {:by ["ops"]})
+                  :rows (vec (map (fn [n] {:index n}) (range 100)))}]
+        (is (= :resolving (:state (session/transition-session! db sid :created :resolving data))))))))
+
 (deftest routing-is-persisted-with-the-allocation-version
   ;; component (additive migration 003-routing.sql): the :routing map
   ;; {:deployment-version ... :bucket ...} that decided the session's

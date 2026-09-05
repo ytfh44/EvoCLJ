@@ -677,3 +677,95 @@
     (is (= #{{:from (:event/id child-ev) :type :subagent/result}} (:causal-links parent-ev)))
     (is (= {:valid? true :events 2} (event/verify-event-chain db sid-parent)))
     (is (= {:valid? true :events 2} (event/verify-event-chain db sid-child)))))
+
+;; ============================================================================
+;; GC-22 — metadata validation rejects non-data WITHOUT materializing it
+;; ============================================================================
+
+(defrecord MetadataProbe [marker])
+
+(deftest metadata-with-lazy-seq-value-is-rejected-unrealized
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        touched (atom false)
+        poison (map (fn [x] (reset! touched true) x) (range 5))
+        e (event-error #(event/append-event! db (base-event sid {:event/type :session/created
+                                                                 :metadata {:source :event-test :items poison}})))]
+    (testing "lazy seq metadata is rejected with the typed error"
+      (is (some? e))
+      (is (= :store/event-invalid (:error/type (ex-data e)))))
+    (testing "validation never realized the seq"
+      (is (false? (realized? poison)))
+      (is (false? @touched)))
+    (testing "nothing was written"
+      (is (= [] (event/events-for-session db sid))))))
+
+(deftest metadata-with-record-value-is-rejected
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        e (event-error #(event/append-event! db (base-event sid {:event/type :session/created
+                                                                 :metadata {:source :event-test
+                                                                            :probe (->MetadataProbe :marked)}})))]
+    (testing "a record inside metadata is rejected with the typed error"
+      (is (some? e))
+      (is (= :store/event-invalid (:error/type (ex-data e)))))
+    (testing "nothing was written"
+      (is (= [] (event/events-for-session db sid))))))
+
+(deftest metadata-with-deeply-nested-lazy-seq-is-rejected
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        poison (map inc (range 3))
+        e (event-error #(event/append-event! db (base-event sid {:event/type :session/created
+                                                                 :metadata {:level-one {:level-two {:level-three poison}}}})))]
+    (testing "a lazy seq three levels deep is rejected with the typed error"
+      (is (some? e))
+      (is (= :store/event-invalid (:error/type (ex-data e)))))
+    (testing "validation never realized the nested seq"
+      (is (false? (realized? poison))))
+    (testing "nothing was written"
+      (is (= [] (event/events-for-session db sid))))))
+
+(deftest metadata-with-function-or-atom-is-rejected
+  (let [db (fresh-db)
+        sid (seed-session! db)]
+    (testing "a function value is rejected"
+      (let [e (event-error #(event/append-event! db (base-event sid {:event/type :session/created
+                                                                     :metadata {:handler (fn [] :boom)}})))]
+        (is (some? e))
+        (is (= :store/event-invalid (:error/type (ex-data e))))))
+    (testing "an atom value is rejected"
+      (let [pending (atom 1)
+            e (event-error #(event/append-event! db (base-event sid {:event/type :session/created
+                                                                     :metadata {:counter pending}})))]
+        (is (some? e))
+        (is (= :store/event-invalid (:error/type (ex-data e))))
+        (is (= 1 @pending) "validation never dereferenced the atom")))
+    (testing "nothing was written"
+      (is (= [] (event/events-for-session db sid))))))
+
+(deftest large-valid-nested-metadata-is-accepted
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        metadata {:source :event-test
+                  :count 42
+                  :ratio 1/3
+                  :price 2.5M
+                  :enabled true
+                  :missing nil
+                  :label "hello"
+                  :initial \a
+                  :route 'agent/run
+                  :correlation #uuid "550e8400-e29b-41d4-a716-446655440000"
+                  :at #inst "2020-01-01T00:00:00.000-00:00"
+                  :tags #{:alpha :beta}
+                  :trail '(1 2 {:depth [3 4]})
+                  :nested {:level-one {:level-two {:level-three [1 2 {:four #{5}}]}}}
+                  :rows (vec (map (fn [n] {:index n :name (str "row-" n) :flags #{:kept}}) (range 200)))}
+        e (event/append-event! db (base-event sid {:event/type :session/created
+                                                   :metadata metadata}))]
+    (testing "a large valid nested plain-data map appends"
+      (is (= metadata (:metadata e))))
+    (testing "the stored payload reads back identically and the chain verifies"
+      (is (= metadata (:metadata (first (event/events-for-session db sid)))))
+      (is (= {:valid? true :events 1} (event/verify-event-chain db sid))))))

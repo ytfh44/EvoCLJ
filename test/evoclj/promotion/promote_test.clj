@@ -705,3 +705,30 @@
       (is (= :not-recorded-in-evaluation-summary
              (:source (:paired-counts basis))))
       (is (= compare/claim-boundary (:claim-boundary basis))))))
+
+;; ---------------------------------------------------------------------------
+;; GC-22 — the promotion outbox metadata check rejects non-data
+;; without materializing it (the check guards internally built
+;; metadata, so it is tested directly rather than through promote!,
+;; whose callers cannot inject metadata)
+;; ---------------------------------------------------------------------------
+
+(defrecord OutboxProbe [marker])
+
+(def ^:private outbox-metadata-safe? @#'promote/edn-safe-metadata?)
+
+(deftest promotion-outbox-metadata-check-rejects-non-data-unrealized
+  (testing "a lazy seq value is rejected without being realized"
+    (let [touched (atom false)
+          poison (map (fn [x] (reset! touched true) x) (range 5))]
+      (is (false? (outbox-metadata-safe? {:from "g1" :drafts poison})))
+      (is (false? (realized? poison)))
+      (is (false? @touched))))
+  (testing "records, functions and atoms are rejected"
+    (is (false? (outbox-metadata-safe? {:probe (->OutboxProbe :marked)})))
+    (is (false? (outbox-metadata-safe? {:handler (fn [] :boom)})))
+    (is (false? (outbox-metadata-safe? {:counter (atom 1)}))))
+  (testing "a non-map is rejected"
+    (is (false? (outbox-metadata-safe? [:from "g1"]))))
+  (testing "plain nested data is accepted"
+    (is (true? (outbox-metadata-safe? {:from "g1" :to "g2" :counts [1 2 {:n #{3}}]})))))

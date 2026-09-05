@@ -8,10 +8,12 @@
   that boundary with four functions:
 
   - (edn-safe? x) — a pure recursive predicate. True when x is plain
-    EDN data: nil, booleans, numbers, strings, keywords, symbols, chars,
-    UUIDs, #inst dates, and vectors/lists/maps/sets whose elements are
-    recursively EDN-safe. It NEVER realizes a lazy sequence: any seq
-    that is not a proper persistent list is not EDN-safe (an unrealized
+    EDN data: nil, booleans, numbers (any java.lang.Number is data),
+    strings, keywords, symbols, chars, regexes, UUIDs, insts
+    (java.util.Date and java.time.Instant), and persistent
+    vector/list/map/set/queue nodes whose elements are recursively
+    EDN-safe. It NEVER realizes a lazy sequence: any seq that is not
+    a proper persistent list or queue is not EDN-safe (an unrealized
     LazySeq is a suspended computation, not data). Records are never
     EDN-safe because they do not round-trip through
     clojure.edn/read-string without a registered reader.
@@ -83,18 +85,24 @@
       (char? x)
       (uuid? x)
       (= java.util.Date (class x))))
-
 (defn edn-safe?
-  "True when x is plain, fully realized EDN data: nil, booleans,
-  numbers, strings, keywords, symbols, chars, UUIDs, #inst dates, and
-  vectors/lists/maps/sets whose elements are recursively EDN-safe.
+  "True when x is plain EDN-safe data, checked recursively WITHOUT
+  realizing anything: nil, booleans, numbers (any java.lang.Number is
+  data — integers, floats, ratios, BigInt, BigDecimal — via number?),
+  strings, keywords, symbols, chars, regexes
+  (java.util.regex.Pattern), UUIDs, insts (exact java.util.Date, the
+  #inst literal, plus java.time.Instant), and persistent
+  map/vector/set/list/queue nodes whose keys and elements are
+  recursively EDN-safe.
 
-  Lazy and other non-list sequences are never EDN-safe and are never
-  realized by this predicate — an unrealized LazySeq could be infinite,
-  and checking its type is sufficient. Records are never EDN-safe
-  because they do not round-trip through clojure.edn/read-string
-  without a registered reader. Everything else — Java objects,
-  functions, vars, atoms, promises, futures, delays — is false.
+  Records are never EDN-safe even though they are maps: the explicit
+  record? check runs before map?. Lazy sequences and every other
+  non-persistent seq are never EDN-safe and are never realized by this
+  predicate — an unrealized LazySeq could be infinite, and checking
+  its type is sufficient. Pending values (atoms, refs, agents,
+  promises, futures, delays) must never be forced by validation, so
+  they are false without being dereferenced. Everything else —
+  functions, vars, and other Java objects — is false.
 
   See materialize-edn for the coercive, limit-enforcing side of the
   boundary."
@@ -102,10 +110,14 @@
   (cond
     (edn-primitive? x) true
     (record? x) false
+    (instance? java.util.regex.Pattern x) true
+    (instance? java.time.Instant x) true
     (map? x) (every? (fn [[k v]] (and (edn-safe? k) (edn-safe? v))) x)
     (vector? x) (every? edn-safe? x)
     (set? x) (every? edn-safe? x)
-    (list? x) (every? edn-safe? x)
+    ;; Lists and queues are the only accepted seq nodes: both are fully
+    ;; realized, so walking them forces nothing.
+    (or (list? x) (instance? clojure.lang.PersistentQueue x)) (every? edn-safe? x)
     :else false))
 
 ;; --- materialization helpers -----------------------------------------------

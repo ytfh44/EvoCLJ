@@ -45,12 +45,12 @@
   drive Session), but new code should drive Work; scheduler mirrors
   Session transitions to Work for the 48->7 collapse."
 ;; E1: Event prev vs causal-links — session creation uses :prev/event-id nil + :causal-links #{}, no :cause.
-  (:require [clojure.edn :as edn]
-            [clojure.java.jdbc :as jdbc]
+  (:require [clojure.java.jdbc :as jdbc]
             [malli.core :as m]
             [malli.error :as me]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
+            [evoclj.sci.boundary :as boundary]
             [evoclj.store.session-states :as sstates]
             [evoclj.store.session-store :as ss]
             [evoclj.store.existence :as existence]
@@ -132,12 +132,13 @@
   s)
 
 (defn- edn-safe-map?
+  "True when x is nil or a map of plain EDN-safe data (Global
+  Constraint 22). Recursive pre-materialization check via
+  evoclj.sci.boundary/edn-safe?: lazy seqs, records, functions and
+  other non-data are rejected WITHOUT being realized or serialized."
   [x]
   (or (nil? x)
-      (and (map? x)
-           (try
-             (map? (edn/read-string (pr-str x)))
-             (catch Exception _ false)))))
+      (and (map? x) (boundary/edn-safe? x))))
 
 (defn- normalize-store
   "Normalize `store` to a SessionStore. Accepts a SessionStore or a

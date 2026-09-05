@@ -319,3 +319,27 @@
       (is (nil? (cmd/fetch-command db (:cmd/id cmd))) "command must NOT be persisted after event failure (rollback)")
       (is (= 1 (count (event/events-for-session db sid))) "only the root event should remain after rollback")
       (is (= {:valid? true :events 1} (event/verify-event-chain db sid)) "chain still valid after rolled-back outbox"))))
+
+;; ---------------------------------------------------------------------------
+;; GC-22 — outbox event metadata rejects non-data without materializing it
+;; ---------------------------------------------------------------------------
+
+(deftest outbox-event-metadata-with-lazy-seq-is-rejected-unrealized
+  (testing "lazy seq event metadata fails the outbox with the typed error and rolls back"
+    (let [db (fresh-db)
+          sid (seed-session! db)
+          cmd (command-for sid {})
+          touched (atom false)
+          poison (map (fn [x] (reset! touched true) x) (range 5))
+          bad-event {:event/type :command/submitted
+                     :metadata {:command/id (str (:cmd/id cmd)) :items poison}}]
+      (try
+        (cmd/create-command-with-event! db cmd bad-event)
+        (is false "lazy metadata should have thrown")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= :store/event-invalid (:error/type (ex-data e)))
+              "metadata must be rejected as non-EDN-safe")))
+      (is (false? (realized? poison)) "validation never realized the seq")
+      (is (false? @touched))
+      (is (nil? (cmd/fetch-command db (:cmd/id cmd))) "command must NOT be persisted after metadata failure")
+      (is (= 1 (count (event/events-for-session db sid))) "only the root event should remain"))))

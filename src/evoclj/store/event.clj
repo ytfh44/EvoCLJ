@@ -75,6 +75,7 @@
             [evoclj.genome.hash :as hash]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
+            [evoclj.sci.boundary :as boundary]
             [evoclj.security.redact :as redact]
             [evoclj.store.event-schema :as es]
             [evoclj.store.sqlite :as sqlite])
@@ -222,10 +223,12 @@
   (hash/text-digest (canonical-header-legacy h)))
 
 (defn- edn-safe-metadata?
+  "True when m is a map of plain EDN-safe data (Global Constraint 22).
+  Recursive pre-materialization check via evoclj.sci.boundary/edn-safe?:
+  lazy seqs, records, functions and other non-data are rejected WITHOUT
+  being realized or serialized."
   [m]
-  (try
-    (map? (edn/read-string (pr-str m)))
-    (catch Exception _ false)))
+  (and (map? m) (boundary/edn-safe? m)))
 
 (defn- ensure-causal-links-table!
   "Idempotent DDL for the causal_links table inside a transaction.
