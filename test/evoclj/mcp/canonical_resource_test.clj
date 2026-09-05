@@ -136,9 +136,11 @@
   (testing "args missing the canonical :args envelope / empty args do not
            throw and fall back to the safe invoke default"
     (let [descriptor {:tool/id :mcp/plain}]
-      (is (= {:kind :tool :id :mcp/plain :mcp/remote-effect :invoke}
+      (is (= {:kind :tool :id :mcp/plain :mcp/remote-effect :invoke
+              :mcp/classification :invoke-fallback}
              (canonical/canonical-resource descriptor nil)))
-      (is (= {:kind :tool :id :mcp/plain :mcp/remote-effect :invoke}
+      (is (= {:kind :tool :id :mcp/plain :mcp/remote-effect :invoke
+              :mcp/classification :invoke-fallback}
              (canonical/canonical-resource descriptor {}))))))
 
 (deftest declared-projection-with-non-string-value-normalized-as-is
@@ -191,11 +193,14 @@
            'read_file' tool name or a 'path' parameter name; the removed
            read-file-tool? heuristic must have no effect"
     ;; these exact inputs used to yield :filesystem/path via the name
-    ;; heuristic; after M13 they yield the fail-closed invoke default.
-    (is (= {:kind :tool :id :mcp/read_file :mcp/remote-effect :invoke}
+    ;; heuristic; after M13 they yield the fail-closed invoke default,
+    ;; now honestly marked :invoke-fallback (broker denies it by default).
+    (is (= {:kind :tool :id :mcp/read_file :mcp/remote-effect :invoke
+            :mcp/classification :invoke-fallback}
            (canonical/canonical-resource {:tool/id :mcp/read_file}
                                          {"path" "a/../secret"})))
-    (is (= {:kind :tool :id :read_file :mcp/remote-effect :invoke}
+    (is (= {:kind :tool :id :read_file :mcp/remote-effect :invoke
+            :mcp/classification :invoke-fallback}
            (canonical/canonical-resource {:tool/id :read_file}
                                          {"path" "a/../secret"})))
     ;; :filesystem/path is ONLY reachable through a DECLARED projection now
@@ -209,3 +214,30 @@
     (is (= :invoke
            (:mcp/remote-effect
             (canonical/canonical-resource {:tool/id :mcp/anything} {}))))))
+
+(deftest declared-projection-carries-declared-provenance
+  (testing "a projection applied from a declared spec is marked
+           :declared-projection, so the broker can tell it from coarse"
+    (let [descriptor {:tool/id :mcp/read-file
+                      :mcp/param-projections
+                      [{:param "path"
+                        :resource-kind :filesystem/path
+                        :resource-path-key :path
+                        :resource-action :read
+                        :remote-effect :filesystem-read}]}
+          r (canonical/canonical-resource descriptor {"path" "/work/a"})]
+      (is (= :declared-projection (:mcp/classification r))))))
+
+(deftest declared-but-unmatched-carries-fallback-provenance
+  (testing "declared projections with no matching param fall back
+           honestly marked :invoke-fallback, not silently unmarked"
+    (let [descriptor {:tool/id :mcp/read-file
+                      :mcp/param-projections
+                      [{:param "path"
+                        :resource-kind :filesystem/path
+                        :resource-path-key :path
+                        :resource-action :read
+                        :remote-effect :filesystem-read}]}
+          r (canonical/canonical-resource descriptor {"other" "x"})]
+      (is (= :tool (:kind r)))
+      (is (= :invoke-fallback (:mcp/classification r))))))

@@ -16,16 +16,38 @@
     (set? v) (into #{} (map value->canonical v))
     :else v))
 
-(defn- base-invoke-resource
-  "Fail-closed safe default for a tool request whose parameters carry NO
-   declared projection: the whole request is a single remote :invoke
-   effect. Classification is NEVER inferred from parameter names (M13) —
-   a parameter named \"file\"/\"path\"/\"url\" does NOT become a
-   filesystem-read effect."
+(def ^:private classification-declared
+  "Provenance marker for a resource projected from a DECLARED
+  :mcp/param-projections spec. The broker authorizes it at the fine
+  granularity the declaration describes."
+  :declared-projection)
+
+(def ^:private classification-fallback
+  "Provenance marker for the whole-tool :invoke default. The broker
+  denies fallback-classified requests by default; a lease must
+  explicitly opt into the coarse scope with
+  :mcp/allow-coarse-invoke true on its :resource grant. See
+  evoclj.capability.policy/decide."
+  :invoke-fallback)
+
+ (defn- base-invoke-resource
+  "Coarse whole-tool default for a request with NO declared projection
+  covering its parameters: the whole request is a single remote
+  :invoke effect over the whole tool (one scope for /work/a and
+  /etc/shadow alike). Classification is NEVER inferred from parameter
+  names (M13) — a parameter named \"file\"/\"path\"/\"url\" does NOT
+  become a filesystem-read effect.
+
+  The returned map carries :mcp/classification :invoke-fallback so the
+  broker can tell coarse from fine-grained. This default is NOT an
+  authorization: the broker denies fallback-classified requests unless
+  a lease explicitly opts into the coarse scope
+  (:mcp/allow-coarse-invoke true on the lease :resource)."
   [tool-id]
   {:kind :tool
    :id tool-id
-   :mcp/remote-effect :invoke})
+   :mcp/remote-effect :invoke
+   :mcp/classification classification-fallback})
 
 (defn- project-param
   "Apply ONE declarative projection spec to canonicalized args. Returns a
@@ -45,7 +67,8 @@
     (when (some? val)
       (cond-> {:kind (:resource-kind spec)
                :action (or (:resource-action spec) :read)
-               :mcp/remote-effect (or (:remote-effect spec) :invoke)}
+               :mcp/remote-effect (or (:remote-effect spec) :invoke)
+               :mcp/classification classification-declared}
         (:resource-path-key spec)
         (assoc (:resource-path-key spec)
                (if (string? val) (normalize-path val) val))
@@ -55,17 +78,22 @@
 (defn canonical-resource
   "Project a normalized request's args into a canonical resource descriptor
    using the tool's DECLARED projection DSL — a vector of specs carried on
-   the descriptor under :mcp/param-projections.
+   the descriptor under :mcp/param-projections. Every returned map carries
+   :mcp/classification provenance so the broker can tell fine-grained from
+   coarse (audit item 4: effects(execute) ⊆ effects-described-by(normalize)
+   must be a kernel property, not a provider promise):
 
-   - DECLARED: when the descriptor carries :mcp/param-projections, the
-     FIRST spec whose declared :param is present in args is applied via
-     evoclj.mcp.canonical/project-param. Classification comes from the
-     declared spec, never from the parameter name itself.
-   - UNDECLARED: when the descriptor declares no projection at all, the
-     request falls back to the fail-closed default
-     {:mcp/remote-effect :invoke} — a single remote invoke effect. A
-     parameter named \"file\"/\"path\"/\"url\" with no declared projection
-     does NOT become a filesystem-read effect.
+   - :declared-projection — a declared spec's :param was present and its
+     projection applied. Authorized at the fine granularity the
+     declaration describes.
+   - :invoke-fallback — NO declared spec covered the request (either no
+     projection was declared at all, or declared params were all absent).
+     The whole request is one coarse remote :invoke scope over the whole
+     tool. A parameter named \"file\"/\"path\"/\"url\" never becomes a
+     filesystem effect by name. The broker DENIES fallback-classified
+     requests by default; a lease must explicitly opt into the coarse
+     scope with :mcp/allow-coarse-invoke true on its :resource grant
+     (evoclj.capability.policy/decide).
 
    This replaces the M12-era name heuristic (the removed read-file-tool?
    special-cased tool/param names) so effect classification is driven by
@@ -79,9 +107,9 @@
     (if-let [specs (seq (:mcp/param-projections descriptor))]
       (or (some #(project-param % args) specs)
           ;; a projection was declared but no declared :param matched:
-          ;; fail closed to the safe invoke default (never infer by name)
+          ;; coarse fallback, honestly marked (never infer by name)
           (base-invoke-resource (:tool/id descriptor)))
-      ;; no declared projection at all -> safe default
+      ;; no declared projection at all -> coarse fallback, honestly marked
       (base-invoke-resource (:tool/id descriptor)))))
 
 ;; ---------------------------------------------------------------------------

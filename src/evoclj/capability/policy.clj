@@ -39,11 +39,15 @@
       :capability/action-denied     the requested action is not granted
       :capability/scope-denied      the canonical resource is outside the grant
       :capability/budget-exceeded   the lease's :max-calls is exhausted
+      :capability/coarse-invoke-denied  fallback-classified whole-tool
+        :invoke (no declared projection covered the call) without an
+        explicit coarse opt-in on the lease
 
     A single lease is checked in the FIXED order principal -> window ->
-    action -> resource scope -> call budget, so the reported reason
-    for a multiple-fault lease is deterministic. When several leases
-    are present they are considered in a deterministic total order
+    action -> resource scope -> coarse-fallback -> call budget, so the
+    reported reason for a multiple-fault lease is deterministic. When
+    several leases are present they are considered in a deterministic
+    total order
     (sorted by :cap/id): the first lease that passes every check
     allows and its :cap/id is the decision's :lease-id; if no lease
     allows, the reported reason is the reason of the lease that got
@@ -54,6 +58,16 @@
     allow: allow decisions are monotone in the lease set (usage is an
     independent input, so a covering lease cannot be invalidated by
     adding others).
+
+  Coarse whole-tool opt-in (audit item 4): a request resource carrying
+  :mcp/classification :invoke-fallback is ONE scope for every path the
+  tool can touch, so a plain whole-tool grant does NOT imply it. The
+  lease opts in explicitly by carrying :mcp/allow-coarse-invoke true
+  (exact true) on its open :resource grant map. Scope still applies:
+  the grant must cover the request resource by id. An allow decision
+  echoes the request provenance as :mcp/classification so the effect
+  journal can record how the request classified (additive key, present
+  only when the request carried one).
 
   :usage maps a lease's :cap/id to an entry {:calls N :bytes B} with the
   calls and bytes ALREADY consumed under it (a legacy flat number entry
@@ -168,11 +182,31 @@
   Both :max-calls and :max-bytes are checked; nil = unlimited."
   [lease usage]
   (cstr/within-budget? (:constraints lease) usage (:cap/id lease)))
+(defn- coarse-fallback?
+  "True when the request resource carries the coarse whole-tool mark
+  :mcp/classification :invoke-fallback (evoclj.mcp.canonical): an MCP
+  tool call no declared :mcp/param-projections spec covered. Resources
+  from providers that never classify (plain :tool maps with no
+  :mcp/classification key) are NOT fallbacks, so pre-existing leases
+  keep working."
+  [resource]
+  (= :invoke-fallback (:mcp/classification resource)))
+
+(defn- coarse-granted?
+  "True when the lease explicitly opts into the coarse whole-tool scope:
+  its open :resource grant map carries :mcp/allow-coarse-invoke true
+  (exact true, fail-closed on anything else). No lease-schema change is
+  needed. The grant must STILL cover the request resource by id; the
+  marker only lifts the fallback deny, it never widens scope."
+  [lease]
+  (true? (get-in lease [:resource :mcp/allow-coarse-invoke])))
+
 (defn- check-lease
   "Check a single lease against a request via Grant (C2) product order.
   ResourceScope × ActionSet: lease Grant must cover request Grant
   (resource covers? + actions superset).  Preserves the fixed reason order
-  principal -> window -> action -> scope -> budget for deterministic denies."
+  principal -> window -> action -> scope -> coarse-fallback -> budget
+  for deterministic denies."
   [lease principal resource action now usage]
   (cond
     (not (lease/principal-matches? lease principal))
@@ -198,11 +232,22 @@
                          {:resource resource :actions #{action}}))
     [4 {:decision :deny :reason :capability/scope-denied}]
 
+    ;; Coarse whole-tool fallback (audit item 4): a fallback-classified
+    ;; request authorizes one scope for every path the tool can touch,
+    ;; so a plain whole-tool grant must NOT imply it. Deny unless the
+    ;; lease explicitly opts in with :mcp/allow-coarse-invoke true.
+    (and (coarse-fallback? resource) (not (coarse-granted? lease)))
+    [5 {:decision :deny :reason :capability/coarse-invoke-denied}]
+
     (not (within-call-budget? lease usage))
-    [5 {:decision :deny :reason :capability/budget-exceeded}]
+    [6 {:decision :deny :reason :capability/budget-exceeded}]
 
     :else
-    [6 {:decision :allow :lease-id (:cap/id lease)}]))
+    [7 (if-let [classification (:mcp/classification resource)]
+          {:decision :allow
+           :lease-id (:cap/id lease)
+           :mcp/classification classification}
+          {:decision :allow :lease-id (:cap/id lease)})]))
 
 (defn decide
   [leases principal resource action now usage]

@@ -19,7 +19,10 @@
 
 (defn- lease-for [tool-id & kvs]
   (let [base {:cap/id (random-uuid)
-              :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+              ;; must match the intent's session: I2 principal equality
+              ;; is exact, otherwise dispatch denies before execute and
+              ;; the freeze assertions cannot observe the execute phase.
+              :principal {:principal/type :session :session/id session-id}
               :resource {:kind :tool :id tool-id}
               :actions #{:invoke}
               :constraints {:max-calls 10}

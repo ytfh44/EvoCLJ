@@ -164,6 +164,90 @@
     (update value :audit merge (binding/binding->audit binding))
     value))
 
+(defn- scope-contains?
+  "True when one observed touch falls inside an authorized scope.
+  A :filesystem/path scope contains slash-boundary-prefixed paths; a
+  :tool scope contains only its own tool id. Any other scope kind
+  contains nothing: the kernel must not claim confinement it cannot
+  check (fail closed). Lexical only — object truth for symlinks lives
+  with the effect-layer guard, not here."
+  [authorized-scope observed]
+  (let [kind (:kind authorized-scope)]
+    (cond
+      (= :filesystem/path kind)
+      (let [root (:path authorized-scope)]
+        (and (string? root)
+             (string? observed)
+             (or (= root observed)
+                 (.startsWith ^String observed (str root "/")))))
+      (= :tool kind)
+      (= (:id authorized-scope) observed)
+      :else false)))
+
+(defn- attest-with-evidence
+  "Compare OBSERVED evidence against an authorized scope and return the
+  attestation body. OBSERVED is a set (possibly empty) of touched paths
+  or tool ids, or nil when the backend supplied no evidence. Nil
+  evidence is NEVER confinement: remote MCP effects are unobservable to
+  the kernel, so the verdict stays :unverifiable-remote — declared but
+  unverified, never a confinement claim. A mismatch verdict carries a
+  typed :audit/event so it is loud and queryable; lease revocation on
+  violation belongs to the enforceable effect layer, because the kernel
+  cannot un-execute a remote call."
+  [authorized-scope observed remote?]
+  (cond
+    (nil? observed)
+    {:authorized-scope authorized-scope
+     :observed :unavailable
+     :verdict (if remote? :unverifiable-remote :unverifiable-local)
+     :note "no touched-path evidence reached the kernel"}
+    (every? (fn [touch] (scope-contains? authorized-scope touch))
+            observed)
+    {:authorized-scope authorized-scope
+     :observed (err/sanitize (vec observed))
+     :verdict :attested-confined}
+    :else
+    {:authorized-scope authorized-scope
+     :observed (err/sanitize (vec observed))
+     :verdict :attested-violation
+     :audit/event {:event/type :attestation/violation
+                   :authorized-scope authorized-scope
+                   :observed (err/sanitize (vec observed))}}))
+
+(defn- attestation-for
+  "Post-execution attestation for the effect journal (audit item 4).
+  Classification provenance comes from the normalized resource (or the
+  echoed decision key); evidence would come from
+  :effect/observed-touches on the normalized request, a channel no
+  backend fills today — remote MCP backends return values, not
+  touched-path sets, so classified remote calls honestly record
+  :unverifiable-remote. Denied (never executed) calls record
+  :not-executed; unclassified calls record :not-applicable."
+  [binding decision]
+  (let [resource (get-in binding [:binding/normalized :resource])
+        classification (or (:mcp/classification resource)
+                           (:mcp/classification decision)
+                           :none)]
+    (cond
+      (= :none classification)
+      {:mcp/classification :none
+       :observed :not-applicable
+       :verdict :not-applicable}
+      (or (nil? decision)
+          (= :deny (:decision decision))
+          (= :none (:decision decision)))
+      {:mcp/classification classification
+       :authorized-scope resource
+       :observed :none
+       :verdict :not-executed}
+      :else
+      (let [descriptor (:binding/descriptor binding)
+            remote? (= :remote (:effect descriptor))
+            evidence (get-in binding [:binding/normalized
+                                      :effect/observed-touches])]
+        (assoc (attest-with-evidence resource evidence remote?)
+               :mcp/classification classification)))))
+
 (defn- effect-journal
   [binding intent decision final-status]
   {:effect/proposed {:intent/id (:intent/id intent)}
@@ -171,6 +255,7 @@
    :effect/call-started {:idempotency/key (get-in intent [:metadata :idempotency/key])
                          :revision/seq (when binding (:revision/seq binding))
                          :binding/id (when binding (:binding/id binding))}
+   :effect/attestation (attestation-for binding decision)
    :effect/final final-status})
 
 (defn- final-status-for

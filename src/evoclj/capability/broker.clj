@@ -61,6 +61,14 @@
   are stable and documented in evoclj.capability.policy (plus
   :capability/unknown-resource-kind, which is raised by the broker
   before any policy decision when the resource kind is not registered).
+
+  Coarse fallback (audit item 4): an MCP request whose resource carries
+  :mcp/classification :invoke-fallback (no declared projection covered
+  the call) is denied with :capability/coarse-invoke-denied unless a
+  lease explicitly opts into the coarse whole-tool scope with
+  :mcp/allow-coarse-invoke true on its :resource grant. A whole-tool
+  grant alone never implies the fallback scope.
+
   Malformed input is never silently judged: it throws
   :capability/schema-invalid (or :intent/schema-invalid for a malformed
   intent), because garbage never authorizes and never hides a caller
@@ -184,4 +192,17 @@
             (if (= :deny (:decision d))
               d
               (recur (rest remaining) (or best d))))
-          (or best {:decision :deny :reason :capability/missing}))))))
+          (let [result (or best {:decision :deny :reason :capability/missing})
+                classification (:mcp/classification
+                                (:resource normalized-request))]
+            ;; Multi-target kinds (e.g. :filesystem/path authorizes a
+            ;; :tool target first) return the first allow, which may come
+            ;; from an unclassified target resource. Echo the request
+            ;; provenance so the decision — and therefore the journal —
+            ;; always records how the request classified. Additive key,
+            ;; present only when the request carried one.
+            (if (and (= :allow (:decision result))
+                     (some? classification)
+                     (nil? (:mcp/classification result)))
+              (assoc result :mcp/classification classification)
+              result)))))))

@@ -212,3 +212,34 @@
                                                   :leases [model-lease]
                                                   :usage {}
                                                   :now in-window})))))))
+
+(deftest fallback-gate-at-decide-level
+  (testing "policy/decide denies :invoke-fallback without the coarse
+           marker, allows with it, and ignores the gate for resources
+           that never classified"
+    (let [subject {:principal/type :session :session/id session-id}
+          base-lease {:cap/id #uuid "30303030-3030-4303-8303-303030303030"
+                      :principal {:principal/type :session
+                                  :session/id session-id}
+                      :resource {:kind :tool :id :mcp/read-file}
+                      :actions #{:invoke}
+                      :constraints {}
+                      :issued-at issued-at
+                      :expires-at expires-at}
+          fallback {:kind :tool :id :mcp/read-file
+                    :mcp/remote-effect :invoke
+                    :mcp/classification :invoke-fallback}
+          granted-lease (assoc-in base-lease
+                                  [:resource :mcp/allow-coarse-invoke]
+                                  true)]
+      (is (= :capability/coarse-invoke-denied
+             (:reason (policy/decide [base-lease] subject fallback
+                                     :invoke in-window {}))))
+      (is (= :allow
+             (:decision (policy/decide [granted-lease] subject fallback
+                                       :invoke in-window {}))))
+      (is (= :allow
+             (:decision (policy/decide [base-lease] subject
+                                       {:kind :tool :id :mcp/read-file}
+                                       :invoke in-window {})))
+          "unclassified tool resources are unaffected by the gate"))))

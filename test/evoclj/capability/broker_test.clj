@@ -446,3 +446,95 @@
     (is (= :capability/budget-exceeded
            (:reason (model-decision [(model-lease :constraints {:max-calls 2})]
                                     model-a-id {model-cap-id {:calls 3 :bytes 0}}))))))
+
+(def ^:private fallback-tool-id :mcp/read-file)
+
+(def ^:private fallback-cap-id #uuid "b0b0b0b0-b0b0-4b0b-8b0b-b0b0b0b0b0b0")
+
+(defn- fallback-intent
+  []
+  (intent/tool-call session-id phenotype-p1 :node/tool cause-event-id
+                    {:tool/id fallback-tool-id :args {:path "/etc/shadow"}}
+                    budget))
+
+(defn- fallback-request
+  []
+  {:tool/id fallback-tool-id
+   :resource {:kind :tool
+              :id fallback-tool-id
+              :mcp/remote-effect :invoke
+              :mcp/classification :invoke-fallback}
+   :args {"path" "/etc/shadow"}})
+
+(defn- fallback-lease
+  [& kvs]
+  (let [base {:cap/id fallback-cap-id
+              :principal {:principal/type :session :session/id session-id}
+              :resource {:kind :tool :id fallback-tool-id}
+              :actions #{:invoke}
+              :constraints {:max-calls 10}
+              :issued-at issued-at
+              :expires-at expires-at}]
+    (if (seq kvs) (apply assoc base kvs) base)))
+
+(defn- fallback-decision
+  [leases]
+  (broker/authorize {:intent (fallback-intent)
+                     :normalized-request (fallback-request)
+                     :leases leases
+                     :usage {}
+                     :now in-window}))
+
+(deftest fallback-invoke-denied-without-coarse-grant
+  (testing "a plain whole-tool lease no longer implies the coarse
+           fallback scope: deny with :capability/coarse-invoke-denied"
+    (let [d (fallback-decision [(fallback-lease)])]
+      (is (= :deny (:decision d)))
+      (is (= :capability/coarse-invoke-denied (:reason d))))))
+
+(deftest fallback-invoke-allowed-with-explicit-coarse-grant
+  (testing "the SAME request with :mcp/allow-coarse-invoke true on the
+           lease resource is allowed, and the decision echoes the
+           fallback provenance for the journal"
+    (let [granted (fallback-lease :resource {:kind :tool
+                                             :id fallback-tool-id
+                                             :mcp/allow-coarse-invoke true})
+          d (fallback-decision [granted])]
+      (is (= :allow (:decision d)))
+      (is (= fallback-cap-id (:lease-id d)))
+      (is (= :invoke-fallback (:mcp/classification d))))))
+
+(deftest coarse-opt-in-marker-must-be-exact-true
+  (testing "a non-true marker value does not opt in (fail closed)"
+    (doseq [marker [1 "true" :yes]]
+      (let [granted (fallback-lease :resource {:kind :tool
+                                               :id fallback-tool-id
+                                               :mcp/allow-coarse-invoke marker})
+            d (fallback-decision [granted])]
+        (is (= :deny (:decision d))
+            (str "marker " (pr-str marker) " must not opt in"))
+        (is (= :capability/coarse-invoke-denied (:reason d))
+            (str "marker " (pr-str marker) " keeps the coarse reason"))))))
+
+(deftest declared-projection-still-authorizes-at-fine-granularity
+  (testing "a :declared-projection filesystem resource authorizes
+           through the normal fine-grained lease pair (tool + fs)"
+    (let [tool-grant (fallback-lease)
+          fs-grant (fallback-lease
+                    :cap/id #uuid "f5f5f5f5-f5f5-4ff5-8ff5-f5f5f5f5f5f5"
+                    :resource {:kind :filesystem/path :path "/work"}
+                    :actions #{:read})
+          declared-request {:tool/id fallback-tool-id
+                            :resource {:kind :filesystem/path
+                                       :path "/work/a"
+                                       :action :read
+                                       :mcp/remote-effect :filesystem-read
+                                       :mcp/classification :declared-projection}
+                            :args {"path" "/work/a"}}
+          d (broker/authorize {:intent (fallback-intent)
+                               :normalized-request declared-request
+                               :leases [tool-grant fs-grant]
+                               :usage {}
+                               :now in-window})]
+      (is (= :allow (:decision d)))
+      (is (= :declared-projection (:mcp/classification d))))))
