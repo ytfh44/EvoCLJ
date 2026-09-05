@@ -24,6 +24,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [evoclj.capability.registry :as reg]
+            [evoclj.fs.resolve :as fs-resolve]
             [evoclj.kernel.error :as err]))
 
 ;; ---------------------------------------------------------------------------
@@ -50,12 +51,31 @@
   [d] (resource-schema d))
 
 ;; ---------------------------------------------------------------------------
-;; Shared pure helpers (previously in lease)
+;; LogicalPath vs HostFilesystemObject (audit item 5)
 ;; ---------------------------------------------------------------------------
+;; LogicalPath helpers below (canonicalize-path, path-inside?,
+;; canonicalize-mount-path, mount-path-inside?) are LEXICAL authority over a
+;; pure-virtual namespace: the CAS snapshot tree, where no symlinks,
+;; junctions, or reparse points can exist. Lexical canonicalization plus
+;; slash-boundary prefix containment is SOUND there and stays fast and pure.
+;;
+;; HostFilesystemObject authority — real host filesystem OBJECTS — lives in
+;; evoclj.fs.resolve and is backed by realpath semantics (no-follow
+;; per-component resolution, object-identity containment). A lexical `covers?`
+;; allow on a host path is NECESSARY but NOT sufficient: a lease on /work
+;; lexically covers /work/link/shadow even when /work/link is a symlink to
+;; /etc. The descriptors below therefore (a) keep the lexical decision as a
+;; fast deny-first pre-filter, (b) deny outright when realpath evidence
+;; PROVES escape (`proven-host-escape?`), and (c) leave the authoritative
+;; object decision to the effect layer, which re-resolves-and-compares inside
+;; the same privileged section before acting (evoclj.mount.filesystem
+;; guard-host-object! over evoclj.fs.resolve/authorize-host-object!).
 
 (defn canonicalize-path
-  "Resolve a path string to canonical form by dropping empty and \".\" and
-  popping \"..\" segments. Returns nil for non-string."
+  "LogicalPath canonicalizer: resolve a path string to canonical form by
+  dropping empty and \".\" segments and popping \"..\" segments. Returns nil
+  for non-string. Sound authority ONLY for pure-virtual namespaces (CAS
+  tree); for host objects see evoclj.fs.resolve."
   [s]
   (when (string? s)
     (let [absolute? (str/starts-with? s "/")
@@ -69,12 +89,39 @@
       (str (when absolute? "/") (str/join "/" segments)))))
 
 (defn- path-inside?
+  "LogicalPath containment: lexical slash-boundary prefix on canonical
+  forms. Necessary-but-not-sufficient for host objects (see header)."
   [root path]
   (let [r (canonicalize-path root)
         p (canonicalize-path path)]
     (and r p
          (or (= r "/") (= r p)
              (str/starts-with? p (str r "/"))))))
+
+(defn- proven-host-escape?
+  "True only when realpath evidence PROVES the absolute host request escapes
+  the absolute host grant (symlink on the chain, or the resolved object
+  outside the grant object). False when unverifiable (missing files, IO
+  errors, non-absolute input) — the lexical decision then stands and the
+  mount provider's effect-time guard makes the authoritative object decision
+  before any effect."
+  [grant-path request-path]
+  (try
+    (boolean (fs-resolve/proven-host-escape? grant-path request-path))
+    (catch Exception _ false)))
+
+(defn covers-host-object?
+  "Strict HostFilesystemObject cover decision for absolute host paths: true
+  only when the request object provably resolves inside the grant object
+  right now. Fail-closed (false) when unverifiable — including nonexistent
+  paths. Pure-lexical callers (broker pre-filter, scope algebra) keep using
+  covers-resource?; callers that can touch the filesystem and need the
+  authoritative answer use this (or the throwing
+  evoclj.fs.resolve/authorize-host-absolute! for detail)."
+  [grant-path request-path]
+  (try
+    (boolean (fs-resolve/covers-host-object? grant-path request-path))
+    (catch Exception _ false)))
 
 (defn- canonicalize-mount-path
   [s]
@@ -90,6 +137,11 @@
       (str/join "/" segments))))
 
 (defn- mount-path-inside?
+  "LogicalPath containment for the mount namespace (mount-relative strings).
+  Sound as the broker pre-filter AND as full authority for CAS-tree mounts
+  (pure-virtual manifest: no links can exist). For host-directory mounts the
+  provider additionally re-anchors the act to the authorized OBJECT at effect
+  time (evoclj.mount.filesystem guard-host-object!)."
   [grant-path req-path]
   (let [g (canonicalize-mount-path (or grant-path ""))
         p (canonicalize-mount-path (or req-path ""))]
@@ -165,7 +217,11 @@
     (when (map? r)
       {:kind :filesystem :path (canonicalize-path (:path r))}))
   (covers? [_ granted requested _]
-    (path-inside? (:path granted) (:path requested)))
+    ;; HostFilesystemObject: lexical allow is necessary-not-sufficient; deny
+    ;; outright when realpath evidence PROVES escape (unverifiable cases keep
+    ;; the lexical decision — the effect layer decides authoritatively).
+    (and (path-inside? (:path granted) (:path requested))
+         (not (proven-host-escape? (:path granted) (:path requested)))))
   (attenuates? [this parent child] (covers? this parent child nil))
   (meet [_ a b]
     (let [pa (:path a) pb (:path b)
@@ -191,9 +247,15 @@
         (contains? r :mount/id) (assoc :mount/id (:mount/id r)))))
   (covers? [_ granted requested _]
     (if (contains? granted :mount/id)
+      ;; Mount namespace (LogicalPath): mount-id equality plus lexical scope.
+      ;; Sound in full for CAS-tree mounts; host-directory mounts re-anchor
+      ;; the act to the authorized object at effect time.
       (and (= (:mount/id granted) (:mount/id requested))
            (mount-path-inside? (:path granted) (:path requested)))
-      (path-inside? (:path granted) (:path requested))))
+      ;; Bare host paths: lexical allow is necessary-not-sufficient; deny on
+      ;; proven realpath escape (unverifiable cases keep the lexical answer).
+      (and (path-inside? (:path granted) (:path requested))
+           (not (proven-host-escape? (:path granted) (:path requested))))))
   (attenuates? [this parent child] (covers? this parent child nil))
   (meet [_ a b]
     (let [ma? (contains? a :mount/id) mb? (contains? b :mount/id)]

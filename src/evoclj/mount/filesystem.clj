@@ -21,6 +21,9 @@
   Additional guarantees:
     - \"..\" never escapes mount (canonicalize-mount-path throws :filesystem/path-outside-mount)
     - mount A lease cannot access mount B (mount-id equality required)
+    - symlink/junction/reparse escape never authorizes on host mounts: the act
+      is re-anchored to the authorized OBJECT (guard-host-object! over
+      evoclj.fs.resolve) — lexical cover alone never reaches the backend
     - CAS tree content is independent of upstream host changes after snapshot
       (manifest is loaded once from CAS and cached in backend)
 
@@ -35,6 +38,7 @@
             [evoclj.capability.lease :as lease]
             [evoclj.capability.mint :as cap-mint]
             [evoclj.capability.schema :as cap-schema]
+            [evoclj.fs.resolve :as fs-resolve]
             [evoclj.mount.backend :as backend]
             [evoclj.kernel.error :as err]
             [evoclj.provider.protocol :as proto]
@@ -208,7 +212,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- lease-grants?
-  "True when a valid `lease` grants `action` for mount-id + req-path.
+  "Returns the granting `lease` when it grants `action` for mount-id + req-path.
   B4: principal and expiry are FORCED — but only on the lease that actually
   covers this request (scope + action). A lease that does not cover the
   request simply does not grant (returns false, so another lease may); a
@@ -230,26 +234,62 @@
                             "filesystem access requires a requesting :principal to enforce the lease principal binding"
                             {:mount/id mount-id :action action})))
         (verify-fs-lease! lease {:now now :principal princ :registry registry}))
-      true)
+      lease)
     false))
 
 (defn- authorized?
-  "True when any lease in collection grants action for resource.
-  Surface check is separate (EffectiveAccess is intersection). A lease that
-  is expired/revoked/subject-mismatched throws its precise typed error
-  (fail-closed), never silently skipped."
+  "Returns the first lease in collection that grants action for resource
+  (nil when none grants, so another lease may). Surface check is separate
+  (EffectiveAccess is intersection). A lease that is expired/revoked/
+  subject-mismatched throws its precise typed error (fail-closed), never
+  silently skipped. The returned lease is the AUTHORIZING GRANT the effect
+  is re-anchored to (guard-host-object!)."
   [leases mount-id req-path action opts]
   (some (fn [lease] (lease-grants? lease mount-id req-path action opts))
         (or leases [])))
 
+(defn- guard-host-object!
+  "Re-anchor an authorized mount-relative request to its HostFilesystemObject.
+
+  Lexical authorization (lease covers? over the mount namespace) is necessary
+  but NOT sufficient on host-directory mounts: it cannot see symlinks,
+  junctions, or reparse points. This guard resolves the AUTHORIZING GRANT's
+  scope and the request strictly (evoclj.fs.resolve/authorize-host-object! —
+  no-follow per component, realpath containment per existing level) and
+  requires the request OBJECT to stay inside the grant OBJECT, failing closed
+  (:filesystem/symlink-rejected / :filesystem/path-outside-mount).
+
+  CAS-tree mounts skip the guard: the manifest namespace is pure-virtual
+  (LogicalPath) — no links can exist there, so lexical containment is sound.
+
+  TOCTOU residual: the JVM has no openat2/O_NOFOLLOW handle semantics, so the
+  guard and the backend effect are two steps run back-to-back inside this same
+  privileged section (no awaits, no user code between). A concurrent writer
+  with tree access could swap a component in the microsecond window; fully
+  closing that needs OS support or an immutable snapshot (prefer CAS mounts
+  for threat-bearing trees)."
+  [mount granting-lease canonical]
+  (when (= :host-directory (backend/backend-type (:backend mount)))
+    (let [grant-resource (:resource granting-lease)
+          grant-rel (:path grant-resource)]
+      (when-not (and (contains? grant-resource :mount/id) (string? grant-rel))
+        (throw (err/error :capability/denied
+                          "grant scope is not a mount-relative path for this mount"
+                          {:mount/id (:mount/id mount)})))
+      (fs-resolve/authorize-host-object! (:root (:backend mount)) grant-rel canonical))))
+
 (defn- check-effective-access!
-  "Enforce EffectiveAccess = SurfaceAccessMax ∩ CapabilityLease.
+  "Enforce EffectiveAccess = SurfaceAccessMax ∩ CapabilityLease, then re-anchor
+  the act to the authorized OBJECT (guard-host-object!): authorize-then-act
+  operates on the resolved object, never on the lexical string alone.
 
   Throws:
     :mount/not-found if mount missing
     :filesystem/path-outside-mount if path escapes (from canonicalize)
     :mount/access-denied if surface does not contain action
     :capability/denied (or :filesystem/access-denied) if no lease grants
+    :filesystem/symlink-rejected / :filesystem/path-outside-mount when the
+    request object escapes the authorizing grant object on a host mount
 
   Returns mount and canonical path on success."
   [registry mount-id raw-path action leases opts]
@@ -262,11 +302,16 @@
         (throw (err/error :mount/read-only
                           (str "surface does not grant " action)
                           {:mount/id mount-id :action action :access/max surface})))
-      (when-not (authorized? (or leases []) mount-id canonical action opts)
-        (throw (err/error :capability/denied
-                          (str "no lease grants " action " for mount")
-                          {:mount/id mount-id :path canonical :action action})))
-      {:mount mount :canonical canonical})))
+      (let [granting (authorized? (or leases []) mount-id canonical action opts)]
+        (when-not granting
+          (throw (err/error :capability/denied
+                            (str "no lease grants " action " for mount")
+                            {:mount/id mount-id :path canonical :action action})))
+        ;; HostFilesystemObject re-anchoring (audit item 5): the backend effect
+        ;; below runs in this same privileged section, immediately after this
+        ;; resolve-and-compare — no awaits, no user code between.
+        (guard-host-object! mount granting canonical)
+        {:mount mount :canonical canonical}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Provider
