@@ -27,22 +27,44 @@
   monotonic :event/seq inside a single BEGIN IMMEDIATE transaction, so
   concurrent writers serialize on SQLite's write lock.
 
-  Hash chain (Step 5, E1): each event's :event-hash is sha256 over the
-  canonical header
+  Hash chain (audit item 6, strict-commitment header v2): each
+  event's :event-hash is sha256 over the canonical header, one field
+  per line in this fixed order (nil rendered as an empty line),
+  hashed with the deterministic conventions of evoclj.genome.hash
+  (UTF-8 bytes, CRLF/CR normalized to LF, sha256 colon 64 hex):
 
-      session
-      seq
-      type (full namespaced keyword string)
-      prev
-      payload-ref
-      prev-hash
-      created-at
+      session               session id string
+      seq                   per-session :event/seq
+      type                  full namespaced keyword string
+      prev                  :prev/event-id (empty for roots)
+      payload-ref           content-address payload reference (empty when nil)
+      prev-hash             previous event's :event-hash (empty for seq 1)
+      created-at            canonical ISO-8601 instant
+      generation-id         session-pinned generation
+      phenotype-id          session-pinned code-image identity
+      metadata-edn          EXACT stored payload EDN string (pr-str bytes)
+      causal-links-edn      pr-str of the sorted from/type edge vector (open-close brackets when empty)
 
-  one field per line in this fixed order, nil rendered as an empty
-  line, hashed with the deterministic conventions of
-  evoclj.genome.hash (UTF-8 bytes, CRLF/CR normalized to LF,
-  \"sha256:<64 hex>\"). :prev-hash links an event to the previous
-  event's :event-hash in the same session (nil for the first event).
+  The v2 header is a strict extension of the legacy 7-line header
+  (session..created-at): every field the legacy header committed is
+  still committed in the same position. Metadata is committed via the
+  exact stored payload string — the write path builds the header from
+  the same pr-str bytes it INSERTs, and the verifier reads the payload
+  column verbatim — so no EDN round-trip ordering issue can split
+  writer and verifier. Causal-links are committed as a sorted vector
+  of [from-id type-string] pairs, so set order never leaks into the
+  digest.
+
+  Old-row strategy (documented dual acceptance, never silent): rows
+  written before this change — and rows written by out-of-band writers
+  still emitting the legacy header (the promotion outbox in
+  evoclj.promotion.promote) — carry a 7-line legacy hash.
+  verify-event-chain tries the v2 header first, then the legacy header
+  explicitly, and accepts when EITHER matches the stored :event-hash.
+  A tampered v2 row cannot fall through to legacy acceptance (the two
+  inputs differ in length, so cross-acceptance would require a sha256
+  collision). :prev-hash positional linkage is checked before either
+  hash comparison and is unchanged.
 
   Public data contract: the Event shape in
   evoclj.store.event-schema/EventSchema. The first argument of every
@@ -149,9 +171,39 @@
     (str ns "/" (name t))
     (name t)))
 
+(defn- canonical-causal-links
+  "Deterministic EDN encoding of a causal-links set for hash
+  commitment. Sorted by [from type] so set iteration order never leaks
+  into the digest; each edge encodes as a [from-id type-string] pair
+  (plain data, no map key-order sensitivity). #{} encodes as \"[]\"."
+  [links]
+  (pr-str (mapv (fn [{:keys [from type]}] [from (type->db type)])
+                (sort-by (juxt :from :type) (or links [])))))
+
 (defn- canonical-header
-  "Deterministic header hashed for :event-hash. E1 uses :prev/event-id
-  in the 4th line."
+  "Deterministic v2 header hashed for :event-hash: the legacy 7 lines
+  (session, seq, type, prev, payload-ref, prev-hash, created-at) plus
+  generation-id, phenotype-id, the exact stored metadata EDN string,
+  and the canonical causal-links encoding — one field per line, nil as
+  an empty line. See the ns docstring for the exact field order."
+  [h]
+  (str (:session/id h) "\n"
+       (:event/seq h) "\n"
+       (type->db (:event/type h)) "\n"
+       (or (:prev/event-id h) "") "\n"
+       (or (:payload-ref h) "") "\n"
+       (or (:prev-hash h) "") "\n"
+       (:created-at h) "\n"
+       (or (:generation/id h) "") "\n"
+       (or (:phenotype/id h) "") "\n"
+       (or (:metadata-edn h) "") "\n"
+       (or (:causal-links-edn h) "")))
+
+(defn- canonical-header-legacy
+  "The pre-strict-commitment 7-line header (session..created-at).
+  Accepted by the verifier ONLY for rows whose stored hash was computed
+  before the v2 header existed (or by out-of-band writers still on the
+  legacy form) — see the ns docstring old-row strategy."
   [h]
   (str (:session/id h) "\n"
        (:event/seq h) "\n"
@@ -164,6 +216,10 @@
 (defn- event-hash
   [h]
   (hash/text-digest (canonical-header h)))
+
+(defn- legacy-event-hash
+  [h]
+  (hash/text-digest (canonical-header-legacy h)))
 
 (defn- edn-safe-metadata?
   [m]
@@ -211,14 +267,22 @@
       (catch Exception _ {}))))
 
 (defn- row->header-map
-  [row]
+  "Header fields for hash verification, rebuilt from a stored row.
+  `links` is the causal-links set already fetched for this row. The
+  metadata commitment is the payload column verbatim — the exact bytes
+  the write path stored — so writer and verifier always agree."
+  [row links]
   {:session/id (:session_id row)
    :event/seq (:event_seq row)
    :event/type (keyword (:event_type row))
    :prev/event-id (or (:prev_event_id row) (:cause_event_id row))
    :payload-ref (:payload_ref row)
    :prev-hash (:prev_hash row)
-   :created-at (:created_at row)})
+   :created-at (:created_at row)
+   :generation/id (:generation_id row)
+   :phenotype/id (:phenotype_id row)
+   :metadata-edn (or (:payload row) "")
+   :causal-links-edn (canonical-causal-links links)})
 
 (defn- row->event
   "Convert a DB row into the public Event contract map. `links` is the
@@ -261,8 +325,9 @@
   Typed errors: :security/redact-invalid, :store/event-invalid,
   :store/session-not-found, :store/cause-not-found (prev not found),
   :store/cause-session-mismatch (prev must be same session, also
-  :store/prev-session-mismatch), :store/cause-not-earlier (prev must be
-  earlier, also :store/prev-not-earlier), :store/causal-link-not-found."
+  :store/prev-session-mismatch), :store/prev-not-immediate (prev must be
+  the immediate predecessor at seq = new-seq - 1),
+  :store/causal-link-not-found."
   ([store event]
    (append-event! store event nil))
   ([store event redaction-specs]
@@ -324,12 +389,23 @@
                                          {:event/type type :prev/event-id prev-id
                                           :session/id session-id
                                           :cause/session-id (:session_id prev-row)})))
-                     (when-not (< (:event_seq prev-row) new-seq)
-                       (throw (err/error :store/cause-not-earlier
-                                         "prev must reference an earlier event"
-                                         {:event/type type :prev/event-id prev-id
-                                          :cause/event-seq (:event_seq prev-row)
-                                          :event/seq new-seq})))
+                     ;; STRICT predecessor (audit item 6a): the supplied prev
+                     ;; must BE the row at (session, new-seq - 1) — fetched
+                     ;; directly by position, not inferred from the supplied
+                     ;; id. An earlier-but-not-immediate prev (a fork) is
+                     ;; rejected even though it is "earlier": the hash chain's
+                     ;; prev-hash is always taken from the positional
+                     ;; predecessor, so any other prev would fork the two
+                     ;; predecessor concepts.
+                     (let [immediate-prev (first (raw-query conn "SELECT id, event_seq FROM events WHERE session_id = ? AND event_seq = ?"
+                                                             [session-key (dec new-seq)]))]
+                       (when-not (= (:id immediate-prev) prev-id)
+                         (throw (err/error :store/prev-not-immediate
+                                           "prev must reference the immediate predecessor (seq = new-seq - 1) in the same session"
+                                           {:event/type type :prev/event-id prev-id
+                                            :event/seq new-seq
+                                            :immediate-prev-event-id (:id immediate-prev)
+                                            :immediate-prev-event-seq (:event_seq immediate-prev)}))))
                      ;; causal-links: each from must exist (any session)
                      (doseq [{:keys [from type]} causal-links]
                        (when-not (contains? #{:from :type} :from)
@@ -350,20 +426,27 @@
                                         [session-key (dec new-seq)])
                              first :event_hash)
                ts (canonical-timestamp (:created-at event))
+               metadata (or (:metadata event) {})
+               _ (when-not (edn-safe-metadata? metadata)
+                   (throw (err/error :store/event-invalid
+                                     "metadata must be EDN-safe Clojure data"
+                                     {:event/type type})))
+               ;; The committed metadata bytes are EXACTLY the stored payload
+               ;; string: header and INSERT share this binding, so writer and
+               ;; verifier can never disagree on the committed bytes.
+               payload (pr-str metadata)
                header {:session/id session-key
                        :event/seq new-seq
                        :event/type type
                        :prev/event-id prev-id
                        :payload-ref (:payload-ref event)
                        :prev-hash prev-hash
-                       :created-at ts}
-               ev-hash (event-hash header)
-               metadata (or (:metadata event) {})
-               _ (when-not (edn-safe-metadata? metadata)
-                   (throw (err/error :store/event-invalid
-                                     "metadata must be EDN-safe Clojure data"
-                                     {:event/type type})))
-               payload (pr-str metadata)]
+                       :created-at ts
+                       :generation/id (:generation/id event)
+                       :phenotype/id (:phenotype/id event)
+                       :metadata-edn payload
+                       :causal-links-edn (canonical-causal-links causal-links)}
+               ev-hash (event-hash header)]
            (raw-insert! conn
                         "INSERT INTO events
                            (session_id, event_seq, generation_id, phenotype_id,
@@ -452,16 +535,29 @@
     (catch Exception _ #{})))
 
 (defn verify-event-chain
-  "Verify the integrity of a session's event chain (component Step 5).
+  "Verify the integrity of a session's event chain (component Step 5,
+  strict-commitment header v2).
 
   Reads every event of `session-id` in :event/seq order and, for each
   one: checks that its stored :prev-hash links to the previous event's
   stored :event-hash (nil for the first event), then re-derives its
   :event-hash from the canonical header of its OWN stored row and
-  compares it against the stored :event-hash. Any mismatch — including
-  a tampered :event/type, :payload-ref, :prev/event-id, :prev-hash,
-  or :created-at in a copied historical row — fails verification,
-  reporting the offending :event/seq and :reason.
+  compares it against the stored :event-hash. The v2 header is tried
+  first, then the legacy 7-line header explicitly (documented dual
+  acceptance for pre-change rows and legacy out-of-band writers — see
+  the ns docstring); EITHER match accepts the row.
+
+  Precise coverage claim. For a v2 row, verification failing means one
+  of these stored fields was altered after append: session id, seq,
+  type, prev id, payload-ref, prev-hash, created-at, generation id,
+  phenotype id, metadata (payload EDN bytes), or causal-links. For a
+  legacy row, only the legacy 7 fields (session..created-at) are
+  covered. Positional :prev-hash linkage is always checked. NOT
+  covered: the autoincrement row id, the sessions-table pin (checked at
+  append time, not by the verifier), and causal_links.created_at
+  timestamps. \"Valid\" therefore means \"the full semantic record is
+  untampered\" for v2 rows, and \"the linear chain is untampered\" for
+  legacy rows — never a blanket cross-table audit truth.
 
   Returns {:valid? true :events n} for an intact chain (an empty
   session is trivially valid), or {:valid? false :reason k
@@ -471,10 +567,13 @@
   (let [rows (sqlite/query store
                            ["SELECT * FROM events WHERE session_id = ?
                              ORDER BY event_seq ASC"
-                            (str (types/session-id session-id))])]
+                            (str (types/session-id session-id))])
+        link-map (causal-links-for-rows store rows)]
     (loop [rows rows, prev-hash nil, n 0]
       (if-let [row (first rows)]
-        (let [expected (event-hash (row->header-map row))
+        (let [header (row->header-map row (get link-map (:id row) #{}))
+              expected (event-hash header)
+              legacy-expected (legacy-event-hash header)
               stored-hash (:event_hash row)]
           (cond
             (not= prev-hash (:prev_hash row))
@@ -483,7 +582,7 @@
              :event/seq (:event_seq row)
              :expected-prev prev-hash
              :actual-prev (:prev_hash row)}
-            (not= expected stored-hash)
+            (and (not= expected stored-hash) (not= legacy-expected stored-hash))
             {:valid? false
              :reason :event/hash-mismatch
              :event/seq (:event_seq row)

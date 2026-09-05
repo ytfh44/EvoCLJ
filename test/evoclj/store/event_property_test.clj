@@ -125,7 +125,11 @@
           now (Date.)
           _ (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                      :event/type :session/created :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {}})
-          _ (loop [prev-id (:event/id (first (event/events-for-session db sid-a))) i 1]
+          ;; The shared DB cannot be cleaned (the append-only trigger rejects
+          ;; DELETE), so rows accumulate across trials: the predecessor must
+          ;; be the LATEST event, never the first. Chaining from the oldest
+          ;; row is a fork and is rejected by the strict predecessor rule.
+          _ (loop [prev-id (:event/id (last (event/events-for-session db sid-a))) i 1]
               (when (< i n)
                 (let [e (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                                  :event/type :tool/invoke :prev/event-id prev-id :causal-links #{} :payload-ref nil :created-at now :metadata {:i i}})]

@@ -512,7 +512,22 @@
 
 (defn- root-event? [t] (contains? root-event-types t))
 
+(defn- canonical-causal-links
+  "Deterministic EDN encoding of a causal-links set for hash
+  commitment, lockstep with evoclj.store.event/canonical-causal-links.
+  The command outbox never writes causal_links rows, so this is always
+  called with #{} and encodes as \"[]\" — the empty commitment is the
+  honest value for these rows."
+  [links]
+  (pr-str (mapv (fn [{:keys [from type]}]
+                  [from (if-let [ns (namespace type)] (str ns "/" (name type)) (name type))])
+                (sort-by (juxt :from :type) (or links [])))))
+
 (defn- canonical-header
+  "Deterministic v2 header hashed for :event-hash, lockstep with
+  evoclj.store.event: the legacy 7 lines plus generation-id,
+  phenotype-id, the exact stored metadata EDN string, and the canonical
+  causal-links encoding — one field per line in this fixed order."
   [h]
   (str (:session/id h) "\n"
        (:event/seq h) "\n"
@@ -521,7 +536,11 @@
        (or (:cause/event-id h) "") "\n"
        (or (:payload-ref h) "") "\n"
        (or (:prev-hash h) "") "\n"
-       (:created-at h)))
+       (:created-at h) "\n"
+       (or (:generation/id h) "") "\n"
+       (or (:phenotype/id h) "") "\n"
+       (or (:metadata-edn h) "") "\n"
+       (or (:causal-links-edn h) "")))
 
 (defn- event-hash
   [h]
@@ -598,7 +617,11 @@
                 :cause/event-id (some-> resolved-cause str)
                 :payload-ref payload-ref
                 :prev-hash prev-hash
-                :created-at ts}
+                :created-at ts
+                :generation/id generation-id
+                :phenotype/id phenotype-id
+                :metadata-edn payload
+                :causal-links-edn (canonical-causal-links #{})}
         ev-hash (event-hash header)]
     (raw-insert! conn
                  "INSERT INTO events (session_id, event_seq, generation_id, phenotype_id, event_type, cause_event_id, payload_ref, payload, prev_hash, event_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"

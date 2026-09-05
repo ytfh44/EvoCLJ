@@ -113,6 +113,15 @@
                  (:payload_ref row) (:payload row) (:prev_hash row)
                  (:event_hash row) (:created_at row)]))
 
+(defn- copy-links!
+  "Copy every causal_links row from src-db into db. Event ids align
+  because both databases receive the copied event rows in the same order
+  into fresh AUTOINCREMENT sequences."
+  [src-db db]
+  (doseq [link-row (sqlite/query src-db ["SELECT from_event_id, to_event_id, link_type, created_at FROM causal_links"])]
+    (sqlite/exec! db ["INSERT OR IGNORE INTO causal_links (from_event_id, to_event_id, link_type, created_at) VALUES (?, ?, ?, ?)"
+                      (:from_event_id link-row) (:to_event_id link-row) (:link_type link-row) (:created_at link-row)])))
+
 ;; ============================================================================
 ;; Step 1 — per-session monotonic sequence allocation inside a transaction
 ;; ============================================================================
@@ -135,10 +144,22 @@
         sid (seed-session! db)
         root (event/append-event! db (base-event sid {:event/type :session/created}))
         per-thread 25
+        ;; Under the strict predecessor rule, racing writers may read the
+        ;; same latest event before either commits; the loser retries with
+        ;; the fresh predecessor (compare-and-swap style). Bounded retries:
+        ;; every rejection means the peer committed, so the loop converges.
         worker (fn []
                  (dotimes [_ per-thread]
-                   (let [latest (last (event/events-for-session db sid))]
-                     (event/append-event! db (base-event sid {:prev/event-id (:event/id latest)})))))]
+                   (loop [attempt 0]
+                     (let [latest (last (event/events-for-session db sid))
+                           outcome (try
+                                     (event/append-event! db (base-event sid {:prev/event-id (:event/id latest)}))
+                                     (catch clojure.lang.ExceptionInfo rejected rejected))]
+                       (when (instance? clojure.lang.ExceptionInfo outcome)
+                         (if (and (= :store/prev-not-immediate (:error/type (ex-data outcome)))
+                                  (< attempt 100))
+                           (recur (inc attempt))
+                           (throw outcome)))))))]
     (let [t1 (future (worker))
           t2 (future (worker))]
       @t1
@@ -185,17 +206,23 @@
       (is (some? e))
       (is (= :store/event-invalid (:error/type (ex-data e)))))))
 
-(deftest earlier-same-session-prev-is-accepted
+(deftest forked-predecessor-append-is-rejected
   (let [db (fresh-db)
         sid (seed-session! db)
-        root (event/append-event! db (base-event sid {:event/type :session/created}))
-        e2 (event/append-event! db (base-event sid {:prev/event-id (:event/id root)}))
-        e3 (event/append-event! db (base-event sid {:prev/event-id (:event/id e2)}))]
-    (is (= (:event/id root) (:prev/event-id e2)))
-    (is (= (:event/id e2) (:prev/event-id e3)))
-    (testing "a prev may reference any earlier event, not only the immediate predecessor"
-      (let [e4 (event/append-event! db (base-event sid {:prev/event-id (:event/id root)}))]
-        (is (= (:event/id root) (:prev/event-id e4)))))))
+        root-event (event/append-event! db (base-event sid {:event/type :session/created}))
+        middle-event (event/append-event! db (base-event sid {:prev/event-id (:event/id root-event)}))]
+    (testing "an append whose prev skips the immediate predecessor is rejected at append time"
+      (let [forked-attempt (event-error #(event/append-event! db (base-event sid {:prev/event-id (:event/id root-event)})))]
+        (is (some? forked-attempt))
+        (is (= :store/prev-not-immediate (:error/type (ex-data forked-attempt))))))
+    (testing "the rejected fork writes nothing and the chain still verifies"
+      (is (= [1 2] (mapv :event/seq (event/events-for-session db sid))))
+      (is (= {:valid? true :events 2} (event/verify-event-chain db sid))))
+    (testing "the legitimate immediate-predecessor append still passes"
+      (let [closing-event (event/append-event! db (base-event sid {:prev/event-id (:event/id middle-event)}))]
+        (is (= (:event/id middle-event) (:prev/event-id closing-event)))
+        (is (= 3 (:event/seq closing-event)))
+        (is (= {:valid? true :events 3} (event/verify-event-chain db sid)))))))
 
 (deftest prev-must-reference-an-existing-event
   (let [db (fresh-db)
@@ -424,6 +451,98 @@
           (is (false? (:valid? v)))
           (is (= :event/hash-mismatch (:reason v)))
           (is (= (:event/seq ev2) (:event/seq v))))))))
+
+(deftest tampered-metadata-fails-verification
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        root-event (event/append-event! db (base-event sid {:event/type :session/created}))
+        middle-event (event/append-event! db (base-event sid {:prev/event-id (:event/id root-event)
+                                                              :metadata {:role :middle :count 41}}))
+        _ (event/append-event! db (base-event sid {:prev/event-id (:event/id middle-event)}))
+        rows (sqlite/query db ["SELECT * FROM events ORDER BY event_seq"])]
+    (is (= 3 (count rows)))
+    (testing "rewriting the stored metadata bytes breaks the hash"
+      (let [db-copy (fresh-db)
+            _ (seed-session! db-copy sid)
+            tampered (mapv #(if (= (:event_seq %) (:event/seq middle-event))
+                              (assoc % :payload (pr-str {:role :middle :count 42}))
+                              %)
+                           rows)]
+        (doseq [row tampered] (insert-row! db-copy row))
+        (let [verdict (event/verify-event-chain db-copy sid)]
+          (is (false? (:valid? verdict)))
+          (is (= :event/hash-mismatch (:reason verdict)))
+          (is (= (:event/seq middle-event) (:event/seq verdict))))))))
+
+(deftest tampered-causal-links-fail-verification
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        root-event (event/append-event! db (base-event sid {:event/type :session/created}))
+        linked-event (event/append-event! db (base-event sid {:prev/event-id (:event/id root-event)
+                                                              :causal-links #{{:from (:event/id root-event) :type :test/derives}}}))
+        rows (sqlite/query db ["SELECT * FROM events ORDER BY event_seq"])]
+    (testing "the intact chain (links stored alongside rows) verifies"
+      (is (= #{{:from (:event/id root-event) :type :test/derives}} (:causal-links linked-event)))
+      (is (= {:valid? true :events 2} (event/verify-event-chain db sid))))
+    (testing "copying rows without their links fails verification"
+      (let [db-copy (fresh-db)
+            _ (seed-session! db-copy sid)]
+        (doseq [row rows] (insert-row! db-copy row))
+        (let [verdict (event/verify-event-chain db-copy sid)]
+          (is (false? (:valid? verdict)))
+          (is (= :event/hash-mismatch (:reason verdict)))
+          (is (= (:event/seq linked-event) (:event/seq verdict))))))
+    (testing "copying rows with their links verifies"
+      (let [db-copy (fresh-db)
+            _ (seed-session! db-copy sid)]
+        (doseq [row rows] (insert-row! db-copy row))
+        (copy-links! db db-copy)
+        (is (= {:valid? true :events 2} (event/verify-event-chain db-copy sid)))))
+    (testing "an added link on an otherwise valid row fails verification"
+      (let [db-copy (fresh-db)
+            _ (seed-session! db-copy sid)]
+        (doseq [row rows] (insert-row! db-copy row))
+        (copy-links! db db-copy)
+        (sqlite/exec! db-copy ["INSERT OR IGNORE INTO causal_links (from_event_id, to_event_id, link_type, created_at) VALUES (?, ?, ?, ?)"
+                               (:event/id root-event) (:event/id linked-event) "test/forged" now])
+        (let [verdict (event/verify-event-chain db-copy sid)]
+          (is (false? (:valid? verdict)))
+          (is (= :event/hash-mismatch (:reason verdict)))
+          (is (= (:event/seq linked-event) (:event/seq verdict))))))))
+
+(deftest tampered-generation-and-phenotype-fail-verification
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        root-event (event/append-event! db (base-event sid {:event/type :session/created}))
+        middle-event (event/append-event! db (base-event sid {:prev/event-id (:event/id root-event)}))
+        rows (sqlite/query db ["SELECT * FROM events ORDER BY event_seq"])]
+    (is (= [1 2] (mapv :event_seq rows)))
+    (testing "rewriting the stored phenotype identity breaks the hash"
+      (let [db-copy (fresh-db)
+            _ (seed-session! db-copy sid)
+            tampered (mapv #(if (= (:event_seq %) (:event/seq middle-event))
+                              (assoc % :phenotype_id (str "sha256:" (apply str (repeat 64 "f"))))
+                              %)
+                           rows)]
+        (doseq [row tampered] (insert-row! db-copy row))
+        (let [verdict (event/verify-event-chain db-copy sid)]
+          (is (false? (:valid? verdict)))
+          (is (= :event/hash-mismatch (:reason verdict)))
+          (is (= (:event/seq middle-event) (:event/seq verdict))))))
+    (testing "repointing the stored generation breaks the hash"
+      (let [db-copy (fresh-db)
+            _ (seed-session! db-copy sid)
+            _ (sqlite/exec! db-copy ["INSERT INTO generations (id, genome_id, resolution_id, parent_id, state, current, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                                     "generation-decoy" genome resolution nil "active" 0 now])
+            tampered (mapv #(if (= (:event_seq %) (:event/seq middle-event))
+                              (assoc % :generation_id "generation-decoy")
+                              %)
+                           rows)]
+        (doseq [row tampered] (insert-row! db-copy row))
+        (let [verdict (event/verify-event-chain db-copy sid)]
+          (is (false? (:valid? verdict)))
+          (is (= :event/hash-mismatch (:reason verdict)))
+          (is (= (:event/seq middle-event) (:event/seq verdict))))))))
 
 ;; ============================================================================
 ;; component — redaction on the event write path (F7)

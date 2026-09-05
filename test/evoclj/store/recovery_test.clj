@@ -264,14 +264,14 @@
         _ (seed-generation! db genome-id)
         done (:session/id (session/create-session! db (session-request genome-id)))
         created (event/append-event! db (base-event done {:event/type :session/created}))
-        _ (event/append-event! db (base-event done {:event/type :session/started
-                                                    :prev/event-id (:event/id created)}))
+        started (event/append-event! db (base-event done {:event/type :session/started
+                                                          :prev/event-id (:event/id created)}))
         _ (session/transition-session! db done :created :resolving {})
         _ (session/transition-session! db done :resolving :running {})
         _ (session/transition-session! db done :running :waiting {})
         _ (session/transition-session! db done :waiting :completed {})
         _ (event/append-event! db (base-event done {:event/type :session/completed
-                                                    :prev/event-id (:event/id created)}))]
+                                                    :prev/event-id (:event/id started)}))]
     (is (= [] (:orphaned-sessions (recovery/scan-recovery-state db root))))))
 
 ;; ============================================================================
@@ -286,9 +286,9 @@
         sid (:session/id (session/create-session! db (session-request genome-id)))
         created (event/append-event! db (base-event sid {:event/type :session/created}))
         ghost (str "sha256:" (apply str (repeat 64 "f")))
-        _ (event/append-event! db (base-event sid {:event/type :intent/proposed
-                                                   :payload-ref ghost
-                                                   :prev/event-id (:event/id created)}))
+        proposed (event/append-event! db (base-event sid {:event/type :intent/proposed
+                                                          :payload-ref ghost
+                                                          :prev/event-id (:event/id created)}))
         report (recovery/scan-recovery-state db root)]
     (testing "the unresolved content reference is reported with its event"
       (is (= [{:session/id sid
@@ -300,7 +300,7 @@
       (let [present (:artifact/id (put! root "request body"))
             _ (event/append-event! db (base-event sid {:event/type :intent/normalized
                                                        :payload-ref present
-                                                       :prev/event-id (:event/id created)}))]
+                                                       :prev/event-id (:event/id proposed)}))]
         (is (= [ghost] (mapv :payload-ref (:missing-artifacts
                                            (recovery/scan-recovery-state db root)))))))))
 
