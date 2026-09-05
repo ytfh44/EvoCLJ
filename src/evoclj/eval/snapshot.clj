@@ -93,8 +93,11 @@
   (make-snapshot sources))
 
 (defn code-id
-  "Code identity derived from abi, genome-id and resolution-id only.
-  Environment snapshot and runtime leases are intentionally excluded."
+  "ProgramImage identity derived from abi, genome-id and resolution-id
+  only. Environment snapshot and runtime leases are intentionally
+  excluded — and the result identifies the ABI-compatible program ONLY,
+  never execution semantics (same ProgramImage NEVER implies the same
+  execution; see evoclj.compiler.core/runtime-image-id)."
   [abi genome-id resolution-id]
   (when-not (map? abi)
     (throw (ex-info "abi must be map" {:abi abi})))
@@ -105,7 +108,7 @@
   (hash/text-digest (str (pr-str (into (sorted-map) abi)) genome-id resolution-id)))
 
 (defn code-image-id
-  "Alias for code-id — CodeImageId is H(kernel ABI, Genome, Resolution)."
+  "Alias for code-id — the ProgramImage: H(kernel ABI, Genome, Resolution). Program identity ONLY, never execution semantics."
   [abi genome-id resolution-id]
   (code-id abi genome-id resolution-id))
 
@@ -119,8 +122,8 @@
     :else v))
 
 (defn deployment-id
-  "Deployment identity binding code-id, bindings, and authority:
-  DeploymentId = SHA256(code-id || canonical(bindings) || canonical(authority))."
+  "Deployment identity binding the ProgramImage id, bindings, and authority:
+  DeploymentId = SHA256(program-image-id || canonical(bindings) || canonical(authority)). Binds program to deployment — not execution semantics."
   [code-id-str bindings authority]
   (hash/text-digest
    (str (or code-id-str "")
@@ -132,8 +135,36 @@
   []
   (java.util.UUID/randomUUID))
 
-;; Legacy alias for backwards compat (deprecated, will be removed next wave)
+;; Legacy alias for backwards compat — RETAINED (decision): still called by
+;; test/evoclj/eval/snapshot_test.clj and test/evoclj/acceptance/unified_test.clj,
+;; so removal is unsafe. It names the ProgramImage, nothing more.
 (defn phenotype-id
-  "Deprecated alias for code-id — retained for test compat, but I1 prefers code-id/code-image-id."
+  "Deprecated alias for code-id — the ProgramImage: H(kernel ABI, Genome,
+  Resolution). Program identity ONLY, never execution semantics; I1 prefers
+  code-id/code-image-id."
   [abi genome-id resolution-id]
   (code-id abi genome-id resolution-id))
+
+;; --- RuntimeImage + ExecutionEnvironment mirror --------------------------------
+;; Mirrors evoclj.compiler.core/runtime-image-id and
+;; evoclj.compiler.resolution/execution-environment so eval-side helpers stay
+;; usable without pulling the compiler into every eval namespace. The
+;; runtime-image-id formula MUST stay byte-identical to the compiler's: both
+;; canonicalize the descriptor with sorted maps and hash
+;; (canonical-descriptor || program-image-id). A mirror-consistency test
+;; pins the equality.
+
+(defn runtime-image-id
+  "Mirror of evoclj.compiler.core/runtime-image-id: the RuntimeImageId over
+  runtime-descriptor || program-image-id. The SAME ProgramImage under
+  DIFFERENT runtime descriptors yields DIFFERENT ids — and the id still
+  does NOT imply identical SaaS model behavior (pair with an
+  ExecutionEnvironment record for observational provenance)."
+  [program-image-id runtime-descriptor]
+  (hash/text-digest (str (pr-str (canonical-edn-value runtime-descriptor)) program-image-id)))
+
+(defn return-fingerprint
+  "Mirror of evoclj.compiler.resolution/return-fingerprint: fingerprints the
+  returned BYTES only, never the behavior that produced them."
+  [result]
+  (hash/text-digest (pr-str result)))

@@ -61,6 +61,7 @@
             [clojure.java.jdbc :as jdbc]
             [evoclj.capability.constraint :as constraint]
             [evoclj.compiler.core :as compiler]
+            [evoclj.compiler.resolution :as resolution]
             [evoclj.genome.load :as load]
             [evoclj.genome.path :as genome-path]
             [evoclj.intent.dispatch :as dispatch]
@@ -221,13 +222,64 @@
                 (str path "\u0000" digest "\n"))
               (sort-by first genome-path/bytewise-compare (:files loaded)))))
 
+(defn- program-identity
+  "The ProgramImage triple off a compile-genome result, tolerant of the
+  historical :compiled/* key shape: {:genome/id :resolution/id :code/id}.
+  The pin and every execution record below resolve program identity ONLY
+  through this helper — never by naming one key shape."
+  [compiled]
+  {:genome/id (or (:code/genome-id compiled) (:compiled/genome-id compiled))
+   :resolution/id (or (:code/resolution-id compiled) (:compiled/resolution-id compiled))
+   :code/id (or (:code/id compiled) (:compiled/code-id compiled)
+                (:compiled/phenotype-id compiled) (:phenotype/id compiled))})
+
+(defn- runtime-identity
+  "The RuntimeImageId + ExecutionEnvironment for one side's `compiled`
+  map: the runtime descriptor comes from
+  evoclj.compiler.core/default-runtime-descriptor (same ABI/Genome/
+  Resolution keep the ProgramImage stable while any implementation
+  change moves the RuntimeImageId), and the observed providers are the
+  logical binding entries observed at execution (NOT SaaS deployment
+  headers — the broker carries none, so SaaS builds stay unobserved; the
+  record is observational provenance, never content identity)."
+  [compiled case-map seed]
+  (let [program (:code/id (program-identity compiled))
+        runtime-id (compiler/runtime-image-id
+                    program (compiler/default-runtime-descriptor compiled))
+        observed (into (sorted-map)
+                       (map (fn [[model-name entry]]
+                              [model-name (select-keys entry [:provider :provider-model :adapter-version])]))
+                       (:models (:resolution compiled)))]
+    {:runtime/image-id runtime-id
+     :execution-environment
+     (resolution/execution-environment
+      {:observed-providers observed
+       :request-params {:case/id (:case/id case-map)
+                        :seed seed
+                        :side/kind (:side/kind case-map)}
+       :result {:program-image-id program
+                :runtime-image-id runtime-id}})}))
+
+(defn- complete-environment
+  "Rebuild a skeleton ExecutionEnvironment (from runtime-identity) with the
+  completed result: the return fingerprint now covers {:output-ref <sha |
+  nil> :outputs <vector | nil>}. The skeleton stays on the :session/created
+  event metadata (fingerprint over the pinned identity triple); the
+  completed record travels on the side result. Both are schema-valid
+  observational provenance — neither promises future behavior."
+  [skeleton result]
+  (resolution/execution-environment
+   {:observed-providers (:execution-environment/observed-providers skeleton)
+    :request-params (:execution-environment/request-params skeleton)
+    :result result}))
+
 (defn- register-compiled-artifacts!
   "Seed the fresh side store with the compiled identity rows required by
   the post-009/post-011 foreign keys before creating its session."
   [stores loaded compiled]
   (let [db (:sqlite stores)
         cas-store (:cas stores)
-        genome-id (:compiled/genome-id compiled)
+        genome-id (:genome/id (program-identity compiled))
         genome-body (.getBytes (genome-index-body loaded) StandardCharsets/UTF_8)
         stored (:artifact/id (cas/put-bytes! cas-store genome-body {}))
         _ (when-not (= stored genome-id)
@@ -237,35 +289,40 @@
                                :stored-artifact-id stored})))]
     (artifact/ensure-artifact! db genome-id "application/octet-stream"
                                 (alength genome-body))
-    (artifact/ensure-artifact! db (:compiled/resolution-id compiled)
+    (artifact/ensure-artifact! db (:resolution/id (program-identity compiled))
                                 "application/edn" 0)
-    (artifact/ensure-artifact! db (:compiled/phenotype-id compiled)
+    (artifact/ensure-artifact! db (:code/id (program-identity compiled))
                                 "application/edn" 0)
     (artifact/ensure-genome! db genome-id)
     stores))
 
 
 (defn- create-pinned-session!
-  "create-session! pinned to the compiled genome's identity, then
-  append the :session/created root event (the host's job — the
-  scheduler anchors its causal chain on it). Returns the session id."
-  [stores compiled generation-id]
+  "create-session! pinned to the compiled genome's ProgramImage identity,
+  then append the :session/created root event (the host's job — the
+  scheduler anchors its causal chain on it). The root event metadata
+  carries the RuntimeImageId and the ExecutionEnvironment skeleton
+  (observed binding + request params; the return fingerprint lands on
+  the side result once outputs exist). Returns the session id."
+  [stores compiled generation-id runtime-env]
   (let [db (:sqlite stores)
+        program (program-identity compiled)
         sid (:session/id
              (session/create-session!
               db
-              {:genome/id (:compiled/genome-id compiled)
-               :resolution/id (:compiled/resolution-id compiled)
-               :phenotype/id (:compiled/phenotype-id compiled)
+              {:genome/id (:genome/id program)
+               :resolution/id (:resolution/id program)
+               :phenotype/id (:code/id program)
                :generation/id generation-id}))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id
-                          :phenotype/id (:compiled/phenotype-id compiled)
+                          :phenotype/id (:code/id program)
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
-                          :metadata {}})
+                          :metadata {:runtime/image-id (:runtime/image-id runtime-env)
+                                     :execution-environment (:execution-environment runtime-env)}})
     sid))
 
 ;; --- side usage (component counters, Feature C) ------------------------------
@@ -358,7 +415,9 @@
 
       {:side/kind ... :side/id ...
        :side/instance-id <uuid>      ; the FRESH Phenotype INSTANCE marker
-       :side/phenotype-id <sha256>
+       :side/phenotype-id <sha256>   ; the ProgramImage (:code/id) this side pinned
+       :side/runtime-image-id <sha256> ; the RuntimeImageId recorded for this side
+       :side/execution-environment <map> ; completed observational provenance (return fingerprint over outputs)
        :side/session-id <uuid>       ; the fresh pinned session
        :side/status :completed | :failed | :budget-exhausted
        :side/output-ref <sha256 | nil>
@@ -392,7 +451,8 @@
                 (registry/register! registry (fixture-for evaluator tool-id seed)))
             ;; create session FIRST so leases can bind SessionPrincipal(sid) (I2)
             _ (register-compiled-artifacts! stores loaded compiled)
-            sid (create-pinned-session! stores compiled generation-id)
+            runtime-env (runtime-identity compiled case-map seed)
+            sid (create-pinned-session! stores compiled generation-id runtime-env)
             ;; H1 Hydration factory — verify pinned identity via the
             ;; single hydration path (Genome/Resolution/CodeImage via
             ;; store, Deployment check, fresh SCI/broker). The factory
@@ -444,7 +504,12 @@
         {:side/kind side-kind
          :side/id side-id
          :side/instance-id (random-uuid)
-         :side/phenotype-id (:compiled/phenotype-id compiled)
+         :side/phenotype-id (:code/id (program-identity compiled))
+         :side/runtime-image-id (:runtime/image-id runtime-env)
+         :side/execution-environment
+         (complete-environment (:execution-environment runtime-env)
+                                {:output-ref (:output-ref run)
+                                 :outputs outputs})
          :side/session-id sid
          :side/status (:status run)
          :side/output-ref (:output-ref run)

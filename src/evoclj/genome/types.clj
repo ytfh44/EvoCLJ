@@ -2,16 +2,28 @@
   "ID conventions and validated value helpers for EvoCLJ.
 
   Content-addressed IDs — genome, resolution, artifact, code-image,
-  deployment — are canonical strings of the form \"sha256:<64 lowercase hex>\".
+  runtime-image, deployment — are canonical strings of the form \"sha256:<64 lowercase hex>\".
   Session, intent, and execution IDs are UUIDs, accepted either as #uuid
   values or their canonical string representation. IDs are kept as plain
   values in validated maps so they stay easy to persist and print; records
   and protocols are deliberately deferred.
 
-  I1 identity split:
-    CodeImageId  = H(kernel ABI, Genome, Resolution) — pure code identity
-    DeploymentId = H(CodeImage, bindings, authority) — bound deployment
-    ExecutionId  = UUID per activation — distinct execution identity
+  I1 identity split — what each identity DOES and does NOT imply:
+    CodeImageId (ProgramImage) = H(kernel ABI, Genome, Resolution) — pure
+      program identity. DOES: name which ABI-compatible program this is;
+      identical inputs always yield the identical id. Does NOT: imply the
+      same execution semantics, the same model function behind a logical
+      binding, or reproducibility of any observation.
+    DeploymentId = H(CodeImage, bindings, authority) — bound deployment.
+      DOES: name which program runs under which host bindings/authority.
+      Does NOT: imply execution semantics either.
+    RuntimeImageId = H(ProgramImage, runtime-descriptor) — implementation
+      identity (kernel build, interpreter build, provider adapter builds).
+      DOES: distinguish the same program executed by different
+      implementations. Does NOT: imply identical SaaS model behavior —
+      that needs ExecutionEnvironment observational provenance alongside.
+    ExecutionId  = UUID per activation — distinct execution identity.
+      DOES: distinguish activations. Does NOT: carry any content meaning.
   PhenotypeId legacy alias is removed (one-time break compat)."
   (:require [evoclj.kernel.error :as err]))
 
@@ -41,9 +53,17 @@
   (sha256-id? x))
 
 (defn code-image-id?
-  "Alias for code-id? — CodeImageId is H(kernel ABI, Genome, Resolution)."
+  "Alias for code-id? — CodeImageId is the ProgramImage: H(kernel ABI,
+  Genome, Resolution). Program identity ONLY, never execution semantics."
   [x]
   (code-id? x))
+(defn runtime-image-id?
+  "True when x is a canonical \"sha256:<64 hex>\" RuntimeImage ID string
+  (I1): H(ProgramImage, runtime-descriptor). Implementation identity
+  ONLY — distinguishing builds, never promising identical SaaS model
+  behavior."
+  [x]
+  (sha256-id? x))
 
 (defn deployment-id?
   "True when x is a canonical \"sha256:<64 hex>\" Deployment ID string (I1)."
@@ -109,6 +129,12 @@
   "Alias for code-id — validate CodeImageId."
   [x]
   (code-id x))
+(defn runtime-image-id
+  "Validate x as a RuntimeImage ID, returning the canonical string unchanged."
+  [x]
+  (if (runtime-image-id? x)
+    x
+    (invalid-id! :runtime/image-id "sha256:<64 hex> string" x)))
 
 (defn deployment-id
   "Validate x as a Deployment ID, returning the canonical string unchanged."

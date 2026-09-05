@@ -137,6 +137,71 @@
         (is (not= (:resolution/id (resolution/resolve-models (seed-models-config) catalog-v1))
                   (:resolution/id (resolution/resolve-models (seed-models-config) catalog-v4))))))))
 
+;; --- logical binding: same names => same id, never same function ------------
+
+(deftest logical-resolution-identical-for-same-service-names
+  (testing "independently built catalogs with the same names resolve identically"
+    (let [catalog-a {:reasoning/high {:provider :fixture
+                                      :provider-model "fixture-model-v1"
+                                      :adapter-version "1"}}
+          catalog-b {:reasoning/high {:provider :fixture
+                                      :provider-model "fixture-model-v1"
+                                      :adapter-version "1"}}
+          config {:models {:planner {:alias :reasoning/high}}}]
+      (is (= (:resolution/id (resolution/resolve-models config catalog-a))
+             (:resolution/id (resolution/resolve-models config catalog-b)))
+          "the id names the LOGICAL binding (names + adapter versions)")))
+  (testing "the id is binding-sensitive and still promises no model function"
+    (let [r (resolution/resolve-models (seed-models-config) (fixture-catalog))]
+      (is (types/resolution-id? (:resolution/id r)))
+      (is (= #{:provider :provider-model :adapter-version :alias}
+             (set (keys (get-in r [:models :planner]))))
+          "the binding records names only — behavior is observed later"))))
+
+;; --- ExecutionEnvironment observational provenance ---------------------------
+
+(deftest execution-environment-records-observed-provenance-and-validates
+  (testing "a complete observation builds a schema-valid record"
+    (let [env (resolution/execution-environment
+               {:observed-providers {:planner {:provider :fixture
+                                               :provider-model "fixture-model-v1"
+                                               :adapter-version "1"}}
+                :request-params {:case/id :sel/c1 :seed "seed-1"}
+                :result {:text "hi-fixed"}
+                :captured-at 1720000000000})]
+      (is (resolution/execution-environment? env))
+      (is (= {:planner {:provider :fixture
+                        :provider-model "fixture-model-v1"
+                        :adapter-version "1"}}
+             (:execution-environment/observed-providers env)))
+      (is (= {:case/id :sel/c1 :seed "seed-1"}
+             (:execution-environment/request-params env)))
+      (is (= 1720000000000 (:execution-environment/captured-at env)))
+      (is (= (resolution/return-fingerprint {:text "hi-fixed"})
+             (:execution-environment/return-fingerprint env))
+          "the fingerprint covers the returned bytes")))
+  (testing "captured-at defaults to now"
+    (let [before (System/currentTimeMillis)
+          env (resolution/execution-environment
+               {:observed-providers {} :request-params {} :result nil})]
+      (is (resolution/execution-environment? env))
+      (is (<= before (:execution-environment/captured-at env)))))
+  (testing "malformed shapes fail closed with :resolution/invalid"
+    (doseq [bad [{:observed-providers nil :request-params {} :result nil}
+                 {:observed-providers {} :request-params nil :result nil}
+                 {:observed-providers "x" :request-params {} :result nil}]]
+      (let [e (try (resolution/execution-environment bad)
+                   (catch clojure.lang.ExceptionInfo ex ex))]
+        (is (= :resolution/invalid (:error/type (ex-data e)))))))
+  (testing "the predicate rejects near-misses"
+    (is (not (resolution/execution-environment? nil)))
+    (is (not (resolution/execution-environment? {})))
+    (is (not (resolution/execution-environment?
+              {:execution-environment/observed-providers {}
+               :execution-environment/request-params {}
+               :execution-environment/captured-at 1720000000000
+               :execution-environment/return-fingerprint "not-a-hash"})))))
+
 ;; --- secret-looking key rejection ------------------------------------------
 
 (deftest secret-looking-keys-are-rejected

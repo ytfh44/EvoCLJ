@@ -11,18 +11,30 @@
   beyond orchestration glue: reading the two declared modules
   (topology, models) out of the immutable in-memory :files (never from
   disk, and never executed), attaching the program registry, checking
-  topology program references resolve, and computing the CodeImage identity.
+  topology program references resolve, and computing the ProgramImage
+  identity.
 
   Identity split (I1):
 
-    CodeImageId  = H(kernel-abi || genome-id || resolution-id)
-    DeploymentId = H(CodeImage || bindings || authority)
-    ExecutionId  = UUID per activation
-  CodeImageId identifies pure compiled code: identical ABI, Genome, and
-  Resolution always yield identical CodeImageId. DeploymentId binds
-  CodeImageId to a concrete deployment's host bindings and authority
+    ProgramImageId (CodeImageId) = H(kernel-abi || genome-id || resolution-id)
+    DeploymentId   = H(ProgramImage || bindings || authority)
+    ExecutionId    = UUID per activation
+    RuntimeImageId = H(ProgramImage || runtime-descriptor)
+  ProgramImageId (persisted as :code/id, the historical CodeImageId key)
+  identifies the ABI-compatible program and NOTHING more: identical ABI,
+  Genome, and Resolution always yield identical ProgramImageId, but the
+  same ProgramImageId NEVER implies the same execution semantics — a
+  different kernel implementation, interpreter build, or provider
+  adapter build behind the same interface versions executes the same
+  program differently (SaaS model endpoints change without notice, so
+  the same logical binding NEVER implies the same model function).
+  Same-execution-semantics claims require the RuntimeImageId
+  (runtime-image-id in this namespace), recorded on execution records,
+  together with the ExecutionEnvironment observational provenance
+  (evoclj.compiler.resolution/execution-environment). DeploymentId binds
+  the ProgramImage to a concrete deployment's host bindings and authority
   (capability leases). ExecutionId is a fresh UUID per activation:
-  two Executions with the same CodeImage share :code/id but have
+  two Executions with the same ProgramImage share :code/id but have
   distinct :execution/id. PhenotypeId legacy alias is removed
   (one-time break compat).
   The CompiledGenome is pure, fully serializable EDN data (Global
@@ -165,22 +177,88 @@
   (pr-str (canonical-edn-value v)))
 
 (defn- code-id
-  "The canonical CodeImageId: sha256:<64 hex> over the canonical serialization
-  of kernel-abi || genome-id || resolution-id (pure code identity)."
+  "The canonical ProgramImageId (historical name CodeImageId):
+  sha256:<64 hex> over the canonical serialization of kernel-abi ||
+  genome-id || resolution-id. Identifies the ABI-compatible program
+  ONLY — the same id NEVER implies the same execution semantics (see
+  the namespace docstring and runtime-image-id). Byte-identical formula,
+  unchanged."
   [abi genome-id resolution-id]
   (hash/text-digest (str (canonical-edn-string abi) genome-id resolution-id)))
 
 (defn deployment-id
-  "Derive the DeploymentId from code-image-id, bindings, and authority:
-  DeploymentId = SHA256(code-image-id || canonical(bindings) || canonical(authority)).
+  "Derive the DeploymentId from the ProgramImage id, bindings, and authority:
+  DeploymentId = SHA256(program-image-id || canonical(bindings) || canonical(authority)).
   bindings is a collection of [type id digest] or similar; authority is a
   collection of leases or authority tokens. Both are canonicalized via
-  sorted pr-str."
+  sorted pr-str. Binds the program to a deployment — still not an
+  execution-semantics identity (see runtime-image-id)."
   [code-image-id bindings authority]
   (hash/text-digest
    (str (or code-image-id "")
         (canonical-edn-string (vec (sort-by pr-str (or bindings []))))
         (canonical-edn-string (vec (sort-by pr-str (or authority [])))))))
+
+;; --- RuntimeImage identity (Program vs Runtime split) -------------------------
+
+(def interpreter-build-id
+  "The interpreter build behind every SCI execution, as a stable string:
+  the org.babashka/sci Maven pin in deps.edn. This constant MUST be bumped
+  together with that pin; no automated check enforces the match (known
+  residual — compilation performs no IO, so the pin cannot be read here)."
+  "sci-0.15.58")
+
+(def kernel-build-unresolved
+  "Marker carried in the runtime descriptor where a stable kernel build id
+  would go. The kernel ABI map (e.g. {:kernel 1 :genome 1 :intent 1 :tool 1})
+  is an INTERFACE version only: it cannot distinguish two different kernel
+  implementations behind the same interface. No version file, build stamp,
+  or content hash of the kernel implementation exists in-repo, so the
+  descriptor records this marker honestly instead of inventing a hermetic
+  id (known residual)."
+  :kernel/build-unresolved)
+
+(defn adapter-builds-from-resolution
+  "The provider adapter builds named by a Resolution: a sorted map of
+  model-name to its :adapter-version string. Entries without an explicit
+  :adapter-version record :adapter/unversioned. Known residuals: the
+  OpenAI/Anthropic adapter namespaces carry no separate code-build
+  constant, and SaaS endpoint builds are unobservable from the compile
+  side — the logical binding name is all the program side can see, which
+  is exactly why the same logical binding NEVER implies the same model
+  function."
+  [resolution]
+  (into (sorted-map)
+        (map (fn [[model-name entry]]
+               [model-name (or (:adapter-version entry) :adapter/unversioned)]))
+        (:models resolution)))
+
+(defn default-runtime-descriptor
+  "The runtime descriptor for one execution of `compiled` (a compile-genome
+  result): the kernel ABI (interface version only, plus the
+  unresolved-build marker), the interpreter build id, and the adapter
+  builds named by the compiled Resolution. Pure data. Callers simulating
+  an implementation change (kernel, interpreter, or adapter swap behind
+  unchanged interfaces) override the relevant field before hashing."
+  [compiled]
+  {:kernel/abi (:abi compiled)
+   :kernel/build kernel-build-unresolved
+   :interpreter/build interpreter-build-id
+   :adapter/builds (adapter-builds-from-resolution (:resolution compiled))})
+
+(defn runtime-image-id
+  "The RuntimeImageId: sha256:<64 hex> over the canonical serialization of
+  runtime-descriptor || program-image-id, where runtime-descriptor is a
+  default-runtime-descriptor map (or a caller override simulating an
+  implementation change) and program-image-id is the :code/id ProgramImage.
+  The SAME ProgramImage under DIFFERENT runtime descriptors yields
+  DIFFERENT RuntimeImageIds; the same pair always yields the same id. A
+  RuntimeImageId still does NOT imply identical SaaS model behavior —
+  pair it with the ExecutionEnvironment observational provenance
+  (evoclj.compiler.resolution/execution-environment) for that."
+  [program-image-id runtime-descriptor]
+  (types/code-id program-image-id)
+  (hash/text-digest (str (canonical-edn-string runtime-descriptor) program-image-id)))
 ;; --- public entry point ----------------------------------------------------
 
 (defn compile-genome
@@ -207,16 +285,22 @@
   (Effects ⊆ Requested); runtime lease checks complete the upper bound.
 
   Returns a pure data map with exactly the normative CompiledGenome key
-  set (I1 Data Contracts): :code/id (CodeImageId), :code/genome-id,
+  set (I1 Data Contracts): :code/id (ProgramImageId, historical
+  CodeImageId key), :code/genome-id,
   :code/resolution-id, :deployment/id (DeploymentId with empty
   bindings/authority for pure compile), :execution/id (fresh UUID per
   compile), :abi, :manifest, :topology, :effects,
   :programs (sorted :program/id => ProgramDescriptor),
   :requested-capabilities, and :resolution. :code/id is
-  sha256:<64 hex> over ABI || genome-id || resolution-id. :deployment/id
+  sha256:<64 hex> over ABI || genome-id || resolution-id and identifies
+  the ABI-compatible program ONLY — never execution semantics.
+  :deployment/id
   is SHA256(code-id || canonical(bindings) || canonical(authority)) with
   empty bindings/authority at compile time. :execution/id is a fresh
-  random UUID per compilation. The result round-trips through pr-str /
+  random UUID per compilation. The RuntimeImageId is deliberately NOT a
+  compile-output key (the key set stays exactly normative): execution
+  records derive it via runtime-image-id from this map. The result
+  round-trips through pr-str /
   clojure.edn read-string and contains no raw source bytes or byte arrays
   (Global Constraint 22). PhenotypeId legacy alias is removed.
 

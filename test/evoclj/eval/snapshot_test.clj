@@ -98,3 +98,29 @@
     (let [s (snap/make-snapshot {:skills/user (rev/payload->id "x")})]
       (is (some? (snap/revision-for s :skills/user)))
       (is (nil? (snap/revision-for s :mcp/github))))))
+
+(deftest program-image-excludes-runtime-implementation
+  (testing "same ABI/Genome/Resolution keeps the ProgramImage while RuntimeImageId differs"
+    (let [abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+          gid "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          rid "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          program (snap/code-id abi gid rid)
+          descriptor {:kernel/abi abi
+                      :kernel/build :kernel/build-unresolved
+                      :interpreter/build "sci-0.15.58"
+                      :adapter/builds {:planner "1"}}
+          same-program (snap/code-id abi gid rid)
+          runtime-a (snap/runtime-image-id program descriptor)
+          runtime-b (snap/runtime-image-id
+                     same-program
+                     (assoc descriptor :kernel/build :simulated-next-kernel))]
+      (is (= program same-program) "ProgramImage stable across implementation change")
+      (is (re-matches #"^sha256:[0-9a-f]{64}$" runtime-a))
+      (is (not= runtime-a runtime-b) "RuntimeImageId moves with the implementation")
+      (is (= runtime-a (snap/runtime-image-id program descriptor)) "deterministic")))
+  (testing "the phenotype alias names the ProgramImage and nothing more"
+    (let [abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+          gid "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          rid "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+      (is (= (snap/code-id abi gid rid) (snap/phenotype-id abi gid rid)))
+      (is (= (snap/code-id abi gid rid) (snap/code-image-id abi gid rid))))))

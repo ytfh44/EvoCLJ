@@ -40,7 +40,9 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.compiler.resolution :as resolution]
             [evoclj.eval.paired :as paired]
+            [evoclj.genome.types :as types]
             [evoclj.genome.hash :as hash]
             [evoclj.provider.protocol :as proto])
   (:import (java.nio.charset StandardCharsets)
@@ -427,3 +429,50 @@
          (dissoc (evaluator {:sel/c1 (selection-case :sel/c1 "hi")} (atom []))
                  :provider/catalog)
          (request [:sel/c1] 1)))))
+
+;; ============================================================================
+;; Identity separation — comparability rests on shared seed/case, never image sameness
+;; ============================================================================
+
+(deftest paired-comparison-rests-on-shared-seed-and-case-not-image-sameness
+  (let [seed-log (atom [])
+        case (selection-case :sel/c9 "hi")
+        ev (evaluator {:sel/c9 case} seed-log
+                      {:seed "provenance-seed"
+                       :genome/roots {"G42" (bundle! "text")
+                                      "C17" (bundle! "(str text \"!\")")}})
+        result (paired/run-paired-selection! ev (request [:sel/c9] 1))
+        pair (first (:pairs result))
+        parent-side (get-in pair [:sides :parent])
+        candidate-side (get-in pair [:sides :candidate])
+        parent-env (:side/execution-environment parent-side)
+        candidate-env (:side/execution-environment candidate-side)]
+    (testing "the sides are comparable despite different ProgramImages"
+      (is (not= (:side/phenotype-id parent-side)
+                (:side/phenotype-id candidate-side))
+          "different bundles, different ProgramImages — comparison still runs")
+      (is (= :parent-wins (:status (:case/outcome pair)))
+          "the decision derives from scores, never from image equality"))
+    (testing "each side records schema-valid observational provenance"
+      (is (resolution/execution-environment? parent-env))
+      (is (resolution/execution-environment? candidate-env))
+      (is (types/runtime-image-id? (:side/runtime-image-id parent-side)))
+      (is (types/runtime-image-id? (:side/runtime-image-id candidate-side))))
+    (testing "the shared comparability basis is the seed and the case"
+      (doseq [env [parent-env candidate-env]]
+        (is (= (:pair/seed pair)
+               (get-in env [:execution-environment/request-params :seed])))
+        (is (= :sel/c9
+               (get-in env [:execution-environment/request-params :case/id])))))
+    (testing "each return fingerprint covers that side's own outputs"
+      (is (= (resolution/return-fingerprint
+              {:output-ref (:side/output-ref parent-side)
+               :outputs (:side/outputs parent-side)})
+             (:execution-environment/return-fingerprint parent-env)))
+      (is (= (resolution/return-fingerprint
+              {:output-ref (:side/output-ref candidate-side)
+               :outputs (:side/outputs candidate-side)})
+             (:execution-environment/return-fingerprint candidate-env)))
+      (is (not= (:execution-environment/return-fingerprint parent-env)
+                (:execution-environment/return-fingerprint candidate-env))
+          "different outputs, different fingerprints"))))

@@ -17,15 +17,19 @@
     appear. Secret-looking keys (:api-key, :token, :password, :secret
     and their spellings) in resolved data are rejected with a typed
     :resolution/secret-key error.
-  - The Resolution ID follows the same canonical deterministic EDN
-    conventions as evoclj.genome.hash: the resolved :models value is
-    recursively normalized (maps and sets sorted) into a canonical EDN
-    form and hashed with hash/text-digest (UTF-8 bytes, CRLF/CR
-    normalized to LF), yielding a \"sha256:<64 hex>\" ID validated by
+  - The Resolution ID is the LOGICAL service binding: the canonical
+    deterministic EDN conventions of evoclj.genome.hash hash the resolved
+    :models value (provider/provider-model/adapter-version NAMES) with
+    hash/text-digest (UTF-8 bytes, CRLF/CR normalized to LF), yielding a
+    \"sha256:<64 hex>\" ID validated by
     evoclj.genome.types/resolution-id. Identical logical models config
     plus catalog therefore yield identical IDs; different concrete
     provider-model/provider/adapter-version entries yield different IDs
-    even for the same Genome (Global Constraints 1, 2, 6).
+    even for the same Genome (Global Constraints 1, 2, 6). The logical
+    binding NEVER implies the same model function: a SaaS endpoint
+    changes behavior behind an unchanged name, so same-Resolution means
+    same binding, never same behavior. Behavioral provenance is recorded
+    separately, at execution time, as an ExecutionEnvironment (see below).
 
   Error types: :resolution/invalid (malformed input shapes or non-EDN
   values), :resolution/alias-missing (alias requested by the Genome is
@@ -151,7 +155,8 @@
   ... :adapter-version ...} ...}} with :models sorted by model name.
   The ID is deterministic over the canonical EDN of the resolved
   :models value, so identical config plus catalog always produce the
-  same ID and different concrete model IDs produce different IDs.
+  same ID and different concrete model IDs produce different IDs. The ID
+  names the LOGICAL binding only — never the model function behind it.
 
   Throws ExceptionInfo with a stable :error/type: :resolution/invalid
   (malformed input shapes or non-EDN values), :resolution/alias-missing
@@ -193,3 +198,67 @@
               (:models models-config)))]
     {:resolution/id (resolution-digest models)
      :models models}))
+
+;; --- ExecutionEnvironment observational provenance -----------------------------
+
+(defn return-fingerprint
+  "Content fingerprint of one execution's returned value: sha256:<64 hex>
+  over the pr-str of `result`. Identifies the returned BYTES only — never
+  the behavior that produced them."
+  [result]
+  (hash/text-digest (pr-str result)))
+
+(defn execution-environment?
+  "True when x is an ExecutionEnvironment observational-provenance record:
+  a map carrying :execution-environment/observed-providers (map),
+  :execution-environment/request-params (map),
+  :execution-environment/captured-at (integer epoch ms), and
+  :execution-environment/return-fingerprint (sha256:<64 hex> string)."
+  [x]
+  (and (map? x)
+       (map? (:execution-environment/observed-providers x))
+       (map? (:execution-environment/request-params x))
+       (integer? (:execution-environment/captured-at x))
+       (let [fp (:execution-environment/return-fingerprint x)]
+         (and (string? fp)
+              (boolean (re-matches #"^sha256:[0-9a-f]{64}$" fp))))))
+
+(defn execution-environment
+  "Capture the observational provenance of one execution as pure EDN data:
+
+    (execution-environment {:observed-providers {model-name {:provider ...
+                                                             :provider-model ...
+                                                             :adapter-version ...}}
+                            :request-params {:case/id ... :seed ...}
+                            :result <the returned value>
+                            :captured-at <epoch ms, default now>})
+    ;; => {:execution-environment/observed-providers {...}
+    ;;     :execution-environment/request-params {...}
+    ;;     :execution-environment/captured-at <ms>
+    ;;     :execution-environment/return-fingerprint \"sha256:<64 hex>\"}
+
+  This record is OBSERVATIONAL provenance, NEVER content identity: it says
+  what was observed where and when, not what the same setup will do next
+  time. For fixture/local providers the observation may be exact (the
+  fixture computes deterministically); for SaaS providers it is explicitly
+  a dated observation of behavior that may change behind an unchanged
+  binding name. Callers MUST NOT put secrets in :request-params (API keys,
+  tokens); the store layer redacts event metadata, but this constructor
+  carries its inputs verbatim.
+
+  Throws :resolution/invalid when the shape is wrong."
+  [{:keys [observed-providers request-params result captured-at]}]
+  (when-not (map? observed-providers)
+    (throw (err/error :resolution/invalid
+                      "execution environment requires an observed-providers map"
+                      {:reason :invalid-observed-providers
+                       :value (err/sanitize observed-providers)})))
+  (when-not (map? request-params)
+    (throw (err/error :resolution/invalid
+                      "execution environment requires a request-params map"
+                      {:reason :invalid-request-params
+                       :value (err/sanitize request-params)})))
+  {:execution-environment/observed-providers observed-providers
+   :execution-environment/request-params request-params
+   :execution-environment/captured-at (or captured-at (System/currentTimeMillis))
+   :execution-environment/return-fingerprint (return-fingerprint result)})

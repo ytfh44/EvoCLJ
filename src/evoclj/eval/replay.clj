@@ -451,18 +451,22 @@
         (:programs compiled)))
 
 (defn- leases-for
-  "One CapabilityLease per tool id in the case's trace, granting a
-  deterministic principal the tool's :invoke action. Uses operator
-  principal for replay (isolated, no session) — the replay runner
-  attributes intents to operator when no session is present, so the
-  lease principal matches. Broker authorizes tool calls against
-  these leases exactly as it would in a live run."
-  [case _phenotype-id]
+  "One CapabilityLease per tool id in the case's trace, granting the
+  case session's principal the tool's :invoke action. The lease
+  principal MUST be the SessionPrincipal of the session id the harness
+  stamps on every intent (Global Constraint 20 attribution via
+  run-topology!): authorization compares principal by exact equality
+  (I2), so the historical operator-principal grant never authorized a
+  session-attributed replay intent and the broker denied every tool
+  call with :capability/denied before the replay provider could serve
+  or deny it. Broker authorizes tool calls against these leases exactly
+  as it would in a live run."
+  [case session-id]
   (let [now (Date.)
         expires (Date. (+ (.getTime now) 60000))]
     (mapv (fn [tool-id]
             {:cap/id (random-uuid)
-             :principal {:principal/type :operator}
+             :principal {:principal/type :session :session/id session-id}
              :resource {:kind :tool :id tool-id}
              :actions #{:invoke}
              :constraints {:max-calls 10000}
@@ -499,19 +503,20 @@
   the REAL node handlers (node/step) and the REAL broker
   (dispatch/dispatch!), feeding provider :ok results back into the
   accumulated outputs exactly like run-session! — minus persistence.
-  A fresh session id and the case's fresh isolated SCI runtime carry
-  the per-session attribution (Global Constraint 23).
+  The caller supplies the case's session id so the broker leases (bound
+  to that session's principal by leases-for) authorize the session-
+  attributed intents; the case's fresh isolated SCI runtime carries the
+  per-session attribution (Global Constraint 23).
 
   Returns {:run/status :completed | :failed | :budget-exhausted
-  :session/id <fresh uuid> :output <accumulated outputs> :intents
-  [<dispatch outcomes> ...] :error <serializable error data, :failed
-  only>}."
-  [phenotype broker-context task-input]
+  :session/id <the supplied session id> :output <accumulated outputs>
+  :intents [<dispatch outcomes> ...] :error <serializable error data,
+  :failed only>}."
+  [phenotype broker-context task-input session-id]
   (let [topology (get-in phenotype [:compiled :topology])
         entry (:entry topology)
         max-steps (get-in topology [:limits :max-steps])
-        session-id (random-uuid)
-        phenotype-id (:phenotype/id phenotype)
+        phenotype-id (or (:code/id phenotype) (:phenotype/id phenotype))
         seed {:event/id 1 :event/type :session/started :payload task-input}
         finish (fn [status error outputs intent-outcomes]
                  {:run/status status
@@ -661,10 +666,13 @@
 
 (defn- run-case!
   "Run ONE replay case: build the replay provider wrappers for the
-  case's trace tools (Step 2), a fresh broker context with leases for
-  exactly those tools, a fresh isolated Phenotype (fresh SCI runtime —
-  fresh session per case, Global Constraint 23), and run the candidate
-  topology on the case's :task-input. Returns the case outcome."
+  case's trace tools (Step 2), mint a fresh case session id and broker
+  leases binding exactly those tools to that session's principal, a
+  fresh isolated Phenotype (fresh SCI runtime — fresh session per case,
+  Global Constraint 23), and run the candidate topology on the case's
+  :task-input. The session id is minted here (not inside the harness)
+  so the leases and the session-attributed intents share one principal.
+  Returns the case outcome."
   [evaluator compiled loaded case]
   (let [registry (registry/create-registry)
         tool-ids (sort (keys (:responses case)))
@@ -675,7 +683,8 @@
                               (:mode case)
                               (get (:responses case) tool-id))))
         usage (atom {})
-        leases (leases-for case (:compiled/phenotype-id compiled))
+        session-id (random-uuid)
+        leases (leases-for case session-id)
         broker-context (dispatch/make-broker-context
                         {:registry registry :leases leases :usage usage})
         phenotype (phenotype/instantiate
@@ -683,7 +692,7 @@
                    {:providers {:registry registry}
                     :capabilities {:leases leases :usage usage}
                     :program-sources (program-sources loaded compiled)})
-        run (run-topology! phenotype broker-context (:task-input case))]
+        run (run-topology! phenotype broker-context (:task-input case) session-id)]
     (case-outcome case run)))
 
 (defn- aggregate

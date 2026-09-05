@@ -66,3 +66,15 @@
       (is (instance? clojure.lang.ExceptionInfo e))
       (is (= :id/invalid (:error/type (ex-data e))))
       (is (= kind (:id/kind (ex-data e)))))))
+
+(deftest runtime-image-id-conventions
+  (testing "canonical sha256 ids are accepted as RuntimeImageIds"
+    (is (types/runtime-image-id? (str "sha256:" hex64)))
+    (is (= (str "sha256:" hex64) (types/runtime-image-id (str "sha256:" hex64)))))
+  (testing "malformed ids are rejected by predicate and constructor"
+    (is (not (types/runtime-image-id? "G42")))
+    (is (not (types/runtime-image-id? nil)))
+    (let [e (try (types/runtime-image-id "nope")
+                 (catch clojure.lang.ExceptionInfo ex ex))]
+      (is (= :id/invalid (:error/type (ex-data e))))
+      (is (= :runtime/image-id (:id/kind (ex-data e)))))))

@@ -90,3 +90,46 @@
     (testing "compile output verifiable: code/id is H(abi, genome, resolution)"
       (let [expected (snapshot/code-id (:abi compiled) (:code/genome-id compiled) (:code/resolution-id compiled))]
         (is (= expected (:code/id compiled)) "code/id verifiable via snapshot helper")))))
+
+(deftest program-image-stable-across-kernel-implementation-change-while-runtime-image-differs
+  (let [compiled (compiler-core/compile-genome (seed-loaded-genome) (fixture-catalog))
+        recompiled (compiler-core/compile-genome (seed-loaded-genome) (fixture-catalog))
+        program (:code/id compiled)
+        descriptor (compiler-core/default-runtime-descriptor compiled)
+        runtime-id (compiler-core/runtime-image-id program descriptor)
+        next-kernel-id (compiler-core/runtime-image-id
+                        program
+                        (assoc descriptor :kernel/build :simulated-next-kernel))
+        next-interpreter-id (compiler-core/runtime-image-id
+                             program
+                             (assoc descriptor :interpreter/build "sci-next"))]
+    (testing "same ABI/Genome/Resolution keeps the ProgramImage"
+      (is (= program (:code/id recompiled))
+          "CodeImageId formula unchanged: program identity only"))
+    (testing "any implementation change behind unchanged interfaces moves the RuntimeImageId"
+      (is (types/runtime-image-id? runtime-id))
+      (is (not= runtime-id next-kernel-id) "kernel implementation change differs")
+      (is (not= runtime-id next-interpreter-id) "interpreter build change differs")
+      (is (= runtime-id (compiler-core/runtime-image-id
+                         program
+                         (compiler-core/default-runtime-descriptor recompiled)))
+          "same pair always yields the same id"))
+    (testing "the descriptor names real in-repo version sources"
+      (is (= "sci-0.15.58" (:interpreter/build descriptor))
+          "interpreter build is the deps.edn sci pin")
+      (is (= (:abi compiled) (:kernel/abi descriptor)))
+      (is (= "1" (get-in descriptor [:adapter/builds :planner]))
+          "adapter builds come from the Resolution binding names"))))
+
+(deftest snapshot-runtime-image-mirror-matches-compiler-formula
+  (let [compiled (compiler-core/compile-genome (seed-loaded-genome) (fixture-catalog))
+        program (:code/id compiled)
+        descriptor (compiler-core/default-runtime-descriptor compiled)]
+    (testing "eval-side mirror stays byte-identical to the compiler formula"
+      (is (= (compiler-core/runtime-image-id program descriptor)
+             (snapshot/runtime-image-id program descriptor))))
+    (testing "the mirror moves with the descriptor too"
+      (is (not= (snapshot/runtime-image-id program descriptor)
+                 (snapshot/runtime-image-id
+                  program
+                  (assoc descriptor :adapter/builds {:planner "2"})))))))
