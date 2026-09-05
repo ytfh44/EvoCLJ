@@ -79,6 +79,7 @@
             [evoclj.kernel.error :as err]
             [evoclj.mount.backend :as mount-backend]
             [evoclj.mount.filesystem :as mount-fs]
+            [evoclj.sci.boundary :as boundary]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.sqlite :as sqlite]
@@ -228,15 +229,6 @@
 (def ^:private metadata-backend-allowlist
   #{:type :tree/id :root})
 
-(defn- edn-round-trips?
-  "True when v survives pr-str -> clojure.edn/read-string IDENTICALLY.
-  Strict EDN: fns, objects, regexes and other unreadable values fail
-  (the read throws or diverges)."
-  [v]
-  (try
-    (= v (edn/read-string (pr-str v)))
-    (catch Exception _ false)))
-
 (defn- metadata-invalid!
   "Throw typed :store/binding-metadata-invalid."
   [message data]
@@ -254,9 +246,10 @@
     only; record backends flatten to the plain
     {:type :cas-tree :tree/id ...} descriptor; any other backend
     becomes the same plain descriptor keyed by revision;
-  - finally the result MUST round-trip strict EDN identically — a
-    poisoned value under an allowed key is rejected typed, never
-    silently sanitized away."
+  - finally the result MUST be plain EDN-safe data (Global Constraint
+    22, checked recursively WITHOUT realizing anything) — a poisoned
+    value under an allowed key is rejected typed, never silently
+    sanitized away."
   [s]
   (let [stripped (dissoc s :materializer)
         rejected (remove metadata-surface-allowlist (keys stripped))]
@@ -278,8 +271,8 @@
                             {:type :cas-tree :tree/id (or tree-id (:revision/id stripped))})]
                 (assoc stripped :backend plain))
               stripped)]
-      (when-not (edn-round-trips? b)
-        (metadata-invalid! "surface values must round-trip strict EDN (non-serializable value under an allowed key)"
+      (when-not (boundary/edn-safe? b)
+        (metadata-invalid! "surface values must be plain EDN-safe data (non-data value under an allowed key)"
                            {:surface/type (:surface/type b) :surface/id (:surface/id b)}))
       b)))
 
@@ -317,24 +310,63 @@
         row (first (sqlite/query db ["SELECT id FROM events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1" sid]))]
     (:id row)))
 
+(def ^:private event-append-max-attempts
+  "Bounded retries for the auditable event append. Each
+  :store/prev-not-immediate rejection implies a peer committed to the
+  session tip first, so re-reading the tip converges; 10 attempts bounds
+  worst-case spinning far above realistic racer counts."
+  10)
+
 (defn- append-binding-event!
   "Append an auditable binding event (:binding/activated, :binding/reloaded, :binding/deactivated).
-  Uses the session's pinned generation/phenotype and chains to the latest event."
+  Uses the session's pinned generation/phenotype and chains to the latest event.
+
+  Why retry (not deny) on a lost tip race: concurrent binding lifecycle
+  intents for DISTINCT logical-ids are independent — event order between
+  them carries no semantic conflict, since the events only audit state
+  rows that are already committed under their own UNIQUE guard (same
+  logical-id contention still fails closed via
+  :store/binding-already-active at row insert, before this append). A
+  failed append attempt writes nothing (the store throws before INSERT,
+  inside its own rolled-back transaction), so re-reading the tip and
+  re-appending the identical event is side-effect-free and the final
+  chain still satisfies the strict predecessor invariant on every row.
+  Only :store/prev-not-immediate is retried; every other error
+  propagates immediately. Exhaustion throws
+  :store/binding-event-contention."
   [db session-id event-type metadata]
   (let [{:keys [generation_id phenotype_id]} (fetch-session db session-id)
-        cause (latest-cause db session-id)
-        req {:session/id (types/session-id session-id)
-             :generation/id generation_id
-             :phenotype/id phenotype_id
-             :event/type event-type
-             :prev/event-id cause
-             :payload-ref nil
-             :metadata (or metadata {})}]
-    (if (nil? cause)
-      (throw (err/error :store/binding-invalid
-                        "session has no events; expected :session/created root before binding activation"
-                        {:session/id (types/session-id session-id) :event/type event-type}))
-      (event/append-event! db req))))
+        sid (types/session-id session-id)]
+    (loop [attempt 1]
+      (let [cause (latest-cause db session-id)]
+        (when (nil? cause)
+          (throw (err/error :store/binding-invalid
+                            "session has no events; expected :session/created root before binding activation"
+                            {:session/id sid :event/type event-type})))
+        (let [req {:session/id sid
+                   :generation/id generation_id
+                   :phenotype/id phenotype_id
+                   :event/type event-type
+                   :prev/event-id cause
+                   :payload-ref nil
+                   :metadata (or metadata {})}
+              outcome (try
+                        (event/append-event! db req)
+                        (catch clojure.lang.ExceptionInfo rejected rejected))]
+          (cond
+            (not (instance? clojure.lang.ExceptionInfo outcome))
+            outcome
+            (not (= :store/prev-not-immediate (:error/type (ex-data outcome))))
+            (throw outcome)
+            (< attempt event-append-max-attempts)
+            (recur (inc attempt))
+            :else
+            (throw (err/error :store/binding-event-contention
+                              "binding event append lost too many races for the session tip"
+                              {:session/id sid
+                               :event/type event-type
+                               :attempts attempt
+                               :last-error (ex-data outcome)}))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Validation helpers

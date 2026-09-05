@@ -426,6 +426,26 @@
     (testing "nothing was written"
       (is (nil? (any-row db sid))))))
 
+(deftest b1-metadata-allowlist-rejects-lazy-values-without-realizing
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        cas-handle (fresh-cas-with! "lazy-poisoned")
+        touched (atom false)
+        poison (map (fn [x] (reset! touched true) x) (range 5))
+        ;; allowlisted KEY carrying an unrealized lazy seq
+        b (make-skill-bundle [:skill "lazypoisoner"] "lazy-poisoned"
+                             {:surface-overrides {:context {:descriptor {:prompt "lazy-poisoned"
+                                                                          :drafts poison}}}})
+        thrown (capture-ex #(binding/activate! db sid b {:cas cas-handle}))]
+    (testing "typed rejection, not silent sanitization and not materialization"
+      (is (= :store/binding-metadata-invalid (:error/type (ex-data thrown))))
+      (is (re-find #"EDN" (str (ex-message thrown)))))
+    (testing "validation never realized the seq"
+      (is (false? (realized? poison)))
+      (is (false? @touched)))
+    (testing "nothing was written"
+      (is (nil? (any-row db sid))))))
+
 (deftest b1-metadata-materializer-stripped-and-record-backends-flattened
   (let [db (fresh-db)
         sid (seed-session! db)
