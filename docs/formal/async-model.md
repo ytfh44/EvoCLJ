@@ -59,7 +59,7 @@ SELECT id, type, state, owner_session_id, parent_cmd_id, payload_ref, deadline, 
 * `:work/deadline` powers `timed-out` terminal via W2.
 * The `state` CHECK is DB mirror of `work-states` — illegal states rejected even if code bypasses Malli. SQLite FKs are per-connection (`PRAGMA foreign_keys = ON`) via `store/sqlite` helpers.
 
-The heritage `commands` table (`012-commands.sql`, 6 states) is **retained for migration read-only**; new writes must use `works`. The command helpers (`create-command!`, `dispatch-command!`, etc.) are deprecated aliases that delegate to `store/work` for compat (break compat loudly if removed).
+The heritage `commands` table (`012-commands.sql`, 6 states) is **retained as the compat/backfill track**; new writes must use `works`. The command helpers (`create-command!`, `dispatch-command!`, etc.) remain a full standalone implementation for that track, and command recovery is a deprecated thin wrapper over Work recovery for one migration cycle (`store/recovery.clj`).
 
 ### 1.2 State machine (seven states — W1 refinement)
 
@@ -205,12 +205,12 @@ each :from must reference an existing event (any session); cross-session allowed
 root events carry empty causal-links
 ```
 
-Stored in `causal_links(from_event_id, to_event_id, link_type)` (`017-event-prev-causal-links.sql`). Subagent result delivery appends parent event with `prev = parent's predecessor` and `causal-links = #{ {:from <child-terminal-id> :type :subagent/result} }`. Legacy `:cause/event-id` is accepted as deprecated alias for `prev` when `causal-links` absent (same-session only).
+Stored in `causal_links(from_event_id, to_event_id, link_type)` (`017-event-prev-causal-links.sql`). Subagent result delivery appends parent event with `prev = parent's predecessor` and `causal-links = #{ {:from <child-terminal-id> :type :subagent/result} }`. The `:cause/event-id` alias is removed from the current append path — only the retained `commands` compat track still accepts a cause id, in the prev slot with earlier-event semantics.
 
 ### 5.4 sha256 hash chain [W-32]
 
 ```text
-header_i = "id | session_id | type | prev | causal-links-digest | payload-ref | prev-hash | created_at" ; canonical-header
+header_i = session/id ‖ event/seq ‖ type ‖ prev/event-id ‖ payload-ref ‖ prev-hash ‖ created-at ‖ generation/id ‖ phenotype/id ‖ metadata-edn ‖ causal-links-edn ; v2 canonical-header (11 lines, nil as empty line)
 hash_i   = sha256( header_i )
 prev-hash_i = hash_{i-1} in same session (nil for first)
 verify-event-chain(session_id) → checks header hash per event and that seq chaining has no gap and prev links are linear; tampering changes digest and is detected

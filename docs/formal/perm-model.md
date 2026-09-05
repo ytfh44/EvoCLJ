@@ -26,7 +26,7 @@ Grant     = ResourceScope × ActionSet                                          
 Lease     = Grant × Principal × TimeWindow × Quota                                            // C3
 ```
 
-The on-wire projection is a closed EDN map (seven keys, no extension) validated by `CapabilityLeaseSchema`. The in-process handle is a sealed `deftype` — `assoc`/`without` throw, identity is `identical?` on a file-private secret (mirrors the broker registry S5/S6 sealing). Legacy `:subject` is canonicalized to `:principal` on entry (migration compat) but new code must use `:principal`.
+The on-wire projection is a closed EDN map (seven keys, no extension) validated by `CapabilityLeaseSchema`. The in-process handle is a sealed `deftype` — `assoc`/`without` throw, identity is `identical?` on a file-private secret (mirrors the broker registry S5/S6 sealing). There is no `:subject` → `:principal` canonicalization: the closed schema rejects a `:subject` key outright, and new code must use `:principal`.
 
 ### 1.2 Principal — single field tagged union (I2, replaces dual-anchor)
 
@@ -41,7 +41,7 @@ The on-wire projection is a closed EDN map (seven keys, no extension) validated 
 
 * **Single field:** `:principal` carries exactly one variant; there is no `:phenotype/id` second anchor. Phenotype identity moved to `CodeImage/Deployment/Execution` (I1) and is pinned on `sessions.code_image_id`, not on the lease principal. Two sessions sharing a genome are different principals iff their `:session/id` differs — equality is tagged-value equality, no wildcard, no dual check.
 * **Why single field:** the dual-anchor `{session/id, phenotype/id}` conflated session identity with code identity; refinement separates them (I1+I2) so a lease binds to a session/job/eval/operator principal and the session's code pin is orthogonal (hydration H1). Tests in `capability/lease_test.clj` prove exact principal matching — sibling sessions on same genome are distinct principals.
-* **Construction:** `session-principal`, `job-principal`, `eval-principal`, `operator-principal` (capability/schema.clj). `validate-lease` canonicalizes legacy `:subject` → `:principal` for compat, then validates against `CapabilityLeaseSchema`.
+* **Construction:** `session-principal`, `job-principal`, `eval-principal`, `operator-principal` (capability/schema.clj). `validate-lease` rejects a legacy `:subject` key (closed schema), then validates against `CapabilityLeaseSchema`.
 
 ### 1.3 ResourceKindDescriptor — open registry (C1, replaces closed kind set)
 
@@ -104,7 +104,7 @@ The on-wire projection is a closed EDN map (seven keys, no extension) validated 
 | [W-05] | `rejectMissingPrincipal` | missing or malformed principal → rejected | pass |
 | [W-06] | `rejectIllegalAction` | action outside allowlist → rejected | pass |
 | [W-07] | `rejectZeroWindow` | zero window → rejected | pass |
-| [W-08] | `principalSingleFieldQ` | lease carries single `:principal` field; legacy `:subject` canonicalizes but new writes must use `:principal` | pass |
+| [W-08] | `principalSingleFieldQ` | lease carries single `:principal` field; a `:subject` key is rejected, new writes must use `:principal` | pass |
 
 All eight were true on the first refined pass. The former dual-anchor reading (`subject {session/id, phenotype/id}`) is retired — phenotype identity now lives in `CodeImage/Deployment` (I1) and session pin, not in the lease.
 

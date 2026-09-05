@@ -1,9 +1,9 @@
 # EvoCLJ Feature Roadmap
 
-**Status: COMPLETE (15/15)** — the five-direction goal finished on
-2026 (5 directions x 3 features; see the git log for the per-feature
-commits). Completed items are ticked below; unticked items are the
-backlog for a future round.
+**Status: NEAR-COMPLETE (14/15)** — four directions fully landed (see the git log for the per-feature
+commits). O4 below is unticked: its acceptance text names `docs/performance-baseline.md` real-model timings,
+and that document (§7.1) records fixture-mode timings only with real-model timings deferred. Completed items are
+ticked below; the unticked item is the backlog for a future round.
 
 ## Direction 1: Evolution Loop Depth (evolution/)
 - [x] LLM Diagnostician + LLM Mutator + host wiring (committed 4086cfd/4972398/b7bb858)
@@ -40,8 +40,9 @@ backlog for a future round.
 - [x] O1: session detail CLI — event-tree query for one session
 - [x] O2: cost report CLI — model usage/cost aggregated by generation
 - [x] O3: recovery scan CLI — expose store recovery scan results
-- [x] O4: LLM performance baseline — update docs/performance-baseline.md with
-      real-model cycle timings
+- [ ] O4: LLM performance baseline — update docs/performance-baseline.md with
+      real-model cycle timings (DEFERRED: §7.1 records fixture-mode timings only;
+      needs a host with a configured model endpoint)
 - [x] O5: lineage CLI polish — promotion lineage with candidate diffs
 
 ## Direction 5: Security & Adversarial (sci/, capability/, adversarial/)
@@ -53,6 +54,6 @@ backlog for a future round.
       judge/diagnosis/mutation shapes
 
 ## Progress log
-- Round 1-27 (goal rounds): all 15 completed features landed one at a time,
+- Round 1-27 (goal rounds): 14 completed features landed one at a time,
   each verified (targeted + full suite) and committed; real-token (LM Studio)
   verification was run for the judge and the full evolve/eval/promote loop.

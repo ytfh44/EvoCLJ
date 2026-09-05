@@ -21,8 +21,10 @@ topology the executor carries. Within one call:
   `:node/completed`, and every intent-effect event for that node are
   appended to the store first;
 - the session's causal log is a single **linear chain**: every event's
-  `:cause/event-id` is the previous event's `:event/id`, anchored on a
-  `:session/created` root the host appended at creation time;
+  `:prev/event-id` is its immediate predecessor (`:event/seq = prev-seq + 1`,
+  same session), anchored on a `:session/created` root the host appended at
+  creation time; cross-session causality travels separately in `:causal-links`
+  (E1 split);
 - the topology's `:limits {:max-steps N}` bounds the walk;
   `:loop` iteration counters travel in the scheduler's per-session
   `:loop-state` (session-local data, never a SCI global var).
@@ -33,11 +35,10 @@ concurrency (or its absence) is decided by the host that calls it.
 ## 2. What is serialized (within a session)
 
 | Concern | Mechanism |
-| --- | --- |
+| Event persistence | `append-event!` runs each append in one `BEGIN IMMEDIATE` transaction: seq allocation (`max(seq)+1`), prev validation (strict immediate predecessor), `prev-hash` linkage, v2 hash computation, row insert — atomic, never interleaved |
 | Node execution | FIFO; one node completes before the next is stepped |
-| Event persistence | `append-event!` runs each append in one `BEGIN IMMEDIATE` transaction: seq allocation (`max(seq)+1`), cause validation, `prev-hash` linkage, hash computation, row insert — atomic, never interleaved |
 | Session state | compare-and-set `transition-session!` hops: `:created → :resolving → :running → :waiting → :completed` (or `:failed` / `:budget-exhausted`) |
-| SCI runtime use | one session at a time — `evoclj.sci.execute` documents a SCI runtime as **not thread-safe** ("it belongs to one Phenotype/session") |
+| SCI runtime use | one session at a time — a SCI runtime is not thread-safe: one live session per runtime (the stress test builds exactly this shape) |
 | Intent effect transaction | per intent: `:intent/proposed` → broker dispatch (one call) → `:intent/authorized` + `:provider/call-started` + `:provider/call-completed`, or `:intent/denied` / `:intent/failed` — persisted before the session continues |
 | Loop state | per-session `:loop-state` map, built fresh by every `run-session!` call |
 
@@ -55,10 +56,9 @@ thread — and the following shared components handle the contention:
 | Reads | `events-for-session`, `get-session`, `verify-event-chain` are reads and run concurrently with appends |
 
 The one hard rule the host must respect: **a concurrently running
-session must not share a SCI runtime with another running session**
-(`evoclj.sci.execute`: "A runtime is not thread-safe"). Each parallel
-session gets its own Phenotype instance (its own isolated SCI
-runtime); the store is shared. The stress test builds exactly this
+session must not share a SCI runtime with another running session**.
+Each parallel session gets its own isolated SCI runtime (its own Phenotype
+instance); the store is shared. The stress test builds exactly this
 shape — N per-session executors over ONE shared sqlite db, CAS, and
 registry.
 
@@ -72,8 +72,9 @@ For N sessions × M events run concurrently:
 2. **No cross-session leakage** — every event row carries its own
    session id and the session's pinned generation/phenotype identity
    (Global Constraint 20); the store enforces that every non-root
-   `:cause/event-id` references an **earlier event in the same
-   session** (`:store/cause-session-mismatch` otherwise); per-session
+   `:prev/event-id` is the **immediate predecessor in the same
+   session** (`:event/seq = prev-seq + 1`; `:store/prev-not-immediate` /
+   `:store/prev-session-mismatch` otherwise); per-session
    `:event/seq` is exactly `1..M` with no gaps or duplicates; session
    pins (genome/resolution/phenotype) are immutable after insert
    (Global Constraint 2).
@@ -92,7 +93,7 @@ persists the same exact M = 5 + 6×tool-count events (root, started,
 6 per tool node, 2 for the emit node, completed), with its own task
 text. After all sessions finish it asserts, for every session:
 verified hash chain with exactly M events, the exact expected
-event-type sequence, per-session seq `1..M`, no cross-session cause
+event-type sequence, per-session seq `1..M`, no cross-session prev
 references, no foreign event rows, pinned session rows, outputs
 containing only that session's own text, the provider execution count
 (N × tool-count), and the global event total (N × M). A second test
@@ -115,7 +116,15 @@ fingerprints (determinism).
 
 **Components:** `evoclj.store.command` (schema, SM, outbox), `evoclj.store.recovery` (orphan classification and recovery), `evoclj.environment.registry` (`refresh-async!`), `evoclj.mcp.adapter` (Tasks `continue`). Wolfram [W-20..W-27] (`docs/formal/async-model.md`).
 
-Async commands eliminate bare `future`. Every piece of work that outlives its call site is reified as a row in `commands`, tracked by a six-state machine, and resumable after a crash. The write path is an **outbox**: the command row and its `:command/submitted` announcement are committed in one `BEGIN IMMEDIATE` transaction, so they co-live or co-die.
+> **Lifecycle note (W1/W2):** `Work` (`works` table, 7-state SM
+> `queued|running|waiting|succeeded|failed|cancelled|timed-out`) is the sole
+> durable lifecycle for new code (INV-12). The `commands` six-state track
+> documented below is the retained compat/backfill path: `store/recovery.clj`
+> keeps `find-orphaned-commands`/`recover-commands!` as a deprecated thin
+> wrapper over Work recovery for one migration cycle. New code must use the
+> Work APIs (`evoclj.store.work`, `evoclj.runtime.work`).
+
+On the retained `commands` track, async commands eliminate bare `future`. Every piece of work that outlives its call site is reified as a row in `commands`, tracked by a six-state machine, and resumable after a crash. The write path is an **outbox**: the command row and its `:command/submitted` announcement are committed in one `BEGIN IMMEDIATE` transaction, so they co-live or co-die.
 
 ### 7.1 `commands` table
 
@@ -170,9 +179,11 @@ No other edges exist; in particular there is no `running -> queued` (re-queue re
 BEGIN IMMEDIATE                           -- with-command-tx
   1. INSERT INTO commands (...)           -- command row
   2. INSERT event :command/submitted      -- same connection, same TX
-     -- seq = max(seq)+1 for owner session, cause validated, prev-hash linked,
-     -- hash = sha256(canonical-header) where canonical-header is
-     --        "id|session|type|cause|seq|created-at" (store/event canonical-header)
+     -- seq = max(seq)+1 for owner session, cause validated (compat-track:
+     -- earlier event in the same session), prev-hash linked,
+     -- hash = sha256(canonical-header) where canonical-header is the v2
+     -- 11-line header (store/command canonical-header, lockstep with
+     -- store/event; the cause id occupies the prev slot)
 COMMIT  -- or ROLLBACK on any failure
 ```
 
@@ -236,11 +247,9 @@ Both paths go through `store/command.clj` (`make-mcp-continue-cmd` + `create-com
 
 A subagent is not a thread. It is an independent **session** — own `session/id`, own phenotype (SCI runtime), own single-session FIFO scheduler — that runs through the same broker and store as its parent and is supervised via the link graph and the lease lattice. Parent and child share no mutable state except the `subagent_links` edge and the derived lease chain.
 
-### 8.1 What a subagent session is
-
-* **Same genome/resolution, new session + new phenotype subject.** Spawn derives a child phenotype from the parent's genome/resolution (P3 dual-anchor `{:session/id :phenotype/id}`), so the subject is `{:session/id child-id :phenotype/id child-phenotype}` — siblings on the same genome are different subjects (`subject-matches?` isolation, [W-01]).
+* **Same genome/resolution, new session + new child Principal.** Spawn derives a child execution (Phenotype instance) from the parent's genome/resolution, so the Principal is `{:principal/type :session :session/id child-id}` (I2 single field) — siblings on the same genome are different Principals (exact tagged-value equality, [W-01]).
 * **Derived leases via `capability/mint.clj` `derive-lease!`.** The child's capability set is an **attenuation** of the parent's: `actions child subset actions parent`, `maxCalls child <= maxCalls parent`, `issued child >= issued parent`, `expires child <= expires parent`, with `:cap/attenuated-from` chain retained for audit. An expanded action set or longer window is rejected (`[W-08..W-11]` narrow derivation + downward-closed: the parent's authority is a superset of every reachable child's). The mutation path never mints a fresh lease for a child — it always derives.
-* **Independent scheduler lane.** The child's intents all pass the broker with the child's subject and derived leases; provider execution is per-session. Each session's event chain is positionally `1..M` (`[W-25]`) with earlier-cause only (`[W-26]`) and sha256 hash chain verified per session (`[W-27]`).
+* **Independent scheduler lane.** The child's intents all pass the broker with the child's Principal and derived leases; provider execution is per-session. Each session's event chain is positionally `1..M` (`[W-25]`) with strict immediate-prev only (`[W-26]`) and sha256 hash chain verified per session (`[W-27]`).
 
 ### 8.2 `subagent_links` graph — `store/session.clj` + `runtime/subagent.clj`
 
@@ -275,10 +284,10 @@ intent/subagent-spawn
   -> intent/schema.clj validates PayloadSubagentSpawnSchema (Malli)
   -> intent/dispatch.clj -> runtime/subagent.clj spawn-subagent! (db, parent-id, child-spec, parent-leases)
        * checks depth <= max-subagent-depth (5) and spawns-per-parent <= 10 before insertion
-       * derives child phenotype from parent (P3 dual-anchor)
+       * derives child execution (Phenotype instance) from parent genome/resolution; child Principal is {:principal/type :session :session/id child-id} (I2)
        * derives child leases as narrowings via capability/mint.clj derive-lease!
        * inserts child session row (state :created) + subagent_links row + records leases in leases-by-session
-       * appends :subagent/spawned event to the parent chain with cause -> parent's last event (GC-20 causal link)
+       * appends :subagent/spawned event to the parent chain with prev -> parent's latest event id (GC-20 causal link)
        * child is Runnable: created -> resolving on first scheduler tick
 ```
 
@@ -290,10 +299,10 @@ Malli payload (`intent/schema.clj` `PayloadSubagentSpawnSchema`): `{:session/id 
 run-subagent! (child-id, task)
   -> build-child-executor (own SCI namespace, own compiler program, own CAS dir, own Phenotype instance)
   -> run-session! (child-id, task)   -- same scheduler path as any session
-  -> child intents all pass broker with child leases + child subject
+  -> child intents all pass broker with child leases + child Principal
 ```
 
-* No shared SCI binding, no shared lease atom, no shared event cursor. Each session's `seq` is `1..M` locally; parent and child chains interleave only via the `:subagent/spawned` causal `cause`.
+* No shared SCI binding, no shared lease atom, no shared event cursor. Each session's `seq` is `1..M` locally; parent and child chains interleave only via the `:subagent/spawned` prev link and `:causal-links` edges.
 * Progress events are fanned out through `mcp/manager` so the host can observe `waiting` vs `running` accurately.
 * Hash chain: each session's `verify-event-chain` is independent; tampering changes the header digest and is detected per session.
 
@@ -303,7 +312,7 @@ Typed intent `intent/subagent-cancel` (`{:session/id target, :reason #{:user-req
 
 * **Lease revocation (fail-closed).** `runtime/subagent.clj` `revoke-leases-for-session!` (and bulk `cancel-subagent!` / `cancel-subagent-tree!`) revokes every lease recorded for each target in the global `subagent-lease-registry` (in-memory, `capability/mint.clj` `revoke-lease!`, `create-lease-registry`) and in the persistent `capabilities` table (`store/capability-store` `revoke-capability!` when present), plus `leases-by-session` tombstones. The registry is partition-safe — revoked leases are tombstoned even if unseen. The next broker call on that child with the revoked lease yields `:capability/denied`.
 * **Session state via `store/session.clj` `try-cancel-session!`.** Cancel uses **direct SQL** (`UPDATE sessions SET state = 'cancelled' WHERE state IN (...)`) rather than `transition-session!`, so it can move **` :created -> :cancelled`** directly (the normal `transition-session!` edge set does not allow `:created -> :cancelled` for sessions, but a subagent that was spawned and then cancelled before ever resolving must still land in a terminal). `try-cancel-session!` is idempotent — an already `:cancelled` row is a no-op (returns `already-cancelled?`), and other terminal rows (`completed`, `failed`, `budget-exhausted`) are left as-is.
-* **Transitive cascade.** `cancel-subagent-tree!` with root `R` computes `list-descendants(R)` as the BFS closure and revokes + cancels every descendant in one call; `cancel-subagent!` on a mid-tree node likewise cancels its subtree, so a child cannot outlive its parent's revocation. Events ` :session/cancelled` (on each child) and `:subagent/cancelled` (on each child's immediate parent) are appended best-effort with `cause` pointing at the latest event of the respective chain.
+* **Transitive cascade.** `cancel-subagent-tree!` with root `R` computes `list-descendants(R)` as the BFS closure and revokes + cancels every descendant in one call; `cancel-subagent!` on a mid-tree node likewise cancels its subtree, so a child cannot outlive its parent's revocation. Events ` :session/cancelled` (on each child) and `:subagent/cancelled` (on each child's immediate parent) are appended best-effort with `prev` pointing at the latest event of the respective chain.
 
 ### 8.6 Result delivery — `:subagent/result` with CAS ref
 
@@ -314,7 +323,7 @@ child terminal (completed|failed|budget-exhausted|cancelled)
        * checks child is in a terminal state (non-terminal delivery is rejected)
        * appends :subagent/result event to the PARENT chain with payload
          {:child/session-id uuid, :child/state kw, :result/cas-ref sha256: or :error}
-         and cause -> child's terminal event
+         and prev -> child's terminal event, with a `:causal-links #{ {:from <child-terminal-id> :type :subagent/result} }` edge
        * atomic with the link update (same outbox discipline as A2)
   -> recovery: orphaned children (parent completed while child still
      non-terminal :created|:resolving|:running|:waiting) are surfaced by

@@ -6,6 +6,8 @@
 
 **Tech Stack:** JVM Clojure; EDN; Integrant for host-system lifecycle; Malli for runtime schemas; Babashka SCI for restricted evolvable programs; rewrite-clj for source-preserving structural patches; SQLite JDBC for durable metadata/event state; filesystem content-addressed storage for large immutable artifacts; `clojure.test` plus property/integration/adversarial test layers.
 
+> **Refinement note (2026-09):** the milestone bodies below are the as-written v0 plan (unchecked boxes, early API sketches with `:subject` / `:cause/event-id` / `PhenotypeId`). Landed refinements supersede those sketches: I1 ProgramImage/RuntimeImage/ExecutionEnvironment split, I2 Principal single field, C1–C3 Grant algebra, P1 AuthorityStore DB truth, E1 prev+causal-links with the v2 event header, H1 hydration, W1/W2 Work sole lifecycle, the closed lease schema, and fallback-deny MCP projections. For the current truth see [`invariants.md`](invariants.md) (INV-01–INV-13) and [`formal/`](formal/). The Global Constraints section directly below remains normative.
+
 ## Global Constraints
 
 1. `Genome` MUST be immutable and content-addressed.

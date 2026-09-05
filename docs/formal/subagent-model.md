@@ -119,7 +119,7 @@ child Work terminal (succeeded|failed|cancelled|timed-out)
     are surfaced by store/work find-orphaned-works (W2) and reported, never fabricated as succeeded
 ```
 
-The `:subagent/result` intent type is the parent-side handle for awaiting a child's artifact. Delivery validates that the `from` event exists (any session) and that `prev` is same-session linear. Legacy `:cause/event-id` alias is accepted as `prev` when `causal-links` is absent (same-session only, deprecated).
+The `:subagent/result` intent type is the parent-side handle for awaiting a child's artifact. Delivery validates that the `from` event exists (any session) and that `prev` is the same-session immediate predecessor. The `:cause/event-id` alias is removed from the current append path.
 
 The `tool.specs` canonical pair `:agent/spawn` / `:agent/status` (S6) is the model-facing façade: `activate_skill`-style tool names dispatched to `agent-spawn-provider` / `agent-status-provider` in `runtime/subagent.clj`, now operating on Works.
 
@@ -180,7 +180,7 @@ Every subagent effect is captured via **E1 split**:
 * `prev/event-id` — linear predecessor in the **same session** (nil only for root `:session/created`). Validated at append: must be same session and immediately preceding (`event_seq = new-seq -1`).
 * `causal-links` — **cross-session graph** `${:from :type}` where `:from` may be any prior event (any session) and `:to` is implicitly the appended event. Validated at append: `from` must exist, `:type` must be keyword. Cross-session is allowed.
 
-`append-event!` persists `prev` as `prev_event_id` column and each causal link as a row in `causal_links(from_event_id, to_event_id, link_type)` (migration `017-event-prev-causal-links.sql`). This is how `recovery` reconstructs orphan relationships without fabricating completion and how `verify-event-chain` checks both the linear hash chain and the semantic graph. Legacy `:cause/event-id` is accepted as deprecated alias for `prev` when `:causal-links` absent (same-session only).
+`append-event!` persists `prev` as `prev_event_id` column and each causal link as a row in `causal_links(from_event_id, to_event_id, link_type)` (migration `017-event-prev-causal-links.sql`). This is how `recovery` reconstructs orphan relationships without fabricating completion and how `verify-event-chain` checks both the linear hash chain and the semantic graph. The `:cause/event-id` alias is removed from the current append path (only the retained `commands` compat track still accepts a cause id).
 
 ### 5.1 Wolfram checks for this model [W-27..W-32] — E1 causal refinement (new, 6 checks)
 

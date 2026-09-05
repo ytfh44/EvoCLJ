@@ -8,6 +8,13 @@ to observe the current canary deployment state without mutating it.
 
 ## Polling Endpoint
 
+> **Verification note (2026-09):** the endpoint and CLI below do not exist
+> in the current tree — `src/evoclj/http/api.clj` serves only `GET /health`,
+> `GET /sessions/:id`, and `GET /evolution/status`, and `evoclj deploy`
+> takes a `<generation-id>` argument (no `current` subcommand). The
+> response-shape / frequency / failure / observability sections describe the
+> intended polling contract, not a verified surface.
+
 The host polls the deployment state through the public read path:
 
     GET /api/deployment/current

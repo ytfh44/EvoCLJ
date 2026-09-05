@@ -1,8 +1,9 @@
 # EvoCLJ Documentation
 
 EvoCLJ is a JVM-Clojure self-evolving agent runtime: immutable,
-content-addressed **Genomes** compile into isolated **Phenotypes**;
-phenotypes execute tasks through typed **Intents** that cross a
+content-addressed **Genomes** compile into isolated program images
+(**Phenotypes** — program identity only, never execution semantics);
+Phenotype instances execute tasks through typed **Intents** that cross a
 kernel-owned capability broker; evolution proposes structured
 successor mutations, evaluates them in isolation, and promotes the
 candidates that pass evaluation under the active profile through
@@ -18,8 +19,7 @@ profile P — never a global improvement proof).
 | [`roadmap.md`](roadmap.md) | Feature roadmap across five directions (evolution, evaluation, runtime, ops, security) with completion state | You want the current feature status and the future backlog |
 | [`semantic-verification.md`](semantic-verification.md) | Formal verification of the seven core semantic claims (no mocks, real namespaces, re-runnable scripts) | You are changing core invariants or auditing safety |
 | [`performance-baseline.md`](performance-baseline.md) | Measured benchmark baselines and regression ceilings (component) | You are optimizing or changing hot paths |
-| [`invariants.md`](invariants.md) | Shared invariant checklist: inherited Global Constraints GC-01–GC-24 plus repair invariants INV-01–INV-09, each with incident evidence, violation consequences, and its guarding test/script | You are implementing or adversarially reviewing a repair work item (PROTOCOL-B step 5) |
-| [`superpowers/specs/2026-08-20-mcp-gap-closure-report.md`](superpowers/specs/2026-08-20-mcp-gap-closure-report.md) | **SUPERSEDED (historical).** The 2026-08-20 MCP gap-closure pass (6 steps, 26 gaps A1–G3, `mcp:2.0.0`). Retained for context only; no longer the current closure truth — for the authoritative MCP/Skills closure and repair state see [`invariants.md`](invariants.md) and [`codebase/REPAIR-PLAN.md`](codebase/REPAIR-PLAN.md) (work item D1 landed the supersede + hash-traceable pointer) | You are tracing the original MCP gap-closure rationale; not a source of current truth |
+| [`invariants.md`](invariants.md) | Shared invariant checklist: inherited Global Constraints GC-01–GC-24 plus repair invariants INV-01–INV-13, each with incident evidence, violation consequences, and its guarding test/script. Also the authoritative MCP/Skills closure state (the 2026-08-20 gap-closure report was superseded and has since been retired) | You are implementing or adversarially reviewing a repair work item (checklist step 5) |
 
 ## Suggested reading order
 

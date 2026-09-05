@@ -16,10 +16,10 @@ authoritative wording of GC-01 – GC-24 is
 `docs/implementation-plan.md` (the "Global Constraints" section,
 lines 9–34). Where this file and the implementation plan disagree, the
 implementation plan wins. Part 2 derives from
-`docs/codebase/REPAIR-PLAN.md` (section "新增不变量", items 1–9) plus the
+the retired repair ledger (section "新增不变量", items 1–9) plus the
 V1 refinement (`local://evoclj-reconstruction-dag-2.md` V1 — Principal I2,
 Grant C2, Work W1/W2, Hydration H1, Event prev/causal-links E1, Authority P1)
-and the confirmed findings recorded in `docs/codebase/BASELINE-TRIAGE.md`
+and the confirmed findings recorded in the retired baseline triage
 and the repair ledger's progress log.
 
 All `file:line` references below were valid at the time of writing; they
@@ -111,7 +111,7 @@ an executing component. Each role gets its own derivation.
   placeholders) and `cf` is a stable sha256 digest of `:auth/ref` —
   safe without migration because the pool is purely in-memory state.
   Adversarial reviewers attack this tuple with at least one
-  differ-only-in-secret counterexample (PROTOCOL-B step 4).
+  differ-only-in-secret counterexample (adversarial review protocol, Part 3 rule 3).
 
 ### INV-02 — Existence checks must throw on failure
 
@@ -211,7 +211,7 @@ drift defect waiting to happen.
   protocol pass-through branch (`satisfies?` at
   `src/evoclj/kernel/system.clj:375` in the fixed tree) while the
   parallel builder `build-mutator` did not (see
-  `docs/codebase/BASELINE-TRIAGE.md`, BT1), so every record-valued
+  the retired baseline triage, BT1), so every record-valued
   mutator config threw `:evolution/system-invalid` and ~160 tests went
   red; the fix (`src/evoclj/kernel/system.clj:394-401`) had to re-establish
   the ordering discipline the twin builder already had.
@@ -288,16 +288,14 @@ is unauditable.
 - **Motivation.** Before T5 there was no mechanical check, and docs had
   accumulated stale references: the first authoritative scan of the real
   `docs/` tree produced an invalid-reference inventory (recorded in the
-  repair ledger's T5 entry as D1 input — eight occurrences at that time).
-  The concrete incident (now closed by WO-D1): the MCP gap-closure report's
-  "Commits" section
-  (`docs/superpowers/specs/2026-08-20-mcp-gap-closure-report.md`) cited six
-  abbreviated SHAs — previously at `:53-58` — that no longer resolve to any
+  retired repair ledger's T5 entry as D1 input — eight occurrences at that time).
+  The concrete incident (now closed): the retired MCP gap-closure report's
+  "Commits" section cited six abbreviated SHAs that no longer resolve to any
   commit in this repository; the history they described was rewritten away,
-  and nothing could detect that until the scan existed. WO-D1 has since
-  marked that report SUPERSEDED with a resolvable pointer and removed the
-  unresolvable SHAs, so it can no longer be mistaken for the current closure
-  truth.
+  and nothing could detect that until the scan existed. The report was later
+  marked SUPERSEDED with a resolvable pointer, the unresolvable SHAs were
+  removed, and the report file itself has since been retired — so it can no
+  longer be mistaken for the current closure truth, which this checklist carries.
   `scripts/verify-doc-hashes.clj` now scans every markdown file and
   verifies each candidate with `git rev-parse --verify <sha>^{commit}`.
 - **Violation consequence.** A reviewer tracing "which commit introduced
@@ -342,9 +340,9 @@ lacks are all banned.
   whole-system run stumbles onto it (d) — late, expensive, and hard to
   bisect.
 - **Enforcement.** Standing protocol guard, applied to every work item:
-  PROTOCOL-B steps 2–3 — mutation check (new tests must fail on the
-  pre-fix baseline) and bypass scan (grep for injected fns replacing WO-
-  designated production components, shape-only assertions, replicated
+  the inherited repair protocol — step 2 mutation check (new tests must fail on the
+  pre-fix baseline) and step 3 bypass scan (grep for injected fns replacing
+  work-designated production components, shape-only assertions, replicated
   logic), plus at least three executed counterexamples (step 4). Work
   items that remove a hook (S1 bans `cas-fn`; M20 wires McpSource into
   production) close the corresponding instance. Regression floor: the
@@ -355,9 +353,9 @@ lacks are all banned.
 
 A lease binds exactly one **Principal** tagged union `{:principal/type :session|:job|:eval|:operator}` — no second anchor, no `phenotype/id` on the lease, no wildcard, equality is exact tagged-value equality. The `CodeImage/Deployment/Execution` pin (I1) is orthogonal and lives on the `sessions`/`events` rows, not on the principal.
 
-- **Motivation.** Heritage `Subject {session/id, phenotype/id}` mixed session identity with code identity; a lease for session A on genome G could alias to session B on G if B reuses G, breaking isolation. V1 splits them (I1+I2): `sessions.code_image_id` pins code, `capabilities.principal_type/principal_id` pins principal; `validate-lease` canonicalizes legacy `:subject` → `:principal` for compat but new code must write `:principal`. `capability/lease_test.clj` Step 1 asserts exact principal matching — SessionPrincipal(sid) only matches the same sid, sibling sessions on same genome are distinct.
+- **Motivation.** Heritage `Subject {session/id, phenotype/id}` mixed session identity with code identity; a lease for session A on genome G could alias to session B on G if B reuses G, breaking isolation. V1 splits them (I1+I2): `sessions.code_image_id` pins code, `capabilities.principal_type/principal_id` pins principal; the closed `CapabilityLeaseSchema` rejects a `:subject` key outright (`:capability/schema-invalid`) — there is no `:subject` → `:principal` canonicalization, and new code must write `:principal`. (The `capabilities` table retains `subject_*` columns as backfill storage, written from the principal.) `capability/lease_test.clj` Step 1 asserts exact principal matching — SessionPrincipal(sid) only matches the same sid, sibling sessions on same genome are distinct.
 - **Violation consequence.** A lease minted for `:session S1` authorizes `S2` on same genome (alias), or an operator lease matches any session (over-broad), or a grant for `:job J1` also matches `:eval E1` (type confusion). Adversarial lineage shows the fix: `subject_anchor_test.clj` (I2) pins that `OperatorPrincipal` never equals `SessionPrincipal`.
-- **Enforcement.** Landed by WO-I2 (migration `015-principal.sql`, `capability/schema.clj` `PrincipalSchema` + `SessionPrincipalSchema` etc., sealed `CapabilityLease` with `.principal`, `capability_table_test.clj` FK-free principal scoping): targeted tests in `evoclj.capability.lease-test` and `evoclj.capability.subject-anchor-test` assert exact tagged equality, no wildcard, single field, plus `test/evoclj/store/capability_table_test.clj` asserts capabilities are principal-scoped not FK-bound. Mechanical guard: `scripts/verify-forms.clj` [W-08] `principalSingleFieldQ` checks `docs/formal/perm-model.md` mentions single `Principal` and `capability/schema.clj` has `PrincipalSchema` with four variants; a grep audit finds no production write path that still emits `:subject` without canonicalization.
+- **Enforcement.** Landed by WO-I2 (migration `015-principal.sql`, `capability/schema.clj` `PrincipalSchema` + `SessionPrincipalSchema` etc., sealed `CapabilityLease` with `.principal`, `capability_table_test.clj` FK-free principal scoping): targeted tests in `evoclj.capability.lease-test` and `evoclj.capability.subject-anchor-test` assert exact tagged equality, no wildcard, single field, plus `test/evoclj/store/capability_table_test.clj` asserts capabilities are principal-scoped not FK-bound. Mechanical guard: `scripts/verify-forms.clj` [W-08] `principalSingleFieldQ` checks `docs/formal/perm-model.md` mentions single `Principal` and `capability/schema.clj` has `PrincipalSchema` with four variants; a grep audit finds no production write path that still emits a `:subject` lease key (the closed schema rejects it).
 
 ### INV-11 — Grant lattice: ResourceScope × ActionSet with meet (C2)
 
@@ -365,19 +363,19 @@ A grant is the product `Grant = ResourceScope × ActionSet`; `covers?` is the co
 
 - **Motivation.** Heritage attenuation checked `actions ⊆` and `maxCalls ≤` and window narrower as independent booleans without a product structure; adding a new resource kind required ad-hoc `path-inside?` checks in multiple places, and `derive-lease!` could produce an expanded resource while shrinking actions yet still claim "narrowing" (dimension leakage). C2 factors leases into `Grant` algebra so each dimension composes: a child lease attenuates iff its Grant attenuates (both halves), its Principal equals, its window is narrower, and its quota is narrower (`Lease = Grant × Principal × TimeWindow × Quota`).
 - **Violation consequence.** A child lease claims `filesystem/path /a/b` covering `/a` (expanded) while actions shrink, yet passes attenuation because the check only compared action sets. Or two grants for `/a/b` and `/a/c` claim their meet is `/a/b` (wrong — disjoint, should be nil). The lattice laws (idempotent, commutative, greatest lower bound) fail, so revocation cascade via narrowing breaks.
-- **Enforcement.** Landed by WO-C2 (`capability/grant.clj` `Grant` record + `resource_kind.clj` descriptors + `constraint.clj`): `evoclj.capability.grant-property-test` samples 100 random Grants per law (idempotent meet, commutative meet, greatest lower bound, meet attenuates parents, covers reflexive, attenuates transitive) — see `test/evoclj/capability/grant_property_test.clj`. Mechanical guard: `scripts/verify-forms.clj` [W-11..W-14] verify lattice; property tests 100 rounds pass is required for any capability change (PROTOCOL-B step 2). Reviewers reject any attenuation that does not delegate to `Grant.attenuates?`.
+- **Enforcement.** Landed with the `Grant` record (`capability/grant.clj` + `resource_kind.clj` descriptors + `constraint.clj`): `evoclj.capability.grant-property-test` samples 100 random Grants per law (idempotent meet, commutative meet, greatest lower bound, meet attenuates parents, covers reflexive, attenuates transitive) — see `test/evoclj/capability/grant_property_test.clj`. Mechanical guard: `scripts/verify-forms.clj` [W-11..W-14] verify lattice; property tests 100 rounds pass is required for any capability change (mutation-check gate). Reviewers reject any attenuation that does not delegate to `Grant.attenuates?`.
 
 ### INV-12 — Work is the sole durable lifecycle; Session×Command 48 → 7 collapse (W1/W2)
 
 `Work` (`works` table, 7-state SM `queued|running|waiting|succeeded|failed|cancelled|timed-out`) is the **only** durable lifecycle; `AsyncCommand` 6-state and `SubAgentSession` 8-state are retired; `Session` is an immutable context pin (I1 `code_image_id/deployment_id/execution_id`). The heritage product `8 × 6 = 48` collapses to `7`; `Work.running` IS execution (future is internal await handle, not second source of truth). Cancel/timeout are CAS on `works.state`; recovery drives `running|waiting → failed` with `:recovery/orphaned`, never fabricates `succeeded`; `queued` stays `queued` for redelivery.
 
-- **Motivation.** Heritage kept two durable tables (`commands` + `subagent_sessions` + `sessions` state) with overlapping waiting states and dual `budgetExhausted`/`failed` terminals; a subagent's durable identity was split across rows, so orphan recovery required scanning three tables and had causal ambiguity (which row drives hash chain?). W1 migrates all new writes to `works` (`018-work.sql` backfills from `commands`) and `store/command.clj` aliases to `store/work` for compat; W2 removes bare `future` shadowing — `Work.running` equals execution, verified by `runtime/work.clj` acyclic SM and `store/work.clj` CAS.
+- **Motivation.** Heritage kept two durable tables (`commands` + `subagent_sessions` + `sessions` state) with overlapping waiting states and dual `budgetExhausted`/`failed` terminals; a subagent's durable identity was split across rows, so orphan recovery required scanning three tables and had causal ambiguity (which row drives hash chain?). W1 migrates all new writes to `works` (`018-work.sql` backfills from `commands`) and `store/command.clj` is retained only as the compat/backfill track (`store/recovery.clj` wraps command recovery over Work recovery for one migration cycle); W2 removes bare `future` shadowing — `Work.running` equals execution, verified by `runtime/work.clj` acyclic SM and `store/work.clj` CAS.
 - **Violation consequence.** A `future` handle leaks outside `Work` and its completion races the DB row (ghost success after cancel). Or a subagent child is both a `commands` row and a `sessions` row — cancel revokes one but not the other, so the child outlives revocation. Recovery fabricates `succeeded` for an orphan `running` Work, claiming work completed that never did.
-- **Enforcement.** Landed by WO-W1/W2 (`runtime/work.clj` 7-state vocabulary + `verify-work-sm` + `collapse-ratio`, `store/work.clj` 5 CAS helpers, `018-work.sql`, `store/recovery.clj` → `store/work` recovery): `evoclj.runtime.work-test` (`work-collapses-48-to-7`, `work-sm-*`) + `test/evoclj/store/work_property_test.clj` (100 rounds per SM walk) assert `48 → 7` and acyclic/terminals; `evoclj.store.work-store-work-test` drives each transition via CAS; `evoclj.store.recovery-test` asserts orphan `queued` stays and `running|waiting` → `failed` with `:recovery/orphaned`. Mechanical guard: `scripts/verify-forms.clj` [W-19..W-25] verify product collapse; a grep audit ensures no production path writes `commands` without also writing `works` and no bare `future` is exposed as API.
+- **Enforcement.** Landed by WO-W1/W2 (`runtime/work.clj` 7-state vocabulary + `verify-work-sm` + `collapse-ratio`, `store/work.clj` 5 CAS helpers, `018-work.sql`, `store/recovery.clj` → `store/work` recovery): `evoclj.runtime.work-test` (`work-collapses-48-to-7`, `work-sm-*`) + `test/evoclj/store/work_property_test.clj` (100 rounds per SM walk) assert `48 → 7` and acyclic/terminals; `evoclj.store.work-store-work-test` drives each transition via CAS; `evoclj.store.recovery-test` asserts orphan `queued` stays and `running|waiting` → `failed` with `:recovery/orphaned`. Mechanical guard: `scripts/verify-forms.clj` [W-19..W-25] verify product collapse; new production paths must write `works` (the `commands` table is compat-only during the migration cycle) and no bare `future` is exposed as API.
 
 ### INV-13 — Hydration pin → ExecutionHandle & Event prev + causal-links refinement (H1+E1)
 
-`hydrate(pin) → ExecutionHandle` (H1) is the single construction path from a pinned session (`code_image_id`/`deployment_id`/`execution_id`/`generation_id`) to a fresh execution context (SCI, usage atom, CAS temp dir, DB-truth leases); unknown pin fails closed with `:hydrate/pin-not-found` (never synthetic). Events use **E1 split**: `prev/event-id` is the linear predecessor in the same session (nil only for `:session/created`, otherwise immediately preceding `seq = new-seq -1`, validated to stay local), `causal-links #{ {:from :type} }` is the cross-session semantic graph (any session `from` must exist, cross-session allowed), the earlier `:cause` alias is retained only for local linear predecessor compatibility. `verify-event-chain` checks positional `seq` continuity (`events[i].seq = i+1`), linear `prev` linkage, graph edge existence, and sha256 header digest.
+`hydrate(pin) → ExecutionHandle` (H1) is the single construction path from a pinned session (`code_image_id`/`deployment_id`/`execution_id`/`generation_id`) to a fresh execution context (SCI, usage atom, CAS temp dir, DB-truth leases); unknown pin fails closed with `:hydrate/pin-not-found` (never synthetic). Events use **E1 split**: `prev/event-id` is the linear predecessor in the same session (nil only for `:session/created`, otherwise immediately preceding `seq = new-seq -1`, validated to stay local), `causal-links #{ {:from :type} }` is the cross-session semantic graph (any session `from` must exist, cross-session allowed); the `:cause/event-id` alias is removed from the current append path (`store/event.clj`) — only the retained `commands` compat track (`store/command.clj`) still accepts a cause id, in the prev slot with earlier-event semantics. `verify-event-chain` checks positional `seq` continuity (`events[i].seq = i+1`), linear `prev` linkage, graph edge existence, and sha256 header digest.
 
 - **Motivation.** (a) Heritage `Session` creation fused code loading with lease minting and left `resolve` implicit inside `sessions` state — testing regen required mutating session rows. H1 extracts a pure factory `hydrate` so the pin is immutable and execution is fresh per call. (b) Heritage `Event.cause` overloaded linear order + causality + cross-session; the former heritage invariant tied to the same session rejected legitimate cross-session `subagent/result` edges and allowed a `prev` that skipped `seq` while still passing set-equality checks. E1 separates them: `prev` drives `prev-hash` and `seq` (linear), `causal-links` drives `subagent/result` (graph). The former "[W-25] seq values are the multiset {1..M}" was shown by Wolfram to accept `{1,3,2}` — the positional fix plus E1 resolves both.
 - **Violation consequence.** (a) Hydration synthesizes a lease on DB miss (ghost authority) or reuses an `ExecutionHandle` across distinct pins (cross-execution leakage). (b) An event's `prev` skips one `seq` (`seq 1 → seq 3`) yet the legacy local check still passes because a predecessor exists in the same session and is earlier (but not immediately preceding) — the linear hash chain is broken but verification reports ok. A `:subagent/result` parent edge with `from` cross-session is rejected as a local mismatch even though it is correct semantic causality.
@@ -396,8 +394,8 @@ A grant is the product `Grant = ResourceScope × ActionSet`; `covers?` is the co
    `file:line` anchor cited here, the same change updates the citation.
    Deleted incidents are condensed, not erased — the motivation must
    always point at something verifiable.
-3. **Reviewers adjudicate against this checklist.** Per PROTOCOL-B step
-   5, every adversarial review marks each applicable invariant
+3. **Reviewers adjudicate against this checklist.** Per the review protocol,
+   every adversarial review marks each applicable invariant
    ok/violation/n-a with a reason; a REJECT finding may cite an invariant
    number directly.
 4. **Precedence.** GC-01–GC-24 remain normatively defined in
