@@ -486,6 +486,7 @@
   (str "sha256:" (apply str (repeat 64 "f"))))
 
 (def ^:private session-id #uuid "11111111-1111-4111-8111-111111111111")
+(def ^:private sibling-session-id #uuid "22222222-2222-4222-8222-222222222222")
 (def ^:private issued-at (java.util.Date. 0))
 (def ^:private expires-at (java.util.Date. 4102444800000)) ; year 2100
 (def ^:private now (java.util.Date. 1700000000000))
@@ -675,11 +676,16 @@
 
 (defn- tool-intent
   "A validated :intent/tool-call for one evolution retrieval tool,
-  attributed to `phenotype-id`."
-  [phenotype-id tool-id args]
-  (intent/tool-call session-id phenotype-id :node/evolution 0
-                    {:tool/id tool-id :args args}
-                    {:wall-ms 1000 :max-steps 1}))
+  attributed to `phenotype-id` in `session` (defaults to the
+  mutator's session). Authorization keys on the session principal
+  (I2): a lease binds ONE exact session, so the sibling subject
+  dispatches under its own session and is denied."
+  ([phenotype-id tool-id args]
+   (tool-intent session-id phenotype-id tool-id args))
+  ([session phenotype-id tool-id args]
+   (intent/tool-call session phenotype-id :node/evolution 0
+                     {:tool/id tool-id :args args}
+                     {:wall-ms 1000 :max-steps 1})))
 
 (defn- broker-context
   "A dispatcher broker context over a fresh registry with the given
@@ -725,7 +731,7 @@
                [(evo-tools/evidence-provider store)]
                [(evo-tools/evolution-tool-lease
                  mutator-phenotype-id :evolution/evidence
-                 {:issued-at issued-at :expires-at expires-at})])
+                 {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
                   ctx (tool-intent mutator-phenotype-id :evolution/evidence
                                    {:evidence/id (:evidence/id pack)}))]
@@ -748,7 +754,7 @@
                [(evo-tools/evidence-provider store)]
                [(evo-tools/evolution-tool-lease
                  mutator-phenotype-id :evolution/evidence
-                 {:issued-at issued-at :expires-at expires-at})])
+                 {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
                   ctx (tool-intent mutator-phenotype-id :evolution/evidence
                                    {:candidate/id cid}))]
@@ -765,7 +771,7 @@
                [(evo-tools/evidence-provider store)]
                [(evo-tools/evolution-tool-lease
                  mutator-phenotype-id :evolution/evidence
-                 {:issued-at issued-at :expires-at expires-at})])
+                 {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
                   ctx (tool-intent mutator-phenotype-id :evolution/evidence
                                    {:candidate/id (uuid-of 99)}))]
@@ -785,7 +791,7 @@
                [(evo-tools/history-provider store)]
                [(evo-tools/evolution-tool-lease
                  mutator-phenotype-id :evolution/history
-                 {:issued-at issued-at :expires-at expires-at})])
+                 {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
                   ctx (tool-intent mutator-phenotype-id :evolution/history
                                    {:generation-lineage ["generation-1"]}))]
@@ -802,7 +808,7 @@
                  [(evo-tools/history-provider store)]
                  [(evo-tools/evolution-tool-lease
                    mutator-phenotype-id :evolution/history
-                   {:issued-at issued-at :expires-at expires-at})])
+                   {:issued-at issued-at :expires-at expires-at :session/id session-id})])
             result (dispatch/dispatch!
                     ctx (tool-intent mutator-phenotype-id :evolution/history
                                      {:generation-lineage ["generation-1"]
@@ -820,7 +826,7 @@
                [(evo-tools/history-provider store)]
                [(evo-tools/evolution-tool-lease
                  mutator-phenotype-id :evolution/history
-                 {:issued-at issued-at :expires-at expires-at})])
+                 {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
                   ctx (tool-intent mutator-phenotype-id :evolution/history
                                    {:generation-lineage ["generation-1"]}))]
@@ -833,7 +839,7 @@
                [(evo-tools/history-provider store)]
                [(evo-tools/evolution-tool-lease
                  mutator-phenotype-id :evolution/history
-                 {:issued-at issued-at :expires-at expires-at})])
+                 {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
                   ctx (tool-intent mutator-phenotype-id :evolution/history
                                    {:generation-lineage ["generation-1"]
@@ -852,9 +858,9 @@
                [(evo-tools/evidence-provider store)]
                [(evo-tools/evolution-tool-lease
                  mutator-phenotype-id :evolution/evidence
-                 {:issued-at issued-at :expires-at expires-at})])
+                 {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
-                  ctx (tool-intent sibling-phenotype-id :evolution/evidence
+                  ctx (tool-intent sibling-session-id sibling-phenotype-id :evolution/evidence
                                    {:evidence/id placeholder-hash}))]
       (is (= :error (:result/status result)))
       (is (= :capability/denied (:error/type result)))
@@ -886,10 +892,10 @@
                 (evo-tools/history-provider store)]
                [(evo-tools/evolution-tool-lease
                  mutator-phenotype-id :evolution/evidence
-                 {:issued-at issued-at :expires-at expires-at})
+                 {:issued-at issued-at :expires-at expires-at :session/id session-id})
                 (evo-tools/evolution-tool-lease
                  mutator-phenotype-id :evolution/history
-                 {:issued-at issued-at :expires-at expires-at})])
+                 {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           before (store-snapshot store)
           _ (dispatch/dispatch!
              ctx (tool-intent mutator-phenotype-id :evolution/evidence
