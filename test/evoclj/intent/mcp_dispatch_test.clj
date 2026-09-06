@@ -39,8 +39,11 @@
 (defn- lease
   [& kvs]
   (let [base {:cap/id #uuid "33333333-3333-4333-8333-333333333333"
-              :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
-              :resource {:kind :tool :id :mcp/sequential-thinking}
+              ;; I2: the lease principal must equal the intent's session
+              ;; principal exactly (session-id above), or the broker
+              ;; denies with :capability/principal-mismatch.
+              :principal {:principal/type :session :session/id session-id}
+              :resource {:kind :tool :id :mcp/sequential-thinking :mcp/allow-coarse-invoke true}
               :actions #{:invoke}
               :constraints {:max-calls 10}
               :issued-at issued-at
@@ -86,7 +89,8 @@
                                                   [:metadata :idempotency/key] "req-1"))]
               (is (= :ok (:result/status r)) (:error r))
               (is (= {:decision :allow
-                      :lease-id (:cap/id lease)} (:authorization r)))
+                      :lease-id (:cap/id lease)
+                      :mcp/classification :invoke-fallback} (:authorization r)))
               ;; execute-request! returns {:value <envelope> :audit <map>}
               (is (map? (:value r)))
               (let [outer (:value r)

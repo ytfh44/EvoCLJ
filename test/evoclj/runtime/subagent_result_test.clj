@@ -10,6 +10,7 @@
             [evoclj.store.migrate :as migrate]
             [evoclj.store.recovery :as recovery]
             [evoclj.store.session :as session]
+            [evoclj.store.work :as work-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.util Date UUID)
            (java.nio.file Files)
@@ -85,9 +86,10 @@
           pl (parent-lease parent-id phenotype #{:invoke})
           {:keys [child/session-id]} (subagent/spawn-subagent! db parent-id {:task "child-task"} [pl])
           _ (subagent/run-subagent! db parent-id session-id {:text "hello-echo"})
-          ;; child is now :completed
-          child-sess (session/get-session db session-id)
-          _ (is (= :completed (:state child-sess)) "child should be :completed after run")
+          ;; W1/W2: Work owns the lifecycle — the session row stays :created
+          ;; (immutable identity); completion truth is the child Work :succeeded.
+          child-work-state (some-> (last (work-store/list-works db session-id)) :work/state)
+          _ (is (= :succeeded child-work-state) "child Work should be :succeeded after run")
           result-event (subagent/deliver-result! db parent-id session-id cas-ref-good)
           parent-events (event/events-for-session db parent-id)
           result-events (filter #(= :subagent/result (:event/type %)) parent-events)

@@ -56,7 +56,9 @@
 (defn- lease [phen-id]
   (let [now (Date.)]
     {:cap/id (UUID/randomUUID)
-     :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+     ;; I2: the lease principal must equal the intent's session principal
+     ;; exactly — the intent below runs as session 00000000-...-0000000000dd.
+     :principal {:principal/type :session :session/id #uuid "00000000-0000-0000-0000-0000000000dd"}
      :resource {:kind :memory :id :note}
      :actions #{:invoke}
      :constraints {:max-calls 100}
