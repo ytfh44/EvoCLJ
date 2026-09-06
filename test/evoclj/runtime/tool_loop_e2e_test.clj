@@ -139,9 +139,9 @@
         root (tool-genome)
         loaded (load/load-genome (java.nio.file.Paths/get root (make-array String 0)))
         compiled (core/compile-genome loaded provider-catalog)
-        genome-id (:compiled/genome-id compiled)
-        resolution-id (:compiled/resolution-id compiled)
-        phenotype-id (:compiled/phenotype-id compiled)
+        genome-id (:code/genome-id compiled)
+        resolution-id (:code/resolution-id compiled)
+        phenotype-id (:code/id compiled)
         db-path (temp-db-path)
         db (sqlite/spec db-path)
         _ (migrate/migrate! db)
@@ -174,9 +174,24 @@
                    (model-index-for base-url)
                    {:registry/api-keys {:lmstudio "lm-studio"}})
         usage (atom {})
+        sid (:session/id
+             (session/create-session!
+              db
+              {:genome/id genome-id
+               :resolution/id resolution-id
+               :phenotype/id phenotype-id
+               :generation/id generation-id}))
+        _ (event/append-event! db
+                               {:session/id sid
+                                :generation/id generation-id
+                                :phenotype/id phenotype-id
+                                :event/type :session/created
+                                :prev/event-id nil
+                                :payload-ref nil
+                                :metadata {}})
         lease (fn [resource]
                 {:cap/id (random-uuid)
-                 :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+                 :principal {:principal/type :session :session/id sid}
                  :resource resource
                  :actions #{:invoke}
                  :constraints {:max-calls 10}
@@ -197,21 +212,6 @@
                               :model-registry model-reg
                               :leases [model-lease tool-lease]
                               :usage usage})}
-        sid (:session/id
-             (session/create-session!
-              db
-              {:genome/id genome-id
-               :resolution/id resolution-id
-               :phenotype/id phenotype-id
-               :generation/id generation-id}))
-        _ (event/append-event! db
-                               {:session/id sid
-                                :generation/id generation-id
-                                :phenotype/id phenotype-id
-                                :event/type :session/created
-                                :prev/event-id nil
-                                :payload-ref nil
-                                :metadata {}})
         result (scheduler/run-session! executor sid {:op :ask :text "use the tool"})]
     (is (= :completed (:status result)))
     (is (some? (:output-ref result)))

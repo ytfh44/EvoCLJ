@@ -803,8 +803,8 @@
             sid (:session/id
                  (session/create-session!
                   db
-                  {:genome/id (:compiled/genome-id compiled)
-                   :resolution/id (:compiled/resolution-id compiled)
+                  {:genome/id (:genome/id program)
+                   :resolution/id (:resolution/id program)
                    :phenotype/id phenotype-id
                    :generation/id (:generation/id generation)}))
             ;; H1 Hydration factory — verify pinned identity via the

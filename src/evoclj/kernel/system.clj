@@ -701,7 +701,7 @@
                               (assoc :programs [seed-route-descriptor]))))
         compiled (evoclj.compiler.core/compile-genome
                   (loader) (:provider-catalog config))]
-    (:compiled/resolution-id compiled)))
+    (:code/resolution-id compiled)))
 
 (defmethod ig/init-key :promotion/system
   [_ config]

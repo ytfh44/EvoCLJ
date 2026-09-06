@@ -436,7 +436,7 @@
   "The compiled ResolutionId of a candidate Genome bundle (compilation
   is the host's job — promote! never compiles; mirrors cli/promotion.clj)."
   [bundle-root]
-  (:compiled/resolution-id
+  (:code/resolution-id
    (compiler/compile-genome (session/load-genome-for-execution bundle-root)
                             session/provider-catalog)))
 

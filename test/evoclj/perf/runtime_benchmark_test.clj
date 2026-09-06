@@ -187,12 +187,12 @@
         (:programs compiled)))
 
 (defn- echo-lease
-  "A valid CapabilityLease granting the phenotype the :fixture/echo
+  "A session-principal CapabilityLease (I2) granting the :fixture/echo
   :invoke action for the next minute."
-  [phenotype-id]
+  [session-id]
   (let [now (java.util.Date.)]
     {:cap/id (random-uuid)
-     :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+     :principal {:principal/type :session :session/id session-id}
      :resource {:kind :tool :id :fixture/echo}
      :actions #{:invoke}
      :constraints {:max-calls 1000}
@@ -200,11 +200,11 @@
      :expires-at (java.util.Date. (+ (.getTime now) 60000))}))
 
 (defn- model-lease
-  "A valid CapabilityLease granting the phenotype :model/call."
-  [phenotype-id]
+  "A session-principal CapabilityLease (I2) granting :model/call."
+  [session-id]
   (let [now (java.util.Date.)]
     {:cap/id (random-uuid)
-     :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+     :principal {:principal/type :session :session/id session-id}
      :resource {:kind :model :id "lmstudio/*"}
      :actions #{:invoke}
      :constraints {:max-calls 1000}
@@ -245,17 +245,32 @@
   []
   (let [loaded (seed-loaded-genome)
         compiled (core/compile-genome loaded (fixture-catalog))
-        genome-id (:compiled/genome-id compiled)
-        resolution-id (:compiled/resolution-id compiled)
-        phenotype-id (:compiled/phenotype-id compiled)
+        genome-id (:code/genome-id compiled)
+        resolution-id (:code/resolution-id compiled)
+        phenotype-id (:code/id compiled)
         executions (atom 0)
         reg (registry/create-registry)
         _ (registry/register! reg (fixture/echo-provider
                                    {:execution-count executions}))
         _ (registry/register! reg (fixture/non-idempotent-provider))
         usage (atom {})
-        leases [(echo-lease phenotype-id) (model-lease phenotype-id)]
         [db db-path] (fresh-db genome-id resolution-id phenotype-id)
+        sid (:session/id
+             (session/create-session!
+              db
+              {:genome/id genome-id
+               :resolution/id resolution-id
+               :phenotype/id phenotype-id
+               :generation/id generation-id}))
+        _ (event/append-event! db
+                               {:session/id sid
+                                :generation/id generation-id
+                                :phenotype/id phenotype-id
+                                :event/type :session/created
+                                :prev/event-id nil
+                                :payload-ref nil
+                                :metadata {}})
+        leases [(echo-lease sid) (model-lease sid)]
         cas-root (temp-path! "evoclj-bench-cas-")
         ph (phenotype/instantiate
             compiled
@@ -274,30 +289,10 @@
      :cas-root cas-root
      :compiled compiled
      :phenotype ph
+     :session/id sid
      :leases leases
      :registry reg}))
 
-(defn- create-pinned-session
-  "create-session! pinned to the compiled identity, then append the
-  :session/created root event. Returns the session id."
-  [executor compiled]
-  (let [db (:sqlite (:stores executor))
-        sid (:session/id
-             (session/create-session!
-              db
-              {:genome/id (:compiled/genome-id compiled)
-               :resolution/id (:compiled/resolution-id compiled)
-               :phenotype/id (:compiled/phenotype-id compiled)
-               :generation/id generation-id}))]
-    (event/append-event! db
-                         {:session/id sid
-                          :generation/id generation-id
-                          :phenotype/id (:compiled/phenotype-id compiled)
-                          :event/type :session/created
-                          :prev/event-id nil
-                          :payload-ref nil
-                          :metadata {}})
-    sid))
 
 ;; ============================================================================
 ;; candidate-evaluation fixtures (component minimal evaluator, self-contained)
@@ -534,7 +529,7 @@
         {:keys [best-ms mean-ms]} (best-of 3 #(core/compile-genome loaded catalog))
         compiled (core/compile-genome loaded catalog)]
     (report "compile seed genome" {:best-ms best-ms :mean-ms mean-ms :samples 3})
-    (is (= (:compiled/genome-id compiled) (:genome/id loaded))
+    (is (= (:code/genome-id compiled) (:genome/id loaded))
         "the compiled genome names the loaded bundle's address")
     (is (<= best-ms 10000.0)
         "compile must complete in < 10s")))
@@ -565,7 +560,7 @@
              :args {:text "hi"}}
         now (java.util.Date. 1700001800000)
         lease {:cap/id #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-               :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+               :principal {:principal/type :session :session/id sid}
                :resource {:kind :tool :id :fixture/echo}
                :actions #{:invoke}
                :constraints {:max-calls 1000}
@@ -589,17 +584,10 @@
         "mean broker authorization must be < 10ms (pathological only)")))
 
 (deftest ^:perf append-event-throughput-above-pathological-floor
-  (let [{:keys [executor compiled]} (build-executor)
+  (let [{:keys [executor compiled] :as built} (build-executor)
         db (:sqlite (:stores executor))
-        sid (create-pinned-session executor compiled)
-        root (event/append-event! db
-                                  {:session/id sid
-                                   :generation/id generation-id
-                                   :phenotype/id (:compiled/phenotype-id compiled)
-                                   :event/type :session/created
-                                   :prev/event-id nil
-                                   :payload-ref nil
-                                   :metadata {}})
+        sid (:session/id built)
+        root (first (event/events-for-session db sid))
         n 200
         [elapsed _] (ms (fn []
                           (loop [i 0 cause (:event/id root)]
@@ -608,7 +596,7 @@
                                        db
                                        {:session/id sid
                                         :generation/id generation-id
-                                        :phenotype/id (:compiled/phenotype-id compiled)
+                                        :phenotype/id (:code/id compiled)
                                         :event/type :intent/proposed
                                         :prev/event-id cause
                                         :payload-ref nil
@@ -647,7 +635,7 @@
         executor (:executor built)
         compiled (:compiled built)
         db (:sqlite (:stores executor))
-        sid (create-pinned-session executor compiled)
+        sid (:session/id built)
         [run-ms result] (ms (fn []
                               (scheduler/run-session! executor sid
                                                       {:op :echo :text "abc"})))

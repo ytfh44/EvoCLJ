@@ -184,13 +184,13 @@
     [db path]))
 
 (defn- echo-lease
-  "A valid CapabilityLease granting THIS phenotype's exact id the
-  :fixture/echo :invoke action for the next minute. Only :fixture/echo
+  "A session-principal CapabilityLease (I2) granting the :fixture/echo
+  :invoke action for the next minute. Only :fixture/echo
   is granted: :fixture/non-idempotent stays visible-but-ungranted."
-  [phenotype-id]
+  [session-id]
   (let [now (java.util.Date.)]
     {:cap/id (random-uuid)
-     :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+     :principal {:principal/type :session :session/id session-id}
      :resource {:kind :tool :id :fixture/echo}
      :actions #{:invoke}
      :constraints {:max-calls 10}
@@ -198,11 +198,11 @@
      :expires-at (java.util.Date. (+ (.getTime now) 60000))}))
 
 (defn- model-lease
-  "A valid CapabilityLease granting the phenotype :model/call."
-  [phenotype-id]
+  "A session-principal CapabilityLease (I2) granting :model/call."
+  [session-id]
   (let [now (java.util.Date.)]
     {:cap/id (random-uuid)
-     :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+     :principal {:principal/type :session :session/id session-id}
      :resource {:kind :model :id "lmstudio/*"}
      :actions #{:invoke}
      :constraints {:max-calls 1000}
@@ -219,24 +219,38 @@
   The runtime provider REGISTRY registers both fixture providers
   (:fixture/echo and :fixture/non-idempotent); the broker carries
   leases for :fixture/echo and :model/call (the seed's requested
-  capabilities include both). Returns {:executor ... :executions ...
-  :db-path ... :cas-root ...} where :executions counts real provider
-  executions and :db-path/:cas-root are the on-disk handles the
-  restart step reopens."
+  capabilities include both). The pinned session is created first so
+  the leases carry its session principal (I2 exact-equality).
+  Returns {:executor ... :executions ... :session/id ... :db-path ...}."
   []
   (let [loaded (seed-loaded-genome)
         compiled (core/compile-genome loaded (fixture-catalog))
-        genome-id (:compiled/genome-id compiled)
-        resolution-id (:compiled/resolution-id compiled)
-        phenotype-id (:compiled/phenotype-id compiled)
+        genome-id (:code/genome-id compiled)
+        resolution-id (:code/resolution-id compiled)
+        phenotype-id (:code/id compiled)
         executions (atom 0)
         reg (registry/create-registry)
         _ (registry/register! reg (fixture/echo-provider
                                    {:execution-count executions}))
         _ (registry/register! reg (fixture/non-idempotent-provider))
         usage (atom {})
-        leases [(echo-lease phenotype-id) (model-lease phenotype-id)]
         [db db-path] (fresh-db genome-id resolution-id phenotype-id)
+        sid (:session/id
+             (session/create-session!
+              db
+              {:genome/id genome-id
+               :resolution/id resolution-id
+               :phenotype/id phenotype-id
+               :generation/id generation-id}))
+        _ (event/append-event! db
+                               {:session/id sid
+                                :generation/id generation-id
+                                :phenotype/id phenotype-id
+                                :event/type :session/created
+                                :prev/event-id nil
+                                :payload-ref nil
+                                :metadata {}})
+        leases [(echo-lease sid) (model-lease sid)]
         cas-root (temp-cas-dir)
         ph (phenotype/instantiate
             compiled
@@ -255,30 +269,9 @@
      :cas-root cas-root
      :compiled compiled
      :phenotype ph
+     :session/id sid
      :lease (first leases)
      :leases leases}))
-(defn- create-pinned-session
-  "create-session! pinned to the seed's compiled identity, then append
-  the :session/created root event (the host's job — the scheduler
-  anchors its causal chain on it). Returns the session id."
-  [executor compiled]
-  (let [db (:sqlite (:stores executor))
-        sid (:session/id
-             (session/create-session!
-              db
-              {:genome/id (:compiled/genome-id compiled)
-               :resolution/id (:compiled/resolution-id compiled)
-               :phenotype/id (:compiled/phenotype-id compiled)
-               :generation/id generation-id}))]
-    (event/append-event! db
-                         {:session/id sid
-                          :generation/id generation-id
-                          :phenotype/id (:compiled/phenotype-id compiled)
-                          :event/type :session/created
-                          :prev/event-id nil
-                          :payload-ref nil
-                          :metadata {}})
-    sid))
 
 (defn- artifact-edn
   "Read a CAS artifact back as EDN data."
@@ -293,7 +286,7 @@
 ;; ============================================================================
 
 (deftest seed-genome-runs-end-to-end-with-the-normative-invariants
-  (let [{:keys [executor executions db-path cas-root compiled lease]}
+  (let [{:keys [executor executions db-path cas-root compiled lease] :as built}
         (build-executor)
         db (:sqlite (:stores executor))
         store (:stores executor)]
@@ -303,17 +296,17 @@
         (is (re-matches #"^sha256:[0-9a-f]{64}$" (:genome/id g1)))
         (is (= (:genome/id g1) (:genome/id g2))
             "reloading genomes/seed must yield the same content address")
-        (is (= (:genome/id g1) (:compiled/genome-id compiled))
+        (is (= (:genome/id g1) (:code/genome-id compiled))
             "the compiled genome names the loaded bundle's address")))
     (testing "the phenotype instantiated from the real seed carries its ids"
-      (is (= (:compiled/phenotype-id compiled) (:phenotype/id (:phenotype executor))))
+      (is (= (:code/id compiled) (:code/id (:phenotype executor))))
       (is (= :node/router (get-in compiled [:topology :entry])))
       (let [files (set (keys (:files (seed-loaded-genome))))]
         (is (contains? files "programs/route.clj"))
         (is (every? files ["manifest.edn" "topology.edn" "models.edn"
                            "memory.edn" "evolution.edn"]))
         (is (= 6 (count files)))))
-    (let [sid (create-pinned-session executor compiled)
+    (let [sid (:session/id built)
           result (scheduler/run-session! executor sid {:op :echo :text "abc"})
           events (event/events-for-session db sid)
           by-type (group-by :event/type events)]
@@ -376,9 +369,9 @@
         (let [row (first (sqlite/query db
                                        ["SELECT genome_id, resolution_id, phenotype_id, generation_id
                                          FROM sessions WHERE id = ?" (str sid)]))]
-          (is (= (:compiled/genome-id compiled) (:genome_id row)))
-          (is (= (:compiled/resolution-id compiled) (:resolution_id row)))
-          (is (= (:compiled/phenotype-id compiled) (:phenotype_id row)))
+          (is (= (:code/genome-id compiled) (:genome_id row)))
+          (is (= (:code/resolution-id compiled) (:resolution_id row)))
+          (is (= (:code/id compiled) (:phenotype_id row)))
           (is (= generation-id (:generation_id row)))))
       (testing "the append-only chain verifies end to end"
         (is (:valid? (event/verify-event-chain db sid))))
@@ -387,8 +380,8 @@
           (is (uuid? (:episode/id ep)))
           (is (= sid (:session/id ep)))
           (is (= generation-id (:generation/id ep)))
-          (is (= (:compiled/genome-id compiled) (:genome/id ep)))
-          (is (= (:compiled/resolution-id compiled) (:resolution/id ep)))
+          (is (= (:code/genome-id compiled) (:genome/id ep)))
+          (is (= (:code/resolution-id compiled) (:resolution/id ep)))
           (is (= {:status :completed :score nil} (:outcome ep)))
           (is (= {:first-event (:event/id (first events))
                   :last-event (:event/id (last events))}
@@ -407,7 +400,7 @@
       (testing "Step 5 — close and REOPEN the store from disk; the episode and
                 trace remain queryable"
         (let [reopened-db (sqlite/spec db-path)
-              _ (is (= {:status :noop :version 13}
+              _ (is (= {:status :noop :version migrate/latest-version}
                        (migrate/migrate! reopened-db)))
               reopened-cas (cas/->cas cas-root)
               reopened-store {:sqlite reopened-db :cas reopened-cas}
@@ -415,7 +408,7 @@
               reopened-events (event/events-for-session reopened-db sid)]
           (is (uuid? (:episode/id ep)))
           (is (= sid (:session/id ep)))
-          (is (= (:compiled/genome-id compiled) (:genome/id ep)))
+          (is (= (:code/genome-id compiled) (:genome/id ep)))
           (is (= 1 (count (sqlite/query reopened-db
                                         ["SELECT * FROM episodes WHERE session_id = ?"
                                          (str sid)]))))
@@ -428,10 +421,11 @@
               "the append-only chain re-verifies after the restart")
           (testing "the session row and its pin survive the restart"
             (let [s (session/get-session reopened-db sid)]
-              (is (= :completed (:state s)))
-              (is (= (:compiled/genome-id compiled) (:genome/id s)))
-              (is (= (:compiled/resolution-id compiled) (:resolution/id s)))
-              (is (= (:compiled/phenotype-id compiled) (:phenotype/id s))))))))))
+              (is (= :created (:state s))
+                  "W2: the session row is an immutable pin — completion lives in the terminal Work and the :session/completed event above, never a Session transition")
+              (is (= (:code/genome-id compiled) (:genome/id s)))
+              (is (= (:code/resolution-id compiled) (:resolution/id s)))
+              (is (= (:code/id compiled) (:phenotype/id s))))))))))
 
 ;; ============================================================================
 ;; The route program contract (the rest of the M3/M4 decision table)

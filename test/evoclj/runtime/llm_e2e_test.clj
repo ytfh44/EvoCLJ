@@ -120,10 +120,10 @@
     :model/cost {:input 0.14 :output 0.28}}})
 
 (defn- model-lease
-  [phenotype-id]
+  [session-id]
   (let [now (java.util.Date.)]
     {:cap/id (random-uuid)
-     :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+     :principal {:principal/type :session :session/id session-id}
      :resource {:kind :model :id "deepseek/*"}
      :actions #{:invoke}
      :constraints {:max-calls 10}
@@ -136,9 +136,9 @@
         root (.toPath (io/file "test/fixtures/modelsdev-genome"))
         loaded (assoc (load/load-genome root) :programs [])
         compiled (core/compile-genome loaded provider-catalog)
-        genome-id (:compiled/genome-id compiled)
-        resolution-id (:compiled/resolution-id compiled)
-        phenotype-id (:compiled/phenotype-id compiled)
+        genome-id (:code/genome-id compiled)
+        resolution-id (:code/resolution-id compiled)
+        phenotype-id (:code/id compiled)
         db-path (temp-db-path)
         db (sqlite/spec db-path)
         _ (migrate/migrate! db)
@@ -165,20 +165,6 @@
                    (model-index-for base-url)
                    {:registry/api-keys {:deepseek "sk-test"}})
         usage (atom {})
-        lease (model-lease phenotype-id)
-        ph (phenotype/instantiate
-            compiled
-            {:stores {:sqlite :poison :cas {:root :poison}}
-             :providers {:registry reg}
-             :capabilities {:leases [lease] :usage usage}
-             :program-sources {}})
-        executor {:phenotype ph
-                  :stores {:sqlite db :cas cas-store}
-                  :dispatch (dispatch/make-broker-context
-                             {:registry reg
-                              :model-registry model-reg
-                              :leases [lease]
-                              :usage usage})}
         sid (:session/id
              (session/create-session!
               db
@@ -194,6 +180,20 @@
                                 :prev/event-id nil
                                 :payload-ref nil
                                 :metadata {}})
+        lease (model-lease sid)
+        ph (phenotype/instantiate
+            compiled
+            {:stores {:sqlite :poison :cas {:root :poison}}
+             :providers {:registry reg}
+             :capabilities {:leases [lease] :usage usage}
+             :program-sources {}})
+        executor {:phenotype ph
+                  :stores {:sqlite db :cas cas-store}
+                  :dispatch (dispatch/make-broker-context
+                             {:registry reg
+                              :model-registry model-reg
+                              :leases [lease]
+                              :usage usage})}
         result (scheduler/run-session! executor sid {:op :ask :text "hi"})]
     (is (= :completed (:status result)))
     (is (some? (:output-ref result)))

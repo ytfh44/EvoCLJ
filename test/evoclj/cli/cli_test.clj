@@ -173,12 +173,12 @@
         db (sqlite/spec db-path)
         _ (migrate/migrate! db)
         {:keys [loaded compiled]} (compile-route-a)
-        genome-id (:compiled/genome-id compiled)
-        resolution-id (:compiled/resolution-id compiled)
+        genome-id (:code/genome-id compiled)
+        resolution-id (:code/resolution-id compiled)
         cas-root (str dir "/cas")
         cas-store (cas/->cas cas-root)]
     (sqlite/with-db [conn db]
-      (doseq [artifact-id [genome-id resolution-id (:compiled/phenotype-id compiled)]]
+      (doseq [artifact-id [genome-id resolution-id (:code/id compiled)]]
         (jdbc/execute!
          conn
          ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
@@ -237,10 +237,10 @@
 ;; ============================================================================
 
 (defn- echo-lease
-  [phenotype-id]
+  [session-id]
   (let [now (java.util.Date.)]
     {:cap/id (random-uuid)
-     :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+     :principal {:principal/type :session :session/id session-id}
      :resource {:kind :tool :id :fixture/echo}
      :actions #{:invoke}
      :constraints {:max-calls 100}
@@ -257,7 +257,22 @@
         _ (registry/register! reg (fixture/echo-provider {}))
         _ (registry/register! reg (fixture/non-idempotent-provider {}))
         usage (atom {})
-        lease (echo-lease (:compiled/phenotype-id compiled))
+        sid (:session/id
+             (session/create-session!
+              db
+              {:genome/id (:code/genome-id compiled)
+               :resolution/id (:code/resolution-id compiled)
+               :phenotype/id (:code/id compiled)
+               :generation/id generation-id}))
+        _ (event/append-event! db
+                               {:session/id sid
+                                :generation/id generation-id
+                                :phenotype/id (:code/id compiled)
+                                :event/type :session/created
+                                :prev/event-id nil
+                                :payload-ref nil
+                                :metadata {}})
+        lease (echo-lease sid)
         ph (phenotype/instantiate
             compiled
             {:stores {:sqlite :poison :cas {:root :poison}}
@@ -267,22 +282,7 @@
         executor {:phenotype ph
                   :stores {:sqlite db :cas cas-store}
                   :dispatch (dispatch/make-broker-context
-                             {:registry reg :leases [lease] :usage usage})}
-        sid (:session/id
-             (session/create-session!
-              db
-              {:genome/id (:compiled/genome-id compiled)
-               :resolution/id (:compiled/resolution-id compiled)
-               :phenotype/id (:compiled/phenotype-id compiled)
-               :generation/id generation-id}))]
-    (event/append-event! db
-                         {:session/id sid
-                          :generation/id generation-id
-                          :phenotype/id (:compiled/phenotype-id compiled)
-                          :event/type :session/created
-                          :prev/event-id nil
-                          :payload-ref nil
-                          :metadata {}})
+                             {:registry reg :leases [lease] :usage usage})}]
     (let [result (scheduler/run-session! executor sid task)
           ep (episode/materialize-episode! {:sqlite db :cas cas-store} sid)]
       {:session/id sid :result result :executor executor})))

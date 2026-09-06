@@ -80,9 +80,9 @@
     (let [root (genome-root)
           loaded (load/load-genome (Paths/get root (make-array String 0)))
           compiled (core/compile-genome loaded provider-catalog)
-          genome-id (:compiled/genome-id compiled)
-          resolution-id (:compiled/resolution-id compiled)
-          phenotype-id (:compiled/phenotype-id compiled)
+          genome-id (:code/genome-id compiled)
+          resolution-id (:code/resolution-id compiled)
+          phenotype-id (:code/id compiled)
           db-path (temp-db-path)
           _ (track! db-path)
           db (sqlite/spec db-path)
@@ -108,9 +108,24 @@
           cas-store (cas/->cas cas-root)
           reg (registry/create-registry)
           _ (registry/register! reg (mem/memory-provider {:store db}))
+          sid (:session/id
+               (session/create-session!
+                db
+                {:genome/id genome-id
+                 :resolution/id resolution-id
+                 :phenotype/id phenotype-id
+                 :generation/id generation-id}))
+          _ (event/append-event! db
+                                 {:session/id sid
+                                  :generation/id generation-id
+                                  :phenotype/id phenotype-id
+                                  :event/type :session/created
+                                  :prev/event-id nil
+                                  :payload-ref nil
+                                  :metadata {}})
           now (Date.)
           memory-lease {:cap/id (random-uuid)
-                        :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+                        :principal {:principal/type :session :session/id sid}
                         :resource {:kind :memory :id :note}
                         :actions #{:invoke}
                         :constraints {:max-calls 100}
@@ -128,21 +143,6 @@
                                {:registry reg
                                 :leases [memory-lease]
                                 :usage (atom {})})}
-          sid (:session/id
-               (session/create-session!
-                db
-                {:genome/id genome-id
-                 :resolution/id resolution-id
-                 :phenotype/id phenotype-id
-                 :generation/id generation-id}))
-          _ (event/append-event! db
-                                 {:session/id sid
-                                  :generation/id generation-id
-                                  :phenotype/id phenotype-id
-                                  :event/type :session/created
-                                  :prev/event-id nil
-                                  :payload-ref nil
-                                  :metadata {}})
           result (scheduler/run-session! executor sid {:op :remember :text "hello memory"})
           outputs (when (:output-ref result)
                     (edn/read-string

@@ -39,8 +39,8 @@
   run-session! reads the session from the store and verifies its
   pinned :genome/id, :resolution/id, and :phenotype/id agree with the
   executor's compiled genome (evoclj.compiler.core returns
-  :compiled/genome-id, :compiled/resolution-id,
-  :compiled/phenotype-id) before touching anything. A disagreement is
+  :code/genome-id, :code/resolution-id,
+  :code/id) before touching anything. A disagreement is
   :scheduler/pin-mismatch — the scheduler refuses to run a session
   against the wrong phenotype (the session's pinned identity is the
   store's contract, not the executor's claim).
@@ -462,6 +462,15 @@
   (some #(when (work/terminal? (:work/state %)) %)
         (work-store/list-works db session-id)))
 
+(defn- session-tip-id
+  "The current tip event id of `session-id` (the last event appended),
+  or `fallback-id` when the session has no events yet. Dispatch can
+  append events before throwing, so failing from a stale cause would
+  mask the real error with :store/prev-not-immediate."
+  [db session-id fallback-id]
+  (or (:event/id (last (event/events-for-session db session-id)))
+      fallback-id))
+
 (defn- fail-session!
   "Fail the run: store the serializable error payload as a CAS artifact,
   append :node/failed (chained to `cause`, :payload-ref = the artifact),
@@ -773,7 +782,7 @@
                                             (:intents transition))
                                     (catch Throwable t
                                       {:failed-outcome
-                                       (fail-session! executor pin (:event/id completed)
+                                       (fail-session! executor pin (session-tip-id db (:session/id pin) (:event/id completed))
                                                       node-id (inc steps)
                                                       (err/error-data t) outputs)}))]
                               (if-let [failed-outcome (:failed-outcome dispatch-result)]

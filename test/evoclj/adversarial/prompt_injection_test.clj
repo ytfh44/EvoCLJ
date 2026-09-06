@@ -141,9 +141,9 @@
   (let [root (tool-genome)
         loaded (load/load-genome (Paths/get root (make-array String 0)))
         compiled (core/compile-genome loaded provider-catalog)
-        genome-id (:compiled/genome-id compiled)
-        resolution-id (:compiled/resolution-id compiled)
-        phenotype-id (:compiled/phenotype-id compiled)
+        genome-id (:code/genome-id compiled)
+        resolution-id (:code/resolution-id compiled)
+        phenotype-id (:code/id compiled)
         db-path (str (Files/createTempFile "evoclj-inj-" ".db" (make-array FileAttribute 0)))
         _ (track! db-path)
         db (sqlite/spec db-path)
@@ -178,9 +178,24 @@
                    (model-index-for base-url)
                    {:registry/api-keys {:lmstudio "lm-studio"}})
         now (Date.)
+        sid (:session/id
+             (session/create-session!
+              db
+              {:genome/id genome-id
+               :resolution/id resolution-id
+               :phenotype/id phenotype-id
+               :generation/id generation-id}))
+        _ (event/append-event! db
+                               {:session/id sid
+                                :generation/id generation-id
+                                :phenotype/id phenotype-id
+                                :event/type :session/created
+                                :prev/event-id nil
+                                :payload-ref nil
+                                :metadata {}})
         lease (fn [resource]
                 {:cap/id (random-uuid)
-                 :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+                 :principal {:principal/type :session :session/id sid}
                  :resource resource
                  :actions #{:invoke}
                  :constraints {:max-calls 10}
@@ -202,21 +217,6 @@
                               :model-registry model-reg
                               :leases leases
                               :usage (atom {})})}
-        sid (:session/id
-             (session/create-session!
-              db
-              {:genome/id genome-id
-               :resolution/id resolution-id
-               :phenotype/id phenotype-id
-               :generation/id generation-id}))
-        _ (event/append-event! db
-                               {:session/id sid
-                                :generation/id generation-id
-                                :phenotype/id phenotype-id
-                                :event/type :session/created
-                                :prev/event-id nil
-                                :payload-ref nil
-                                :metadata {}})
         ;; The PLT5 preflight rejects a declared tool effect when no
         ;; corresponding host grant exists; the helper exposes that typed
         ;; result so scenario B remains an explicit fail-closed assertion.
