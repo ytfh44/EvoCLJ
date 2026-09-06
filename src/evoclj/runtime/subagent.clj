@@ -519,6 +519,7 @@
 ;; Child execution (S3) — H1 Hydration factory
 ;; ---------------------------------------------------------------------------
 
+(declare agent-spawn-provider agent-status-provider agent-cancel-provider subagent-tool-catalog)
 (defn- build-child-executor
   "Build an isolated child executor for `child-session` via the
   hydration factory. Delegates to evoclj.runtime.hydrate/hydrate so
@@ -526,11 +527,29 @@
   verifies Deployment/Execution ids, loads program sources, materializes
   bindings, and creates a fresh SCI + broker pair. Synthetic
   topology/programs/CAS/fixture lease are owned by the factory, not
-  copied here."
+  copied here.
+
+  Production catalog wiring (S6/S14): the hydrated registry carries only
+  the fixture provider, so the child's own tool loop could never dispatch
+  :agent/spawn (nested spawn), :agent/status, or :agent/cancel — a nested
+  spawn would fail closed as :provider/not-found. This step registers the
+  three kernel-owned agent providers (spawn closed over the child's link
+  parent) and resolves subagent-tool-catalog against the registry, so the
+  production path consumes the single-sourced catalog instead of leaving
+  it test-only. The resolved map is attached as :subagent/tool-catalog."
   [db child-session]
   (let [hydrate @(requiring-resolve 'evoclj.runtime.hydrate/hydrate)
-        pin (if (map? child-session) child-session {:session/id child-session})]
-    (hydrate db pin)))
+        pin (if (map? child-session) child-session {:session/id child-session})
+        executor (hydrate db pin)
+        child-id (types/session-id (or (:session/id pin) (:session/id child-session)))
+        parent-id (try (get-parent-session-id db child-id) (catch Exception _ nil))
+        reg (get-in executor [:dispatch :registry])]
+    (when (and (some? reg) (instance? clojure.lang.Atom reg))
+      (registry/register! reg (agent-spawn-provider db parent-id))
+      (registry/register! reg (agent-status-provider db))
+      (registry/register! reg (agent-cancel-provider db))
+      (let [resolved (registry/resolve-tool-catalog reg subagent-tool-catalog)]
+        (assoc executor :subagent/tool-catalog resolved)))))
 
 (defn audit-child-task
   "Audit the executed `task` against the spawn-time digest bind carried by
@@ -601,7 +620,9 @@
 
   `db`                 — sqlite spec, path, or SessionStore handle (must be migrated).
   `parent-session-id`  — UUID of the parent session (for validation / audit; may be nil).
-  `child-session-id`   — UUID of the child session to run (must exist, status :created).
+  `child-session-id`   — UUID of the child session to run (must exist; the
+  session row is immutable identity and stays :created — there is NO
+  created-session lifecycle requirement, W2).
   `task`               — EDN-safe task input (e.g. {:text \"hello\"}) fed as the entry node's payload.
   `work-id`            — (5-arity) the child Work to drive. Must exist and
   belong to the child; nil resolves the child's single Work as the 4-arity does.
@@ -1479,165 +1500,78 @@
     (catch Throwable t
       {:delivered false :reason :delivery-error :error/type :subagent/delivery-failed})))
 
+;; ---------------------------------------------------------------------------
+;; Agent tool surface (S6) — single-sourced from evoclj.tool.specs
+;; ---------------------------------------------------------------------------
+;; The Malli arg/output schemas, the canonical C-Tool descriptors, and the
+;; wire catalog entries are defined ONCE in tool.specs (INV-05). Everything
+;; below aliases those definitions — no descriptor map is duplicated here.
+;; Providers describe via the canonical maps (identical values) and
+;; validate args against the canonical :input-schema.
 (def AgentSpawnArgsSchema
-  "Malli input schema for :agent/spawn (model-facing). :task is required,
-  :capabilities is an optional vector of capability hint strings."
-  [:map {:closed true}
-   [:task string?]
-   [:capabilities {:optional true} [:vector string?]]])
+  "Alias of tool.specs/AgentSpawnArgsSchema (single source)."
+  tool.specs/AgentSpawnArgsSchema)
 
 (def AgentSpawnOutputSchema
-  "Malli output schema for :agent/spawn."
-  [:map {:closed false}
-   [:child/session-id uuid?]
-   [:child/work-id {:optional true} uuid?]
-   [:child/capabilities {:optional true} [:vector :map]]])
+  "Alias of tool.specs/AgentSpawnOutputSchema (single source)."
+  tool.specs/AgentSpawnOutputSchema)
 
 (def AgentStatusArgsSchema
-  "Malli input schema for :agent/status. Either :session-id (the child
-  session uuid string) or :work-id (the child Work uuid string, resolved
-  to its owning session) selects the target — the Work handle is
-  first-class. At least one is required (enforced at execute time)."
-  [:map {:closed true}
-   [:session-id {:optional true} string?]
-   [:work-id {:optional true} string?]])
+  "Alias of tool.specs/AgentStatusArgsSchema (single source)."
+  tool.specs/AgentStatusArgsSchema)
 
 (def AgentStatusOutputSchema
-  "Malli output schema for :agent/status — at minimum the session id and state."
-  [:map {:closed false}
-   [:session/id {:optional true} uuid?]
-   [:work/id {:optional true} uuid?]
-   [:state {:optional true} keyword?]])
-
-(def agent-spawn-tool-descriptor
-  "The v0 tool descriptor of :agent/spawn. :effect :pure — spawn is persisted
-  as a session row + causal event before returning; depth/budget caps are fail-closed."
-  {:tool/id :agent/spawn
-   :tool/description "Spawn a subagent session"
-   :tool/parameters {:type "object"
-                     :properties {:task {:type "string"
-                                        :description "Task text for the child subagent"}
-                                 :capabilities {:type "array"
-                                                :description "Optional capability hints"
-                                                :items {:type "string"}}}
-                     :required ["task"]}
-   :tool/budget {:max-calls 10}
-   :effect :pure
-   :input-schema AgentSpawnArgsSchema
-   :output-schema AgentSpawnOutputSchema
-   :required-action :invoke
-   :lease/resource {:kind :tool :id :agent/spawn}
-   :tool/audience #{:model}})
-
-(def agent-status-tool-descriptor
-  "The v0 tool descriptor of :agent/status."
-  {:tool/id :agent/status
-   :tool/description "Query subagent status"
-   :tool/parameters {:type "object"
-                     :properties {:session-id {:type "string"
-                                              :description "Child session id (uuid string)"}
-                                 :work-id {:type "string"
-                                           :description "Child Work id (uuid string) — resolves to its owning session"}}
-                     :required []}
-   :effect :pure
-   :input-schema AgentStatusArgsSchema
-   :output-schema AgentStatusOutputSchema
-   :required-action :invoke
-   :lease/resource {:kind :tool :id :agent/status}
-   :tool/audience #{:model}})
+  "Alias of tool.specs/AgentStatusOutputSchema (single source)."
+  tool.specs/AgentStatusOutputSchema)
 
 (def AgentCancelArgsSchema
-  "Malli input schema for :agent/cancel. Either :session-id (the child
-  session uuid string) or :work-id (the child Work uuid string, resolved
-  to its owning session) selects the target — the Work handle is
-  first-class. At least one is required (enforced at execute time).
-  :reason is an optional cancel reason (default :user-request)."
-  [:map {:closed true}
-   [:session-id {:optional true} string?]
-   [:work-id {:optional true} string?]
-   [:reason {:optional true} keyword?]])
+  "Alias of tool.specs/AgentCancelArgsSchema (single source)."
+  tool.specs/AgentCancelArgsSchema)
 
 (def AgentCancelOutputSchema
-  "Malli output schema for :agent/cancel — the cancelled subtree."
-  [:map {:closed false}
-   [:session/id {:optional true} uuid?]
-   [:work/id {:optional true} uuid?]
-   [:cancelled {:optional true} [:vector uuid?]]
-   [:already-cancelled? {:optional true} boolean?]])
+  "Alias of tool.specs/AgentCancelOutputSchema (single source)."
+  tool.specs/AgentCancelOutputSchema)
+
+(def agent-spawn-tool-descriptor
+  "Alias of the canonical tool.specs/agent-spawn-tool (:effect :write —
+  spawn persists session row + event + link + exactly one queued child Work)."
+  tool.specs/agent-spawn-tool)
+
+(def agent-status-tool-descriptor
+  "Alias of the canonical tool.specs/agent-status-tool (read-only over
+  the Work lifecycle)."
+  tool.specs/agent-status-tool)
 
 (def agent-cancel-tool-descriptor
-  "The v0 tool descriptor of :agent/cancel. :effect :pure — cancel is an
-  atomic durable Work CAS plus cascade revoke, idempotent on already
-  cancelled targets."
-  {:tool/id :agent/cancel
-   :tool/description "Cancel a subagent session"
-   :tool/parameters {:type "object"
-                     :properties {:session-id {:type "string"
-                                              :description "Child session id (uuid string)"}
-                                 :work-id {:type "string"
-                                           :description "Child Work id (uuid string) — resolves to its owning session"}
-                                 :reason {:type "string"
-                                          :description "Cancel reason (default user-request)"}}
-                     :required []}
-   :effect :pure
-   :input-schema AgentCancelArgsSchema
-   :output-schema AgentCancelOutputSchema
-   :required-action :invoke
-   :lease/resource {:kind :tool :id :agent/cancel}
-   :tool/audience #{:model}})
+  "Alias of the canonical tool.specs/agent-cancel-tool (atomic durable
+  Work CAS plus cascade revoke)."
+  tool.specs/agent-cancel-tool)
 
-;; Reference the single source in tool.specs so S6 does not duplicate
-;; the canonical C-Tool definitions (tool.specs is the single source of truth).
-;; These defs simply alias tool.specs for callers that prefer the subagent namespace.
+;; Back-compat aliases for callers that prefer the `canonical-` prefix.
 (def canonical-agent-spawn-tool tool.specs/agent-spawn-tool)
 (def canonical-agent-status-tool tool.specs/agent-status-tool)
 (def canonical-agent-cancel-tool tool.specs/agent-cancel-tool)
 
 (def agent-spawn-tool-catalog-entry
-  "Wire declaration of :agent/spawn for the model and the tool loop
-  ({:name :description :parameters :tool} — :tool maps wire name back to
-  EvoCLJ tool id the scheduler executes through the broker)."
-  {:name "agent_spawn"
-   :description "Spawn a subagent session"
-   :parameters {:type "object"
-                :properties {:task {:type "string"
-                                   :description "Task text for the child subagent"}
-                            :capabilities {:type "array"
-                                           :description "Optional capability hints"
-                                           :items {:type "string"}}}
-                :required ["task"]}
-   :tool :agent/spawn})
+  "Alias of the canonical tool.specs/agent-spawn-wire-tool."
+  tool.specs/agent-spawn-wire-tool)
 
 (def agent-status-tool-catalog-entry
-  "Wire declaration of :agent/status."
-  {:name "agent_status"
-   :description "Query subagent status"
-   :parameters {:type "object"
-                :properties {:session-id {:type "string"
-                                         :description "Child session id (uuid string)"}
-                             :work-id {:type "string"
-                                       :description "Child Work id (uuid string) — resolves to its owning session"}}
-                :required []}
-   :tool :agent/status})
+  "Alias of the canonical tool.specs/agent-status-wire-tool."
+  tool.specs/agent-status-wire-tool)
 
 (def agent-cancel-tool-catalog-entry
-  "Wire declaration of :agent/cancel."
-  {:name "agent_cancel"
-   :description "Cancel a subagent session"
-   :parameters {:type "object"
-                :properties {:session-id {:type "string"
-                                         :description "Child session id (uuid string)"}
-                             :work-id {:type "string"
-                                       :description "Child Work id (uuid string) — resolves to its owning session"}
-                             :reason {:type "string"
-                                      :description "Cancel reason (default user-request)"}}
-                :required []}
-   :tool :agent/cancel})
+  "Alias of the canonical tool.specs/agent-cancel-wire-tool."
+  tool.specs/agent-cancel-wire-tool)
 
 (def subagent-tool-catalog
   "The tool catalog the scheduler's tool loop consumes for subagents:
-  the three S6 wire tools, in the wire form ({:name :description :parameters :tool})."
-  [agent-spawn-tool-catalog-entry agent-status-tool-catalog-entry agent-cancel-tool-catalog-entry])
+  the three S6 wire tools, single-sourced from tool.specs (wire form
+  {:name :description :parameters :tool}). build-child-executor registers
+  the matching providers and resolves this catalog against the child
+  executor's registry (S14 pin→provider enforcement), so the production
+  path consumes the catalog instead of leaving it test-only."
+  [tool.specs/agent-spawn-wire-tool tool.specs/agent-status-wire-tool tool.specs/agent-cancel-wire-tool])
 
 ;; --- providers (broker-executable) ----------------------------------------
 

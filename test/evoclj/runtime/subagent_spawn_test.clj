@@ -90,13 +90,22 @@
           child-sess (:child/session res)]
       (is (uuid? child-id) "child id is uuid")
       (is (some? child-sess) "child session map returned")
-      (is (= :created (:state child-sess)) "child status :created")
+      (is (= :created (:state child-sess)) "session row stays :created (immutable identity, never a lifecycle)")
       (is (= genome (:genome/id child-sess)) "same genome as parent")
       (is (= resolution (:resolution/id child-sess)) "same resolution as parent")
       (is (= phenotype (:phenotype/id child-sess)) "same phenotype as parent")
       (is (= gen (:generation/id child-sess)) "same generation as parent")
       (is (= parent-id (subagent/get-parent-session-id db child-id)) "parent link stored")
       (is (= [child-id] (subagent/child-session-ids db parent-id)) "child appears in parent's children")
+      ;; W2: the lifecycle truth is the child Work CAS — exactly one queued
+      ;; :subagent/run Work carrying the spawn-time task digest, named by
+      ;; the returned handle.
+      (let [child-works (work-store/list-works db child-id)]
+        (is (= 1 (count child-works)) "exactly one child Work per spawn")
+        (is (= :queued (:work/state (first child-works))) "child Work starts :queued")
+        (is (= :subagent/run (:work/type (first child-works))) "child Work type is :subagent/run")
+        (is (= (:child/work-id res) (:work/id (first child-works))) "returned handle names the Work row")
+        (is (string? (:work/payload-ref (first child-works))) "child Work carries the spawn-time task digest"))
       (let [child-events (event/events-for-session db child-id)]
         (is (= :session/created (:event/type (first child-events))) "child chain opens with :session/created")))))
 

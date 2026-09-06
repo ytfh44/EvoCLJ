@@ -146,7 +146,9 @@
                             :args {:task "narrowed via tool"
                                    :capabilities ["tool:fixture/echo"]}}
                   :budget {:wall-ms 1000}
-                  :metadata {}}
+                  ;; :agent/spawn is :effect :write — the tool-call path
+                  ;; demands an idempotency key in :metadata.
+                  :metadata {:idempotency/key (str (UUID/randomUUID))}}
           res (dispatch/dispatch! ctx intent)
           caps (get-in res [:value :child/capabilities])]
       (is (= :ok (:result/status res)) (str "dispatch ok: " (pr-str res)))

@@ -104,6 +104,7 @@
     (let [desc subagent/agent-spawn-tool-descriptor]
       ;; validates via single source (tool.specs)
       (is (= desc (specs/validate-descriptor desc)) "validates via tool.specs")
+      (is (identical? desc specs/agent-spawn-tool) "no duplicate descriptor: alias IS the canonical map")
       (is (= :agent/spawn (:tool/id desc)) "tool id")
       (is (= "Spawn a subagent session" (:tool/description desc)) "description")
       (is (map? (:tool/parameters desc)) "parameters is map")
@@ -111,12 +112,15 @@
       (is (= "string" (get-in desc [:tool/parameters :properties :task :type])) "task is string")
       (is (= ["task"] (get-in desc [:tool/parameters :required])) "task required")
       (is (= {:max-calls 10} (:tool/budget desc)) "budget max-calls 10")
-      (is (= :pure (:effect desc)) "effect pure")
+      (is (= :write (:effect desc)) "effect write: spawn persists session row + event + link + child Work")
       (is (= :invoke (:required-action desc)) "required-action invoke")
       ;; input-schema must require :task string and validate correctly
       (is (m/validate (:input-schema desc) {:task "hello"}) "task validates")
       (is (not (m/validate (:input-schema desc) {})) "missing task fails")
-      (is (m/validate (:input-schema desc) {:task "hello" :capabilities ["a" "b"]}) "capabilities optional"))
+      (is (m/validate (:input-schema desc) {:task "hello" :capabilities ["a" "b"]}) "capabilities optional")
+      ;; output carries the child Work handle (the durable execution identity)
+      (is (m/validate (:output-schema desc) {:child/session-id (random-uuid) :child/work-id (random-uuid)})
+          "output validates with session + work handles"))
     ;; also canonical spec alias validates
     (let [desc specs/agent-spawn-tool]
       (is (= desc (specs/validate-descriptor desc)) "canonical spec validates")
@@ -125,8 +129,24 @@
     ;; :agent/status also valid
     (let [desc subagent/agent-status-tool-descriptor]
       (is (= desc (specs/validate-descriptor desc)) "status validates")
+      (is (identical? desc specs/agent-status-tool) "status alias IS the canonical map")
       (is (= :agent/status (:tool/id desc)))
-      (is (= "Query subagent status" (:tool/description desc))))))
+      (is (= "Query subagent status" (:tool/description desc))))
+    ;; :agent/cancel also valid
+    (let [desc subagent/agent-cancel-tool-descriptor]
+      (is (= desc (specs/validate-descriptor desc)) "cancel validates")
+      (is (identical? desc specs/agent-cancel-tool) "cancel alias IS the canonical map")
+      (is (= :agent/cancel (:tool/id desc))))))
+
+(deftest subagent-tool-catalog-is-single-sourced
+  (testing "subagent-tool-catalog carries the tool.specs wire entries, no duplicates"
+    (is (= 3 (count subagent/subagent-tool-catalog)) "three S6 wire tools")
+    (is (= [specs/agent-spawn-wire-tool specs/agent-status-wire-tool specs/agent-cancel-wire-tool]
+           subagent/subagent-tool-catalog)
+        "catalog IS the canonical wire entries")
+    (is (= #{:agent/spawn :agent/status :agent/cancel}
+           (set (map :tool subagent/subagent-tool-catalog)))
+        "catalog pins exactly the three agent tool ids")))
 
 ;; ===========================================================================
 ;; 2 — spawn via tool call creates child session (integration with dispatch)
@@ -155,9 +175,12 @@
                   :payload {:tool/id :agent/spawn
                             :args {:task "child via tool"}}
                   :budget {:wall-ms 1000}
-                  :metadata {}}
+                  ;; :agent/spawn is :effect :write — the tool-call path
+                  ;; demands an idempotency key in :metadata.
+                  :metadata {:idempotency/key (str (random-uuid))}}
           res (dispatch/dispatch! ctx intent)
-          child-id (get-in res [:value :child/session-id])]
+          child-id (get-in res [:value :child/session-id])
+          child-work-id (get-in res [:value :child/work-id])]
       (is (= :ok (:result/status res)) (str "dispatch ok: " (pr-str res)))
       (is (uuid? child-id) "child id is uuid")
       (is (seq (get-in res [:value :child/capabilities]))
@@ -165,7 +188,14 @@
       (let [child (session/get-session db child-id)]
         (is (some? child) "child session exists")
         (is (= parent-id (subagent/get-parent-session-id db child-id)) "parent link stored")
-        (is (= :created (:state child)) "child state created"))
+        (is (= :created (:state child)) "session row stays :created (immutable identity, never a lifecycle)"))
+      ;; W2: the lifecycle truth is the child Work CAS — exactly one queued
+      ;; :subagent/run Work, and the returned handle names it.
+      (let [child-works (work-store/list-works db child-id)]
+        (is (= 1 (count child-works)) "exactly one child Work per spawn")
+        (is (= :queued (:work/state (first child-works))) "child Work starts :queued")
+        (is (= :subagent/run (:work/type (first child-works))) "child Work type is :subagent/run")
+        (is (= (:work/id (first child-works)) child-work-id) "returned handle names the Work row"))
       ;; verify :agent/status tool also works via dispatch
       (let [cause2 (:event/id (last (event/events-for-session db parent-id)))
             status-intent {:intent/id (random-uuid)
@@ -244,7 +274,7 @@
                           :cause/event-id cause-id
                           :payload {:tool/id :agent/spawn :args {:task "too-deep via tool"}}
                           :budget {:wall-ms 1000}
-                          :metadata {}}
+                          :metadata {:idempotency/key (str (random-uuid))}}
                   res (dispatch/dispatch! ctx intent)]
               (is (= :error (:result/status res)) "dispatch returns error for depth exceeded")
               ;; Through the provider pipeline every provider throw is a

@@ -289,6 +289,10 @@
 
 ;; ---------------------------------------------------------------------------
 ;; Agent tool surface (S6) — broker-executable :agent/spawn + :agent/status
+;; + :agent/cancel. Single source: the Malli arg/output schemas, the
+;; canonical C-Tool maps, and the wire declarations below are the ONLY
+;; definitions. evoclj.runtime.subagent aliases them (no duplicate maps)
+;; and consumes subagent-tool-catalog-equivalent wire entries from here.
 ;; ---------------------------------------------------------------------------
 
 (def agent-spawn-tool-id
@@ -299,13 +303,70 @@
   "Broker tool id for querying subagent status."
   :agent/status)
 
+(def AgentSpawnArgsSchema
+  "Malli input schema for :agent/spawn (model-facing). :task is required,
+  :capabilities is an optional vector of capability hint strings (Grant-meet
+  narrowing request, not audit metadata)."
+  [:map {:closed true}
+   [:task string?]
+   [:capabilities {:optional true} [:vector string?]]])
+
+(def AgentSpawnOutputSchema
+  "Malli output schema for :agent/spawn — the child session handle, the
+  child Work handle (the durable execution identity), and the derived
+  child leases."
+  [:map {:closed false}
+   [:child/session-id uuid?]
+   [:child/work-id {:optional true} uuid?]
+   [:child/capabilities {:optional true} [:vector :map]]])
+
+(def AgentStatusArgsSchema
+  "Malli input schema for :agent/status. Either :session-id (the child
+  session uuid string) or :work-id (the child Work uuid string, resolved
+  to its owning session) selects the target — the Work handle is
+  first-class. At least one is required (enforced at execute time)."
+  [:map {:closed true}
+   [:session-id {:optional true} string?]
+   [:work-id {:optional true} string?]])
+
+(def AgentStatusOutputSchema
+  "Malli output schema for :agent/status — at minimum the session id and
+  the child Work state (the lifecycle truth)."
+  [:map {:closed false}
+   [:session/id {:optional true} uuid?]
+   [:work/id {:optional true} uuid?]
+   [:state {:optional true} keyword?]])
+
+(def AgentCancelArgsSchema
+  "Malli input schema for :agent/cancel. Either :session-id (the child
+  session uuid string) or :work-id (the child Work uuid string, resolved
+  to its owning session) selects the target — the Work handle is
+  first-class. At least one is required (enforced at execute time).
+  :reason is an optional cancel reason (default :user-request)."
+  [:map {:closed true}
+   [:session-id {:optional true} string?]
+   [:work-id {:optional true} string?]
+   [:reason {:optional true} keyword?]])
+
+(def AgentCancelOutputSchema
+  "Malli output schema for :agent/cancel — the cancelled subtree."
+  [:map {:closed false}
+   [:session/id {:optional true} uuid?]
+   [:work/id {:optional true} uuid?]
+   [:cancelled {:optional true} [:vector uuid?]]
+   [:already-cancelled? {:optional true} boolean?]])
+
 (def agent-spawn-tool
   "Canonical C-Tool / provider descriptor for :agent/spawn.
 
-  INPUT is the tool's model-facing args: {:task string :capabilities [any]}.
-  :required-action is :invoke (capability-gated via broker). :effect is :pure
-  for idempotency semantics — spawn is persisted via session create + event,
-  and depth/budget caps are enforced fail-closed.
+  INPUT is the tool's model-facing args: {:task string :capabilities [string]}.
+  :required-action is :invoke (capability-gated via broker). :effect is
+  :write — spawn persists a child session row, a :subagent/spawned event,
+  a subagent_links edge, and exactly one queued :subagent/run child Work,
+  so the tool-call path demands :metadata {:idempotency/key ...}.
+  W2: the returned :child/work-id is the durable execution identity the
+  run, status, cancel, and replay paths resolve; the session row stays
+  :created (immutable identity, never a lifecycle).
   :tool/budget {:max-calls 10} mirrors the assignment surface."
   {:tool/id agent-spawn-tool-id
    :tool/description "Spawn a subagent session"
@@ -317,31 +378,29 @@
                                                 :items {:type "string"}}}
                      :required ["task"]}
    :tool/budget {:max-calls 10}
-   :effect :pure
-   :input-schema [:map {:closed true}
-                  [:task string?]
-                  [:capabilities {:optional true} [:vector any?]]]
-   :output-schema [:map {:closed false}
-                   [:child/session-id uuid?]
-                   [:child/capabilities {:optional true} [:vector :map]]]
+   :effect :write
+   :input-schema AgentSpawnArgsSchema
+   :output-schema AgentSpawnOutputSchema
    :required-action :invoke
    :lease/resource {:kind :tool :id agent-spawn-tool-id}
    :tool/audience #{:model}})
 
 (def agent-status-tool
-  "Canonical C-Tool / provider descriptor for :agent/status."
+  "Canonical C-Tool / provider descriptor for :agent/status. Read-only
+  over the Work lifecycle: resolves the target by session id or by
+  first-class Work id and reports the child Work state (the lifecycle
+  truth) plus link/depth info for descendants of the requester."
   {:tool/id agent-status-tool-id
    :tool/description "Query subagent status"
    :tool/parameters {:type "object"
                      :properties {:session-id {:type "string"
-                                              :description "Child session id (uuid string)"}}
-                     :required ["session-id"]}
+                                              :description "Child session id (uuid string)"}
+                                 :work-id {:type "string"
+                                           :description "Child Work id (uuid string) — resolves to its owning session"}}
+                     :required []}
    :effect :pure
-   :input-schema [:map {:closed true}
-                  [:session-id string?]]
-   :output-schema [:map {:closed false}
-                   [:session/id {:optional true} uuid?]
-                   [:state {:optional true} keyword?]]
+   :input-schema AgentStatusArgsSchema
+   :output-schema AgentStatusOutputSchema
    :required-action :invoke
    :lease/resource {:kind :tool :id agent-status-tool-id}
    :tool/audience #{:model}})
@@ -353,24 +412,23 @@
 (def agent-cancel-tool
   "Canonical C-Tool / provider descriptor for :agent/cancel. Cancels a
   child subagent (and its transitive descendants) by session id or by
-  first-class Work id. Effect :pure for idempotency semantics — cancel
-  is a durable Work CAS plus cascade revoke, idempotent on already
-  cancelled targets."
+  first-class Work id. W2: cancel is an atomic durable Work CAS
+  (queued|running|waiting -> cancelled) plus cascade revoke and cancel
+  events in one transaction, idempotent on already cancelled targets;
+  the session rows stay :created (immutable identity)."
   {:tool/id agent-cancel-tool-id
    :tool/description "Cancel a subagent session"
    :tool/parameters {:type "object"
                      :properties {:session-id {:type "string"
                                               :description "Child session id (uuid string)"}
                                  :work-id {:type "string"
-                                           :description "Child Work id (uuid string) — resolves to its owning session"}}
-                     :required ["session-id"]}
+                                           :description "Child Work id (uuid string) — resolves to its owning session"}
+                                 :reason {:type "string"
+                                          :description "Cancel reason (default user-request)"}}
+                     :required []}
    :effect :pure
-   :input-schema [:map {:closed true}
-                  [:session-id string?]
-                  [:work-id {:optional true} string?]]
-   :output-schema [:map {:closed false}
-                   [:session/id {:optional true} uuid?]
-                   [:cancelled {:optional true} [:vector uuid?]]]
+   :input-schema AgentCancelArgsSchema
+   :output-schema AgentCancelOutputSchema
    :required-action :invoke
    :lease/resource {:kind :tool :id agent-cancel-tool-id}
    :tool/audience #{:model}})
