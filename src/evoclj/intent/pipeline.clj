@@ -48,6 +48,7 @@
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.subagent :as subagent]
             [evoclj.sci.boundary :as boundary]
+            [evoclj.store.work :as work-store]
             [malli.core :as m])
   (:import (java.nio.charset StandardCharsets)))
 
@@ -620,10 +621,27 @@
                               nil @usage-atom))
           :else
           (try
-            (subagent/deliver-result! db parent-id child-id cas-ref)
-            (emit (result-ok intent {:parent/session-id parent-id
-                                     :child/session-id child-id
-                                     :result/cas-ref cas-ref}
+            (let [cwid (:child/work-id payload)
+                  pwid (:parent/work-id payload)
+                  term (:terminal/event-id payload)]
+              (when (and (nil? cwid) (some? term))
+                (throw (err/error :store/work-invalid
+                                  "subagent result :terminal/event-id requires an explicit :child/work-id"
+                                  {:child/session-id child-id})))
+              (when (and (some? cwid) (nil? term))
+                (throw (err/error :store/work-invalid
+                                  "subagent result :child/work-id requires an explicit :terminal/event-id"
+                                  {:child/session-id child-id
+                                   :child/work-id cwid})))
+              (if cwid
+                (subagent/deliver-result-for-works! db parent-id pwid cwid term cas-ref)
+                (subagent/deliver-result! db parent-id child-id cas-ref)))
+            (emit (result-ok intent (cond-> {:parent/session-id parent-id
+                                            :child/session-id child-id
+                                            :result/cas-ref cas-ref}
+                                     (:child/work-id payload) (assoc :child/work-id (:child/work-id payload))
+                                     (:parent/work-id payload) (assoc :parent/work-id (:parent/work-id payload))
+                                     (:terminal/event-id payload) (assoc :terminal/event-id (:terminal/event-id payload)))
                              nil @usage-atom))
             (catch clojure.lang.ExceptionInfo e
               (let [edata (ex-data e)]
@@ -659,27 +677,46 @@
       (let [payload (:payload intent)
             requester (:session/id intent)
             target-id (:target/session-id payload)
+            target-work-id (:target/work-id payload)
             reason (:reason payload)]
-        (if-not (ancestor-or-self? db requester target-id)
-          (emit (result-error intent :capability/scope-denied
-                              "subagent cancel is ancestor-scoped: the requester is not the target's parent-or-ancestor"
-                              {:session/id requester
-                               :target/session-id target-id}
-                              nil @usage-atom))
-          (try
-            (let [res (subagent/cancel-subagent! db requester target-id reason)]
-              (emit (result-ok intent {:child/session-id (:child/session-id res)
-                                       :cancelled (:cancelled res)
-                                       :already-cancelled? (:already-cancelled? res)}
-                               nil @usage-atom)))
-            (catch clojure.lang.ExceptionInfo e
-              (let [edata (ex-data e)]
-                (emit (result-error intent (or (:error/type edata) :intent/dispatch-failed)
-                                    (ex-message e) edata nil @usage-atom))))
-            (catch Throwable t
-              (emit (result-error intent :intent/dispatch-failed
-                                  (str "subagent cancel threw " (.getName (class t)))
-                                  {:cause (err/error-data t)} nil @usage-atom)))))))))
+        (let [work-err (when target-work-id
+                         (let [w (try (work-store/fetch-work db target-work-id)
+                                      (catch Exception _ nil))]
+                           (cond
+                             (nil? w) (result-error intent :store/work-not-found
+                                                    "subagent cancel Work handle names no row"
+                                                    {:target/work-id target-work-id}
+                                                    nil @usage-atom)
+                             (not= target-id (:work/session-id w))
+                             (result-error intent :store/work-invalid
+                                           "subagent cancel Work handle is not owned by the target session"
+                                           {:target/session-id target-id
+                                            :target/work-id target-work-id
+                                            :work/session-id (:work/session-id w)}
+                                           nil @usage-atom)
+                             :else nil)))]
+          (if work-err
+            (emit work-err)
+            (if-not (ancestor-or-self? db requester target-id)
+              (emit (result-error intent :capability/scope-denied
+                                  "subagent cancel is ancestor-scoped: the requester is not the target's parent-or-ancestor"
+                                  {:session/id requester
+                                   :target/session-id target-id}
+                                  nil @usage-atom))
+              (try
+                (let [res (subagent/cancel-subagent! db requester target-id reason)]
+                  (emit (result-ok intent {:child/session-id (:child/session-id res)
+                                           :cancelled (:cancelled res)
+                                           :already-cancelled? (:already-cancelled? res)}
+                                   nil @usage-atom)))
+                (catch clojure.lang.ExceptionInfo e
+                  (let [edata (ex-data e)]
+                    (emit (result-error intent (or (:error/type edata) :intent/dispatch-failed)
+                                        (ex-message e) edata nil @usage-atom))))
+                (catch Throwable t
+                  (emit (result-error intent :intent/dispatch-failed
+                                      (str "subagent cancel threw " (.getName (class t)))
+                                      {:cause (err/error-data t)} nil @usage-atom)))))))))))
 
 (defn- terminal-intent-rejection
   [broker-context intent]

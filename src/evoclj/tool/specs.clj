@@ -346,6 +346,34 @@
    :lease/resource {:kind :tool :id agent-status-tool-id}
    :tool/audience #{:model}})
 
+(def agent-cancel-tool-id
+  "Broker tool id for cancelling a subagent session."
+  :agent/cancel)
+
+(def agent-cancel-tool
+  "Canonical C-Tool / provider descriptor for :agent/cancel. Cancels a
+  child subagent (and its transitive descendants) by session id or by
+  first-class Work id. Effect :pure for idempotency semantics — cancel
+  is a durable Work CAS plus cascade revoke, idempotent on already
+  cancelled targets."
+  {:tool/id agent-cancel-tool-id
+   :tool/description "Cancel a subagent session"
+   :tool/parameters {:type "object"
+                     :properties {:session-id {:type "string"
+                                              :description "Child session id (uuid string)"}
+                                 :work-id {:type "string"
+                                           :description "Child Work id (uuid string) — resolves to its owning session"}}
+                     :required ["session-id"]}
+   :effect :pure
+   :input-schema [:map {:closed true}
+                  [:session-id string?]
+                  [:work-id {:optional true} string?]]
+   :output-schema [:map {:closed false}
+                   [:session/id {:optional true} uuid?]
+                   [:cancelled {:optional true} [:vector uuid?]]]
+   :required-action :invoke
+   :lease/resource {:kind :tool :id agent-cancel-tool-id}
+   :tool/audience #{:model}})
 (def agent-spawn-wire-tool
   "Wire declaration for :agent/spawn (OpenAI function-tool shape + :tool id)."
   {:name "agent_spawn"
@@ -360,9 +388,18 @@
    :parameters (:tool/parameters agent-status-tool)
    :tool agent-status-tool-id})
 
+(def agent-cancel-wire-tool
+  "Wire declaration for :agent/cancel."
+  {:name "agent_cancel"
+   :description "Cancel a subagent session"
+   :parameters (:tool/parameters agent-cancel-tool)
+   :tool agent-cancel-tool-id})
+
 (defn agent-tool?
-  "True when m is one of the :agent/spawn or :agent/status wire declarations."
+  "True when m is one of the :agent/spawn, :agent/status, or
+  :agent/cancel wire declarations."
   [m]
   (and (map? m)
        (or (= agent-spawn-tool-id (:tool m))
-           (= agent-status-tool-id (:tool m)))))
+           (= agent-status-tool-id (:tool m))
+           (= agent-cancel-tool-id (:tool m)))))

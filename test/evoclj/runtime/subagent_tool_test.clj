@@ -434,13 +434,16 @@
   (str "sha256:" (apply str (repeat 64 "b"))))
 
 (deftest result-and-cancel-intents-execute
-  (testing "subagent-result delivers after the child completes"
+  (testing "subagent-result delivers after the child completes (idempotent with run-time auto-delivery)"
     (let [db (fresh-db)
           parent (create-parent-session! db)
           parent-id (:session/id parent)
           pl (parent-lease parent-id phenotype #{:invoke})
-          {:keys [child/session-id]} (subagent/spawn-subagent! db parent-id {:task "child-task"} [pl])
+          {:keys [child/session-id child/work-id]} (subagent/spawn-subagent! db parent-id {:task "child-task"} [pl])
           _ (subagent/run-subagent! db parent-id session-id {:text "hello-echo"})
+          ;; the supplied CAS must equal the child Work's payload_ref
+          cas-ref (:work/payload-ref (work-store/fetch-work db work-id))
+          _ (is (string? cas-ref) "child work carries the output CAS ref")
           reg (registry/create-registry)
           ctx (dispatch/make-broker-context {:registry reg :leases [] :db db})
           parent-events-before (event/events-for-session db parent-id)
@@ -453,15 +456,18 @@
                   :cause/event-id cause-id
                   :payload {:parent/session-id parent-id
                             :child/session-id session-id
-                            :result/cas-ref cas-ref-good}
+                            :child/work-id work-id
+                            :terminal/event-id (:event/id (last (event/events-for-session db session-id)))
+                            :result/cas-ref cas-ref}
                   :budget {:wall-ms 1000}
                   :metadata {}}
           res (dispatch/dispatch! ctx intent)
           parent-events-after (event/events-for-session db parent-id)]
       (is (= :ok (:result/status res)) (str "got " (pr-str res)))
       (is (= session-id (get-in res [:value :child/session-id])))
-      (is (= (inc (count parent-events-before)) (count parent-events-after))
-          "one :subagent/result event appended")
+      (is (= work-id (get-in res [:value :child/work-id])) "work handle echoed")
+      (is (= (count parent-events-before) (count parent-events-after))
+          "re-delivery is a no-op (run-time auto-delivery already recorded the terminal)")
       (is (= :subagent/result (:event/type (last parent-events-after))))))
   (testing "subagent-result for another parent's child is scope-denied"
     (let [db (fresh-db)
@@ -576,4 +582,72 @@
       (let [rself (query parent-id parent-id)]
         (is (= :provider/execution-failed (:error/type rself)) "self query fails")
         (is (= :capability/scope-denied (get-in rself [:error/data :cause :error/type])))))))
+
+(deftest cancel-intent-accepts-work-id
+  (testing "subagent-cancel with :target/work-id cancels; a foreign work-id is :store/work-invalid"
+    (let [db (fresh-db)
+          parent (create-parent-session! db)
+          parent-id (:session/id parent)
+          spawned (subagent/spawn-subagent! db parent-id {:task "doomed"} [])
+          child-id (:child/session-id spawned)
+          child-work (:child/work-id spawned)
+          reg (registry/create-registry)
+          ctx (dispatch/make-broker-context {:registry reg :leases [] :db db})
+          cancel (fn [payload]
+                   (let [cause-id (:event/id (last (event/events-for-session db parent-id)))]
+                     (dispatch/dispatch! ctx {:intent/id (random-uuid)
+                                              :intent/type :intent/subagent-cancel
+                                              :session/id parent-id
+                                              :phenotype/id phenotype
+                                              :node/id :node/tool
+                                              :cause/event-id cause-id
+                                              :payload payload
+                                              :budget {:wall-ms 1000}
+                                              :metadata {}})))]
+      (let [res (cancel {:target/session-id child-id :target/work-id child-work :reason :user-request})]
+        (is (= :ok (:result/status res)) (str "got " (pr-str res)))
+        (is (= [child-id] (get-in res [:value :cancelled])) "cancelled the child")
+        (is (= :cancelled (:work/state (work-store/fetch-work db child-work))) "child work cancelled"))
+      ;; a work-id owned by another session is rejected, not acted on
+      (let [other (create-parent-session! db)
+            other-work (let [w (UUID/randomUUID)]
+                         (work-store/create-work! db {:work/id w :work/type :session/run
+                                                      :work/state :queued :work/session-id (:session/id other)})
+                         w)
+            res (cancel {:target/session-id child-id :target/work-id other-work :reason :user-request})]
+        (is (= :store/work-invalid (:error/type res)) (str "got " (pr-str res)))))))
+
+(deftest agent-cancel-provider-is-descendant-scoped-and-work-addressable
+  (testing ":agent/cancel cancels a child by session or work id; outsiders are scope-denied"
+    (let [db (fresh-db)
+          parent (create-parent-session! db)
+          parent-id (:session/id parent)
+          spawned (subagent/spawn-subagent! db parent-id {:task "c1"} [])
+          c1 (:child/session-id spawned)
+          c1-work (:child/work-id spawned)
+          outsider (create-parent-session! db)
+          outsider-id (:session/id outsider)
+          reg (registry/create-registry)
+          _ (registry/register! reg (subagent/agent-cancel-provider db))
+          cancel-lease (agent-lease parent-id :agent/cancel #{:invoke})
+          outsider-lease (agent-lease outsider-id :agent/cancel #{:invoke})
+          ctx (dispatch/make-broker-context {:registry reg :leases [cancel-lease outsider-lease] :db db})
+          call (fn [requester args]
+                 (let [cause-id (:event/id (last (event/events-for-session db requester)))]
+                   (dispatch/dispatch! ctx {:intent/id (random-uuid)
+                                            :intent/type :intent/tool-call
+                                            :session/id requester
+                                            :phenotype/id phenotype
+                                            :node/id :node/tool
+                                            :cause/event-id cause-id
+                                            :payload {:tool/id :agent/cancel :args args}
+                                            :budget {:wall-ms 1000}
+                                            :metadata {}})))]
+      (let [r (call outsider-id {:session-id (str c1)})]
+        (is (= :provider/execution-failed (:error/type r)) (str "got " (pr-str r)))
+        (is (= :capability/scope-denied (get-in r [:error/data :cause :error/type])) "outsider denied"))
+      (let [r (call parent-id {:work-id (str c1-work)})]
+        (is (= :ok (:result/status r)) (str "got " (pr-str r)))
+        (is (= [c1] (get-in r [:value :cancelled])) "cancelled by work id")
+        (is (= c1-work (get-in r [:value :work/id])) "work id echoed")))))
 

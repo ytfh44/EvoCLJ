@@ -163,8 +163,15 @@
           child2-events (event/events-for-session db child2-id)]
       (is (= :completed (:status res1)) "child1 completed")
       (is (= :completed (:status res2)) "child2 completed")
-      ;; parent chain unchanged by child execution (only spawn events, no child runtime events)
-      (is (= parent-before-count (count parent-after)) "parent event count unchanged after child runs")
+      ;; S5 auto-delivery: each completed child terminal is delivered to the
+          ;; parent chain (one :subagent/result per child) — the runner, not
+      ;; the model, closes the loop. Child runtime events still never leak:
+      ;; only the parent's own result edges are added.
+      (is (= (+ parent-before-count 2) (count parent-after)) "parent gains one auto-delivered :subagent/result per child run")
+      (let [results (filter #(= :subagent/result (:event/type %)) parent-after)]
+        (is (= 2 (count results)) "two result events")
+        (is (= #{child1-id child2-id} (set (map #(get-in % [:metadata :child/session-id]) results)))
+            "result events name the right children"))
       ;; all child1 events have session/id == child1-id, none leak to parent
       (is (every? #(= child1-id (:session/id %)) child1-events) "child1 chain only contains child1 events")
       (is (every? #(= child2-id (:session/id %)) child2-events) "child2 chain only contains child2 events")

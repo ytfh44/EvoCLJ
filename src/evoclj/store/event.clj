@@ -309,6 +309,148 @@
 
 ;; --- the single write path ---------------------------------------------------
 
+(defn append-event-on-conn!
+  "Append one event using an already-open raw java.sql.Connection `conn`
+  that the caller holds inside a BEGIN IMMEDIATE write transaction
+  (see evoclj.store.sqlite/with-write-tx). The body is exactly the
+  single-write-path logic of append-event! — same validation, same
+  per-session seq allocation, same hash commitment, same causal-links
+  inserts — minus the transaction boundary, so callers can commit the
+  event atomically with companion Work/Capability row updates performed
+  on the same connection. `event` must already carry defaults
+  (:causal-links #{}, :metadata {}, :payload-ref nil) and any redaction;
+  use append-event! when no companion update is needed."
+  [conn event]
+  (ensure-causal-links-table! conn)
+  (let [session-id (types/session-id (:session/id event))
+        session-key (str session-id)
+        type (:event/type event)
+        prev-id (:prev/event-id event)
+        causal-links (or (:causal-links event) #{})
+        root? (root-event? type)
+        sess (first (raw-query conn "SELECT generation_id FROM sessions WHERE id = ?"
+                               [session-key]))
+        _ (when-not sess
+            (throw (err/error :store/session-not-found
+                              "cannot append an event to an unknown session"
+                              {:session/id session-id})))
+        _ (when-not (= (:generation/id event) (:generation_id sess))
+            (throw (err/error :store/event-invalid
+                              "event generation must match the session's pinned generation"
+                              {:event/type type
+                               :event/generation-id (:generation/id event)
+                               :session/generation-id (:generation_id sess)})))
+        new-seq (-> (raw-query conn
+                               "SELECT COALESCE(MAX(event_seq), 0) + 1 AS event_seq
+                                FROM events WHERE session_id = ?"
+                               [session-key])
+                    first :event_seq)
+        _ (cond
+            (and root? prev-id)
+            (throw (err/error :store/event-invalid
+                              "root events carry no prev reference"
+                              {:event/type type :prev/event-id prev-id}))
+            (and root? (seq causal-links))
+            (throw (err/error :store/event-invalid
+                              "root events carry no causal-links"
+                              {:event/type type :causal-links causal-links}))
+            (and (not root?) (nil? prev-id))
+            (throw (err/error :store/event-invalid
+                              "non-root events must reference the immediate predecessor in the same session"
+                              {:event/type type}))
+            (not root?)
+            (let [prev-row (first (raw-query conn "SELECT event_seq, session_id FROM events WHERE id = ?"
+                                              [prev-id]))]
+              (when-not prev-row
+                (throw (err/error :store/cause-not-found
+                                  "prev references a nonexistent event"
+                                  {:event/type type :prev/event-id prev-id})))
+              (when-not (= session-key (:session_id prev-row))
+                (throw (err/error :store/cause-session-mismatch
+                                  "prev must reference an event in the same session"
+                                  {:event/type type :prev/event-id prev-id
+                                   :session/id session-id
+                                   :cause/session-id (:session_id prev-row)})))
+              ;; STRICT predecessor (audit item 6a): the supplied prev
+              ;; must BE the row at (session, new-seq - 1) — fetched
+              ;; directly by position, not inferred from the supplied
+              ;; id. An earlier-but-not-immediate prev (a fork) is
+              ;; rejected even though it is "earlier": the hash chain's
+              ;; prev-hash is always taken from the positional
+              ;; predecessor, so any other prev would fork the two
+              ;; predecessor concepts.
+              (let [immediate-prev (first (raw-query conn "SELECT id, event_seq FROM events WHERE session_id = ? AND event_seq = ?"
+                                                      [session-key (dec new-seq)]))]
+                (when-not (= (:id immediate-prev) prev-id)
+                  (throw (err/error :store/prev-not-immediate
+                                    "prev must reference the immediate predecessor (seq = new-seq - 1) in the same session"
+                                    {:event/type type :prev/event-id prev-id
+                                     :event/seq new-seq
+                                     :immediate-prev-event-id (:id immediate-prev)
+                                     :immediate-prev-event-seq (:event_seq immediate-prev)}))))
+              ;; causal-links: each from must exist (any session)
+              (doseq [{:keys [from type]} causal-links]
+                (when-not (contains? #{:from :type} :from)
+                  (throw (err/error :store/event-invalid "causal link missing :from" {:link {:from from :type type}})))
+                (let [src (first (raw-query conn "SELECT id FROM events WHERE id = ?" [from]))]
+                  (when-not src
+                    (throw (err/error :store/causal-link-not-found
+                                      "causal link from references a nonexistent event"
+                                      {:event/type type :causal/from from})))
+                  (when-not (keyword? type)
+                    (throw (err/error :store/event-invalid
+                                      "causal link :type must be a keyword"
+                                      {:link {:from from :type type}}))))))
+            :else nil)
+        prev-hash (-> (raw-query conn
+                                 "SELECT event_hash FROM events
+                                  WHERE session_id = ? AND event_seq = ?"
+                                 [session-key (dec new-seq)])
+                      first :event_hash)
+        ts (canonical-timestamp (:created-at event))
+        metadata (or (:metadata event) {})
+        _ (when-not (edn-safe-metadata? metadata)
+            (throw (err/error :store/event-invalid
+                              "metadata must be EDN-safe Clojure data"
+                              {:event/type type})))
+        ;; The committed metadata bytes are EXACTLY the stored payload
+        ;; string: header and INSERT share this binding, so writer and
+        ;; verifier can never disagree on the committed bytes.
+        payload (pr-str metadata)
+        header {:session/id session-key
+                :event/seq new-seq
+                :event/type type
+                :prev/event-id prev-id
+                :payload-ref (:payload-ref event)
+                :prev-hash prev-hash
+                :created-at ts
+                :generation/id (:generation/id event)
+                :phenotype/id (:phenotype/id event)
+                :metadata-edn payload
+                :causal-links-edn (canonical-causal-links causal-links)}
+        ev-hash (event-hash header)]
+    (raw-insert! conn
+                 "INSERT INTO events
+                    (session_id, event_seq, generation_id, phenotype_id,
+                     event_type, cause_event_id, prev_event_id, payload_ref, payload,
+                     prev_hash, event_hash, created_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                 [session-key new-seq (:generation/id event) (:phenotype/id event)
+                  (type->db type) prev-id prev-id (:payload-ref event) payload
+                  prev-hash ev-hash ts])
+    (let [row (first (raw-query conn "SELECT * FROM events
+                                     WHERE session_id = ? AND event_seq = ?"
+                                [session-key new-seq]))
+          new-id (:id row)]
+      (doseq [{:keys [from type]} causal-links]
+        (raw-insert! conn
+                     "INSERT OR IGNORE INTO causal_links (from_event_id, to_event_id, link_type, created_at) VALUES (?, ?, ?, ?)"
+                     [from new-id (type->db type) ts]))
+      (let [links (fetch-causal-links conn new-id)
+            ev (row->event row links)]
+        (es/validate-event ev)
+        ev))))
+
 (defn append-event!
   "Append one event to a session's append-only log inside a single
   transaction and return the persisted event (public Event contract).
@@ -341,136 +483,8 @@
      (let [event (if (nil? redaction-specs)
                    event
                    (redact/redact-event event redaction-specs))]
-       (with-append-tx [conn store]
-         (ensure-causal-links-table! conn)
-         (let [session-id (types/session-id (:session/id event))
-               session-key (str session-id)
-               type (:event/type event)
-               prev-id (:prev/event-id event)
-               causal-links (or (:causal-links event) #{})
-               root? (root-event? type)
-               sess (first (raw-query conn "SELECT generation_id FROM sessions WHERE id = ?"
-                                      [session-key]))
-               _ (when-not sess
-                   (throw (err/error :store/session-not-found
-                                     "cannot append an event to an unknown session"
-                                     {:session/id session-id})))
-               _ (when-not (= (:generation/id event) (:generation_id sess))
-                   (throw (err/error :store/event-invalid
-                                     "event generation must match the session's pinned generation"
-                                     {:event/type type
-                                      :event/generation-id (:generation/id event)
-                                      :session/generation-id (:generation_id sess)})))
-               new-seq (-> (raw-query conn
-                                      "SELECT COALESCE(MAX(event_seq), 0) + 1 AS event_seq
-                                       FROM events WHERE session_id = ?"
-                                      [session-key])
-                           first :event_seq)
-               _ (cond
-                   (and root? prev-id)
-                   (throw (err/error :store/event-invalid
-                                     "root events carry no prev reference"
-                                     {:event/type type :prev/event-id prev-id}))
-                   (and root? (seq causal-links))
-                   (throw (err/error :store/event-invalid
-                                     "root events carry no causal-links"
-                                     {:event/type type :causal-links causal-links}))
-                   (and (not root?) (nil? prev-id))
-                   (throw (err/error :store/event-invalid
-                                     "non-root events must reference the immediate predecessor in the same session"
-                                     {:event/type type}))
-                   (not root?)
-                   (let [prev-row (first (raw-query conn "SELECT event_seq, session_id FROM events WHERE id = ?"
-                                                     [prev-id]))]
-                     (when-not prev-row
-                       (throw (err/error :store/cause-not-found
-                                         "prev references a nonexistent event"
-                                         {:event/type type :prev/event-id prev-id})))
-                     (when-not (= session-key (:session_id prev-row))
-                       (throw (err/error :store/cause-session-mismatch
-                                         "prev must reference an event in the same session"
-                                         {:event/type type :prev/event-id prev-id
-                                          :session/id session-id
-                                          :cause/session-id (:session_id prev-row)})))
-                     ;; STRICT predecessor (audit item 6a): the supplied prev
-                     ;; must BE the row at (session, new-seq - 1) — fetched
-                     ;; directly by position, not inferred from the supplied
-                     ;; id. An earlier-but-not-immediate prev (a fork) is
-                     ;; rejected even though it is "earlier": the hash chain's
-                     ;; prev-hash is always taken from the positional
-                     ;; predecessor, so any other prev would fork the two
-                     ;; predecessor concepts.
-                     (let [immediate-prev (first (raw-query conn "SELECT id, event_seq FROM events WHERE session_id = ? AND event_seq = ?"
-                                                             [session-key (dec new-seq)]))]
-                       (when-not (= (:id immediate-prev) prev-id)
-                         (throw (err/error :store/prev-not-immediate
-                                           "prev must reference the immediate predecessor (seq = new-seq - 1) in the same session"
-                                           {:event/type type :prev/event-id prev-id
-                                            :event/seq new-seq
-                                            :immediate-prev-event-id (:id immediate-prev)
-                                            :immediate-prev-event-seq (:event_seq immediate-prev)}))))
-                     ;; causal-links: each from must exist (any session)
-                     (doseq [{:keys [from type]} causal-links]
-                       (when-not (contains? #{:from :type} :from)
-                         (throw (err/error :store/event-invalid "causal link missing :from" {:link {:from from :type type}})))
-                       (let [src (first (raw-query conn "SELECT id FROM events WHERE id = ?" [from]))]
-                         (when-not src
-                           (throw (err/error :store/causal-link-not-found
-                                             "causal link from references a nonexistent event"
-                                             {:event/type type :causal/from from})))
-                         (when-not (keyword? type)
-                           (throw (err/error :store/event-invalid
-                                             "causal link :type must be a keyword"
-                                             {:link {:from from :type type}}))))))
-                   :else nil)
-               prev-hash (-> (raw-query conn
-                                        "SELECT event_hash FROM events
-                                         WHERE session_id = ? AND event_seq = ?"
-                                        [session-key (dec new-seq)])
-                             first :event_hash)
-               ts (canonical-timestamp (:created-at event))
-               metadata (or (:metadata event) {})
-               _ (when-not (edn-safe-metadata? metadata)
-                   (throw (err/error :store/event-invalid
-                                     "metadata must be EDN-safe Clojure data"
-                                     {:event/type type})))
-               ;; The committed metadata bytes are EXACTLY the stored payload
-               ;; string: header and INSERT share this binding, so writer and
-               ;; verifier can never disagree on the committed bytes.
-               payload (pr-str metadata)
-               header {:session/id session-key
-                       :event/seq new-seq
-                       :event/type type
-                       :prev/event-id prev-id
-                       :payload-ref (:payload-ref event)
-                       :prev-hash prev-hash
-                       :created-at ts
-                       :generation/id (:generation/id event)
-                       :phenotype/id (:phenotype/id event)
-                       :metadata-edn payload
-                       :causal-links-edn (canonical-causal-links causal-links)}
-               ev-hash (event-hash header)]
-           (raw-insert! conn
-                        "INSERT INTO events
-                           (session_id, event_seq, generation_id, phenotype_id,
-                            event_type, cause_event_id, prev_event_id, payload_ref, payload,
-                            prev_hash, event_hash, created_at)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                        [session-key new-seq (:generation/id event) (:phenotype/id event)
-                         (type->db type) prev-id prev-id (:payload-ref event) payload
-                         prev-hash ev-hash ts])
-           (let [row (first (raw-query conn "SELECT * FROM events
-                                            WHERE session_id = ? AND event_seq = ?"
-                                       [session-key new-seq]))
-                 new-id (:id row)]
-             (doseq [{:keys [from type]} causal-links]
-               (raw-insert! conn
-                            "INSERT OR IGNORE INTO causal_links (from_event_id, to_event_id, link_type, created_at) VALUES (?, ?, ?, ?)"
-                            [from new-id (type->db type) ts]))
-             (let [links (fetch-causal-links conn new-id)
-                   ev (row->event row links)]
-               (es/validate-event ev)
-               ev))))))))
+      (with-append-tx [conn store]
+        (append-event-on-conn! conn event))))))
 
 ;; --- read/verify queries (no update, no delete — by design) -----------------
 

@@ -343,42 +343,73 @@
                        :work-recovered-queued (:recovered-queued work-report)
                        :work-recovered-running (:recovered-running work-report)})))
 
-;; ---------------------------------------------------------------------------
-;; Subagent recovery (DAG S5) — orphaned children where parent is completed
-;; ---------------------------------------------------------------------------
+(def terminal-work-states
+  "Work states that close a Work's lifecycle. A Work in any other state
+  (:queued, :running, :waiting) after a crash is residue."
+  #{:succeeded :failed :cancelled :timed-out})
 
 (defn find-orphaned-subagents
-  "Find orphaned subagent children where the parent session is completed
-  but the child session is still in a non-terminal running state.
+  "Work-only subagent orphan classification: a child Work stuck
+  non-terminal (:queued, :running, or :waiting per find-orphaned-works)
+  whose parent Work is already terminal. Sessions carry no runtime state
+  (W2) — the retired session-state scan (sessions.state +
+  subagent_links row states) is gone; parent/child links come from the
+  Works themselves (:work/parent-work-id), with owning sessions resolved
+  from the Work rows. Idempotent classification; never writes.
 
-  Crash residue: the parent terminated (state :completed or any terminal
-  state with a :session/completed event) while a spawned child is still
-  :running / :waiting / :created / :resolving. This helper reports them
-  via subagent_links where child state is non-terminal and parent state
-  is terminal (:completed, :failed, :cancelled, :budget-exhausted).
-
-  Minimal S5 implementation: reports subagent_links rows where child state
-  is :running and parent state is :completed (the canonical orphan case
-  from the spec). Extended to any terminal parent + non-terminal child for
-  robustness. Returns vector of {:parent/session-id uuid :child/session-id uuid
-  :parent/state kw :child/state kw}."
+  Returns a vector of {:parent/session-id uuid :child/session-id uuid
+  :parent/work-id uuid :child/work-id uuid :parent/state kw :child/state
+  kw} where states are WORK states (:parent/state is always terminal,
+  :child/state never is)."
   [db]
   (let [spec (if (string? db) db db)
-        _ (try
-            (sqlite/with-db [conn spec]
-              (jdbc/execute! conn ["CREATE TABLE IF NOT EXISTS subagent_links (child_session_id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, created_at TEXT NOT NULL)"]))
-            (catch Exception _))]
-    (try
-      (let [rows (sqlite/query spec
-                               ["SELECT sl.child_session_id AS child_session_id, sl.parent_session_id AS parent_session_id, ps.state AS parent_state, cs.state AS child_state FROM subagent_links sl JOIN sessions ps ON ps.id = sl.parent_session_id JOIN sessions cs ON cs.id = sl.child_session_id"])]
-        (into [] (keep (fn [row]
-                         (let [pstate (:parent_state row)
-                               cstate (:child_state row)
-                               terminal? #{"completed" "failed" "cancelled" "budget-exhausted"}
-                               non-terminal? #{"created" "resolving" "running" "waiting"}]
-                           (when (and (contains? terminal? pstate) (contains? non-terminal? cstate))
-                             {:parent/session-id (UUID/fromString (:parent_session_id row))
-                              :child/session-id (UUID/fromString (:child_session_id row))
-                              :parent/state (keyword pstate)
-                              :child/state (keyword cstate)}))) rows)))
-      (catch Exception _ []))))
+        orphans (try (find-orphaned-works spec) (catch Exception _ []))]
+    (into [] (keep (fn [w]
+                     (let [pwid (:work/parent-work-id w)]
+                       (when pwid
+                         (let [pw (try (work-store/fetch-work spec pwid)
+                                       (catch Exception _ nil))]
+                           (when (and pw (contains? terminal-work-states (:work/state pw)))
+                             {:parent/session-id (:work/session-id pw)
+                              :child/session-id (:work/session-id w)
+                              :parent/work-id (:work/id pw)
+                              :child/work-id (:work/id w)
+                              :parent/state (:work/state pw)
+                              :child/state (:work/state w)})))))
+                   orphans))))
+
+(defn recover-orphaned-subagents!
+  "Act on Work-only orphaned children (find-orphaned-subagents): drive
+  each orphaned child Work to :cancelled via CAS (a child whose parent
+  already settled terminal must never run — structured concurrency)
+  and revoke its owning session's capability rows DB-first (UPDATE WHERE
+  revoked = 0). Queued orphans are NOT left for replay here (unlike
+  recover-works!): their parent is terminal, so redelivery would run an
+  orphan. Already-terminal rows are untouched, so re-running is a no-op.
+  Post-crash recovery owns no in-memory leases (the crashed process took
+  them), so only durable rows are revoked — live registries re-hydrate
+  from the DB. Returns {:orphaned-subagents [...] :recovered
+  [{:child/work-id _}] :revoked-capabilities [...]}."
+  [db]
+  (let [spec (if (string? db) db db)
+        orphans (find-orphaned-subagents spec)]
+    (reduce (fn [report o]
+              (let [cwid (:child/work-id o)
+                    csid (:child/session-id o)]
+                (try (work-store/cancel-work! spec cwid)
+                     (catch Exception _ nil))
+                (let [revoked (try
+                                (let [rows (sqlite/query spec ["SELECT id FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0"
+                                                             (str csid)])
+                                      now (str (java.time.Instant/now))]
+                                  (doseq [r rows]
+                                    (try (sqlite/exec! spec ["UPDATE capabilities SET revoked = 1, revoked_at = ? WHERE id = ? AND revoked = 0"
+                                                             now (:id r)])
+                                         (catch Exception _ nil)))
+                                  (mapv :id rows))
+                                (catch Exception _ []))]
+                  (-> report
+                      (update :recovered conj {:child/work-id cwid})
+                      (update :revoked-capabilities into revoked)))))
+            {:orphaned-subagents orphans :recovered [] :revoked-capabilities []}
+            orphans)))

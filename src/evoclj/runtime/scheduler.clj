@@ -804,4 +804,14 @@
                                                     :error/message "a :continue transition carries no successor"
                                                     :node/id node-id}
                                                    outputs))))))))))))))]
+          ;; Structured concurrency: the session's Work just reached terminal
+          ;; (completed/failed/timed-out — every outcome above is terminal),
+          ;; so live children must not outlive it. Best-effort cascade-cancel
+          ;; of non-terminal child Works (DB-first); a sweep failure never
+          ;; fails the already-determined outcome. The join half is
+          ;; await-child! (parent polls the child Work row); this is the
+          ;; cancel half, enforced at the terminal step.
+          (try ((requiring-resolve 'evoclj.runtime.subagent/cancel-non-terminal-children!)
+                db (:session/id pin))
+               (catch Throwable _ nil))
           (assoc outcome :event/count (event-count executor pin) :work/id work-id))))))))

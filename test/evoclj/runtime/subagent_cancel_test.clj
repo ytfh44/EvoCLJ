@@ -162,3 +162,39 @@
         (is (= :capability/revoked (:reason (authorize-with-lease child-lease))) "still revoked after second cancel")
         (let [r3 (subagent/cancel-subagent-tree! db child-id :user-request)]
           (is (true? (:already-cancelled? r3)) "tree cancel on already-cancelled is idempotent"))))))
+
+(deftest cancel-accepts-work-ids
+  (testing "cancel-subagent! resolves first-class Work ids to their owning sessions"
+    (let [db (fresh-db)
+          parent (create-parent-session! db)
+          parent-id (:session/id parent)
+          spawned (subagent/spawn-subagent! db parent-id {:task "w"} [])
+          child-id (:child/session-id spawned)
+          child-work (:child/work-id spawned)
+          res (subagent/cancel-subagent! db parent-id (str child-work) :user-request)]
+      (is (false? (:already-cancelled? res)) "cancelled")
+      (is (= [child-id] (:cancelled res)) "resolved work id to the child session")
+      (is (= child-id (:child/session-id res)) "child session echoed")
+      (is (= :cancelled (session-work-state db child-id)) "child work cancelled")
+      (let [kinds (set (map :event/type (event/events-for-session db parent-id)))]
+        (is (contains? kinds :subagent/cancelled) "parent chain carries the cancel edge")))))
+
+(deftest parent-terminal-cancels-live-children
+  (testing "cancel-non-terminal-children! cancels queued children and leaves settled ones alone"
+    (let [db (fresh-db)
+          parent (create-parent-session! db)
+          parent-id (:session/id parent)
+          live-spawn (subagent/spawn-subagent! db parent-id {:task "live"} [])
+          done-spawn (subagent/spawn-subagent! db parent-id {:task "done"} [])
+          live (:child/session-id live-spawn)
+          done-id (:child/session-id done-spawn)
+          done-work (:child/work-id done-spawn)]
+      ;; settle one child work directly (it must survive the sweep)
+      (work-store/dispatch-work! db done-work)
+      (work-store/wait-work! db done-work)
+      (work-store/succeed-work! db done-work nil)
+      (let [res (subagent/cancel-non-terminal-children! db parent-id)]
+        (is (contains? (set (:cancelled res)) live) "live child cancelled")
+        (is (not (contains? (set (:cancelled res)) done-id)) "settled child untouched")
+        (is (= :cancelled (session-work-state db live)) "live child work cancelled")
+        (is (= :succeeded (:work/state (work-store/fetch-work db done-work))) "settled work intact")))))

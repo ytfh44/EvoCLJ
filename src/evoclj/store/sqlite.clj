@@ -64,3 +64,58 @@
   [db sql-params]
   (with-db [conn db]
     (jdbc/query conn sql-params)))
+
+(defn exec-raw!
+  "Execute a no-result SQL statement on an already-open raw
+  java.sql.Connection (e.g. inside with-write-tx)."
+  [^java.sql.Connection conn sql]
+  (with-open [stmt (.createStatement conn)]
+    (.execute stmt sql)))
+
+(defn query-raw!
+  "Run a parameterized SELECT on an already-open raw java.sql.Connection.
+  Returns rows as a vector of keyword-keyed maps (column labels)."
+  [^java.sql.Connection conn sql params]
+  (with-open [stmt (.prepareStatement conn sql)]
+    (doseq [[i v] (map-indexed vector params)]
+      (.setObject stmt (inc i) v))
+    (with-open [rs (.executeQuery stmt)]
+      (let [md (.getMetaData rs)
+            n (.getColumnCount md)
+            labels (mapv #(keyword (.getColumnLabel md (inc %))) (range n))]
+        (loop [rows []]
+          (if (.next rs)
+            (recur (conj rows (zipmap labels
+                                      (mapv #(.getObject rs (inc %)) (range n)))))
+            rows))))))
+
+(defn insert-raw!
+  "Run a parameterized INSERT/UPDATE on an already-open raw
+  java.sql.Connection. Returns the update count."
+  [^java.sql.Connection conn sql params]
+  (with-open [stmt (.prepareStatement conn sql)]
+    (doseq [[i v] (map-indexed vector params)]
+      (.setObject stmt (inc i) v))
+    (.executeUpdate stmt)))
+
+(defmacro with-write-tx
+  "Run `body` on a single raw java.sql.Connection to `db` inside one
+  BEGIN IMMEDIATE write transaction (busy_timeout 10s, FK enforcement
+  on), COMMIT on success and ROLLBACK + rethrow on failure.
+  BEGIN IMMEDIATE takes SQLite's write lock up front, so sequence
+  allocation and CAS state checks inside serialize against concurrent
+  writers. `conn-binding` is a raw Connection: use exec-raw!/query-raw!/
+  insert-raw! (or evoclj.store.event/append-event-on-conn!) inside."
+  [[conn-binding db] & body]
+  `(with-open [~conn-binding (jdbc/get-connection (spec ~db))]
+     (exec-raw! ~conn-binding "PRAGMA foreign_keys = ON")
+     (exec-raw! ~conn-binding "PRAGMA busy_timeout = 10000")
+     (try
+       (exec-raw! ~conn-binding "BEGIN IMMEDIATE")
+       (let [result# (do ~@body)]
+         (exec-raw! ~conn-binding "COMMIT")
+         result#)
+       (catch Throwable t#
+         (try (exec-raw! ~conn-binding "ROLLBACK")
+              (catch Throwable _# nil))
+         (throw t#)))))

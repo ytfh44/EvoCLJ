@@ -154,19 +154,30 @@
 
 (def PayloadSubagentResultSchema
   "A subagent-result payload: parent and child session ids plus a
-  result CAS reference (sha256:...). The map is open to further keys.
+  result CAS reference (sha256:...). Optional Work-handle provenance:
+  :parent/work-id and :child/work-id name the exact Works being linked
+  and :terminal/event-id names the child terminal event the causal link
+  points at. When present they are cross-checked against the canonical
+  Work/Event rows (CAS equality, link equality); when absent the legacy
+  session-id resolution applies. The map is open to further keys.
   GC-22: EDN-safe malli checks only."
   [:map {:closed false}
    [:parent/session-id uuid?]
    [:child/session-id uuid?]
-   [:result/cas-ref CasRefSchema]])
+   [:result/cas-ref CasRefSchema]
+   [:parent/work-id {:optional true} uuid?]
+   [:child/work-id {:optional true} uuid?]
+   [:terminal/event-id {:optional true} int?]])
 
 (def PayloadSubagentCancelSchema
   "A subagent-cancel payload: the target session id and a cancel reason
-  drawn from #{:user-request :parent-cancel :timeout}. The map is open
-  to further keys. GC-22: EDN-safe malli checks only."
+  drawn from #{:user-request :parent-cancel :timeout}. :target/work-id
+  is an optional first-class Work handle: when present it must name a
+  Work owned by :target/session-id (cross-checked at dispatch). The map
+  is open to further keys. GC-22: EDN-safe malli checks only."
   [:map {:closed false}
    [:target/session-id uuid?]
+   [:target/work-id {:optional true} uuid?]
    [:reason [:enum :user-request :parent-cancel :timeout]]])
 
 ;; --- the full intent schema -------------------------------------------------

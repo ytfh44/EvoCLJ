@@ -48,6 +48,7 @@
              [evoclj.runtime.phenotype :as phenotype]
              [evoclj.store.cas :as cas]
              [evoclj.store.event :as event]
+             [evoclj.store.event-schema :as es]
              [evoclj.store.session :as session]
              [evoclj.store.session-store :as ss]
              [evoclj.store.sqlite :as sqlite]
@@ -72,6 +73,8 @@
     :else (try
             (.-db ^Object db)
             (catch Exception _ db))))
+
+(declare auto-deliver-child-terminal!)
 
 (defn- ensure-subagent-link-table!
   "Ensure the helper table for parent->child links exists (idempotent)."
@@ -657,10 +660,17 @@
             ;; Work.
             ;; internal future await: Work's running is execution, future is only await
             result @(future (run-session! executor child-id task child-work-id))
-            audit (when child-work-id (audit-child-task db child-work-id task))]
+            audit (when child-work-id (audit-child-task db child-work-id task))
+            ;; S5 auto-delivery: the runner closes the loop — a settled
+            ;; child terminal is delivered to the parent chain without a
+            ;; model round-trip. Best-effort evidence under :delivery;
+            ;; delivery never fails the run itself.
+            delivery (when (and parent-id child-work-id)
+                       (auto-deliver-child-terminal! db parent-id child-id child-work-id))]
         (cond-> result
           audit (assoc :task/audit audit)
-          child-work-id (assoc :work/id child-work-id)))))))
+          child-work-id (assoc :work/id child-work-id)
+          delivery (assoc :delivery delivery)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Async run + parent wait/wakeup join + queued-Work replay (W2)
@@ -872,74 +882,123 @@
                              works)]
     (vec (distinct (concat link-targets work-targets)))))
 
-(defn- revoke-leases-for-session*
-  "P1 durable-first revocation: UPDATE capabilities WHERE revoked=0 before swap! cache.
-  DB is truth, memory is versioned cache. Idempotent and strict — no try/catch swallow."
+(defn- resolve-cancel-session!
+  "Accept a session id or a first-class Work id; Work ids resolve to
+  their owning session (the cancel path is Work-addressable). Unknown
+  ids pass through untouched so the caller's existence check reports
+  them (:subagent/not-found / :store/session-not-found)."
+  [db id]
+  (let [uuid (try (types/session-id id) (catch Exception _ id))
+        w (try (work-store/fetch-work (db-spec db) uuid) (catch Exception _ nil))]
+    (if w (:work/session-id w) uuid)))
+
+(defn- target-cap-ids
+  "Revocable capability row ids (strings) plus in-memory leases for
+  `session-id`: the union of the session's non-revoked capabilities rows
+  and every in-memory/registry lease indexed under the session. Reading
+  both views keeps the DB-first cascade consistent when either lags."
   [db session-id]
   (let [sid (try (types/session-id session-id) (catch Exception _ session-id))
         mem-leases (get @leases-by-session sid [])
-        registry-leases (mint/leases-for-session subagent-lease-registry sid)
+        registry-leases (try (mint/leases-for-session subagent-lease-registry sid)
+                             (catch Exception _ []))
         all-leases (distinct (concat mem-leases registry-leases))
         cap-ids (distinct (concat (mapv :cap/id all-leases) (mapv :cap/id mem-leases)))
-        db-cap-ids (let [rows (sqlite/query (db-spec db) ["SELECT id FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0" (str sid)])
-                         ids (mapv #(:id %) rows)]
-                     ids)
-        all-db-ids (distinct (concat (mapv str cap-ids) db-cap-ids))]
-    ;; DURABLE FIRST: update DB rows for all ids (WHERE revoked=0 inside revoke-capability!)
-    (doseq [id all-db-ids]
-      (when id
-        (let [revoke! (requiring-resolve 'evoclj.store.capability-store/revoke-capability!)]
-          (@revoke! db (str id)))))
-    ;; THEN cache: tombstone in-memory registry and session index
-    (doseq [id all-db-ids]
-      (let [cap-id (try (UUID/fromString (str id)) (catch Exception _ id))]
-        (mint/revoke-lease! subagent-lease-registry cap-id)))
-    (doseq [l all-leases]
-      (when-let [cap-id (:cap/id l)]
-        (mint/revoke-lease! subagent-lease-registry cap-id)))
-    nil))
+        db-cap-ids (try (mapv #(:id %) (sqlite/query (db-spec db) ["SELECT id FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0" (str sid)]))
+                        (catch Exception _ []))]
+    {:all-db-ids (vec (distinct (concat (mapv str cap-ids) db-cap-ids)))
+     :leases (vec all-leases)}))
 
-(defn- append-cancel-events!
-  "Append :session/cancelled to `child-id` and :subagent/cancelled to
-  `parent-id` (when parent provided). Uses latest event as cause where
-  available. Silently no-ops when event append fails (already cancelled
-  or chain inconsistency is not fatal for revocation)."
-  [db parent-id child-id reason]
-  ;; child event
-  (try
-    (let [child-events (event/events-for-session db child-id)
-          cause (some-> (last child-events) :event/id)]
-      (when child-events
-        (try
-          (event/append-event! db
-                               {:session/id child-id
-                                :generation/id (:generation/id (first child-events))
-                                :phenotype/id (:phenotype/id (first child-events))
-                                :event/type :session/cancelled
-                                :prev/event-id cause
-                                :payload-ref nil
-                                :metadata {:reason reason}})
-          (catch Exception _))))
-    (catch Exception _))
-  ;; parent event
-  (when parent-id
-    (try
-      (let [parent-events (event/events-for-session db parent-id)
-            cause (some-> (last parent-events) :event/id)]
-        (when parent-events
-          (try
-            (event/append-event! db
-                                 {:session/id parent-id
-                                  :generation/id (:generation/id (first parent-events))
-                                  :phenotype/id (:phenotype/id (first parent-events))
-                                  :event/type :subagent/cancelled
-                                  :prev/event-id cause
-                                  :payload-ref nil
-                                  :metadata {:child/session-id child-id
-                                             :reason reason}})
-            (catch Exception _))))
-      (catch Exception _)))
+(defn- tombstone-memory-leases!
+  "Apply the in-memory half of durable-first revocation AFTER the DB
+  transaction commits: tombstone every revoked row id and lease in the
+  registry. The DB is truth, memory is versioned cache — this never runs
+  before commit."
+  [cap-ids leases]
+  (doseq [id cap-ids]
+    (let [cap-id (try (UUID/fromString (str id)) (catch Exception _ id))]
+      (mint/revoke-lease! subagent-lease-registry cap-id)))
+  (doseq [l leases]
+    (when-let [cap-id (:cap/id l)]
+      (mint/revoke-lease! subagent-lease-registry cap-id)))
   nil)
+
+(defn- cancel-subtree-tx!
+  "Atomically cancel `targets` (session-id UUIDs, `direct-id` first) in
+  ONE BEGIN IMMEDIATE transaction on a single connection. Per target:
+  revoke its capability rows (UPDATE WHERE revoked = 0), CAS its Works
+  to :cancelled (queued|running|waiting only — other terminals are left
+  as-is), append its :session/cancelled event, and append the
+  :subagent/cancelled edge on its immediate parent chain (`parent-id`
+  for the direct target with the supplied `reason`, the link parent with
+  :parent-cancel for deeper targets). Either the whole subtree cancels
+  or nothing does — revoke and cancel events can never separate across
+  a crash. Strict: any failure rolls back and throws (only the
+  already-cancelled short-circuit in cancel-subagent! skips the tx).
+  Returns {:cap-ids [...] :leases [...]} for the caller to tombstone in
+  memory AFTER commit (durable-first)."
+  [db direct-id parent-id targets reason]
+  (ensure-subagent-link-table! db)
+  (let [spec (db-spec db)
+        link-parent (into {} (map (fn [tid] [tid (try (get-parent-session-id db tid)
+                                                     (catch Exception _ nil))])
+                                  targets))
+        parent-set (vec (distinct (filter some? (cons parent-id (vals link-parent)))))
+        sessions (into {} (map (fn [tid] [tid (session/get-session db tid)])
+                               (distinct (concat targets parent-set))))
+        caps (mapv #(target-cap-ids db %) targets)
+        cap-ids (vec (distinct (mapcat :all-db-ids caps)))
+        leases (vec (distinct (mapcat :leases caps)))
+        work-ids (vec (mapcat (fn [tid]
+                                (try (mapv :work/id (work-store/list-works db tid))
+                                     (catch Exception _ [])))
+                              targets))]
+    (sqlite/with-write-tx [conn spec]
+      ;; 1. durable revoke first: every capability row, WHERE revoked = 0
+      (let [now (str (java.time.Instant/now))]
+        (doseq [id cap-ids]
+          (sqlite/insert-raw! conn "UPDATE capabilities SET revoked = 1, revoked_at = ? WHERE id = ? AND revoked = 0"
+                               [now (str id)])))
+      ;; 2. CAS every target Work to :cancelled (non-terminal only)
+      (let [now (str (java.time.Instant/now))]
+        (doseq [wid work-ids]
+          (sqlite/insert-raw! conn "UPDATE works SET state = 'cancelled', updated_at = ? WHERE id = ? AND state IN ('queued','running','waiting')"
+                               [now (str wid)])))
+      ;; 3. cancel events: :session/cancelled per target + :subagent/cancelled
+      ;;    on the immediate parent chain, sequenced inside the same tx
+      (doseq [tid targets]
+        (let [sess (get sessions tid)
+              last-id (:id (last (sqlite/query-raw! conn "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq"
+                                                    [(str tid)])))
+              edge-reason (if (= tid direct-id) reason :parent-cancel)
+              edge-parent (if (= tid direct-id) parent-id (get link-parent tid))]
+          (when (and sess last-id)
+            (let [req {:session/id tid
+                       :generation/id (:generation/id sess)
+                       :phenotype/id (:phenotype/id sess)
+                       :event/type :session/cancelled
+                       :prev/event-id last-id
+                       :payload-ref nil
+                       :causal-links #{}
+                       :metadata {:reason edge-reason}}]
+              (es/validate-append-request req)
+              (event/append-event-on-conn! conn req)))
+          (when-let [psess (and edge-parent (get sessions edge-parent))]
+            (let [plast-id (:id (last (sqlite/query-raw! conn "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq"
+                                                         [(str edge-parent)])))]
+              (when plast-id
+                (let [req {:session/id edge-parent
+                           :generation/id (:generation/id psess)
+                           :phenotype/id (:phenotype/id psess)
+                           :event/type :subagent/cancelled
+                           :prev/event-id plast-id
+                           :payload-ref nil
+                           :causal-links #{}
+                           :metadata {:child/session-id tid
+                                      :reason edge-reason}}]
+                  (es/validate-append-request req)
+                  (event/append-event-on-conn! conn req))))))))
+    {:cap-ids cap-ids :leases leases}))
 
 (defn- session-work-state
   "The session's sole execution Work state, or nil when it has no Work yet
@@ -952,18 +1011,18 @@
   "Cancel a single child subagent session `child-session-id` spawned from
   `parent-session-id`. Cascade: also cancels all transitive descendants
   (union of the session-link BFS and the Work-graph BFS from the child's Works).
-  - drive each target session's Work to :cancelled (CAS on works.state —
-    idempotent: already :cancelled is a no-op, other terminal Work states
-    are left as-is);
+  Both ids accept session ids or first-class Work ids (a Work id resolves
+  to its owning session).
 
-  Effects per target session in the subtree:
-  - revoke all its leases via capability/mint revoke-lease! (fail-closed:
-    next broker authorize with that lease yields :capability/revoked);
-  - revoke corresponding rows in capabilities table when present;
-  - mark session as :cancelled via store/session transition (idempotent —
-    already :cancelled is a no-op, other terminal states are left as-is);
-  - append :session/cancelled to the child's event chain and
-    :subagent/cancelled to the immediate parent's chain (best-effort).
+  The whole subtree cancels in ONE BEGIN IMMEDIATE transaction
+  (cancel-subtree-tx!): capability-row revoke, Work CAS to :cancelled
+  (idempotent: already :cancelled is a no-op, other terminal Work states
+  are left as-is), :session/cancelled per target, and :subagent/cancelled
+  on the immediate parent chain. Either everything commits or nothing
+  does — revoke and cancel events never separate. In-memory registry
+  tombstones apply after commit (durable-first: next broker authorize
+  with a revoked lease yields :capability/revoked). No Session transition
+  is written — Work is the sole lifecycle.
 
   `reason` is a keyword :user-request | :parent-cancel | :timeout or
   any EDN-safe value, stored in event metadata.
@@ -975,52 +1034,33 @@
   (when (nil? db)
     (throw (ex-info "cancel-subagent! requires a db/store handle" {:error/type :store/session-invalid})))
   (ensure-subagent-link-table! db)
-  (let [child-id (types/session-id child-session-id)
+  (let [child-id (resolve-cancel-session! db child-session-id)
         parent-id (when parent-session-id
-                    (try (types/session-id parent-session-id)
-                         (catch Exception _ parent-session-id)))
+                    (resolve-cancel-session! db parent-session-id))
         child (session/get-session db child-id)]
     (when-not child
       (throw (ex-info (str "child session not found: " child-id)
                       {:error/type :subagent/not-found
                        :session/id child-id})))
-    (when (and parent-id (not (session/get-session db parent-id)))
+    (when (and parent-session-id parent-id (not (session/get-session db parent-id)))
       (throw (ex-info (str "parent session not found: " parent-id)
                       {:error/type :store/session-not-found
                        :session/id parent-id})))
     ;; idempotent: if child already cancelled, no-op (still return)
     (if (= :cancelled (session-work-state db child-id))
       {:cancelled [] :already-cancelled? true :child/session-id child-id}
-      (let [;; collect subtree: child plus descendants from BOTH graphs —
-            ;; the session-link BFS and the Work-graph BFS (union, durable first)
-            descendants (list-descendants db child-id)
-            targets (cancel-targets db child-id)]
-        ;; revoke leases for each target
-        (doseq [tid targets]
-          (revoke-leases-for-session* db tid))
-        ;; Work is the sole graceful-cancel authority: atomically drive each
-        ;; target's Work to :cancelled (CAS on works.state — the DB row is the
-        ;; truth). No Session transition is written.
-        (doseq [tid targets]
-          ;; W2: Work cancel is CAS on works.state — the DB row is the truth
-          (try
-            (let [works (work-store/list-works db tid)]
-              (doseq [w works]
-                (try (work-store/cancel-work! db (:work/id w)) (catch Exception _ nil))))
-            (catch Exception _ nil)))
-        ;; append events: for the direct child, use supplied parent-id;
-        ;; for deeper descendants, append with their immediate parent link
-        (append-cancel-events! db parent-id child-id (or reason :user-request))
-        (doseq [tid descendants]
-          (let [p (try (get-parent-session-id db tid) (catch Exception _ nil))]
-            (append-cancel-events! db p tid (or reason :parent-cancel))))
+      (let [targets (cancel-targets db child-id)
+            {:keys [cap-ids leases]} (cancel-subtree-tx! db child-id parent-id targets (or reason :user-request))]
+        (tombstone-memory-leases! cap-ids leases)
         {:cancelled targets :already-cancelled? false :child/session-id child-id}))))
 
 (defn cancel-subagent-tree!
   "Cascade-cancel the entire subtree rooted at `root-session-id`
   (including root and all transitive descendants — union of the session-link
-  BFS and the Work-graph BFS from the root's Works).
-  Revokes leases and marks each session :cancelled (idempotent).
+  BFS and the Work-graph BFS from the root's Works). The root id accepts a
+  session id or a first-class Work id. One atomic transaction
+  (cancel-subtree-tx!): revoke + Work CAS + cancel events commit together;
+  memory tombstones follow commit (durable-first).
 
   `reason` stored in event metadata (default :user-request).
   Returns {:cancelled [session-ids]}. Throws when root not found."
@@ -1028,7 +1068,7 @@
   (when (nil? db)
     (throw (ex-info "cancel-subagent-tree! requires a db/store handle" {:error/type :store/session-invalid})))
   (ensure-subagent-link-table! db)
-  (let [root-id (types/session-id root-session-id)
+  (let [root-id (resolve-cancel-session! db root-session-id)
         root (session/get-session db root-id)]
     (when-not root
       (throw (ex-info (str "root session not found: " root-id)
@@ -1036,22 +1076,43 @@
                        :session/id root-id})))
     (if (= :cancelled (session-work-state db root-id))
       {:cancelled [] :already-cancelled? true :root/session-id root-id}
-      (let [descendants (list-descendants db root-id)
-            targets (cancel-targets db root-id)]
-        (doseq [tid targets]
-          (revoke-leases-for-session* db tid))
-        (doseq [tid targets]
-          (try
-            (let [works (work-store/list-works db tid)]
-              (doseq [w works]
-                (try (work-store/cancel-work! db (:work/id w)) (catch Exception _ nil))))
-            (catch Exception _ nil)))
-        ;; append events for each target (child + its parent)
-        (doseq [tid targets]
-          (let [p (try (get-parent-session-id db tid) (catch Exception _ nil))]
-            (append-cancel-events! db p tid (or reason :parent-cancel))))
-        ;; also ensure root's parent gets :subagent/cancelled if root is itself a child
+      (let [targets (cancel-targets db root-id)
+            {:keys [cap-ids leases]} (cancel-subtree-tx! db root-id nil targets (or reason :user-request))]
+        (tombstone-memory-leases! cap-ids leases)
         {:cancelled targets :already-cancelled? false :root/session-id root-id}))))
+(defn cancel-non-terminal-children!
+  "Structured-concurrency enforcement: cancel every live child of
+  `session-id` so children never outlive their parent's terminal step.
+  A child is live when its subtree (itself plus link descendants, plus
+  the sessions owning its Works' transitive descendants) owns any
+  non-terminal Work (:queued, :running, or :waiting). Each live direct
+  child is cancelled via cancel-subagent! (atomic revoke + Work CAS +
+  events, :parent-cancel). Never throws for a single bad child — the
+  sweep continues. Returns {:cancelled [session-ids]}."
+  ([db session-id] (cancel-non-terminal-children! db session-id :parent-cancel))
+  ([db session-id reason]
+   (when db
+     (ensure-subagent-link-table! db)
+     (let [sid (try (types/session-id session-id) (catch Exception _ session-id))
+           link-kids (try (child-session-ids db sid) (catch Exception _ []))
+           works (try (work-store/list-works db sid) (catch Exception _ []))
+           work-kids (distinct (mapcat #(try (work-subtree-session-ids db (:work/id %))
+                                             (catch Exception _ []))
+                                       works))
+           live? (fn [cid]
+                   (try
+                     (boolean (some #(contains? #{:queued :running :waiting} (:work/state %))
+                                    (mapcat #(try (work-store/list-works db %) (catch Exception _ []))
+                                            (distinct (cons cid (try (list-descendants db cid)
+                                                                     (catch Exception _ [])))))))
+                     (catch Exception _ false)))]
+       {:cancelled (vec (distinct (mapcat (fn [cid]
+                                            (try
+                                              (if (live? cid)
+                                                (:cancelled (cancel-subagent! db sid cid (or reason :parent-cancel)))
+                                                [])
+                                              (catch Exception _ [])))
+                                          (distinct (concat link-kids work-kids)))))}))))
 ;; ---------------------------------------------------------------------------
 ;; S5 — result delivery to parent chain
 ;; ---------------------------------------------------------------------------
@@ -1060,24 +1121,248 @@
   [s]
   (and (string? s) (boolean (re-matches #"^sha256:[0-9a-f]{64}$" s))))
 
-(defn deliver-result!
-  "Deliver a successful child subagent result to its parent's causal chain.
+(defn- delivered-result-event
+  "The existing :subagent/result event on `parent-id` that already names
+  `terminal-event-id` in its metadata, or nil. Delivery is idempotent:
+  re-delivering the same child terminal returns the recorded event
+  instead of appending a duplicate."
+  [db parent-id terminal-event-id]
+  (some (fn [ev]
+          (when (and (= :subagent/result (:event/type ev))
+                     (= terminal-event-id (get-in ev [:metadata :terminal/event-id])))
+            ev))
+        (try (event/events-for-session db parent-id) (catch Exception _ nil))))
 
-  `db`                — sqlite spec, path, or SessionStore handle (must be migrated).
-  `parent-session-id` — UUID of the parent session (must exist).
-  `child-session-id`  — UUID of the child session (must be :completed).
-  `cas-ref`           — sha256:<64 hex> CAS reference for the child's result artifact.
+(defn- check-delivery-terminal!
+  "Provenance gate shared by both delivery paths: `terminal-event-id`
+  must name the child's LATEST event and it must carry `expected-type`
+  (:session/completed or :session/failed). Returns the terminal event."
+  [db child-id terminal-event-id expected-type]
+  (let [terminal (try (event/get-event-by-id db terminal-event-id) (catch Exception _ nil))]
+    (when-not terminal
+      (throw (err/error :store/event-invalid "delivery terminal event not found"
+                        {:terminal/event-id terminal-event-id :child/session-id child-id})))
+    (when-not (and (= child-id (:session/id terminal))
+                   (= expected-type (:event/type terminal)))
+      (throw (err/error :store/event-invalid "delivery terminal is not the child's expected terminal event"
+                        {:terminal/event-id terminal-event-id
+                         :child/session-id child-id
+                         :event/session-id (:session/id terminal)
+                         :event/type (:event/type terminal)
+                         :expected/type expected-type})))
+    (let [latest-id (some-> (last (try (event/events-for-session db child-id)
+                                       (catch Exception _ nil)))
+                            :event/id)]
+      (when-not (= terminal-event-id latest-id)
+        (throw (err/error :store/event-invalid "delivery terminal is not the child's latest event (stale link)"
+                          {:terminal/event-id terminal-event-id
+                           :latest/event-id latest-id
+                           :child/session-id child-id}))))
+    terminal))
+
+(defn- append-result-event-tx!
+  "Append the :subagent/result event to `parent-id` inside ONE BEGIN
+  IMMEDIATE transaction that FIRST re-checks the child Work is still in
+  `expected-state` (the provenance CAS — a concurrent cancel/settle that
+  moved the row aborts delivery instead of recording a lie). The causal
+  link points at the explicit `terminal-event-id`, never 'the latest'.
+  Returns the appended event."
+  [db parent child-work-id terminal-event-id expected-state metadata]
+  (let [parent-id (:session/id parent)
+        spec (db-spec db)]
+    (sqlite/with-write-tx [conn spec]
+      (let [row (first (sqlite/query-raw! conn "SELECT state FROM works WHERE id = ?" [(str child-work-id)]))
+            state (:state row)]
+        (when-not (= ({:succeeded "succeeded" :failed "failed"} expected-state) state)
+          (throw (err/error (if (= :succeeded expected-state) :subagent/not-completed :subagent/not-failed)
+                            "child work left its terminal state inside the delivery transaction"
+                            {:work/id child-work-id :work/state state}))))
+      (let [prev-id (:id (last (sqlite/query-raw! conn "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq"
+                                                  [(str parent-id)])))]
+        (when-not prev-id
+          (throw (err/error :store/event-invalid "parent session has no events"
+                            {:session/id parent-id})))
+        (let [req {:session/id parent-id
+                   :generation/id (:generation/id parent)
+                   :phenotype/id (:phenotype/id parent)
+                   :event/type :subagent/result
+                   :prev/event-id prev-id
+                   :causal-links #{{:from terminal-event-id :type :subagent/result}}
+                   :payload-ref nil
+                   :metadata metadata}]
+          (es/validate-append-request req)
+          (event/append-event-on-conn! conn req))))))
+
+(defn deliver-result-for-works!
+  "Canonical Work-handle success delivery: link child Work `child-work-id`
+  (must be :succeeded) to its parent under an explicit terminal event.
+
+  `parent-session-id` names the receiving session; `parent-work-id` names
+  the exact parent Work (nil for legacy parents that own no Work — the
+  link-equality check is then skipped, child provenance still enforced).
+  `terminal-event-id` must be the child's latest event and a
+  :session/completed; `cas-ref` must be sha256:<64 hex> AND equal the
+  child Work's :work/payload-ref whenever the row carries one (the
+  scheduler persists the output CAS ref on success — a caller-supplied
+  ref that differs is :store/cas-mismatch, never recorded).
+
+  The event carries {:child/session-id _ :child/work-id _
+  :terminal/event-id _ :result/cas-ref _ :result/status :succeeded} and a
+  causal link from the terminal event. Commit is one BEGIN IMMEDIATE
+  transaction (provenance re-check + append). Idempotent: re-delivering
+  the same terminal returns the recorded event.
+
+  Typed errors: :store/session-invalid (nil db), :store/work-not-found,
+  :subagent/not-found (child session missing), :store/session-not-found
+  (parent missing), :subagent/not-completed, :store/work-invalid (child
+  not attributed to the parent work), :store/cas-invalid,
+  :store/cas-mismatch, :store/event-invalid (unknown, foreign, stale, or
+  non-terminal event)."
+  [db parent-session-id parent-work-id child-work-id terminal-event-id cas-ref]
+  (when (nil? db)
+    (throw (ex-info "deliver-result-for-works! requires a db/store handle" {:error/type :store/session-invalid})))
+  (when-not (sha256-cas-ref? cas-ref)
+    (throw (ex-info (str "invalid cas-ref: " cas-ref)
+                    {:error/type :store/cas-invalid
+                     :cas-ref cas-ref})))
+  (let [spec (db-spec db)
+        child-work (work-store/fetch-work spec child-work-id)]
+    (when-not child-work
+      (throw (err/error :store/work-not-found "child work not found" {:work/id child-work-id})))
+    (when-not (= :succeeded (:work/state child-work))
+      (throw (err/error :subagent/not-completed (str "child not completed: work=" (:work/state child-work))
+                        {:work/id child-work-id
+                         :work/state (:work/state child-work)})))
+    (let [parent-work (when parent-work-id (work-store/fetch-work spec parent-work-id))]
+      (when (and parent-work-id (not parent-work))
+        (throw (err/error :store/work-not-found "parent work not found" {:work/id parent-work-id})))
+      (when (and parent-work
+                 (:work/parent-work-id child-work)
+                 (not= (:work/id parent-work) (:work/parent-work-id child-work)))
+        (throw (err/error :store/work-invalid "child work is not attributed to the parent work"
+                          {:reason :work-link-mismatch
+                           :work/id child-work-id
+                           :parent/work-id parent-work-id
+                           :work/parent-work-id (:work/parent-work-id child-work)})))
+      (when (and parent-work
+                 (not= (:work/session-id parent-work)
+                        (try (types/session-id parent-session-id) (catch Exception _ parent-session-id))))
+        (throw (err/error :store/work-invalid "parent work belongs to another session"
+                          {:reason :parent-work-mismatch
+                           :parent/work-id parent-work-id
+                           :parent/session-id parent-session-id})))
+      (let [child-id (:work/session-id child-work)
+            parent-id (try (types/session-id parent-session-id) (catch Exception _ parent-session-id))]
+        (when-not (session/get-session db child-id)
+          (throw (ex-info (str "child session not found: " child-id)
+                          {:error/type :subagent/not-found
+                           :session/id child-id})))
+        (let [parent (session/get-session db parent-id)]
+          (when-not parent
+            (throw (ex-info (str "parent session not found: " parent-id)
+                            {:error/type :store/session-not-found
+                             :session/id parent-id})))
+          (check-delivery-terminal! db child-id terminal-event-id :session/completed)
+          (let [bound (:work/payload-ref child-work)]
+            (when (and (string? bound) (not= bound cas-ref))
+              (throw (err/error :store/cas-mismatch "supplied cas-ref differs from the child Work payload_ref"
+                                {:work/id child-work-id
+                                 :work/payload-ref bound
+                                 :result/cas-ref cas-ref}))))
+          (if-let [existing (delivered-result-event db parent-id terminal-event-id)]
+            existing
+            (append-result-event-tx! db parent child-work-id terminal-event-id :succeeded
+                                     {:child/session-id child-id
+                                      :child/work-id child-work-id
+                                      :terminal/event-id terminal-event-id
+                                      :result/cas-ref cas-ref
+                                      :result/status :succeeded})))))))
+
+(defn deliver-failure-for-works!
+  "Canonical Work-handle failure delivery: link child Work `child-work-id`
+  (must be :failed) to its parent under an explicit terminal event. The
+  recorded :error is DERIVED from the canonical rows — the child terminal
+  :session/failed event's metadata (:error/artifact-ref, :error/type,
+  :status) — never trusted from the caller. `opts` may carry
+  :error/fallback, used only when the terminal event records no error
+  detail (else {:error/type :subagent/child-failed}). Same atomicity,
+  idempotency, and typed-error contract as deliver-result-for-works!
+  (with :subagent/not-failed for a non-failed child)."
+  ([db parent-session-id parent-work-id child-work-id terminal-event-id]
+   (deliver-failure-for-works! db parent-session-id parent-work-id child-work-id terminal-event-id nil))
+  ([db parent-session-id parent-work-id child-work-id terminal-event-id opts]
+   (when (nil? db)
+     (throw (ex-info "deliver-failure-for-works! requires a db/store handle" {:error/type :store/session-invalid})))
+   (let [spec (db-spec db)
+         child-work (work-store/fetch-work spec child-work-id)]
+     (when-not child-work
+       (throw (err/error :store/work-not-found "child work not found" {:work/id child-work-id})))
+     (when-not (= :failed (:work/state child-work))
+       (throw (err/error :subagent/not-failed (str "child not failed: work=" (:work/state child-work))
+                         {:work/id child-work-id
+                          :work/state (:work/state child-work)})))
+     (let [parent-work (when parent-work-id (work-store/fetch-work spec parent-work-id))]
+       (when (and parent-work-id (not parent-work))
+         (throw (err/error :store/work-not-found "parent work not found" {:work/id parent-work-id})))
+       (when (and parent-work
+                  (:work/parent-work-id child-work)
+                  (not= (:work/id parent-work) (:work/parent-work-id child-work)))
+         (throw (err/error :store/work-invalid "child work is not attributed to the parent work"
+                           {:reason :work-link-mismatch
+                            :work/id child-work-id
+                            :parent/work-id parent-work-id
+                            :work/parent-work-id (:work/parent-work-id child-work)})))
+       (let [child-id (:work/session-id child-work)
+             parent-id (try (types/session-id parent-session-id) (catch Exception _ parent-session-id))]
+         (when-not (session/get-session db child-id)
+           (throw (ex-info (str "child session not found: " child-id)
+                           {:error/type :subagent/not-found
+                            :session/id child-id})))
+         (let [parent (session/get-session db parent-id)]
+           (when-not parent
+             (throw (ex-info (str "parent session not found: " parent-id)
+                             {:error/type :store/session-not-found
+                              :session/id parent-id})))
+           (let [terminal (check-delivery-terminal! db child-id terminal-event-id :session/failed)
+                 derived (select-keys (:metadata terminal) [:error/artifact-ref :error/type :status])
+                 fallback (:error/fallback opts)
+                 error (cond (seq derived) (cond-> derived
+                                             (and fallback (not= fallback derived))
+                                             (assoc :error/caller fallback))
+                             (some? fallback) fallback
+                             :else {:error/type :subagent/child-failed})]
+             (if-let [existing (delivered-result-event db parent-id terminal-event-id)]
+               existing
+               (append-result-event-tx! db parent child-work-id terminal-event-id :failed
+                                        {:child/session-id child-id
+                                         :child/work-id child-work-id
+                                         :terminal/event-id terminal-event-id
+                                         :result/status :failed
+                                         :error error})))))))))
+
+(defn deliver-result!
+  "Deliver a successful child subagent result to its parent's causal chain
+  (legacy session-id entry point — resolves the child's single Work, the
+  attributed (or latest) parent Work, and the child's latest event, then
+  delegates to deliver-result-for-works!). Prefer the Work-handle
+  canonical path for new callers.
 
   E1: appends a :subagent/result event to the parent's chain with
   `:prev/event-id = parent's latest` and
   `:causal-links #{ {:from <child-terminal-event-id> :type :subagent/result} }`
   so cross-session causality is explicit in the graph, not overloaded
-  onto prev.
+  onto prev. The event also carries :child/work-id and
+  :terminal/event-id.
+
+  The supplied `cas-ref` must equal the child Work's :work/payload-ref
+  whenever the row carries one (:store/cas-mismatch otherwise).
 
   Typed errors: :store/session-invalid when db nil, :store/session-not-found
   when parent missing, :subagent/not-found when child missing,
-  :subagent/not-completed when child is not :completed, :store/cas-invalid
-  when cas-ref is not sha256:<64 hex>."
+  :subagent/not-completed when child is not :succeeded, :store/cas-invalid
+  when cas-ref is not sha256:<64 hex>, :store/cas-mismatch on provenance
+  drift, :store/work-not-found / :store/work-invalid on handle problems,
+  :store/event-invalid on terminal problems."
   [db parent-session-id child-session-id cas-ref]
   (when (nil? db)
     (throw (ex-info "deliver-result! requires a db/store handle" {:error/type :store/session-invalid})))
@@ -1087,52 +1372,37 @@
       (throw (ex-info (str "invalid cas-ref: " cas-ref)
                       {:error/type :store/cas-invalid
                        :cas-ref cas-ref})))
-    (let [child (session/get-session db child-id)]
-      (when-not child
-        (throw (ex-info (str "child session not found: " child-id)
-                        {:error/type :subagent/not-found
-                         :session/id child-id})))
-      (when-not (= :succeeded (session-work-state db child-id))
-        (throw (ex-info (str "child not completed: " child-id " work=" (session-work-state db child-id))
+    (when-not (session/get-session db child-id)
+      (throw (ex-info (str "child session not found: " child-id)
+                      {:error/type :subagent/not-found
+                       :session/id child-id})))
+    (let [child-work-id (resolve-child-work-id! db child-id nil)
+          child-work (when child-work-id (work-store/fetch-work (db-spec db) child-work-id))]
+      (when-not (and child-work (= :succeeded (:work/state child-work)))
+        (throw (ex-info (str "child not completed: " child-id " work=" (:work/state child-work))
                         {:error/type :subagent/not-completed
                          :session/id child-id
-                         :work/state (session-work-state db child-id)})))
-      (let [parent (session/get-session db parent-id)]
-        (when-not parent
-          (throw (ex-info (str "parent session not found: " parent-id)
-                          {:error/type :store/session-not-found
-                           :session/id parent-id})))
-        (let [parent-events (event/events-for-session db parent-id)
-              _ (when (empty? parent-events)
-                  (throw (ex-info "parent session has no events"
-                                  {:error/type :store/event-invalid
-                                   :session/id parent-id})))
-              prev-id (:event/id (last parent-events))
-              child-events (event/events-for-session db child-id)
-              child-terminal (last child-events)
-              child-terminal-id (when child-terminal (:event/id child-terminal))
-              causal-links (if child-terminal-id
-                             #{{:from child-terminal-id :type :subagent/result}}
-                             #{})]
-          (event/append-event! db
-                               {:session/id parent-id
-                                :generation/id (:generation/id parent)
-                                :phenotype/id (:phenotype/id parent)
-                                :event/type :subagent/result
-                                :prev/event-id prev-id
-                                :causal-links causal-links
-                                :payload-ref nil
-                                :metadata {:child/session-id child-id
-                                           :result/cas-ref cas-ref
-                                           :result/status :succeeded}}))))))
+                         :work/state (:work/state child-work)})))
+      (when-not (session/get-session db parent-id)
+        (throw (ex-info (str "parent session not found: " parent-id)
+                        {:error/type :store/session-not-found
+                         :session/id parent-id})))
+      (let [parent-work-id (or (:work/parent-work-id child-work)
+                               (some-> (last (work-store/list-works db parent-id)) :work/id))
+            terminal-id (some-> (last (try (event/events-for-session db child-id)
+                                           (catch Exception _ nil)))
+                                :event/id)]
+        (when-not terminal-id
+          (throw (err/error :store/event-invalid "child session has no terminal event"
+                            {:session/id child-id})))
+        (deliver-result-for-works! db parent-id parent-work-id child-work-id terminal-id cas-ref)))))
 
 (defn deliver-failure!
-  "Deliver a failed child subagent result to its parent's causal chain.
-
-  `db`                — sqlite spec, path, or SessionStore handle.
-  `parent-session-id` — UUID of the parent session (must exist).
-  `child-session-id`  — UUID of the child session (must be :failed).
-  `error`             — EDN-safe error data (e.g. {:error/type :foo :error/message \"boom\"}).
+  "Deliver a failed child subagent result to its parent's causal chain
+  (legacy session-id entry point — resolves handles, then delegates to
+  deliver-failure-for-works!). The recorded :error is derived from the
+  canonical child terminal event; the supplied `error` is kept only as a
+  fallback when the terminal records none.
 
   E1: appends :subagent/result with prev = parent latest and
   causal-links #{ {:from <child-terminal> :type :subagent/result} }.
@@ -1142,44 +1412,72 @@
     (throw (ex-info "deliver-failure! requires a db/store handle" {:error/type :store/session-invalid})))
   (let [parent-id (types/session-id parent-session-id)
         child-id (types/session-id child-session-id)]
-    (let [child (session/get-session db child-id)]
-      (when-not child
-        (throw (ex-info (str "child session not found: " child-id)
-                        {:error/type :subagent/not-found
-                         :session/id child-id})))
-      (when-not (= :failed (session-work-state db child-id))
-        (throw (ex-info (str "child not failed: " child-id " work=" (session-work-state db child-id))
+    (when-not (session/get-session db child-id)
+      (throw (ex-info (str "child session not found: " child-id)
+                      {:error/type :subagent/not-found
+                       :session/id child-id})))
+    (let [child-work-id (resolve-child-work-id! db child-id nil)
+          child-work (when child-work-id (work-store/fetch-work (db-spec db) child-work-id))]
+      (when-not (and child-work (= :failed (:work/state child-work)))
+        (throw (ex-info (str "child not failed: " child-id " work=" (:work/state child-work))
                         {:error/type :subagent/not-failed
                          :session/id child-id
-                         :work/state (session-work-state db child-id)})))
-      (let [parent (session/get-session db parent-id)]
-        (when-not parent
-          (throw (ex-info (str "parent session not found: " parent-id)
-                          {:error/type :store/session-not-found
-                           :session/id parent-id})))
-        (let [parent-events (event/events-for-session db parent-id)
-              _ (when (empty? parent-events)
-                  (throw (ex-info "parent session has no events"
-                                  {:error/type :store/event-invalid
-                                   :session/id parent-id})))
-              prev-id (:event/id (last parent-events))
-              child-events (event/events-for-session db child-id)
-              child-terminal (last child-events)
-              child-terminal-id (when child-terminal (:event/id child-terminal))
-              causal-links (if child-terminal-id
-                             #{{:from child-terminal-id :type :subagent/result}}
-                             #{})]
-          (event/append-event! db
-                               {:session/id parent-id
-                                :generation/id (:generation/id parent)
-                                :phenotype/id (:phenotype/id parent)
-                                :event/type :subagent/result
-                                :prev/event-id prev-id
-                                :causal-links causal-links
-                                :payload-ref nil
-                                :metadata {:child/session-id child-id
-                                           :result/status :failed
-                                           :error error}}))))))
+                         :work/state (:work/state child-work)})))
+      (when-not (session/get-session db parent-id)
+        (throw (ex-info (str "parent session not found: " parent-id)
+                        {:error/type :store/session-not-found
+                         :session/id parent-id})))
+      (let [parent-work-id (or (:work/parent-work-id child-work)
+                               (some-> (last (work-store/list-works db parent-id)) :work/id))
+            terminal-id (some-> (last (try (event/events-for-session db child-id)
+                                           (catch Exception _ nil)))
+                                :event/id)]
+        (when-not terminal-id
+          (throw (err/error :store/event-invalid "child session has no terminal event"
+                            {:session/id child-id})))
+        (deliver-failure-for-works! db parent-id parent-work-id child-work-id terminal-id
+                                    (when (some? error) {:error/fallback error}))))))
+
+(defn- auto-deliver-child-terminal!
+  "Auto-deliver a settled child's terminal to its parent (structured
+  result handoff — the runner, not the model, closes the loop). Reads
+  the child Work's own :work/parent-work-id for the parent handle and
+  the child's latest event for the terminal; success delivers with the
+  Work's persisted payload ref as the CAS ref, failure derives the error
+  from the canonical terminal event. Never throws: returns
+  {:delivered true :event/id _} or {:delivered false :reason _
+  [:work/state _] [:error/type _]} for the run result's :delivery."
+  [db parent-id child-id child-work-id]
+  (try
+    (let [child-work (work-store/fetch-work (db-spec db) child-work-id)]
+      (cond
+        (nil? child-work)
+        {:delivered false :reason :work-not-found :work/id child-work-id}
+        ;; A nil :work/parent-work-id (legacy tool-path spawns against a
+        ;; workless parent) still delivers — the canonical path skips only
+        ;; the link-equality check, child provenance still enforced.
+        :else
+        (let [terminal-id (some-> (last (try (event/events-for-session db child-id)
+                                             (catch Exception _ nil)))
+                                  :event/id)]
+          (if-not terminal-id
+            {:delivered false :reason :no-terminal-event}
+            (case (:work/state child-work)
+              :succeeded
+              (if-let [cas (:work/payload-ref child-work)]
+                {:delivered true
+                 :event/id (:event/id (deliver-result-for-works! db parent-id (:work/parent-work-id child-work)
+                                                                 child-work-id terminal-id cas))}
+                {:delivered false :reason :no-payload-ref :work/id child-work-id})
+              :failed
+              {:delivered true
+               :event/id (:event/id (deliver-failure-for-works! db parent-id (:work/parent-work-id child-work)
+                                                                 child-work-id terminal-id))}
+              {:delivered false :reason :not-terminal :work/state (:work/state child-work)})))))
+    (catch clojure.lang.ExceptionInfo e
+      {:delivered false :reason :delivery-error :error/type (:error/type (ex-data e))})
+    (catch Throwable t
+      {:delivered false :reason :delivery-error :error/type :subagent/delivery-failed})))
 
 (def AgentSpawnArgsSchema
   "Malli input schema for :agent/spawn (model-facing). :task is required,
@@ -1248,11 +1546,52 @@
    :lease/resource {:kind :tool :id :agent/status}
    :tool/audience #{:model}})
 
+(def AgentCancelArgsSchema
+  "Malli input schema for :agent/cancel. Either :session-id (the child
+  session uuid string) or :work-id (the child Work uuid string, resolved
+  to its owning session) selects the target — the Work handle is
+  first-class. At least one is required (enforced at execute time).
+  :reason is an optional cancel reason (default :user-request)."
+  [:map {:closed true}
+   [:session-id {:optional true} string?]
+   [:work-id {:optional true} string?]
+   [:reason {:optional true} keyword?]])
+
+(def AgentCancelOutputSchema
+  "Malli output schema for :agent/cancel — the cancelled subtree."
+  [:map {:closed false}
+   [:session/id {:optional true} uuid?]
+   [:work/id {:optional true} uuid?]
+   [:cancelled {:optional true} [:vector uuid?]]
+   [:already-cancelled? {:optional true} boolean?]])
+
+(def agent-cancel-tool-descriptor
+  "The v0 tool descriptor of :agent/cancel. :effect :pure — cancel is an
+  atomic durable Work CAS plus cascade revoke, idempotent on already
+  cancelled targets."
+  {:tool/id :agent/cancel
+   :tool/description "Cancel a subagent session"
+   :tool/parameters {:type "object"
+                     :properties {:session-id {:type "string"
+                                              :description "Child session id (uuid string)"}
+                                 :work-id {:type "string"
+                                           :description "Child Work id (uuid string) — resolves to its owning session"}
+                                 :reason {:type "string"
+                                          :description "Cancel reason (default user-request)"}}
+                     :required []}
+   :effect :pure
+   :input-schema AgentCancelArgsSchema
+   :output-schema AgentCancelOutputSchema
+   :required-action :invoke
+   :lease/resource {:kind :tool :id :agent/cancel}
+   :tool/audience #{:model}})
+
 ;; Reference the single source in tool.specs so S6 does not duplicate
 ;; the canonical C-Tool definitions (tool.specs is the single source of truth).
 ;; These defs simply alias tool.specs for callers that prefer the subagent namespace.
 (def canonical-agent-spawn-tool tool.specs/agent-spawn-tool)
 (def canonical-agent-status-tool tool.specs/agent-status-tool)
+(def canonical-agent-cancel-tool tool.specs/agent-cancel-tool)
 
 (def agent-spawn-tool-catalog-entry
   "Wire declaration of :agent/spawn for the model and the tool loop
@@ -1281,10 +1620,24 @@
                 :required []}
    :tool :agent/status})
 
+(def agent-cancel-tool-catalog-entry
+  "Wire declaration of :agent/cancel."
+  {:name "agent_cancel"
+   :description "Cancel a subagent session"
+   :parameters {:type "object"
+                :properties {:session-id {:type "string"
+                                         :description "Child session id (uuid string)"}
+                             :work-id {:type "string"
+                                       :description "Child Work id (uuid string) — resolves to its owning session"}
+                             :reason {:type "string"
+                                      :description "Cancel reason (default user-request)"}}
+                :required []}
+   :tool :agent/cancel})
+
 (def subagent-tool-catalog
   "The tool catalog the scheduler's tool loop consumes for subagents:
-  the two S6 wire tools, in the wire form ({:name :description :parameters :tool})."
-  [agent-spawn-tool-catalog-entry agent-status-tool-catalog-entry])
+  the three S6 wire tools, in the wire form ({:name :description :parameters :tool})."
+  [agent-spawn-tool-catalog-entry agent-status-tool-catalog-entry agent-cancel-tool-catalog-entry])
 
 ;; --- providers (broker-executable) ----------------------------------------
 
@@ -1434,3 +1787,70 @@
                        :depth (try (subagent-depth db sid) (catch Exception _ nil))
                        :children (try (child-session-ids db sid) (catch Exception _ []))}
                 (:work/id target) (assoc :work/id (:work/id target))))))))))
+
+(defn- resolve-cancel-target
+  "Resolve an :agent/cancel target from `args`: :work-id (first-class Work
+  handle — the Work must exist, resolved to its owning session) or
+  :session-id. Returns {:session/id _ :work/id-or-nil _}. Throws
+  :provider/request-invalid when neither handle is present,
+  :store/work-not-found when the Work handle names no row."
+  [db args]
+  (let [work-str (:work-id args)]
+    (if (some? work-str)
+      (let [wid (try (UUID/fromString (str work-str)) (catch Exception _ work-str))
+            w (try (work-store/fetch-work (db-spec db) wid) (catch Exception _ nil))]
+        (when-not w
+          (throw (err/error :store/work-not-found "cancel Work handle names no row"
+                            {:work/id work-str})))
+        {:session/id (:work/session-id w) :work/id (:work/id w)})
+      (let [sid-str (:session-id args)]
+        (when-not sid-str
+          (throw (err/error :provider/request-invalid
+                            "agent/cancel requires :session-id or :work-id"
+                            {:value (err/sanitize args)})))
+        {:session/id (try (types/session-id sid-str) (catch Exception _ sid-str))
+         :work/id nil}))))
+
+(defn agent-cancel-provider
+  "Build the kernel-owned :agent/cancel provider (component).
+
+  `db` — sqlite handle. normalize validates args and binds the requesting
+  session (the intent's :session/id) as :requester/session-id. execute
+  resolves the target from :session-id or :work-id (first-class Work
+  handle → owning session) and cancels the subtree via cancel-subagent!
+  (atomic revoke + Work CAS + events), but ONLY for descendants of the
+  requester: any other target (self, parent, sibling, unrelated) fails
+  closed with :capability/scope-denied — the same ancestor scope the
+  :intent/subagent-cancel path enforces. :reason is optional
+  (default :user-request)."
+  [db]
+  (reify proto/Provider
+    (describe [_] agent-cancel-tool-descriptor)
+    (normalize-request [_ intent]
+      (let [args (tool-args intent)
+            _ (validate-args! agent-cancel-tool-descriptor args)]
+        {:tool/id :agent/cancel
+         :resource {:kind :tool :id :agent/cancel}
+         :args args
+         :requester/session-id (:session/id intent)}))
+    (execute-request! [_ authorized-request]
+      (let [requester (:requester/session-id authorized-request)]
+        (when-not requester
+          (throw (err/error :provider/request-invalid
+                            "agent/cancel requires the requesting session id (intent :session/id)"
+                            {:value (err/sanitize authorized-request)})))
+        (let [target (resolve-cancel-target db (:args authorized-request))
+              sid (:session/id target)
+              descendants (try (set (list-descendants db requester))
+                               (catch Exception _ #{}))]
+          (when-not (contains? descendants sid)
+            (throw (err/error :capability/scope-denied
+                              "agent/cancel is descendant-scoped: the target is not a descendant of the requesting session"
+                              {:requester/session-id requester
+                               :target/session-id sid})))
+          (let [reason (or (:reason (:args authorized-request)) :user-request)
+                res (cancel-subagent! db requester sid reason)]
+            (cond-> {:cancelled (:cancelled res)
+                     :already-cancelled? (:already-cancelled? res)
+                     :session/id sid}
+              (:work/id target) (assoc :work/id (:work/id target)))))))))
