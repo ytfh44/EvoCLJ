@@ -39,6 +39,7 @@
              [evoclj.capability.grant :as grant]
              [evoclj.capability.mint :as mint]
              [evoclj.compiler.topology :as topology]
+             [evoclj.genome.hash :as hash]
              [evoclj.genome.types :as types]
              [evoclj.kernel.error :as err]
              [evoclj.provider.fixture :as fixture]
@@ -307,6 +308,37 @@
             eligible))))
 
 ;; ---------------------------------------------------------------------------
+;; Task digest bind + deadline (W2: the child Work carries the spawn-time
+;; task digest as :work/payload-ref and an optional :work/deadline, so a
+;; queued Work is replayable and the executed task is auditable against
+;; the spawn-time bind without a CAS handle at spawn time).
+;; ---------------------------------------------------------------------------
+
+(defn task-digest
+  "Content digest (\"sha256:<hex>\") of the EDN task value: sha256 over the
+  exact UTF-8 bytes of (pr-str task) — the same bytes the scheduler's CAS
+  put-payload! hashes, so a spawn-time bind equals the run-time
+  :session/started payload-ref for the same task value. Nil task binds nil."
+  [task]
+  (when (some? task)
+    (hash/file-digest (.getBytes (pr-str task) java.nio.charset.StandardCharsets/UTF_8))))
+
+(defn coerce-deadline
+  "Coerce `d` (nil, java.util.Date, java.time.Instant, ISO-8601 string, or
+  epoch millis) to a java.util.Date, or nil when `d` is nil. Throws
+  :store/work-invalid for anything else (fail closed — a deadline must be
+  an unambiguous instant)."
+  [d]
+  (cond
+    (nil? d) nil
+    (instance? Date d) d
+    (instance? java.time.Instant d) (Date/from ^java.time.Instant d)
+    (integer? d) (Date. ^long (long d))
+    (string? d) (Date/from (java.time.Instant/parse d))
+    :else (throw (err/error :store/work-invalid "deadline must be a Date, Instant, ISO-8601 string, or epoch millis"
+                            {:value (err/sanitize d)}))))
+
+;; ---------------------------------------------------------------------------
 ;; Spawn
 ;; ---------------------------------------------------------------------------
 
@@ -352,6 +384,7 @@
   `parent-leases`   — collection of sealed CapabilityLease values granted to the parent (may be empty/nil).
 
   Returns {:child/session-id uuid
+           :child/work-id    uuid (the single queued :subagent/run Work)
            :child/session    session-map
            :child/capabilities [derived-leases]}
 
@@ -365,9 +398,13 @@
   with a request only the meets survive (fewer requested caps = fewer
   child leases; attenuation ⊆ parent enforced by derive-lease!).
   - appends a :subagent/spawned event to the parent's chain (cause = parent's
-    latest event id) carrying {:child/session-id child-id :child/spec child-spec}
-    in its :metadata.
+    latest event id) carrying {:child/session-id child-id :child/spec
+    child-spec :task/digest <sha256-or-nil>} in its :metadata.
   - records the parent->child link in subagent_links.
+  - creates exactly ONE child Work (:subagent/run, :queued) carrying the
+    spawn-time task digest as :work/payload-ref and the spawn deadline
+    (child-spec :deadline or opts :deadline) as :work/deadline — the
+    durable handle the run, status, cancel, and replay paths resolve.
 
   Typed errors: :store/session-not-found when parent missing,
   :store/work-not-found when an explicit :parent/work-id is missing,
@@ -377,7 +414,10 @@
   derivation, which narrows by construction).
 
   `opts` (optional) carries :parent/work-id — the parent Work the spawn
-  is attributed to. The 4-arity keeps the legacy latest-Work fallback."
+  is attributed to — and :deadline (fallback when child-spec carries none).
+  The 4-arity keeps the legacy latest-Work fallback for the :agent/spawn
+  tool path; the :intent/subagent-spawn path requires an explicit
+  :parent/work-id (enforced at dispatch, never the latest-Work heuristic)."
   ([db parent-session-id child-spec parent-leases]
    (spawn-subagent! db parent-session-id child-spec parent-leases nil))
   ([db parent-session-id child-spec parent-leases opts]
@@ -423,6 +463,7 @@
                               {:error/type :store/event-invalid
                                :session/id parent-id})))
           cause-id (:event/id latest)
+          spawn-digest (task-digest (:task child-spec))
           _ (event/append-event! db
                                  {:session/id parent-id
                                   :generation/id (:generation/id parent)
@@ -431,7 +472,8 @@
                                   :prev/event-id cause-id
                                   :payload-ref nil
                                   :metadata {:child/session-id child-id
-                                             :child/spec child-spec}})
+                                             :child/spec child-spec
+                                             :task/digest spawn-digest}})
           ;; Record parent link
           spec (db-spec db)
           ts (.format (java.time.format.DateTimeFormatter/ISO_INSTANT) (java.time.Instant/now))]
@@ -443,19 +485,28 @@
       ;; W2: durable child Work (queued) — the SOLE execution identity for
       ;; this child. parent-work-id is the explicit :parent/work-id when
       ;; supplied, else the parent's latest Work (nil only for the root
-      ;; session, which has no parent Work).
+      ;; session, which has no parent Work). Exactly one Work per spawn:
+      ;; the run/status/cancel/replay paths resolve this row and never
+      ;; mint a second one.
       (let [parent-work-id (resolve-parent-work-id! db parent-id (:parent/work-id opts))
-            wid (java.util.UUID/randomUUID)]
-        (work-store/create-work! spec {:work/id wid
-                                       :work/type :subagent/run
-                                       :work/state :queued
-                                       :work/session-id child-id
-                                       :work/parent-work-id parent-work-id
-                                       :work/created-at (java.util.Date.)})
-        wid)
-      {:child/session-id child-id
-       :child/session child-session
-       :child/capabilities derived}))))
+            wid (java.util.UUID/randomUUID)
+            deadline (coerce-deadline (or (:deadline child-spec) (:deadline opts)))]
+        (work-store/create-work! spec (cond-> {:work/id wid
+                                                              :work/type :subagent/run
+                                                              :work/state :queued
+                                                              :work/session-id child-id
+                                                              :work/parent-work-id parent-work-id
+                                                              :work/created-at (java.util.Date.)}
+                                                       spawn-digest (assoc :work/payload-ref spawn-digest)
+                                                       deadline (assoc :work/deadline deadline)))
+        ;; the spawn event above was appended before the Work id existed;
+        ;; the returned map (and the Work row itself) is the durable handle.
+        ;; create-work! returns the raw works row (keys :id, not :work/id);
+        ;; the handle is the minted wid above.
+        {:child/session-id child-id
+         :child/work-id wid
+         :child/session child-session
+         :child/capabilities derived})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Child execution (S3)
@@ -478,6 +529,70 @@
         pin (if (map? child-session) child-session {:session/id child-session})]
     (hydrate db pin)))
 
+(defn audit-child-task
+  "Audit the executed `task` against the spawn-time digest bind carried by
+  the child Work `child-work-id`: returns {:spawn/digest <sha256-or-nil>
+  :executed/digest <sha256> :match? bool}. A nil spawn bind (older Works
+  minted before payload persistence, or a nil spawn task) matches nothing
+  and reports :match? false with the executed digest for the record — the
+  audit never throws, so ad-hoc runs of a different task than the spawn
+  spec stay executable while the divergence is observable."
+  [db child-work-id executed-task]
+  (let [w (work-store/fetch-work (db-spec db) child-work-id)
+        spawn-digest (:work/payload-ref w)
+        executed-digest (task-digest executed-task)]
+    {:spawn/digest spawn-digest
+     :executed/digest executed-digest
+     :match? (boolean (and (string? spawn-digest) (= spawn-digest executed-digest)))}))
+
+(defn- resolve-child-work-id!
+  "Resolve the single execution Work for child session `child-id`.
+  When `work-id` is supplied it must exist and belong to `child-id`
+  (:store/work-not-found / :store/work-invalid). When nil, the child's
+  latest Work is used (nil for a never-spawned bare session, whose run
+  mints its own :session/run Work). More than one Work on the child is
+  :store/work-invalid :reason :multiple-child-works — one spawn mints
+  exactly one Work, so two rows mean a second spawn wrote where only a
+  run should read."
+  [db child-id work-id]
+  (if (some? work-id)
+    (let [w (work-store/fetch-work (db-spec db) work-id)]
+      (when-not w
+        (throw (err/error :store/work-not-found "child work not found" {:work/id work-id})))
+      (when (not= child-id (:work/session-id w))
+        (throw (err/error :store/work-invalid "child work belongs to another session"
+                          {:reason :child-work-mismatch
+                           :work/id (:work/id w)
+                           :work/session-id (:work/session-id w)
+                           :child/session-id child-id})))
+      (:work/id w))
+    (let [works (work-store/list-works db child-id)]
+      (when (> (count works) 1)
+        (throw (err/error :store/work-invalid "child session has more than one Work"
+                          {:reason :multiple-child-works
+                           :child/session-id child-id
+                           :work/ids (mapv :work/id works)})))
+      (some-> (last works) :work/id))))
+
+(defn- enforce-child-deadline!
+  "Fail closed when the child Work's :work/deadline has passed: drive the
+  row terminal (CAS — :failed from :queued, :timed-out from :running or
+  :waiting) and throw :subagent/deadline-exceeded. Nil deadline is a no-op."
+  [db child-work-id]
+  (when child-work-id
+    (let [w (work-store/fetch-work (db-spec db) child-work-id)
+          deadline (:work/deadline w)]
+      (when (and deadline (work-store/deadline-passed? deadline (java.util.Date.)))
+        (let [state (:work/state w)]
+          (try
+            (cond
+              (= :queued state) (work-store/fail-work! (db-spec db) child-work-id {:error/type :subagent/deadline-exceeded})
+              (contains? #{:running :waiting} state) (work-store/timeout-work! (db-spec db) child-work-id)
+              :else nil)
+            (catch Exception _ nil)))
+        (throw (err/error :subagent/deadline-exceeded "child Work deadline has passed"
+                          {:work/id child-work-id :work/deadline deadline}))))))
+
 (defn run-subagent!
   "Synchronously execute a child subagent session.
 
@@ -485,12 +600,18 @@
   `parent-session-id`  — UUID of the parent session (for validation / audit; may be nil).
   `child-session-id`   — UUID of the child session to run (must exist, status :created).
   `task`               — EDN-safe task input (e.g. {:text \"hello\"}) fed as the entry node's payload.
+  `work-id`            — (5-arity) the child Work to drive. Must exist and
+  belong to the child; nil resolves the child's single Work as the 4-arity does.
 
   Fetches the child session row, builds a fresh child executor via the
   scheduler's phenotype machinery (same genome/resolution as parent,
   child subject, new isolated SCI runtime), and runs scheduler/run-session!
-  with `task`. Returns the scheduler result map
-  {:status :completed|:failed|:budget-exhausted ...}.
+  with `task` and the resolved child Work id. Returns the scheduler result
+  map {:status :completed|:failed|:budget-exhausted ...} with
+  :task/audit {:spawn/digest _ :executed/digest _ :match? _} comparing the
+  executed task against the spawn-time digest bind (the audit reports,
+  never rejects — running a different task than the spawn spec stays
+  executable while the divergence is observable).
 
   Child intents go through the broker with the child's persisted derived leases
   from the capabilities table (P1 DB truth); DB miss means deny, no synthetic lease.
@@ -501,10 +622,17 @@
   W2: Work's running is execution; a future is only an internal await.
   run-subagent! drives the child Work (queued -> running -> succeeded/failed)
   via CAS and awaits the scheduler's internal future synchronously — no bare
-  Future is leaked. For async callers, poll the Work row, not a Future.
+  Future is leaked. For async callers see run-subagent-async! (Work stays
+  the truth; the future is only an await handle) and await-child!.
 
-  Throws :subagent/not-found when the child session does not exist."
-  [db parent-session-id child-session-id task]
+  Throws :subagent/not-found when the child session does not exist,
+  :store/work-not-found when an explicit work-id is missing,
+  :store/work-invalid when it belongs to another session or the child
+  carries more than one Work, :subagent/deadline-exceeded when the child
+  Work's deadline has passed."
+  ([db parent-session-id child-session-id task]
+   (run-subagent! db parent-session-id child-session-id task nil))
+  ([db parent-session-id child-session-id task work-id]
   (when (nil? db)
     (throw (ex-info "run-subagent! requires a db/store handle" {:error/type :store/session-invalid})))
   (let [child-id (types/session-id child-session-id)
@@ -517,17 +645,184 @@
                       {:error/type :subagent/not-found
                        :session/id child-id
                        :parent/session-id parent-id})))
-    (let [executor (build-child-executor db child)
-          run-session! @(requiring-resolve 'evoclj.runtime.scheduler/run-session!)
-          ;; W2: reuse the Work the spawn created — never mint a second one.
-          ;; The child's sole execution identity is the :subagent/run Work
-          ;; spawn-subagent! persisted (queued); scheduler dispatches it to
-          ;; :running. Only when the child was never spawned (bare run) does
-          ;; the scheduler create its own :session/run Work (work-id nil).
-          child-work-id (some-> (last (work-store/list-works db child-id)) :work/id)
-          ;; internal future await: Work's running is execution, future is only await
-          result @(future (run-session! executor child-id task child-work-id))]
-      result)))
+    (let [child-work-id (resolve-child-work-id! db child-id work-id)]
+      (enforce-child-deadline! db child-work-id)
+      (let [executor (build-child-executor db child)
+            run-session! @(requiring-resolve 'evoclj.runtime.scheduler/run-session!)
+            ;; W2: reuse the Work the spawn created — never mint a second one.
+            ;; The child's sole execution identity is the :subagent/run Work
+            ;; spawn-subagent! persisted (queued); scheduler dispatches it to
+            ;; :running. Only when the child was never spawned (bare run,
+            ;; work-id nil) does the scheduler create its own :session/run
+            ;; Work.
+            ;; internal future await: Work's running is execution, future is only await
+            result @(future (run-session! executor child-id task child-work-id))
+            audit (when child-work-id (audit-child-task db child-work-id task))]
+        (cond-> result
+          audit (assoc :task/audit audit)
+          child-work-id (assoc :work/id child-work-id)))))))
+
+;; ---------------------------------------------------------------------------
+;; Async run + parent wait/wakeup join + queued-Work replay (W2)
+;; ---------------------------------------------------------------------------
+
+(def ^:const await-poll-ms
+  "Poll interval for await-child! Work-state wakeups."
+  50)
+
+(defn run-subagent-async!
+  "Asynchronously execute a child subagent session: resolves the child Work
+  (explicit `work-id` or the child's single Work, same contract as
+  run-subagent!) and runs run-subagent! inside a future. Returns
+  {:future <the await handle> :child/session-id _ :child/work-id _}.
+  W2: the Work row stays the execution truth — the future is only an
+  internal await handle, never an observable lifecycle. Join with
+  await-child! (durable Work poll) or deref the future directly."
+  ([db parent-session-id child-session-id task]
+   (run-subagent-async! db parent-session-id child-session-id task nil))
+  ([db parent-session-id child-session-id task work-id]
+  (when (nil? db)
+    (throw (ex-info "run-subagent-async! requires a db/store handle" {:error/type :store/session-invalid})))
+  (let [child-id (types/session-id child-session-id)
+        child-work-id (resolve-child-work-id! db child-id work-id)
+        f (future (run-subagent! db parent-session-id child-id task child-work-id))]
+    {:future f :child/session-id child-id :child/work-id child-work-id})))
+
+(defn await-child!
+  "Parent wait/wakeup join on a child session: poll the child's latest Work
+  until it reaches a terminal state (:succeeded :failed :cancelled
+  :timed-out) — the terminal row is the wakeup — and return that Work map.
+  `timeout-ms` bounds the wait; expiry throws :subagent/await-timeout
+  carrying the last observed :work/state (nil when the child has no Work
+  yet). Never blocks on a future: the DB row is the truth, so a crashed
+  runner still wakes the waiter via recovery or replay."
+  [db child-session-id timeout-ms]
+  (let [child-id (types/session-id child-session-id)
+        deadline (+ (System/currentTimeMillis) (or timeout-ms 0))]
+    (loop []
+      (let [w (some-> (last (try (work-store/list-works db child-id)
+                                 (catch Exception _ nil)))
+                      (#(try (work-store/fetch-work (db-spec db) (:work/id %))
+                             (catch Exception _ %))))]
+        (cond
+          (and w (contains? #{:succeeded :failed :cancelled :timed-out} (:work/state w))) w
+          (>= (System/currentTimeMillis) deadline)
+          (throw (err/error :subagent/await-timeout "timed out waiting for child Work to settle"
+                            {:child/session-id child-id
+                             :work/state (:work/state w)
+                             :work/id (:work/id w)
+                             :timeout-ms timeout-ms}))
+          :else (do (Thread/sleep await-poll-ms) (recur)))))))
+
+(defn child-task-for-work
+  "Recover the spawn-time task for a queued child Work `work-id` from the
+  parent's :subagent/spawned event metadata (:child/spec :task) — the
+  durable record written at spawn, so a queued Work is replayable after a
+  crash without the original caller. Throws :store/work-not-found when the
+  Work is missing, :subagent/task-not-found when no spawn event names this
+  child session."
+  [db work-id]
+  (let [spec (db-spec db)
+        w (work-store/fetch-work spec work-id)]
+    (when-not w
+      (throw (err/error :store/work-not-found "no work with this id" {:work/id work-id})))
+    (let [child-id (:work/session-id w)
+          parent-id (try (get-parent-session-id db child-id) (catch Exception _ nil))
+          task (when parent-id
+                 (some (fn [ev]
+                         (when (and (= :subagent/spawned (:event/type ev))
+                                    (= child-id (get-in ev [:metadata :child/session-id])))
+                           (get-in ev [:metadata :child/spec :task])))
+                       (try (event/events-for-session db parent-id) (catch Exception _ nil))))]
+      (if (nil? task)
+        (throw (err/error :subagent/task-not-found "no spawn-time task recorded for this child Work"
+                          {:work/id (:work/id w) :child/session-id child-id}))
+        task))))
+
+(defn poll-queued-children!
+  "Durable executor poll loop: find every :queued :subagent/run Work, recover
+  each one's spawn-time task via child-task-for-work, and run it with
+  `run-fn` — (fn [db parent-id child-id task work-id]), defaulting to the
+  synchronous run-subagent!. Queued orphans left by a crash stay :queued
+  (recover-works! never settles them), so a later poll replays them to a
+  terminal state. Returns a vector of {:work/id _ :status _} per replayed
+  Work, or {:work/id _ :error/type _} when the task is unrecoverable or the
+  run throws. Never throws for a single bad row — the loop continues."
+  ([db] (poll-queued-children! db nil))
+  ([db run-fn]
+  (let [run-fn (or run-fn (fn [db parent-id child-id task work-id]
+                            (run-subagent! db parent-id child-id task work-id)))
+        queued (try (work-store/fetch-works-by-state (db-spec db) :queued)
+                    (catch Exception _ []))]
+    (into []
+           (comp (filter #(= :subagent/run (:work/type %)))
+                 (map (fn [w]
+                        (let [wid (:work/id w)
+                              child-id (:work/session-id w)
+                              parent-id (try (get-parent-session-id db child-id)
+                                             (catch Exception _ nil))]
+                          (try
+                            (let [task (child-task-for-work db wid)
+                                  res (run-fn db parent-id child-id task wid)]
+                              {:work/id wid :status (:status res)})
+                            (catch clojure.lang.ExceptionInfo e
+                              {:work/id wid :error/type (:error/type (ex-data e))})
+                            (catch Throwable t
+                              {:work/id wid :error/type :subagent/replay-failed
+                               :error/message (ex-message t)}))))))
+           queued))))
+
+;; ---------------------------------------------------------------------------
+;; Work-graph navigation (W2: parent_work_id is the durable spawn graph;
+;; subagent_links is the session-level mirror kept for compat)
+;; ---------------------------------------------------------------------------
+
+(defn get-parent-work-id
+  "The parent Work id for `work-id`, or nil when `work-id` is a root Work.
+  Delegates to evoclj.store.work/get-parent-work-id (fail closed on missing)."
+  [db work-id]
+  (work-store/get-parent-work-id (db-spec db) work-id))
+
+(defn child-work-ids
+  "Direct child Work ids of `work-id` (oldest first, empty when childless).
+  Delegates to evoclj.store.work/child-work-ids (fail closed on missing)."
+  [db work-id]
+  (work-store/child-work-ids (db-spec db) work-id))
+
+(defn work-descendants
+  "All transitive descendant Work ids of `root-work-id` (BFS, excluding root).
+  Delegates to evoclj.store.work/work-descendants."
+  [db root-work-id]
+  (work-store/work-descendants (db-spec db) root-work-id))
+
+(defn work-depth
+  "Depth of `work-id` in the Work graph (root Work has depth 0).
+  Delegates to evoclj.store.work/work-depth."
+  [db work-id]
+  (work-store/work-depth (db-spec db) work-id))
+
+(defn work-fanout
+  "Number of direct child Works of `work-id`.
+  Delegates to evoclj.store.work/work-fanout."
+  [db work-id]
+  (work-store/work-fanout (db-spec db) work-id))
+
+(defn- work-subtree-session-ids
+  "Session ids owning `work-id` and all its transitive Work descendants.
+  Resolves each Work to its :work/session-id; unresolvable rows are skipped
+  (a Work whose session row is gone revokes nothing, but must not abort
+  the cascade)."
+  [db work-id]
+  (let [spec (db-spec db)
+        ids (into [work-id] (try (work-store/work-descendants spec work-id)
+                                 (catch Exception _ [])))]
+    (into []
+           (comp (map (fn [wid] (try (work-store/fetch-work spec wid) (catch Exception _ nil))))
+                 (filter some?)
+                 (map :work/session-id)
+                 (filter some?)
+                 (distinct))
+           ids)))
 
 ;; ---------------------------------------------------------------------------
 ;; S4 — cancellation and cascade revoke
@@ -561,6 +856,21 @@
                                  (catch Exception _ []))
                       visited' (conj visited cur)]
                   (recur (into rest-q children) visited' (into result children)))))))))))
+
+(defn- cancel-targets
+  "Union of the session-link subtree (child + transitive descendants via
+  subagent_links) and the Work-graph subtree (every session owning the
+  child's Works or their transitive Work descendants). The Work graph is
+  the durable truth; the link table is the compat mirror — cancelling the
+  union keeps both views consistent when either lags."
+  [db child-id]
+  (let [link-targets (into [child-id] (try (list-descendants db child-id)
+                                           (catch Exception _ [])))
+        works (try (work-store/list-works db child-id) (catch Exception _ []))
+        work-targets (mapcat #(try (work-subtree-session-ids db (:work/id %))
+                                   (catch Exception _ []))
+                             works)]
+    (vec (distinct (concat link-targets work-targets)))))
 
 (defn- revoke-leases-for-session*
   "P1 durable-first revocation: UPDATE capabilities WHERE revoked=0 before swap! cache.
@@ -641,6 +951,7 @@
 (defn cancel-subagent!
   "Cancel a single child subagent session `child-session-id` spawned from
   `parent-session-id`. Cascade: also cancels all transitive descendants
+  (union of the session-link BFS and the Work-graph BFS from the child's Works).
   - drive each target session's Work to :cancelled (CAS on works.state —
     idempotent: already :cancelled is a no-op, other terminal Work states
     are left as-is);
@@ -680,9 +991,10 @@
     ;; idempotent: if child already cancelled, no-op (still return)
     (if (= :cancelled (session-work-state db child-id))
       {:cancelled [] :already-cancelled? true :child/session-id child-id}
-      (let [;; collect subtree: child plus all its descendants
+      (let [;; collect subtree: child plus descendants from BOTH graphs —
+            ;; the session-link BFS and the Work-graph BFS (union, durable first)
             descendants (list-descendants db child-id)
-            targets (into [child-id] descendants)]
+            targets (cancel-targets db child-id)]
         ;; revoke leases for each target
         (doseq [tid targets]
           (revoke-leases-for-session* db tid))
@@ -706,7 +1018,8 @@
 
 (defn cancel-subagent-tree!
   "Cascade-cancel the entire subtree rooted at `root-session-id`
-  (including root and all transitive descendants via subagent_links).
+  (including root and all transitive descendants — union of the session-link
+  BFS and the Work-graph BFS from the root's Works).
   Revokes leases and marks each session :cancelled (idempotent).
 
   `reason` stored in event metadata (default :user-request).
@@ -724,7 +1037,7 @@
     (if (= :cancelled (session-work-state db root-id))
       {:cancelled [] :already-cancelled? true :root/session-id root-id}
       (let [descendants (list-descendants db root-id)
-            targets (into [root-id] descendants)]
+            targets (cancel-targets db root-id)]
         (doseq [tid targets]
           (revoke-leases-for-session* db tid))
         (doseq [tid targets]
@@ -879,17 +1192,23 @@
   "Malli output schema for :agent/spawn."
   [:map {:closed false}
    [:child/session-id uuid?]
+   [:child/work-id {:optional true} uuid?]
    [:child/capabilities {:optional true} [:vector :map]]])
 
 (def AgentStatusArgsSchema
-  "Malli input schema for :agent/status."
+  "Malli input schema for :agent/status. Either :session-id (the child
+  session uuid string) or :work-id (the child Work uuid string, resolved
+  to its owning session) selects the target — the Work handle is
+  first-class. At least one is required (enforced at execute time)."
   [:map {:closed true}
-   [:session-id string?]])
+   [:session-id {:optional true} string?]
+   [:work-id {:optional true} string?]])
 
 (def AgentStatusOutputSchema
   "Malli output schema for :agent/status — at minimum the session id and state."
   [:map {:closed false}
    [:session/id {:optional true} uuid?]
+   [:work/id {:optional true} uuid?]
    [:state {:optional true} keyword?]])
 
 (def agent-spawn-tool-descriptor
@@ -918,8 +1237,10 @@
    :tool/description "Query subagent status"
    :tool/parameters {:type "object"
                      :properties {:session-id {:type "string"
-                                              :description "Child session id (uuid string)"}}
-                     :required ["session-id"]}
+                                              :description "Child session id (uuid string)"}
+                                 :work-id {:type "string"
+                                           :description "Child Work id (uuid string) — resolves to its owning session"}}
+                     :required []}
    :effect :pure
    :input-schema AgentStatusArgsSchema
    :output-schema AgentStatusOutputSchema
@@ -954,8 +1275,10 @@
    :description "Query subagent status"
    :parameters {:type "object"
                 :properties {:session-id {:type "string"
-                                         :description "Child session id (uuid string)"}}
-                :required ["session-id"]}
+                                         :description "Child session id (uuid string)"}
+                             :work-id {:type "string"
+                                       :description "Child Work id (uuid string) — resolves to its owning session"}}
+                :required []}
    :tool :agent/status})
 
 (def subagent-tool-catalog
@@ -1003,7 +1326,9 @@
   execute-request! calls spawn-subagent! with the task, attenuating the
   BROKER's leases (carried on the authorized request by the pipeline —
   never empty-by-construction) into child leases, and returns
-  {:child/session-id <uuid> :child/capabilities [...]} (EDN-safe).
+  {:child/session-id <uuid> :child/work-id <uuid> :child/capabilities [...]}
+  (EDN-safe). The tool path keeps the latest-Work parent fallback (model
+  args carry no Work); the Intent path requires an explicit :parent/work-id.
   Depth/budget caps are enforced by spawn-subagent! itself."
   ([db] (agent-spawn-provider db nil))
   ([db parent-session-id]
@@ -1037,49 +1362,75 @@
             parent-leases (or (:leases authorized-request) [])
             res (spawn-subagent! db parent-id child-spec parent-leases)]
          {:child/session-id (:child/session-id res)
+          :child/work-id (:child/work-id res)
           :child/capabilities (:child/capabilities res)})))))
+(defn- resolve-status-target
+  "Resolve an :agent/status target from `args`: :work-id (first-class Work
+  handle — the Work must exist, resolved to its owning session) or
+  :session-id. Returns {:session/id _ :work/id-or-nil _}. Throws
+  :provider/request-invalid when neither handle is present,
+  :store/work-not-found when the Work handle names no row."
+  [db args]
+  (let [work-str (:work-id args)]
+    (if (some? work-str)
+      (let [wid (try (UUID/fromString (str work-str)) (catch Exception _ work-str))
+            w (try (work-store/fetch-work (db-spec db) wid) (catch Exception _ nil))]
+        (when-not w
+          (throw (err/error :store/work-not-found "status Work handle names no row"
+                            {:work/id work-str})))
+        {:session/id (:work/session-id w) :work/id (:work/id w)})
+      (let [sid-str (:session-id args)]
+        (when-not sid-str
+          (throw (err/error :provider/request-invalid
+                            "agent/status requires :session-id or :work-id"
+                            {:value (err/sanitize args)})))
+        {:session/id (try (types/session-id sid-str) (catch Exception _ sid-str))
+         :work/id nil}))))
 
 (defn agent-status-provider
   "Build the kernel-owned :agent/status provider (component).
 
   `db` — sqlite handle. normalize validates args and binds the requesting
   session (the intent's :session/id) as :requester/session-id. execute
-  returns the session map's public fields + child/depth info when
-  available, but ONLY for descendants of the requester: any other target
-  (self, parent, sibling, unrelated) fails closed with
-  :capability/scope-denied. A missing session still reports {:found
-  false} (the pre-existing contract)."
+  resolves the target from :session-id or :work-id (first-class Work
+  handle → owning session) and returns the session map's public fields +
+  child/depth info when available, but ONLY for descendants of the
+  requester: any other target (self, parent, sibling, unrelated) fails
+  closed with :capability/scope-denied. A missing session still reports
+  {:found false} (the pre-existing contract)."
   [db]
   (reify proto/Provider
     (describe [_] agent-status-tool-descriptor)
-     (normalize-request [_ intent]
-       (let [args (tool-args intent)
-             _ (validate-args! agent-status-tool-descriptor args)]
-         {:tool/id :agent/status
-          :resource {:kind :tool :id :agent/status}
-          :args args
-          :requester/session-id (:session/id intent)}))
-     (execute-request! [_ authorized-request]
-       (let [requester (:requester/session-id authorized-request)]
-         (when-not requester
-           (throw (err/error :provider/request-invalid
-                             "agent/status requires the requesting session id (intent :session/id)"
-                             {:value (err/sanitize authorized-request)})))
-         (let [sid-str (get-in authorized-request [:args :session-id])
-               sid (try (types/session-id sid-str) (catch Exception _ sid-str))
-               sess (try (session/get-session db sid) (catch Exception _ nil))]
-           (if-not sess
-             {:found false :reason :session-not-found :session/id sid}
-             (let [descendants (try (set (list-descendants db requester))
-                                    (catch Exception _ #{}))]
-               (when-not (contains? descendants sid)
-                 (throw (err/error :capability/scope-denied
-                                   "agent/status is descendant-scoped: the target is not a descendant of the requesting session"
-                                   {:requester/session-id requester
-                                    :target/session-id sid})))
-               {:found true
-                :session/id (:session/id sess)
-                :state (or (session-work-state db (:session/id sess)) (:state sess))
-                :phenotype/id (:phenotype/id sess)
-                :depth (try (subagent-depth db sid) (catch Exception _ nil))
-                :children (try (child-session-ids db sid) (catch Exception _ []))})))))))
+    (normalize-request [_ intent]
+      (let [args (tool-args intent)
+            _ (validate-args! agent-status-tool-descriptor args)]
+        {:tool/id :agent/status
+         :resource {:kind :tool :id :agent/status}
+         :args args
+         :requester/session-id (:session/id intent)}))
+    (execute-request! [_ authorized-request]
+      (let [requester (:requester/session-id authorized-request)]
+        (when-not requester
+          (throw (err/error :provider/request-invalid
+                            "agent/status requires the requesting session id (intent :session/id)"
+                            {:value (err/sanitize authorized-request)})))
+        (let [target (resolve-status-target db (:args authorized-request))
+              sid (:session/id target)
+              sess (try (session/get-session db sid) (catch Exception _ nil))]
+          (if-not sess
+            (cond-> {:found false :reason :session-not-found :session/id sid}
+              (:work/id target) (assoc :work/id (:work/id target)))
+            (let [descendants (try (set (list-descendants db requester))
+                                   (catch Exception _ #{}))]
+              (when-not (contains? descendants sid)
+                (throw (err/error :capability/scope-denied
+                                  "agent/status is descendant-scoped: the target is not a descendant of the requesting session"
+                                  {:requester/session-id requester
+                                   :target/session-id sid})))
+              (cond-> {:found true
+                       :session/id (:session/id sess)
+                       :state (or (session-work-state db (:session/id sess)) (:state sess))
+                       :phenotype/id (:phenotype/id sess)
+                       :depth (try (subagent-depth db sid) (catch Exception _ nil))
+                       :children (try (child-session-ids db sid) (catch Exception _ []))}
+                (:work/id target) (assoc :work/id (:work/id target))))))))))

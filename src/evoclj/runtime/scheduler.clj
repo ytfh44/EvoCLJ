@@ -431,15 +431,19 @@
 (defn- create-session-work!
   "Create the session's sole execution Work (:session/run, queued). Mandatory:
   a failed INSERT aborts the run (typed) — Work is the execution identity, not
-  a best-effort sidecar (W2). Returns the new work-id."
-  [db session-id]
+  a best-effort sidecar (W2). `task-ref` (a CAS artifact id for the run's
+  task input, nil when empty) is persisted as :work/payload-ref so the
+  queued Work carries its task before dispatch. Returns the new work-id."
+  ([db session-id] (create-session-work! db session-id nil))
+  ([db session-id task-ref]
   (let [wid (java.util.UUID/randomUUID)]
-    (work-store/create-work! db {:work/id wid
-                                 :work/type :session/run
-                                 :work/state :queued
-                                 :work/session-id session-id
-                                 :work/created-at (java.util.Date.)})
-    wid))
+    (work-store/create-work! db (cond-> {:work/id wid
+                                         :work/type :session/run
+                                         :work/state :queued
+                                         :work/session-id session-id
+                                         :work/created-at (java.util.Date.)}
+                                  task-ref (assoc :work/payload-ref task-ref)))
+    wid)))
 
 ;; --- terminal session outcomes ----------------------------------------------
 
@@ -640,7 +644,11 @@
                                               "provided work-id does not exist"
                                               {:work/id work-id})))
                           work-id)
-                      (create-session-work! db (:session/id pin)))
+                      ;; creation path mints the row WITH the task ref so the
+                      ;; queued Work is replayable; the provided path (a
+                      ;; :subagent/run Work from spawn) already carries its
+                      ;; spawn-time digest bind and is left untouched.
+                      (create-session-work! db (:session/id pin) (payload-ref executor task-input)))
             _work-running (try-work-transition! db work-id work-store/dispatch-work!)]
         (let [started (append-event! executor pin (:event/id root) :session/started
                                      (put-payload! executor task-input)

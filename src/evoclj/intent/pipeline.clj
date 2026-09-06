@@ -551,20 +551,32 @@
                           nil @usage-atom))
       (let [payload (:payload intent)
             parent-id (:parent/session-id payload)
+            parent-work-id (:parent/work-id payload)
             requester (:session/id intent)]
-        (if (not= parent-id requester)
+        (cond
+          (not= parent-id requester)
           (emit (result-error intent :capability/principal-mismatch
                               "subagent spawn parent must equal the intent's session (I2 principal binding)"
                               {:parent/session-id parent-id
                                :session/id requester}
                               nil @usage-atom))
+          ;; W2: the Intent path never uses the latest-Work heuristic — the
+          ;; spawn must name the exact parent Work it is attributed to (the
+          ;; :agent/spawn tool path keeps the fallback; model args carry no Work).
+          (nil? parent-work-id)
+          (emit (result-error intent :store/work-invalid
+                              "subagent spawn requires an explicit :parent/work-id (no latest-Work fallback on the Intent path)"
+                              {:parent/session-id parent-id}
+                              nil @usage-atom))
+          :else
           (try
             (let [res (subagent/spawn-subagent!
                        db parent-id
                        (or (:child/spec payload) {})
                        (:leases broker-context)
-                       {:parent/work-id (:parent/work-id payload)})]
+                       {:parent/work-id parent-work-id})]
               (emit (result-ok intent {:child/session-id (:child/session-id res)
+                                       :child/work-id (:child/work-id res)
                                        :child/capabilities (:child/capabilities res)}
                                nil @usage-atom)))
             (catch clojure.lang.ExceptionInfo e

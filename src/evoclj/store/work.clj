@@ -146,6 +146,68 @@
     (throw (err/error :store/work-invalid "state not in Work vocabulary" {:state state})))
   (let [rows (sqlite/query db ["SELECT * FROM works WHERE state = ?" (state->db state)])]
     (mapv row->work rows)))
+(defn get-parent-work-id
+  "The parent Work id for `work-id`, or nil when `work-id` is a root Work.
+  Throws :store/work-not-found when no Work has this id (fail closed —
+  callers must not invent parent links)."
+  [db work-id]
+  (let [w (fetch-work db work-id)]
+    (when-not w
+      (throw (err/error :store/work-not-found "no work with this id" {:work/id work-id})))
+    (:work/parent-work-id w)))
+
+(defn child-work-ids
+  "Direct child Work ids of `work-id` (ordered by created_at, oldest first).
+  Empty vector when childless. Throws :store/work-not-found when `work-id`
+  itself is missing (fail closed)."
+  [db work-id]
+  (when-not (fetch-work db work-id)
+    (throw (err/error :store/work-not-found "no work with this id" {:work/id work-id})))
+  (mapv #(UUID/fromString (:id %))
+        (sqlite/query db ["SELECT id FROM works WHERE parent_work_id = ? ORDER BY created_at"
+                          (str work-id)])))
+
+(defn work-descendants
+  "All transitive descendant Work ids of `root-work-id` via parent_work_id
+  (BFS, not including `root-work-id`). Throws :store/work-not-found when
+  the root is missing."
+  [db root-work-id]
+  (when-not (fetch-work db root-work-id)
+    (throw (err/error :store/work-not-found "no work with this id" {:work/id root-work-id})))
+  (loop [queue [(UUID/fromString (str root-work-id))] visited #{} result []]
+    (if (empty? queue)
+      result
+      (let [cur (first queue)
+            rest-q (vec (rest queue))]
+        (if (contains? visited cur)
+          (recur rest-q visited result)
+          (let [children (try (child-work-ids db cur) (catch Exception _ []))
+                visited' (conj visited cur)]
+            (recur (into rest-q children) visited' (into result children))))))))
+
+(defn work-depth
+  "Depth of `work-id` in the Work graph. A root Work (no parent) has depth
+  0, its child depth 1, etc. Throws :store/work-not-found when missing."
+  [db work-id]
+  (let [w (fetch-work db work-id)]
+    (when-not w
+      (throw (err/error :store/work-not-found "no work with this id" {:work/id work-id})))
+    (loop [cur (:work/parent-work-id w) depth 0 seen #{}]
+      (if (nil? cur)
+        depth
+        (if (contains? seen cur)
+          depth
+          (let [parent (fetch-work db cur)]
+            (if-not parent
+              depth
+              (recur (:work/parent-work-id parent) (inc depth) (conj seen cur)))))))))
+
+(defn work-fanout
+  "Number of direct child Works of `work-id`. Throws :store/work-not-found
+  when missing."
+  [db work-id]
+  (count (child-work-ids db work-id)))
+
 
 ;; ---------------------------------------------------------------------------
 ;; State machine transitions (CAS)
