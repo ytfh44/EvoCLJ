@@ -86,7 +86,6 @@
             [evoclj.environment.source :as src]
             [evoclj.environment.bundle :as bundle]
             [evoclj.kernel.error :as err]
-            [evoclj.store.command :as command]
             [evoclj.store.sqlite :as sqlite]
             [evoclj.store.work :as work-store]
             [evoclj.support.failpoint :as fault]))

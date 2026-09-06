@@ -20,7 +20,7 @@
   ([port system]
    (when port
      (let [wrapped (fn [request]
-                     ((api/handler) (assoc request :system system)))]
+                     (api/handler (assoc request :system system)))]
        (jetty/run-jetty wrapped {:port (int port) :join? false})))))
 
 (defn stop-server!

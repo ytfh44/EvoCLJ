@@ -57,9 +57,9 @@
   :max-iterations — distinguished by :reason), :topology/cycle (a
   raw cycle without a :loop node, with the sorted cycle node ids in
   :nodes), and :topology/unsupported-node-type (a syntactically known
-  node type with no runtime handler — e.g. :route — rejected at
-  compile time because Definition > validation: only executable types
-  are representable via compile; the :reason is
+  node type excluded from the executable feature set the caller passed —
+  rejected at compile time because Definition > validation: only
+  executable types are representable via compile; the :reason is
   :unsupported-node-type and :node/type carries the offending type)."
   (:require [evoclj.capability.core :as capability]
             [evoclj.kernel.error :as err]
@@ -68,14 +68,20 @@
 
 (def syntax-node-types
   "The normative v0 syntax node type set — every type the compiler knows syntactically (definition).
-  :route is syntactically valid but not executable without a handler; see executable-node-types."
-  #{:llm :sci :tool :route :loop :emit :memory/read :memory/write})
+  Syntax IS the executable set: every known type has a runtime handler (see executable-node-types).
+  The :route reservation was removed (ExtraModules repair): it declared only a single :next edge
+  and no branch attributes, so it carried no semantics a plain edge does not already carry —
+  all v0 control flow is :sci decisions + :loop iteration + :tool/:llm/:emit terminals.
+  Reserving it widened syntax without execution meaning; it is rejected as an unknown type now
+  and returns with a handler plus edge schema when branching semantics are specified."
+  #{:llm :sci :tool :loop :emit :memory/read :memory/write})
 
 (def executable-node-types
   "The subset of syntax-node-types the runtime can execute today (handler exists).
-  Definition > validation: only executable types are representable via compile; :route is
-  syntax-only until its handler lands, so compile rejects it with :topology/unsupported-node-type
-  unless the caller provides an expanded runtime feature set that includes it."
+  Definition > validation: only executable types are representable via compile; since every
+  syntax type has a handler, this equals syntax-node-types. Callers may still pass a narrowed
+  feature set, in which case excluded syntax types are rejected with
+  :topology/unsupported-node-type."
   #{:llm :sci :tool :loop :emit :memory/read :memory/write})
 
 (def ^:private required-keys
@@ -83,10 +89,9 @@
   Region/Loop shape: :body is the iterated node id, :exit is the normal
   successor, :until is the done? program id, and :max-iterations is a
   positive integer."
-  {:llm #{:model}
+{:llm #{:model}
    :sci #{:program}
    :tool #{:tool}
-   :route #{:next}
    :loop #{:exit :body :until :max-iterations}
    :emit #{}
    :memory/read #{:memory}
@@ -658,9 +663,9 @@
   :topology/cycle (a normal control-flow cycle with sorted :nodes),
   :topology/type-mismatch (edge output not subtype of input, with
   :reason :type-mismatch, :from, :to, and :edge), or
-  :topology/unsupported-node-type (a syntactically known type with no
-  runtime handler; :reason :unsupported-node-type, :node/type carries
-  the offending type; :route is the canonical example)."
+  :topology/unsupported-node-type (a syntactically known type excluded from the
+  executable feature set the caller passed; :reason :unsupported-node-type, :node/type
+  carries the offending type)."
   ([topology] (compile-topology topology executable-node-types nil))
   ([topology executable-types]
    (compile-topology topology executable-types nil))

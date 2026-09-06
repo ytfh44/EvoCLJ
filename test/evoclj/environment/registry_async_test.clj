@@ -6,7 +6,6 @@
             [evoclj.environment.registry :as reg]
             [evoclj.environment.source :as src]
             [evoclj.environment.static :as static]
-            [evoclj.store.command :as cmd]
             [evoclj.store.work :as work]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]

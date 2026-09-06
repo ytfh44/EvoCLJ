@@ -112,134 +112,63 @@ fingerprints (determinism).
   `:scheduler/session-invalid`.
 - Recovery of a session interrupted mid-run is the store recovery
   layer's job (component), not the scheduler's.
-## 7. Async commands — durable outbox and recoverable execution
+## 7. Async durable work — the `works` lifecycle (W1/W2)
 
-**Components:** `evoclj.store.command` (schema, SM, outbox), `evoclj.store.recovery` (orphan classification and recovery), `evoclj.environment.registry` (`refresh-async!`), `evoclj.mcp.adapter` (Tasks `continue`). Wolfram [W-20..W-27] (`docs/formal/async-model.md`).
+**Components:** `evoclj.store.work` (schema, 7-state SM, CAS, deadline sweeper), `evoclj.store.recovery` (orphan classification and recovery), `evoclj.runtime.work` (vocabulary + SM verification), `evoclj.runtime.subagent` (executor poll loop + wait/wakeup join), `evoclj.environment.registry` (`refresh-async!`), `evoclj.mcp.adapter` (Tasks `continue`). Wolfram [W-20..W-27] (`docs/formal/async-model.md`).
 
-> **Lifecycle note (W1/W2):** `Work` (`works` table, 7-state SM
-> `queued|running|waiting|succeeded|failed|cancelled|timed-out`) is the sole
-> durable lifecycle for new code (INV-12). The `commands` six-state track
-> documented below is the retained compat/backfill path: `store/recovery.clj`
-> keeps `find-orphaned-commands`/`recover-commands!` as a deprecated thin
-> wrapper over Work recovery for one migration cycle. New code must use the
-> Work APIs (`evoclj.store.work`, `evoclj.runtime.work`).
+> **Retired (ExtraModules repair):** the heritage `commands` six-state compat track (`store/command.clj`, `find-orphaned-commands`/`recover-commands!`) is removed — Work is the only lifecycle (INV-12). The `commands` table remains in old databases as inert history (migration `018-work.sql` backfilled it into `works`). The per-state command history lives in git, not here.
 
-On the retained `commands` track, async commands eliminate bare `future`. Every piece of work that outlives its call site is reified as a row in `commands`, tracked by a six-state machine, and resumable after a crash. The write path is an **outbox**: the command row and its `:command/submitted` announcement are committed in one `BEGIN IMMEDIATE` transaction, so they co-live or co-die.
-
-### 7.1 `commands` table
-
-DDL lives in `resources/migrations/012-commands.sql` and is enforced by `store/command.clj` Malli `CommandSchema`:
-
-```sql
-CREATE TABLE IF NOT EXISTS commands (
-  id                TEXT PRIMARY KEY,
-  type              TEXT NOT NULL,
-  state             TEXT NOT NULL CHECK (state IN ('queued','running','succeeded','failed','timed_out','cancelled')),
-  idempotency_key   TEXT NOT NULL UNIQUE,
-  payload_ref       TEXT NOT NULL,  -- sha256: reference to CAS bytes
-  owner_session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
-  parent_cmd_id     TEXT REFERENCES commands(id) ON DELETE SET NULL,
-  continuation_edn  TEXT,
-  deadline          TEXT,
-  created_at        TEXT NOT NULL
-);
-```
-
-* `state` CHECK is the DB mirror of `CommandState` (`[:enum :queued :running :succeeded :failed :timed-out :cancelled]`) — illegal states are rejected even if Malli is bypassed.
-* `idempotency_key UNIQUE` is the at-most-once fence at the storage layer.
-* `payload_ref` is `sha256:` content-addressed (same discipline as `store/cas` and genome artifacts); bytes live in CAS, the row stores the reference.
-* `owner_session_id` FK pins the command to the session that submitted it.
-* `parent_cmd_id` self-FK chains continuations (nullable, `ON DELETE SET NULL`).
-
-### 7.2 State machine
+Async work eliminates bare `future`. Every piece of work that outlives its call site is reified as a row in `works`, tracked by the closed 7-state machine, and resumable after a crash:
 
 ```
-queued | running | succeeded | failed | timedOut | cancelled
+queued | running | waiting | succeeded | failed | timed-out | cancelled
 ```
 
-Stored as lowercase `TEXT` (`timed_out` in SQLite, mapped to `:timed-out` in code via `state->db` / `db->state`). Six is the complete set — no other string passes the `CHECK`.
+Stored as lowercase `TEXT` (`timed_out` in SQLite, mapped to `:timed-out` in code). Transitions are CAS-guarded (`WHERE state IN (...)` — concurrent drivers cannot both move the same row); terminals are sinks. Wolfram checks [W-20..W-24] cover the SM (`runtime/work.clj` verification + `work_property_test.clj` 100-round walks).
 
-| From | To | Helper in `store/command.clj` | CAS guard |
-| --- | --- | --- | --- |
-| `:queued` | `:running` | `dispatch-command!` | `WHERE state = 'queued'` — concurrent dispatchers cannot both move the same row |
-| `:queued` | `:failed` | `fail-command!` | `WHERE state IN ('queued','running')` |
-| `:queued` | `:cancelled` | `cancel-command!` | `WHERE state IN ('queued','running')` |
-| `:running` | `:succeeded` | `succeed-command!` | `WHERE state = 'running'`; writes `:command/completed` + CAS result pattern mirrors `store/promotion_outbox` |
-| `:running` | `:failed` | `fail-command!` | `WHERE state = 'running'` (typed error) |
-| `:running` | `:timedOut` | `timeout-command!` | `WHERE state = 'running'`; gated by `deadline-passed?` on `:cmd/deadline` vs now; `make-interrupt-fn` is non-capturable |
-| `:running` | `:cancelled` | `cancel-command!` | `WHERE state IN ('queued','running')` (explicit cancel, not a timeout) |
+| From | To | Helper in `store/work.clj` |
+| --- | --- | --- |
+| `:queued` | `:running` | `dispatch-work!` |
+| `:running` | `:waiting` | `wait-work!` (paused for input — subagent child, external signal) |
+| `:running\|:waiting` | `:succeeded` | `succeed-work!` |
+| `:queued\|:running\|:waiting` | `:failed` | `fail-work!` |
+| `:queued\|:running\|:waiting` | `:cancelled` | `cancel-work!` (explicit intent, not a timeout) |
+| `:running\|:waiting` | `:timed-out` | `timeout-work!` (after deadline; see the sweeper below) |
 
-No other edges exist; in particular there is no `running -> queued` (re-queue requires a fresh row with a new key). Wolfram checks [W-20] `edgesLegalQ`, [W-21] `acyclicQ`, [W-22] `fourTerminalsSinkQ` (`succeeded, failed, timedOut, cancelled` are sinks), [W-23] `queuedToSucceededPathQ`, [W-24] `queuedToTimedOutPathQ` — all pass (`async-model.md` section 1.3).
+### 7.1 Recovery of orphans — `store/recovery.clj`
 
-### 7.3 Same-transaction outbox — `create-command-with-event!`
+After a restart any row still in `queued`, `running`, or `waiting` has no in-process worker driving it. `store/recovery.clj` is the recovery scan:
 
-`store/command.clj` `create-command-with-event!` is the single outbox writer:
+* `find-orphaned-works` — read-only classification; terminals are never reported.
+* `recover-works!` — **report, not fabricate**: `:queued` orphans stay `:queued` (no write) so redelivery is possible; `:running`/`:waiting` orphans move to `:failed` with `{:error/type :recovery/orphaned}` via CAS — NEVER synthesized `:succeeded`.
 
-```text
-BEGIN IMMEDIATE                           -- with-command-tx
-  1. INSERT INTO commands (...)           -- command row
-  2. INSERT event :command/submitted      -- same connection, same TX
-     -- seq = max(seq)+1 for owner session, cause validated (compat-track:
-     -- earlier event in the same session), prev-hash linked,
-     -- hash = sha256(canonical-header) where canonical-header is the v2
-     -- 11-line header (store/command canonical-header, lockstep with
-     -- store/event; the cause id occupies the prev slot)
-COMMIT  -- or ROLLBACK on any failure
-```
+The report shape is `{:orphaned-works [...] :recovered-queued [...] :recovered-running [...]}`. Re-running on already-terminal rows is a no-op.
 
-Helpers on the same connection: `with-command-tx` (TX macro, rollback on throw), `insert-event-in-tx!` (raw JDBC event insert including `cause` session check and `edn-safe-metadata?` guard), `canonical-header` / `event-hash` (deterministic header serialization shared with `store/event`). The outbox copies the `store/promotion_outbox` single-DB atomic pattern and the FK-owner discipline.
+### 7.2 Deadline sweeper — `sweep-expired-deadlines!`
 
-Failpoint contract (A2): inject a failure after step 1 before step 2 — on retry neither row nor event exists; after a clean commit both exist and `cause` points at the parent. `create-command!` (simple non-outbox path) and `duplicate-key?` detection still run on the same table so bare and outbox inserts share the `UNIQUE` fence.
+`store/work.clj` `sweep-expired-deadlines!` drives every non-terminal Work whose `:work/deadline` has passed to its timeout terminal via CAS: `:queued -> :failed`, `:running`/`:waiting -> :timed-out` (each carrying `{:error/type :work/deadline-exceeded}` in the report). Rows without a deadline and terminal rows are untouched; a CAS race on one row is skipped, never thrown; re-running is a no-op. Tests inject a fixed `now`; production passes none.
 
-### 7.4 Idempotency
+### 7.3 Executor poll loop — sweep, redeliver, wake up
 
-`idempotency_key` is the GC deduplication key. DB `UNIQUE` enforces at-most-once even if code forgets. Re-submitting the same logical command returns the existing row without executing a second time. The creation helpers `create-command!` and `create-command-with-event!` both surface `duplicate-key?` so callers can distinguish "inserted" from "already existed".
+`runtime/subagent.clj` owns the durable join. `poll-queued-children!` is the loop: first sweep expired deadlines (best-effort preamble, never stops the poll), then redeliver every remaining `:queued` `:subagent/run` Work by recovering its spawn-time task and running it to a terminal state. `await-child!` is the waiting half: a parent polls the child's Work row until it reaches a terminal state — the terminal row IS the wakeup, so a crashed runner still wakes the waiter via recovery or replay. Neither path blocks on a future: the DB row is the truth.
 
-### 7.5 Recovery of orphans — `store/recovery.clj`
-
-After a restart any row still in `queued` or `running` has no in-process worker driving it. `store/recovery.clj` is the recovery scan:
-
-* `find-orphaned-commands` — read-only classification: `SELECT ... WHERE state IN ('queued','running')` ordered by `created_at`; terminals are never reported.
-* `recover-commands!` — **report, not fabricate** (preserves the "never fabricate completion" invariant from `store/recovery` for sessions):
-
-```clojure
-;; queued orphan  -> left :queued (no write) so redelivery is possible;
-;;                  resubmit of the same idempotency_key hits UNIQUE and re-queues exactly once
-;; running orphan -> fail-command! with {:error/type :recovery/orphaned}
-;;                  row moves :running -> :failed; NEVER synthesizes :succeeded
-```
-
-The report shape is `{:orphaned-commands [...] :recovered-queued [...] :recovered-running [...]}`. The host decides whether to re-submit a queued key; the running case is crash residue, not a real execution failure, and is surfaced via `:recovery/orphaned`.
-
-### 7.6 Dispatch, timeout, and cancel
-
-* **Dispatch** — `dispatch-command!` compare-and-sets `queued -> running` and then drives the work through the existing broker/provider path (same execution path the scheduler uses for intents). Completion writes a CAS artifact reference plus a `:command/completed` event atomically with the state change (A3).
-* **Timeout** — `:cmd/deadline` powers `timedOut`. `store/command.clj` `deadline-passed?` compares deadline vs now; `timeout-command!` moves `running -> timedOut` and appends `:command/timed-out` on the owner's chain. The SCI interrupt it cooperates with is `sci/limits` `make-interrupt-fn` (non-capturable).
-* **Cancel** — `cancel-command!` moves `queued|running -> cancelled` (explicit intent, not a timeout) and appends `:command/cancelled`. All three helpers are CAS-guarded — a mismatched `state` throws with `{:expected ... :state actual}`.
-
-### 7.7 Host wiring — `refresh-async!` and MCP Tasks `continue`
+### 7.4 Host wiring — `refresh-async!` and MCP Tasks `continue`
 
 ```text
 refresh-async! (environment/registry.clj)
-  before A6: (future (refresh! ...))           -- leaked future, no audit trail
-  now:        synthesizes an :environment/refresh command (id, type, idempotency-key,
-              sha256 payload-ref, owner via resolve-refresh-owner, created-at)
-              -> when a durable :store is wired, create-command! + dispatch-command!
-                 queued->running->succeeded/failed inside the future;
-              -> retains the command map under :command-queue / :last-command so
-                 no-DB tests can assert auditability without a DB;
-              -> stores the raw future under :last-refresh-future but returns the
-                 command map (not the future) — the command is the observable result
-              -> no future handle is leaked as the return value
+  synthesizes an :environment/refresh Work (id, type, state :queued)
+  -> when a durable :store is wired, create-work! + queued->running->succeeded/failed;
+  -> retains the work map under :work-queue / :last-work for auditability;
+  -> no future handle is leaked as the return value (W1: no :last-refresh-future)
 
 MCP Tasks continuation (mcp/adapter.clj)
-  2026 path (Adapter2026/continue): persists a command with parent_cmd_id +
-             continuation_edn and returns {:status :continuing, :command-id id, :command cmd}
-  2025 fallback (Adapter2025/continue): degrades to the same command queue
-             (does NOT throw :mcp/not-supported), returns {:status :queued, :command-id id}
+  2026 path (Adapter2026/continue): persists an :mcp/continue Work and
+             returns {:status :continuing, :work/id id, :work work}
+  2025 fallback (Adapter2025/continue): degrades to the same Work audit
+             (does NOT throw :mcp/not-supported), returns {:status :queued, :work/id id}
 ```
 
-Both paths go through `store/command.clj` (`make-mcp-continue-cmd` + `create-command!`) so recovery and cancellation apply uniformly. Tests assert no leaked future handle remains after `refresh-async!` and that both 2026 and 2025 adapters produce a command row when a store is present.
+Both paths persist `:mcp/continue` / `:environment/refresh` Works best-effort (a store failure leaves the audit in-band, never throws) so recovery and cancellation apply uniformly. Tests assert no leaked future handle remains after `refresh-async!` and that both 2026 and 2025 adapters produce a Work row when a store is present.
 
 ## 8. Subagents — Work-supervised child executions
 

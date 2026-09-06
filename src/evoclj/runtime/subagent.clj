@@ -771,20 +771,28 @@
         task))))
 
 (defn poll-queued-children!
-  "Durable executor poll loop: find every :queued :subagent/run Work, recover
-  each one's spawn-time task via child-task-for-work, and run it with
+  "Durable executor poll loop: sweep expired deadlines, then redeliver queued children.
+  First work-store/sweep-expired-deadlines! drives every non-terminal Work whose
+  :work/deadline has passed to its timeout terminal (:queued -> :failed,
+  :running/:waiting -> :timed-out, best-effort — a sweep failure never stops
+  the poll). Then every remaining :queued :subagent/run Work is replayed:
+  each one's spawn-time task is recovered via child-task-for-work and run with
   `run-fn` — (fn [db parent-id child-id task work-id]), defaulting to the
   synchronous run-subagent!. Queued orphans left by a crash stay :queued
   (recover-works! never settles them), so a later poll replays them to a
-  terminal state. Returns a vector of {:work/id _ :status _} per replayed
+  terminal state. The waiting half of the join is await-child!: a parent
+  polls the child's Work row until it reaches a terminal state — the terminal
+  row is the wakeup, so a crashed runner still wakes the waiter via recovery
+  or this replay. Returns a vector of {:work/id _ :status _} per replayed
   Work, or {:work/id _ :error/type _} when the task is unrecoverable or the
   run throws. Never throws for a single bad row — the loop continues."
   ([db] (poll-queued-children! db nil))
   ([db run-fn]
   (let [run-fn (or run-fn (fn [db parent-id child-id task work-id]
-                            (run-subagent! db parent-id child-id task work-id)))
-        queued (try (work-store/fetch-works-by-state (db-spec db) :queued)
-                    (catch Exception _ []))]
+                            (run-subagent! db parent-id child-id task work-id)))]
+    (try (work-store/sweep-expired-deadlines! (db-spec db)) (catch Exception _ nil))
+    (let [queued (try (work-store/fetch-works-by-state (db-spec db) :queued)
+                      (catch Exception _ []))]
     (into []
            (comp (filter #(= :subagent/run (:work/type %)))
                  (map (fn [w]
@@ -801,7 +809,7 @@
                             (catch Throwable t
                               {:work/id wid :error/type :subagent/replay-failed
                                :error/message (ex-message t)}))))))
-           queued))))
+           queued)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Work-graph navigation (W2: parent_work_id is the durable spawn graph;

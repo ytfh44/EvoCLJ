@@ -87,15 +87,14 @@
                                        ;   :tool args); nil when absent
 
   REGISTRY: node-type keyword -> trusted handler constructor. The
-  syntax vs executable split mirrors
-  evoclj.compiler.topology/syntax-node-types and
-  evoclj.compiler.topology/executable-node-types: syntax is the full
-  v0 syntactic set (including :route), executable is the subset the
-  runtime can execute today (handler exists). Definition > validation:
-  a syntactically known but unimplemented type (today only :route)
-  throws :node/not-implemented-yet from handler-for and is rejected
-  at compile time with :topology/unsupported-node-type so the two
-  layers stay consistent; unknown types throw :node/unknown-type.
+  syntax set mirrors evoclj.compiler.topology/syntax-node-types and
+  equals evoclj.compiler.topology/executable-node-types: every known
+  v0 type has a handler. Definition > validation: only executable types
+  are representable via compile, and handler-for resolves a constructor
+  for every syntax type; unknown types throw :node/unknown-type.
+  (The :route reservation was removed — it declared only a single :next
+  edge with no branch attributes, carrying no semantics a plain edge
+  lacks; see syntax-node-types.)
   handler-for resolves a constructor; the scheduler steps with
   (node/step ((node/handler-for (:node/type node))) runtime-state
   node input-event).
@@ -111,7 +110,7 @@
   :missing-required-key, :invalid-attribute, :invalid-program-output,
   :invalid-intent-request, :unknown-intent-type),
   :node/transition-invalid (a handler result that fails the shared
-  schema), :node/not-implemented-yet, and :node/unknown-type.
+  schema), and :node/unknown-type.
 
   Load order: the handler namespaces (evoclj.runtime.nodes.*) require
   THIS namespace (their reify needs the protocol var at compile time),
@@ -146,20 +145,20 @@
 
 (def syntax-node-types
   "The v0 syntax node type set, mirroring
-  evoclj.compiler.topology/syntax-node-types (definition). Includes
-  :route as syntax-only until its handler lands; see
-  executable-node-types. A test asserts syntax sets stay equal across
+  evoclj.compiler.topology/syntax-node-types (definition). Every known
+  type has a handler — the :route reservation was removed (it declared
+  only a single :next edge with no branch attributes, no semantics a
+  plain edge lacks). A test asserts syntax sets stay equal across
   compiler and runtime so Definition > validation holds."
-  #{:llm :sci :tool :route :loop :emit :memory/read :memory/write})
+  #{:llm :sci :tool :loop :emit :memory/read :memory/write})
 
 (def executable-node-types
   "The subset of syntax-node-types the runtime can execute today
   (handler exists), mirroring
-  evoclj.compiler.topology/executable-node-types. Definition >
-  validation: only executable types are representable via compile; a
-  syntactically known but unimplemented type (today only :route)
-  is rejected at compile time and throws :node/not-implemented-yet
-  from handler-for if it somehow reaches the runtime."
+  evoclj.compiler.topology/executable-node-types. Every syntax type has
+  a handler, so this equals syntax-node-types; the separate def stays
+  so Definition > validation (only executable types are representable
+  via compile) keeps a named executable side."
   #{:llm :sci :tool :loop :emit :memory/read :memory/write})
 
 
@@ -374,11 +373,11 @@
 
 (def node-handler-registry
   "The trusted registry: v0 node type keyword -> handler constructor
-  (a 0-ary fn returning a NodeHandler). :emit, :sci, :tool, :loop,
-  :llm, :memory/read, and :memory/write are implemented; the only
-  remaining v0 type (:route) throws :node/not-implemented-yet from
-  handler-for until its task lands (:loop landed in component, :llm in
-  post-v0 extension 1, :memory/* in feature R1)."
+  (a 0-ary fn returning a NodeHandler). Every v0 type is implemented:
+  :emit, :sci, :tool, :loop, :llm, :memory/read, and :memory/write
+  (:loop landed in component, :llm in post-v0 extension 1, :memory/*
+  in feature R1; the :route reservation was removed — single-:next edge
+  with no branch attributes, no semantics beyond a plain edge)."
   {:emit emit/emit-handler
    :sci sci/sci-handler
    :tool tool/tool-handler
@@ -387,46 +386,21 @@
    :memory/read memory/read-handler
    :memory/write memory/write-handler})
 
-(def known-unimplemented-types
-  "The v0 node types the compiler accepts syntactically but the runtime cannot
-  execute yet: only :route (syntax-node-types minus executable-node-types).
-  handler-for throws :node/not-implemented-yet for it so the compiler's
-  accepted types and the runtime's executable types stay consistent
-  (:memory/read and :memory/write landed in feature R1). The compiler's
-  Definition > validation rejects it at compile time with
-  :topology/unsupported-node-type unless an expanded runtime feature set
-  is provided."
-  #{:route})
-
 (defn handler-for
   "Resolve the trusted handler constructor for `node-type` (a v0 node
-  type keyword).
-
-  - :emit / :sci / :tool / :loop / :llm / :memory/read / :memory/write ->
-    the constructor fn (call it with no args to build the handler:
-    ((handler-for :sci)) — the executable set).
-  - any other syntax type (today only :route, the only member of
-    known-unimplemented-types / syntax minus executable) -> throws
-    :node/not-implemented-yet with the :node/type. The compiler
-    rejects this at compile time with :topology/unsupported-node-type
-    under Definition > validation, so it should never reach the runtime
-    via a compiled topology unless an expanded feature set was used.
-  - anything else -> throws :node/unknown-type.
+  type keyword): every member of the registry resolves to its
+  constructor fn (call it with no args to build the handler:
+  ((handler-for :sci))). Anything else — including the removed :route
+  reservation — throws :node/unknown-type: only executable types are
+  representable, so an unhandled type can never arrive via a compiled
+  topology.
 
   The scheduler steps a node with
   (node/step ((node/handler-for (:node/type node))) runtime-state node
   input-event)."
   [node-type]
-  (cond
-    (contains? node-handler-registry node-type)
+  (if (contains? node-handler-registry node-type)
     (get node-handler-registry node-type)
-
-    (contains? syntax-node-types node-type)
-    (throw (err/error :node/not-implemented-yet
-                      (str "no handler yet for node type " node-type)
-                      {:node/type node-type}))
-
-    :else
     (throw (err/error :node/unknown-type
                       "node type is not part of the v0 node type set"
                       {:node/type (err/sanitize node-type)}))))

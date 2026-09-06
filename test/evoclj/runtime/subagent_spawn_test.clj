@@ -227,3 +227,28 @@
             res (dispatch/dispatch! ctx intent)]
         (is (= :ok (:result/status res)) "tool echo still ok")
         (is (= {:text "hello"} (:value res)) "value correct"))))
+
+;; ===========================================================================
+;; poll loop — sweep expired deadlines, then redeliver queued children
+;; ===========================================================================
+
+(deftest poll-sweeps-expired-deadlines-before-redelivery
+  (testing "an expired child is swept to :failed and never replayed; a live child is redelivered once"
+    (let [db (fresh-db)
+          parent (create-parent-session! db)
+          parent-id (:session/id parent)
+          expired (subagent/spawn-subagent! db parent-id {:task "old" :deadline (Date. 1000000000000)} [])
+          live (subagent/spawn-subagent! db parent-id {:task "new"} [])
+          calls (atom [])
+          run-fn (fn [_db _parent _child _task wid]
+                   (swap! calls conj wid)
+                   {:status :completed})
+          out (subagent/poll-queued-children! db run-fn)]
+      (is (= :failed (:work/state (work-store/fetch-work db (:child/work-id expired))))
+          "expired child swept :queued -> :failed by the poll preamble")
+      (is (not (contains? (set @calls) (:child/work-id expired)))
+          "swept work is never handed to run-fn")
+      (is (= [(:child/work-id live)] @calls) "live child redelivered exactly once")
+      (is (= [{:work/id (:child/work-id live) :status :completed}] out))
+      (is (= :queued (:work/state (work-store/fetch-work db (:child/work-id live))))
+          "stub run-fn leaves the live row queued — the real runner drives it terminal"))))

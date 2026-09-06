@@ -3,8 +3,11 @@
 
   WorkerTransport is the protocol abstraction for submitting evaluation
   tasks to different execution backends. LocalWorkerTransport wraps the
-  existing local run-batch! semantics; RemoteWorkerTransport is a v0
-  stub showing the HTTP dispatch shape.")
+  existing local run-batch! semantics; RemoteWorkerTransport is an
+  explicitly unsupported backend: submit-task returns :failed with
+  :eval/remote-transport-unsupported and its owner, so
+  run-batch-with-transport! files remote tasks under :batch/failed with
+  attribution instead of silently completing them as :skipped.")
 
 (defprotocol WorkerTransport
   (submit-task [transport task]
@@ -64,9 +67,17 @@
   (->LocalWorkerTransport task-runner
                           (java.util.concurrent.Executors/newSingleThreadExecutor)))
 
+(def ^:const remote-transport-owner
+  "Owner of the remote worker transport backend (triage target for S3 follow-ups)."
+  :eval/workers)
+
 (defrecord RemoteWorkerTransport [endpoint client]
   WorkerTransport
   (submit-task [_ task]
     {:task/id (:task/id task)
-     :status :skipped
-     :reason :not-implemented}))
+     :status :failed
+     :error/type :eval/remote-transport-unsupported
+     :error/message (str "remote worker transport is not implemented (endpoint " endpoint
+                         "); use LocalWorkerTransport or own this backend (" remote-transport-owner ")")
+     :error/data {:owner remote-transport-owner
+                  :endpoint endpoint}}))

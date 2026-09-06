@@ -41,8 +41,10 @@ ticked below; the unticked item is the backlog for a future round.
 - [x] O2: cost report CLI — model usage/cost aggregated by generation
 - [x] O3: recovery scan CLI — expose store recovery scan results
 - [ ] O4: LLM performance baseline — update docs/performance-baseline.md with
-      real-model cycle timings (DEFERRED: §7.1 records fixture-mode timings only;
-      needs a host with a configured model endpoint)
+      real-model cycle timings (BLOCKED 2026-09-06, owner eval/workers:
+      §7.1 records fixture-mode timings only; needs a host with a
+      configured model endpoint — unblock by running the full-cycle
+      harness on a keyed host and pasting the :provider section)
 - [x] O5: lineage CLI polish — promotion lineage with candidate diffs
 
 ## Direction 5: Security & Adversarial (sci/, capability/, adversarial/)

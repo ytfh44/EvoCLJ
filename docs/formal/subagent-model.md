@@ -180,7 +180,7 @@ Every subagent effect is captured via **E1 split**:
 * `prev/event-id` — linear predecessor in the **same session** (nil only for root `:session/created`). Validated at append: must be same session and immediately preceding (`event_seq = new-seq -1`).
 * `causal-links` — **cross-session graph** `${:from :type}` where `:from` may be any prior event (any session) and `:to` is implicitly the appended event. Validated at append: `from` must exist, `:type` must be keyword. Cross-session is allowed.
 
-`append-event!` persists `prev` as `prev_event_id` column and each causal link as a row in `causal_links(from_event_id, to_event_id, link_type)` (migration `017-event-prev-causal-links.sql`). This is how `recovery` reconstructs orphan relationships without fabricating completion and how `verify-event-chain` checks both the linear hash chain and the semantic graph. The `:cause/event-id` alias is removed from the current append path (only the retained `commands` compat track still accepts a cause id).
+`append-event!` persists `prev` as `prev_event_id` column and each causal link as a row in `causal_links(from_event_id, to_event_id, link_type)` (migration `017-event-prev-causal-links.sql`). This is how `recovery` reconstructs orphan relationships without fabricating completion and how `verify-event-chain` checks both the linear hash chain and the semantic graph. The `:cause/event-id` alias is removed from the append path (no compat track accepts a cause id anymore).
 
 ### 5.1 Wolfram checks for this model [W-27..W-32] — E1 causal refinement (new, 6 checks)
 

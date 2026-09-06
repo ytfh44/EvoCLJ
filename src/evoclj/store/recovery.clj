@@ -50,9 +50,10 @@
   :queued orphans stay :queued for redelivery, and :running/:waiting orphans are
   marked :failed with {:error/type :recovery/orphaned} via CAS. Recovery NEVER
   fabricates :succeeded and is idempotent — re-running on already-terminal rows
-  is a no-op. Command recovery (`find-orphaned-commands`/`recover-commands!`) is
-  retained as a deprecated thin wrapper over Work recovery for one migration
-  cycle, but new code must use Work APIs.
+  is a no-op. The heritage `commands` compat track (`store/command.clj`,
+  `find-orphaned-commands`/`recover-commands!`) was removed in the ExtraModules
+  repair: Work is the only lifecycle; the `commands` table remains in old
+  databases as inert history (migration 018 backfilled it into `works`).
 
   Known boundary: the current-generation check verifies that the
   generation's genome_id resolves to an intact CAS artifact (existence
@@ -61,7 +62,6 @@
   (:require [clojure.java.jdbc :as jdbc]
             [evoclj.kernel.error :as err]
             [evoclj.store.cas :as cas]
-            [evoclj.store.command :as cmd]
             [evoclj.store.event :as event]
             [evoclj.store.work :as work-store]
             [evoclj.store.session :as session]
@@ -286,11 +286,6 @@
   fabricated as succeeded."
   {:error/type :recovery/orphaned})
 
-(def orphan-command-error
-  "Deprecated alias for orphan-work-error (commands are a deprecated dual
-  track; new code must use orphan-work-error / Work recovery)."
-  orphan-work-error)
-
 (defn find-orphaned-works
   "W2: Works left in a non-terminal in-flight state when the process
   died: :queued, :running, or :waiting. Returns a vector of :work/* maps.
@@ -306,42 +301,6 @@
   Returns {:orphaned-works [...] :recovered-queued [...] :recovered-running [...]}."
   [db]
   (work-store/recover-works! db))
-
-;; Deprecated Command wrappers — thin delegation to Work recovery for one
-;; migration cycle. Break compat by design: commands are no longer the
-;; source of truth, but the wrappers keep old call sites from crashing.
-;; They operate on the `commands` table when present, otherwise delegate.
-
-(defn find-orphaned-commands
-  "Deprecated: use find-orphaned-works. Retained for one migration cycle;
-  queries the `commands` table directly when it exists."
-  [db]
-  (try
-    (into []
-          (mapcat (fn [state] (cmd/fetch-commands-by-state db state)))
-          [:queued :running])
-    (catch Exception _
-      (mapv (fn [w] {:cmd/id (:work/id w) :cmd/state (:work/state w) :cmd/type (:work/type w)})
-            (find-orphaned-works db)))))
-
-(defn recover-commands!
-  "Deprecated: use recover-works!. Retained for one migration cycle.
-  Recovers commands table rows; also drives Work recovery when works exist."
-  [db]
-  (let [cmd-report (try
-    (let [orphans (find-orphaned-commands db)]
-      (reduce (fn [report cmd]
-                (if (= :running (:cmd/state cmd))
-                  (let [_ (try (cmd/fail-command! db (:cmd/id cmd) orphan-command-error) (catch Exception _ nil))]
-                    (update report :recovered-running conj {:cmd/id (:cmd/id cmd) :recovery/error orphan-command-error}))
-                  (update report :recovered-queued conj (:cmd/id cmd))))
-              {:orphaned-commands orphans :recovered-queued [] :recovered-running []}
-              orphans))
-    (catch Exception _ {:orphaned-commands [] :recovered-queued [] :recovered-running []}))
-        work-report (try (recover-works! db) (catch Exception _ {:orphaned-works [] :recovered-queued [] :recovered-running []}))]
-    (merge cmd-report {:orphaned-works (:orphaned-works work-report)
-                       :work-recovered-queued (:recovered-queued work-report)
-                       :work-recovered-running (:recovered-running work-report)})))
 
 (def terminal-work-states
   "Work states that close a Work's lifecycle. A Work in any other state

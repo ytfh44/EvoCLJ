@@ -14,7 +14,6 @@
   through pr-str / clojure.edn read-string."
   (:require [evoclj.kernel.error :as err]
             [evoclj.store.capability-store :as cap-store]
-            [evoclj.store.command :as command]
             [malli.core :as m]))
 
 ;; --- canonical registered schemas ------------------------------------------
@@ -133,26 +132,6 @@
                            {:reason :invalid-schema
                             :value (err/sanitize s)})))))
 
-;; --- CommandSchema re-export (A1) ------------------------------------------
-;; CommandSchema is owned by evoclj.store.command; re-exported here so the
-;; central registry file remains a single discovery point without duplicating
-;; the definition.
-
-(def CommandSchema
-  "Re-export of evoclj.store.command/CommandSchema."
-  command/CommandSchema)
-
-(def validate-command
-  "Re-export of evoclj.store.command/validate-command."
-  command/validate-command)
-
-(def command?
-  "Re-export of evoclj.store.command/command?."
-  command/command?)
-
-(def command-state?
-  "Re-export of evoclj.store.command/command-state?."
-  command/command-state?)
 ;; --- Capabilities store re-export (P7) ---------------------------------------
 ;; Additive persistence layer for CapabilityLease (migration 013).
 ;; Helpers are owned by evoclj.store.capability-store; re-exported here so the

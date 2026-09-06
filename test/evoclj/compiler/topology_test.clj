@@ -23,38 +23,39 @@
        nil
        (catch clojure.lang.ExceptionInfo e e)))
 
-(deftest syntax-vs-executable-split
-  (testing "syntax is the full v0 syntactic set including :route"
-    (is (= #{:llm :sci :tool :route :loop :emit :memory/read :memory/write}
+(deftest syntax-equals-executable-set
+  (testing "syntax is the v0 type set — the :route reservation was removed, every known type has a handler"
+    (is (= #{:llm :sci :tool :loop :emit :memory/read :memory/write}
            topology/syntax-node-types)))
-  (testing "executable is the runtime feature set (handler exists)"
+  (testing "executable is the runtime feature set (handler exists) and equals syntax"
     (is (= #{:llm :sci :tool :loop :emit :memory/read :memory/write}
            topology/executable-node-types))
-    (is (not (contains? topology/executable-node-types :route))))
-  (testing "known-unimplemented is exactly syntax minus executable"
-    (is (= #{:route} (set/difference topology/syntax-node-types topology/executable-node-types)))))
+    (is (= topology/syntax-node-types topology/executable-node-types))))
 
-(deftest route-topology-rejected-without-handler
-  (testing ":route is syntax-only and unrepresentable via compile (Definition > validation)"
+(deftest removed-route-topology-rejected-as-unknown
+  (testing ":route is no longer a known type — rejected fail-closed as unknown, never silently accepted"
     (let [t {:graph/id :graph/main
              :entry :node/a
              :nodes {:node/a {:node/type :route :next :node/b}
                      :node/b {:node/type :emit}}}
           e (compile-error t)]
       (is (instance? clojure.lang.ExceptionInfo e))
-      (is (= :topology/unsupported-node-type (:error/type (ex-data e))))
-      (is (= :unsupported-node-type (:reason (ex-data e))))
+      (is (= :topology/invalid (:error/type (ex-data e))))
+      (is (= :unknown-node-type (:reason (ex-data e))))
       (is (= :node/a (:node-id (ex-data e))))
       (is (= :route (:node/type (ex-data e))))))
-  (testing "with an expanded runtime feature set that includes :route, the same topology compiles"
+  (testing "with a narrowed runtime feature set, an excluded syntax type is still rejected as unsupported"
     (let [t {:graph/id :graph/main
              :entry :node/a
-             :nodes {:node/a {:node/type :route :next :node/b}
+             :nodes {:node/a {:node/type :tool :tool :fixture/echo :next :node/b}
                      :node/b {:node/type :emit}}}
-          c (topology/compile-topology t (conj topology/executable-node-types :route))]
-      (is (map? c))
-      (is (= :route (get-in c [:nodes :node/a :node/type])))
-      (is (= [:node/b] (get-in c [:adjacency :node/a]))))))
+          e (try (topology/compile-topology t (disj topology/executable-node-types :tool))
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (instance? clojure.lang.ExceptionInfo e))
+      (is (= :topology/unsupported-node-type (:error/type (ex-data e))))
+      (is (= :unsupported-node-type (:reason (ex-data e))))
+      (is (= :tool (:node/type (ex-data e)))))))
 
 ;; --- seed fixture ----------------------------------------------------------
 

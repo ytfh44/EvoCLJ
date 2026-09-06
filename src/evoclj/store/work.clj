@@ -385,3 +385,49 @@
                   :else report)))
             {:orphaned-works orphans :recovered-queued [] :recovered-running []}
             orphans)))
+
+;; ---------------------------------------------------------------------------
+;; Deadline sweeper — the loop that drives expired Works to timed-out
+;; ---------------------------------------------------------------------------
+
+(def sweep-deadline-error
+  "Typed marker carried in the sweep report when a Work's :work/deadline has passed."
+  {:error/type :work/deadline-exceeded})
+
+(defn sweep-expired-deadlines!
+  "Drive every non-terminal Work whose :work/deadline has passed to its
+  timeout terminal via CAS: :queued -> :failed, :running/:waiting ->
+  :timed-out. Terminal rows and rows without a deadline are untouched.
+  Each row is swept independently — a CAS race on one row (already settled
+  by its owner) is skipped, never thrown. Idempotent: re-running on swept
+  rows is a no-op (they are terminal now).
+  `now` defaults to the current instant; tests inject a fixed instant.
+  Returns {:swept [...] :timed-out [...] :failed [...]} where each entry is
+  {:work/id _ :recovery/error sweep-deadline-error}."
+  ([db] (sweep-expired-deadlines! db nil))
+  ([db now]
+   (let [now (or now (java.util.Date.))
+         orphans (find-orphaned-works db)]
+     (reduce (fn [report work]
+               (let [wid (:work/id work)
+                     state (:work/state work)
+                     deadline (:work/deadline work)
+                     entry {:work/id wid :recovery/error sweep-deadline-error}]
+                 (if-not (and deadline (deadline-passed? deadline now))
+                   report
+                   (try
+                     (cond
+                       (= :queued state)
+                       (do (fail-work! db wid sweep-deadline-error)
+                           (-> report
+                               (update :swept conj entry)
+                               (update :failed conj entry)))
+                       (contains? #{:running :waiting} state)
+                       (do (timeout-work! db wid)
+                           (-> report
+                               (update :swept conj entry)
+                               (update :timed-out conj entry)))
+                       :else report)
+                     (catch Exception _ report)))))
+             {:swept [] :timed-out [] :failed []}
+             orphans))))

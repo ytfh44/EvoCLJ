@@ -149,7 +149,20 @@ evidence the deterministic pattern Diagnostician needs to fire a
 producing the Evolution set (1 success + 2 failures) that fires the
 mutation and a real promotion (route-b behavior).
 
-### 7.1 NO MODEL ENDPOINT (explicit)
+### 7.1 NO MODEL ENDPOINT — O4 BLOCKED (explicit)
+
+> **O4 status: BLOCKED — no host with a configured model endpoint.**
+> Owner: eval/workers. Reason: a real-model cycle timing requires a live
+> provider (an API key in the kernel-owned model registry); on every host
+> exercised so far `:model/configured []` and `:model/endpoint? false`.
+> Recording a real-model number without a real endpoint would be
+> fabrication, so the fixture-mode numbers below stand as the only
+> honest baseline until the unblock condition is met. Unblock: run
+> `clojure -M scripts/full-cycle.clj` on a host with a configured model
+> endpoint and paste the report's `:provider` section here with the host,
+> model id, and date. Triaged 2026-09-06 (ExtraModules repair) with a
+> stash-baseline proof: no code path in this tree can produce
+> real-model timings without credentials.
 
 The host system is built with the real models.dev catalog (3 s fetch
 timeout; cached under the state dir; an unreachable source degrades
@@ -159,7 +172,7 @@ live provider (an API key). **On the recording host no API keys are
 configured** (`:model/configured []`, `:model/endpoint? false`, catalog
 `:catalog/fresh`), so the harness falls back to the fixture providers:
 **the numbers below are FIXTURE-mode timings, NOT real-model cycle
-timings.** Roadmap O4's real-model timings are deferred until a host
+timings.** Roadmap O4's real-model timings are blocked until a host
 with a configured model endpoint runs the harness; the report's
 `:provider` section always states this honestly.
 

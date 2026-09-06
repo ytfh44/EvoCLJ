@@ -29,8 +29,8 @@
    selection."
   (:require [evoclj.kernel.error :as err]
             [evoclj.mcp.client :as client]
-            [evoclj.store.command :as command]
-            [evoclj.store.sqlite :as sqlite]))
+            [evoclj.store.sqlite :as sqlite]
+            [evoclj.store.work :as work-store]))
 
 ;; ---------------------------------------------------------------------------
 ;; version negotiation / fail-closed selection
@@ -65,7 +65,7 @@
   (wire-request [this contract] "enrich per-request _meta/headers/session")
   (on-notification [this event] "handle toolsChanged/progress/subscriptions")
   (cache-policy [this] "return {:ttl-ms :cache-scope} or nil")
-  (continue [this task] "MRTR/Tasks continuation — A6 auditable via command queue"))
+  (continue [this task] "MRTR/Tasks continuation — auditable via a persisted :mcp/continue Work"))
 
 (defn- adapter-store
   "A6 helper: resolve a durable command store from adapter opts, if wired."
@@ -81,22 +81,28 @@
           (java.util.UUID/fromString (:id r)))))
     (catch Exception _ nil)))
 
-(defn- make-mcp-continue-cmd
-  "Synthesize an :mcp/continue command for MRTR Tasks continuation.
-   The command is idempotent via `mcp-continue-<task-id>-<millis>-<uuid>`."
+(defn- make-mcp-continue-work
+  "Synthesize an :mcp/continue Work for MRTR Tasks continuation audit.
+  W2: continuation audit is a durable Work, not a heritage command row.
+  The owner session resolves to an existing session when the store is
+  wired; otherwise a random id (persist then fails closed and the audit
+  stays in-band in the returned map)."
   [task store]
-  (let [owner (or (resolve-mcp-owner store) (random-uuid))
-        task-id (or (:id task) (:task/id task) (hash task))
-        idem (str "mcp-continue-" task-id "-" (System/currentTimeMillis) "-" (random-uuid))
-        payload-ref (str "sha256:" (apply str (repeat 64 "0")))]
-    {:cmd/id (random-uuid)
-     :cmd/type :mcp/continue
-     :cmd/state :queued
-     :cmd/idempotency-key idem
-     :cmd/payload-ref payload-ref
-     :cmd/owner-session-id owner
-     :cmd/created-at (java.util.Date.)
-     :cmd/continuation-edn task}))
+  (let [owner (or (resolve-mcp-owner store) (random-uuid))]
+    {:work/id (random-uuid)
+     :work/type :mcp/continue
+     :work/state :queued
+     :work/session-id owner
+     :work/created-at (java.util.Date.)
+     :work/continuation-edn task}))
+
+(defn- persist-continue-work!
+  "Best-effort durable audit: persist the :mcp/continue Work when a store
+  is wired. Returns the persisted row or nil (missing session, missing
+  table, or any other store failure — the audit stays in-band)."
+  [store work]
+  (when store
+    (try (work-store/create-work! store work) (catch Exception _ nil))))
 
 (defrecord Adapter2025 [opts]
   ProtocolAdapter
@@ -109,12 +115,13 @@
   (on-notification [_ e] (when-let [f (:tools-change-consumer opts)] (f e)) e)
   (cache-policy [_] nil)
   (continue [_ task]
-    ;; A6: 2025 degrades to command queue instead of throwing :mcp/not-supported.
+    ;; A6/W2: 2025 degrades to a queued :mcp/continue Work instead of
+    ;; throwing :mcp/not-supported. When a store is wired the Work is
+    ;; persisted; otherwise the Work map is returned in-band.
     (let [store (adapter-store opts)
-          cmd (make-mcp-continue-cmd task store)]
-      (when store
-        (try (command/create-command! store cmd) (catch Exception _ nil)))
-      {:status :queued :command-id (:cmd/id cmd) :command cmd :task task :adapter :mcp-2025-11})))
+          work (make-mcp-continue-work task store)
+          _ (persist-continue-work! store work)]
+      {:status :queued :work/id (:work/id work) :work work :task task :adapter :mcp-2025-11})))
 
 (defrecord Adapter2026 [opts cache subscriptions]
   ProtocolAdapter
@@ -132,14 +139,14 @@
     (when-let [f (:listen opts)] (swap! subscriptions conj e)) e)
   (cache-policy [_] {:ttl-ms (or (:ttl-ms opts) 60000) :cache-scope :tools/list})
   (continue [_ task]
-    ;; A6: 2026 keeps :continuing but also audits via the command queue so
-    ;; recovery can observe the continuation. When a store is wired the
-    ;; command is persisted; otherwise the command map is returned in-band.
+    ;; A6/W2: 2026 keeps :continuing but also audits via a queued
+    ;; :mcp/continue Work so recovery can observe the continuation.
+    ;; When a store is wired the Work is persisted; otherwise the Work
+    ;; map is returned in-band.
     (let [store (adapter-store opts)
-          cmd (make-mcp-continue-cmd task store)]
-      (when store
-        (try (command/create-command! store cmd) (catch Exception _ nil)))
-      {:task task :status :continuing :adapter :mcp-2026-07 :command-id (:cmd/id cmd) :command cmd})))
+          work (make-mcp-continue-work task store)
+          _ (persist-continue-work! store work)]
+      {:task task :status :continuing :adapter :mcp-2026-07 :work/id (:work/id work) :work work})))
 
 (defn adapter-2025 ([] (->Adapter2025 {})) ([opts] (->Adapter2025 opts)))
 (defn adapter-2026 ([] (->Adapter2026 {} (atom nil) (atom []))) ([opts] (->Adapter2026 opts (atom nil) (atom []))))

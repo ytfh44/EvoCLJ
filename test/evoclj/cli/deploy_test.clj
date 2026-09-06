@@ -41,22 +41,24 @@
 (use-fixtures :each (fn [f] (f) (cleanup!)))
 
 (defn- provision-deploy-store!
-  "A minimal temp state dir: migrated db + one active generation row."
-  []
-  (let [dir (temp-dir "evoclj-deploy-state-")
-        db-dir (str dir "/db")
-        _ (Files/createDirectories (Paths/get db-dir (make-array String 0))
-                                   (make-array FileAttribute 0))
-        db (sqlite/spec (str dir "/db/evoclj.db"))]
-    (migrate/migrate! db)
-    (jdbc/execute! db ["INSERT INTO generations (id, genome_id, resolution_id, state, current, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-                       "generation-1"
-                       "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                       "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                       "active"
-                       1
-                       "2025-01-01T00:00:00Z"])
-    dir))
+  "A minimal temp state dir: migrated db + one generation row (current by default)."
+  ([]
+   (provision-deploy-store! 1))
+  ([current-flag]
+   (let [dir (temp-dir "evoclj-deploy-state-")
+         db-dir (str dir "/db")
+         _ (Files/createDirectories (Paths/get db-dir (make-array String 0))
+                                    (make-array FileAttribute 0))
+         db (sqlite/spec (str dir "/db/evoclj.db"))]
+     (migrate/migrate! db)
+     (jdbc/execute! db ["INSERT INTO generations (id, genome_id, resolution_id, state, current, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+                        "generation-1"
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        "active"
+                        current-flag
+                        "2025-01-01T00:00:00Z"])
+     dir)))
 
 ;; --- tests -------------------------------------------------------------------
 
@@ -80,3 +82,19 @@
         {:keys [exit data]} (main/execute ["deploy"] {:state-dir dir})]
     (is (= 1 exit))
     (is (= :cli/usage-invalid (:error/type data)))))
+
+(deftest deploy-current-polls-read-only
+  (let [dir (provision-deploy-store!)
+        {:keys [exit data]} (main/execute ["deploy" "current"] {:state-dir dir})]
+    (is (= 0 exit))
+    (is (= "generation-1" (:generation/id data)))
+    (is (= "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" (:genome/id data)))
+    (is (nil? (:canary data)) "no persisted rollout state — nil canary")
+    (is (string? (:timestamp data)))
+    (is (not (contains? data :status)) "no deploy decision recorded")))
+
+(deftest deploy-current-fails-without-current
+  (let [dir (provision-deploy-store! 0)
+        {:keys [exit data]} (main/execute ["deploy" "current"] {:state-dir dir})]
+    (is (= 1 exit))
+    (is (= :cli/no-current-generation (:error/type data)))))

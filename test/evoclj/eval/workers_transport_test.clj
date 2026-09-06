@@ -24,3 +24,11 @@
     (is (= (dissoc (:batch/stats expected) :wall-ms)
            (dissoc (:batch/stats result) :wall-ms)))
     (.shutdown (:executor transport))))
+
+(deftest run-batch-with-transport-remote-files-failures-with-owner
+  (let [transport (wt/->RemoteWorkerTransport "http://example.com" nil)
+        result (workers/run-batch-with-transport! transport (tasks 3) {:concurrency 1})]
+    (is (empty? (:batch/completed result)) "remote tasks must never complete silently")
+    (is (= 3 (count (:batch/failed result))))
+    (is (every? #(= :eval/remote-transport-unsupported (:error/type %)) (:batch/failed result)))
+    (is (= 3 (get-in result [:batch/stats :failed])))))

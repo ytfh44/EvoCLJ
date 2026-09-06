@@ -1,13 +1,13 @@
 (ns evoclj.mcp.adapter-continue-test
-  "A6 — MCP Tasks continue wiring: 2025 degrades to queued, 2026 keeps continuing but audited."
-  (:require [clojure.test :refer [deftest is testing]]
-            [clojure.java.io :as io]
+  "A6/W2 — MCP continue paths audit via queued :mcp/continue Works."
+  (:require [clojure.java.io :as io]
             [clojure.java.jdbc :as jdbc]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.mcp.adapter :as adapter]
-            [evoclj.store.command :as cmd]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
-            [evoclj.store.sqlite :as sqlite]))
+            [evoclj.store.sqlite :as sqlite]
+            [evoclj.store.work :as work-store]))
 
 ;; ---------------------------------------------------------------------------
 ;; helpers — temp db + session seed
@@ -75,7 +75,7 @@
     sid))
 
 ;; ---------------------------------------------------------------------------
-;; 1 — 2025 no longer throws :mcp/not-supported, returns queued
+;; 1 — 2025 no longer throws :mcp/not-supported, returns queued Work audit
 ;; ---------------------------------------------------------------------------
 
 (deftest continue-2025-queues-instead-of-throwing
@@ -83,9 +83,9 @@
     (let [ret (adapter/continue a {:id 1 :op :test})]
       (is (map? ret))
       (is (= :queued (:status ret)) "2025 continue must degrade to :queued")
-      (is (uuid? (:command-id ret)) "must carry a command-id")
-      (is (= :mcp/continue (:cmd/type (:command ret))) "command type is :mcp/continue")
-      (is (string? (:cmd/idempotency-key (:command ret))) "command has idempotency-key")
+      (is (uuid? (:work/id ret)) "must carry a work-id")
+      (is (= :mcp/continue (:work/type (:work ret))) "work type is :mcp/continue")
+      (is (= {:id 1 :op :test} (:work/continuation-edn (:work ret))) "work carries the task for replay")
       (is (= :mcp-2025-11 (:adapter ret))))))
 
 (deftest continue-2025-does-not-throw
@@ -95,7 +95,7 @@
     (is (not (instance? Throwable ret)) "must not be an exception")))
 
 ;; ---------------------------------------------------------------------------
-;; 2 — 2026 keeps :continuing but also audits via command
+;; 2 — 2026 keeps :continuing but also audits via Work
 ;; ---------------------------------------------------------------------------
 
 (deftest continue-2026-keeps-continuing-but-audits
@@ -103,12 +103,12 @@
     (let [ret (adapter/continue a {:id 99})]
       (is (= :continuing (:status ret)))
       (is (= :mcp-2026-07 (:adapter ret)))
-      (is (uuid? (:command-id ret)) "2026 also carries a command-id for audit")
-      (is (= :mcp/continue (:cmd/type (:command ret))))
+      (is (uuid? (:work/id ret)) "2026 also carries a work-id for audit")
+      (is (= :mcp/continue (:work/type (:work ret))))
       (is (= {:id 99} (:task ret))))))
 
 ;; ---------------------------------------------------------------------------
-;; 3 — with a durable store the command is persisted
+;; 3 — with a durable store the Work is persisted
 ;; ---------------------------------------------------------------------------
 
 (deftest continue-2025-persists-when-store-wired
@@ -118,10 +118,10 @@
     (try
       (let [ret (adapter/continue a {:id 42 :op :with-store})]
         (is (= :queued (:status ret)))
-        (let [row (cmd/fetch-command db (:command-id ret))]
-          (is (some? row) "command was persisted to SQLite")
-          (is (= :mcp/continue (:cmd/type row)))
-          (is (= :queued (:cmd/state row)))))
+        (let [row (work-store/fetch-work db (:work/id ret))]
+          (is (some? row) "work was persisted to SQLite")
+          (is (= :mcp/continue (:work/type row)))
+          (is (= :queued (:work/state row)))))
       (finally (cleanup!)))))
 
 (deftest continue-2026-persists-when-store-wired
@@ -131,7 +131,7 @@
     (try
       (let [ret (adapter/continue a {:id 77})]
         (is (= :continuing (:status ret)))
-        (let [row (cmd/fetch-command db (:command-id ret))]
+        (let [row (work-store/fetch-work db (:work/id ret))]
           (is (some? row))
-          (is (= :mcp/continue (:cmd/type row)))))
+          (is (= :mcp/continue (:work/type row)))))
       (finally (cleanup!)))))

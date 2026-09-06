@@ -59,7 +59,7 @@ SELECT id, type, state, owner_session_id, parent_cmd_id, payload_ref, deadline, 
 * `:work/deadline` powers `timed-out` terminal via W2.
 * The `state` CHECK is DB mirror of `work-states` — illegal states rejected even if code bypasses Malli. SQLite FKs are per-connection (`PRAGMA foreign_keys = ON`) via `store/sqlite` helpers.
 
-The heritage `commands` table (`012-commands.sql`, 6 states) is **retained as the compat/backfill track**; new writes must use `works`. The command helpers (`create-command!`, `dispatch-command!`, etc.) remain a full standalone implementation for that track, and command recovery is a deprecated thin wrapper over Work recovery for one migration cycle (`store/recovery.clj`).
+The heritage `commands` table (`012-commands.sql`, 6 states) survives in old databases as **inert history** (migration `018-work.sql` backfilled it into `works`); new writes must use `works`. The `store/command.clj` module and its recovery wrappers (`find-orphaned-commands`/`recover-commands!`) were removed in the ExtraModules repair — Work recovery (`store/recovery.clj` → `store/work`) is the only path.
 
 ### 1.2 State machine (seven states — W1 refinement)
 
@@ -122,7 +122,7 @@ Wolfram check [W-25] pins this:
 |-------|-----------|---------|--------|
 | [W-25] | `workProductCollapseQ` | `Session×Command 48 collapses to Work 7; session pin is immutable, only Work has transitions` | pass |
 
-Code witness: `runtime/work work-states-count =7`, `session-x-command-product =48`, `collapse-ratio` string; `store/session` tests assert session rows never mutate state after insert (immutable pin), while `store/work` drives all transitions. The old `commands` table is retained only for backfill.
+Code witness: `runtime/work work-states-count =7`, `session-x-command-product =48`, `collapse-ratio` string; `store/session` tests assert session rows never mutate state after insert (immutable pin), while `store/work` drives all transitions. The old `commands` table is inert history (backfilled, never written).
 
 ---
 
@@ -205,7 +205,7 @@ each :from must reference an existing event (any session); cross-session allowed
 root events carry empty causal-links
 ```
 
-Stored in `causal_links(from_event_id, to_event_id, link_type)` (`017-event-prev-causal-links.sql`). Subagent result delivery appends parent event with `prev = parent's predecessor` and `causal-links = #{ {:from <child-terminal-id> :type :subagent/result} }`. The `:cause/event-id` alias is removed from the current append path — only the retained `commands` compat track still accepts a cause id, in the prev slot with earlier-event semantics.
+Stored in `causal_links(from_event_id, to_event_id, link_type)` (`017-event-prev-causal-links.sql`). Subagent result delivery appends parent event with `prev = parent's predecessor` and `causal-links = #{ {:from <child-terminal-id> :type :subagent/result} }`. The `:cause/event-id` alias is removed from the append path — no compat track accepts a cause id anymore.
 
 ### 5.4 sha256 hash chain [W-32]
 

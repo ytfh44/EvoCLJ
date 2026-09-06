@@ -59,7 +59,7 @@
       when PRESENT the broker context is built with :model-registry
       injected AND a model lease for this side's exact phenotype id,
       so the llm node's :intent/model-call intents (attributed to the
-      side phenotype) dispatch through dispatch-model-call! to real
+      side phenotype) dispatch through dispatch!/pipeline to real
       providers. When ABSENT no model lease and no :model-registry
       are injected — an :llm topology fails closed with the existing
       :provider/not-found :reason :no-model-registry (never a silent

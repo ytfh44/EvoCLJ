@@ -16,6 +16,7 @@
             [evoclj.genome.types :as types]
             [evoclj.kernel.system :as sys]
             [evoclj.provider.registry :as registry]
+            [evoclj.runtime.orchestrator :as orchestrator]
             [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.session :as session]
@@ -344,3 +345,16 @@
       (is (= :evolution/system-invalid
              (:error/type (ex-data ex))))
       (is (re-find #"unknown :mutator :type" (ex-message ex))))))
+
+(deftest executor-codemode-is-explicit-opt-in
+  (testing "default executor carries no :orchestrator — the scheduler falls back to TraditionalOrchestrator"
+    (let [ex (ig/init-key :runtime/executor {:scheduler {} :store {:sqlite "s" :cas "c"} :dispatch {}})]
+      (is (nil? (:orchestrator ex)) "fail-safe default: no CodeMode")
+      (is (= {:enabled? false} (:ptc ex)))
+      (is (nil? (:orchestrator ((:build ex) {}))) "built executors inherit the default")))
+  (testing ":ptc {:enabled? true} installs a CodeModeOrchestrator on the executor and built maps"
+    (let [ex (ig/init-key :runtime/executor {:scheduler {} :store {:sqlite "s" :cas "c"} :dispatch {} :ptc {:enabled? true}})]
+      (is (instance? evoclj.runtime.orchestrator.CodeModeOrchestrator (:orchestrator ex)))
+      (is (true? (get-in ex [:ptc :enabled?])))
+      (is (instance? evoclj.runtime.orchestrator.CodeModeOrchestrator (:orchestrator ((:build ex) {})))
+          "the scheduler resolves the orchestrator from the built executor"))))

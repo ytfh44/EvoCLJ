@@ -299,24 +299,12 @@
   (pipeline/ambiguous-error? t))
 
 ;; The private normalize / execute / validate helpers are owned by
-;; evoclj.intent.pipeline and are not duplicated here.
-
-;; --- the dispatcher (thin wrappers delegating to pipeline) -----------------
-
-(defn- dispatch-model-call!
-  "Deprecated forwarding wrapper. Delegates to evoclj.intent.pipeline/pipeline.
-  Kept for backward compatibility; new code should call pipeline/pipeline
-  directly."
-  [broker-context intent]
-  (pipeline/pipeline broker-context intent))
-
-(defn- dispatch-registered!
-  "Deprecated forwarding wrapper. Delegates to evoclj.intent.pipeline/pipeline.
-  Kept for backward compatibility; the tool-id and idempotency flag are
-  derived from the intent inside the pipeline, so the extra args are
-  accepted but ignored beyond the delegation."
-  [broker-context intent _tool-id _require-idempotency-key?]
-  (pipeline/pipeline broker-context intent))
+;; evoclj.intent.pipeline and are not duplicated here. The per-type
+;; execution case (:tool-call, :memory-*, :model-call, :subagent-*,
+;; :finish/:fail rejection) also lives exactly once in
+;; evoclj.intent.pipeline/pipeline (INV-05): dispatch! owns only the
+;; validate + Requested-set lattice gate below, then delegates. There
+;; is no second supported-type list to drift.
 
 (defn- requested-effect-denial
   "Return a typed denial when a runtime intent asks for an effect that
@@ -335,55 +323,24 @@
                      nil @(:usage broker-context))
        nil intent nil))))
 
-
-(defn- terminal-intent-rejection
-  "Reject a terminal control intent: :intent/finish and :intent/fail are
-  consumed by the node loop, never executed by the broker."
-  [broker-context intent]
-  (attach-journal
-   (result-error intent :intent/terminal-control
-                 "terminal control intents are consumed by the node loop, never executed by the broker"
-                 {:intent/type (:intent/type intent)}
-                 nil @(:usage broker-context))
-   nil intent nil))
-
 (defn dispatch!
   "Execute intent through the broker pipeline in the NORMATIVE order
-  (component Step 5): validate intent -> lookup provider -> normalize
-  resource -> authorize -> execute once/retry per policy -> validate
-  output -> return a typed result. See the namespace docstring for the
-  result contract and the effect-protocol extension points.
+  (component Step 5): validate intent -> Requested-set lattice gate ->
+  delegate to evoclj.intent.pipeline/pipeline (the single EffectPipeline
+  implementation: lookup provider -> normalize resource -> authorize ->
+  execute once/retry per policy -> validate output -> typed result).
+  See evoclj.intent.pipeline/pipeline for the result contract.
 
   broker-context is a map built by make-broker-context. intent is a
   validated v0 Intent (a malformed intent throws :intent/schema-invalid).
   Every intent family routes through the single EffectPipeline
-  combinator (evoclj.intent.pipeline/pipeline) — including
-  :agent/spawn and :agent/status tool calls, which authorize against
-  exact leases like every other tool (no special-case branch), and the
-  :intent/subagent-* intents, which execute principal-bound against
-  :db. :intent/finish and :intent/fail are terminal control signals
-  and are rejected."
+  combinator — including :agent/spawn and :agent/status tool calls,
+  which authorize against exact leases like every other tool (no
+  special-case branch), and the :intent/subagent-* intents, which
+  execute principal-bound against :db. :intent/finish and :intent/fail
+  are terminal control signals and are rejected by the pipeline."
   [broker-context intent]
   (intent-schema/validate-intent intent)
   (if-let [denial (requested-effect-denial broker-context intent)]
     denial
-    (case (:intent/type intent)
-      :intent/tool-call
-      (dispatch-registered! broker-context intent
-                            (get-in intent [:payload :tool/id]) true)
-      :intent/memory-read
-      (dispatch-registered! broker-context intent :memory/kv false)
-      :intent/memory-write
-      (dispatch-registered! broker-context intent :memory/kv false)
-      :intent/model-call (dispatch-model-call! broker-context intent)
-      :intent/subagent-spawn (pipeline/pipeline broker-context intent)
-      :intent/subagent-result (pipeline/pipeline broker-context intent)
-      :intent/subagent-cancel (pipeline/pipeline broker-context intent)
-      :intent/finish (terminal-intent-rejection broker-context intent)
-      :intent/fail (terminal-intent-rejection broker-context intent)
-      ;; Unreachable: validate-intent rejects unknown types above. Fail
-      ;; closed rather than return nil.
-      (result-error intent :intent/unknown-type
-                    "unknown intent type reached the dispatcher"
-                    {:intent/type (:intent/type intent)}
-                    nil @(:usage broker-context)))))
+    (pipeline/pipeline broker-context intent)))

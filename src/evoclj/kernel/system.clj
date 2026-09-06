@@ -114,6 +114,7 @@
             [evoclj.provider.model-registry :as model-registry]
             [evoclj.provider.modelsdev :as modelsdev]
             [evoclj.provider.registry :as registry]
+            [evoclj.runtime.orchestrator :as orchestrator]
             [evoclj.runtime.scheduler :as scheduler]
             [evoclj.runtime.system]
             [evoclj.store.cas :as cas]
@@ -353,25 +354,41 @@
   {:phenotype ... :stores ... :dispatch ...}) is assembled per session
   by :build from a compiled Phenotype, because the Phenotype is
   constructed inside an isolated SCI runtime and is never a host
-  component (Global Constraints 22, 23)."
+  component (Global Constraints 22, 23).
+
+  PTC CodeMode is explicit opt-in, fail-safe by default: without
+  :ptc {:enabled? true} in config the executor carries no
+  :orchestrator and the scheduler runs TraditionalOrchestrator (the
+  single max-tool-rounds loop; a model code_execution call is NOT
+  executed — the tool is not even declared). With :ptc enabled the
+  executor carries a CodeModeOrchestrator closing over the built
+  Computation, and the scheduler executes model code via
+  SandboxExecute with broker-crossing toolFns. The default never
+  changes under a host: enabling CodeMode is a config decision."
   (let [limits (or (:scheduler config) {})
         raw-ptc (or (:ptc config) {:enabled? false})
-        ptc (if (:enabled? raw-ptc)
-              (merge (computation/make-computation {:limits (or (:limits raw-ptc) limits)})
-                     {:enabled? true})
-              {:enabled? false})]
-    {:scheduler scheduler/run-session!
-     :stores {:sqlite (:sqlite (:store config))
-              :cas (:cas (:store config))}
-     :dispatch (:dispatch config)
-     :limits limits
-     :ptc ptc
-     :build (fn [phenotype]
-              {:phenotype phenotype
-               :stores {:sqlite (:sqlite (:store config))
-                        :cas (:cas (:store config))}
-               :dispatch (:dispatch config)
-               :ptc ptc})}))
+        enabled? (boolean (:enabled? raw-ptc))
+        computation (when enabled?
+                      (computation/make-computation {:limits (or (:limits raw-ptc) limits)}))
+        ptc (if enabled?
+              (merge computation {:enabled? true})
+              {:enabled? false})
+        orchestrator (when enabled?
+                       (orchestrator/->CodeModeOrchestrator computation))]
+    (cond-> {:scheduler scheduler/run-session!
+             :stores {:sqlite (:sqlite (:store config))
+                      :cas (:cas (:store config))}
+             :dispatch (:dispatch config)
+             :limits limits
+             :ptc ptc
+             :build (fn [phenotype]
+                      (cond-> {:phenotype phenotype
+                               :stores {:sqlite (:sqlite (:store config))
+                                        :cas (:cas (:store config))}
+                               :dispatch (:dispatch config)
+                               :ptc ptc}
+                        orchestrator (assoc :orchestrator orchestrator)))}
+      orchestrator (assoc :orchestrator orchestrator))))
 
 (defmethod ig/halt-key! :runtime/executor
   [_ _component]
