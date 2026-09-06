@@ -11,7 +11,8 @@
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
-            [evoclj.store.sqlite :as sqlite])
+            [evoclj.store.sqlite :as sqlite]
+            [evoclj.store.work :as work-store])
   (:import (java.util Date UUID)))
 
 ;; --- fixtures --------------------------------------------------------------
@@ -157,6 +158,13 @@
     (let [db (fresh-db)
           parent (create-parent-session! db)
           parent-id (:session/id parent)
+          parent-work-id (let [wid (UUID/randomUUID)]
+                           (work-store/create-work!
+                            db {:work/id wid
+                                :work/type :session/run
+                                :work/state :queued
+                                :work/session-id parent-id})
+                           wid)
           parent-events (event/events-for-session db parent-id)
           cause-id (:event/id (last parent-events))
           pl (parent-lease parent-id phenotype #{:invoke})
@@ -169,6 +177,7 @@
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:parent/session-id parent-id
+                            :parent/work-id parent-work-id
                             :child/spec {:task "via-dispatch"}
                             :child/capabilities []}
                   :budget {:wall-ms 1000}

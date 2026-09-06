@@ -78,7 +78,6 @@
             [evoclj.provider.model-registry :as model-registry]
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]
-            [evoclj.runtime.subagent :as subagent]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m]))
 ;; --- constants and context -------------------------------------------------
@@ -336,88 +335,17 @@
                      nil @(:usage broker-context))
        nil intent nil))))
 
-(defn- dispatch-agent-spawn-tool!
-  "Handle :intent/tool-call where :tool/id is :agent/spawn (S6 broker tool).
-  Extracts :task from :args and spawns via subagent/spawn-subagent! using
-  the intent's :session/id as parent. Depth/budget caps are enforced by
-  spawn-subagent! itself."
-  [broker-context intent]
-  (let [db (:db broker-context)]
-    (if-not db
-      (result-error intent :intent/dispatch-invalid
-                    "agent/spawn tool requires :db in broker context"
-                    {:tool/id :agent/spawn}
-                    nil @(:usage broker-context))
-      (try
-        (let [args (get-in intent [:payload :args])
-              parent-id (:session/id intent)
-              task (:task args)
-              child-spec (merge {:task task} (dissoc args :task))
-              res (subagent/spawn-subagent! db parent-id child-spec (:leases broker-context))
-              child-id (:child/session-id res)]
-          (attach-journal
-           (result-ok intent {:child/session-id child-id
-                              :child/capabilities (:child/capabilities res)}
-                      nil @(:usage broker-context))
-           nil intent nil))
-        (catch clojure.lang.ExceptionInfo e
-          (let [edata (ex-data e)]
-            (attach-journal
-             (result-error intent (or (:error/type edata) :intent/dispatch-failed)
-                           (.getMessage e)
-                           edata
-                           nil @(:usage broker-context))
-             nil intent nil)))
-        (catch Exception e
-          (attach-journal
-           (result-error intent :intent/dispatch-failed
-                         (.getMessage e)
-                         {:cause (.getMessage e)}
-                         nil @(:usage broker-context))
-           nil intent nil))))))
 
-(defn- dispatch-agent-status-tool!
-  "Handle :intent/tool-call where :tool/id is :agent/status."
+(defn- terminal-intent-rejection
+  "Reject a terminal control intent: :intent/finish and :intent/fail are
+  consumed by the node loop, never executed by the broker."
   [broker-context intent]
-  (let [db (:db broker-context)]
-    (if-not db
-      (result-error intent :intent/dispatch-invalid
-                    "agent/status tool requires :db in broker context"
-                    {:tool/id :agent/status}
-                    nil @(:usage broker-context))
-      (try
-        (let [args (get-in intent [:payload :args])
-              sid-str (:session-id args)
-              sid (try (evoclj.genome.types/session-id sid-str) (catch Exception _ sid-str))
-              sess (try (evoclj.store.session/get-session db sid) (catch Exception _ nil))]
-          (if-not sess
-            (attach-journal
-             (result-ok intent {:found false :reason :session-not-found :session/id sid}
-                        nil @(:usage broker-context))
-             nil intent nil)
-            (attach-journal
-             (result-ok intent {:found true
-                                :session/id (:session/id sess)
-                                :state (:state sess)
-                                :depth (try (subagent/subagent-depth db sid) (catch Exception _ nil))
-                                :children (try (subagent/child-session-ids db sid) (catch Exception _ []))}
-                        nil @(:usage broker-context))
-             nil intent nil)))
-        (catch clojure.lang.ExceptionInfo e
-          (let [edata (ex-data e)]
-            (attach-journal
-             (result-error intent (or (:error/type edata) :intent/dispatch-failed)
-                           (.getMessage e)
-                           edata
-                           nil @(:usage broker-context))
-             nil intent nil)))
-        (catch Exception e
-          (attach-journal
-           (result-error intent :intent/dispatch-failed
-                         (.getMessage e)
-                         {:cause (.getMessage e)}
-                         nil @(:usage broker-context))
-           nil intent nil))))))
+  (attach-journal
+   (result-error intent :intent/terminal-control
+                 "terminal control intents are consumed by the node loop, never executed by the broker"
+                 {:intent/type (:intent/type intent)}
+                 nil @(:usage broker-context))
+   nil intent nil))
 
 (defn dispatch!
   "Execute intent through the broker pipeline in the NORMATIVE order
@@ -427,61 +355,35 @@
   result contract and the effect-protocol extension points.
 
   broker-context is a map built by make-broker-context. intent is a
-  validated v0 Intent (a malformed intent throws
-  :intent/schema-invalid; :intent/tool-call, :intent/memory-read, and
-  :intent/memory-write execute through the provider registry,
-  :intent/model-call executes through the model
-  registry, and every other intent type fails closed with
-  :intent/unsupported-dispatch)."
+  validated v0 Intent (a malformed intent throws :intent/schema-invalid).
+  Every intent family routes through the single EffectPipeline
+  combinator (evoclj.intent.pipeline/pipeline) — including
+  :agent/spawn and :agent/status tool calls, which authorize against
+  exact leases like every other tool (no special-case branch), and the
+  :intent/subagent-* intents, which execute principal-bound against
+  :db. :intent/finish and :intent/fail are terminal control signals
+  and are rejected."
   [broker-context intent]
   (intent-schema/validate-intent intent)
   (if-let [denial (requested-effect-denial broker-context intent)]
     denial
     (case (:intent/type intent)
       :intent/tool-call
-      (let [tool-id (get-in intent [:payload :tool/id])]
-        (cond
-          (= :agent/spawn tool-id) (dispatch-agent-spawn-tool! broker-context intent)
-          (= :agent/status tool-id) (dispatch-agent-status-tool! broker-context intent)
-          :else (dispatch-registered! broker-context intent tool-id true)))
+      (dispatch-registered! broker-context intent
+                            (get-in intent [:payload :tool/id]) true)
       :intent/memory-read
       (dispatch-registered! broker-context intent :memory/kv false)
       :intent/memory-write
       (dispatch-registered! broker-context intent :memory/kv false)
       :intent/model-call (dispatch-model-call! broker-context intent)
-      :intent/subagent-spawn
-      (let [db (:db broker-context)]
-        (if-not db
-          (result-error intent :intent/dispatch-invalid
-                        "subagent spawn requires :db in broker context"
-                        {:intent/type (:intent/type intent)}
-                        nil @(:usage broker-context))
-          (try
-            (let [parent-id (get-in intent [:payload :parent/session-id])
-                  child-spec (get-in intent [:payload :child/spec])
-                  res (subagent/spawn-subagent! db parent-id (or child-spec {}) (:leases broker-context))
-                  child-id (:child/session-id res)]
-              (attach-journal
-               (result-ok intent {:child/session-id child-id
-                                  :child/capabilities (:child/capabilities res)}
-                          nil @(:usage broker-context))
-               nil intent nil))
-            (catch clojure.lang.ExceptionInfo e
-              (let [edata (ex-data e)]
-                (attach-journal
-                 (result-error intent (or (:error/type edata) :intent/dispatch-failed)
-                               (.getMessage e)
-                               edata
-                               nil @(:usage broker-context))
-                 nil intent nil)))
-            (catch Exception e
-              (attach-journal
-               (result-error intent :intent/dispatch-failed
-                             (.getMessage e)
-                             {:cause (.getMessage e)}
-                             nil @(:usage broker-context))
-               nil intent nil)))))
-      (result-error intent :intent/unsupported-dispatch
-                    "the v0 dispatcher executes :intent/tool-call, :intent/memory-read, :intent/memory-write, :intent/model-call, and :intent/subagent-spawn intents only"
+      :intent/subagent-spawn (pipeline/pipeline broker-context intent)
+      :intent/subagent-result (pipeline/pipeline broker-context intent)
+      :intent/subagent-cancel (pipeline/pipeline broker-context intent)
+      :intent/finish (terminal-intent-rejection broker-context intent)
+      :intent/fail (terminal-intent-rejection broker-context intent)
+      ;; Unreachable: validate-intent rejects unknown types above. Fail
+      ;; closed rather than return nil.
+      (result-error intent :intent/unknown-type
+                    "unknown intent type reached the dispatcher"
                     {:intent/type (:intent/type intent)}
                     nil @(:usage broker-context)))))

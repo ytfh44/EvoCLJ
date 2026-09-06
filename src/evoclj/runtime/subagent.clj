@@ -185,6 +185,33 @@
 ;; Spawn
 ;; ---------------------------------------------------------------------------
 
+(defn- resolve-parent-work-id!
+  "Resolve the parent Work id for a spawn of `parent-id`.
+
+  When `work-id` is supplied (the :intent/subagent-spawn path), it must
+  exist and belong to `parent-id` (W2: a spawn is caused by exactly one
+  parent Work) — otherwise throw :store/work-not-found (missing) or
+  :store/work-invalid (belongs to another session). When nil (the
+  :agent/spawn tool path, whose model-facing args carry no Work), fall
+  back to the parent's latest Work (nil for a root session with none)."
+  [db parent-id work-id]
+  (if (nil? work-id)
+    (some-> (last (work-store/list-works (db-spec db) parent-id)) :work/id)
+    (let [w (work-store/fetch-work (db-spec db) work-id)]
+      (when-not w
+        (throw (err/error :store/work-not-found
+                          (str "parent work not found: " work-id)
+                          {:work/id work-id
+                           :parent/session-id parent-id})))
+      (when (not= parent-id (:work/session-id w))
+        (throw (err/error :store/work-invalid
+                          "parent work belongs to another session"
+                          {:reason :parent-work-mismatch
+                           :work/id (:work/id w)
+                           :work/session-id (:work/session-id w)
+                           :parent/session-id parent-id})))
+      (:work/id w))))
+
 (defn spawn-subagent!
   "Create a child session as a subagent of `parent-session-id`.
 
@@ -211,10 +238,17 @@
   - records the parent->child link in subagent_links.
 
   Typed errors: :store/session-not-found when parent missing,
+  :store/work-not-found when an explicit :parent/work-id is missing,
+  :store/work-invalid when it belongs to another session,
   :store/event-invalid for causal failures, :capability/attenuation-invalid
   when a parent lease cannot be attenuated (should not happen for identity
-  attenuation)."
-  [db parent-session-id child-spec parent-leases]
+  attenuation).
+
+  `opts` (optional) carries :parent/work-id — the parent Work the spawn
+  is attributed to. The 4-arity keeps the legacy latest-Work fallback."
+  ([db parent-session-id child-spec parent-leases]
+   (spawn-subagent! db parent-session-id child-spec parent-leases nil))
+  ([db parent-session-id child-spec parent-leases opts]
   (when (nil? db)
     (throw (ex-info "spawn-subagent! requires a db/store handle" {:error/type :store/session-invalid})))
   (let [parent-id (types/session-id parent-session-id)
@@ -277,9 +311,10 @@
                        :parent_session_id (str parent-id)
                        :created_at ts}))
       ;; W2: durable child Work (queued) — the SOLE execution identity for
-      ;; this child. parent-work-id points at the parent's latest Work (nil
-      ;; only for the root session, which has no parent Work).
-      (let [parent-work-id (some-> (last (work-store/list-works spec parent-id)) :work/id)
+      ;; this child. parent-work-id is the explicit :parent/work-id when
+      ;; supplied, else the parent's latest Work (nil only for the root
+      ;; session, which has no parent Work).
+      (let [parent-work-id (resolve-parent-work-id! db parent-id (:parent/work-id opts))
             wid (java.util.UUID/randomUUID)]
         (work-store/create-work! spec {:work/id wid
                                        :work/type :subagent/run
@@ -290,7 +325,7 @@
         wid)
       {:child/session-id child-id
        :child/session child-session
-       :child/capabilities derived})))
+       :child/capabilities derived}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Child execution (S3)
@@ -831,10 +866,15 @@
   available; the closed-over parent is the fallback.
 
   normalize-request validates args against AgentSpawnArgsSchema and returns
-  the canonical resource {:kind :tool :id :agent/spawn}.
-  execute-request! calls spawn-subagent! with the task and returns
-  {:child/session-id <uuid>} (EDN-safe). Depth/budget caps are enforced by
-  spawn-subagent! itself."
+  the canonical resource {:kind :tool :id :agent/spawn}. Authorization is
+  exact-lease: the broker allows only a lease whose principal equals the
+  requesting session and whose resource is exactly {:kind :tool
+  :id :agent/spawn} (I2, Global Constraint 9).
+  execute-request! calls spawn-subagent! with the task, attenuating the
+  BROKER's leases (carried on the authorized request by the pipeline —
+  never empty-by-construction) into child leases, and returns
+  {:child/session-id <uuid> :child/capabilities [...]} (EDN-safe).
+  Depth/budget caps are enforced by spawn-subagent! itself."
   ([db] (agent-spawn-provider db nil))
   ([db parent-session-id]
    (reify proto/Provider
@@ -857,36 +897,57 @@
              task (:task args)
              ;; child-spec carries the task text; extra keys are passed through for audit
              child-spec (merge {:task task} (dissoc args :task))
-             ;; The leases for attenuation come from the provider's closed-over db state:
-             ;; if no explicit parent-leases are available, pass [] — spawn still creates
-             ;; the session + parent link + event, just with no derived leases.
-             res (spawn-subagent! db parent-id child-spec [])]
+             ;; Attenuate the broker's leases into the child (P1 durable
+             ;; derive). The pipeline carries the authorizing leases on the
+             ;; authorized request; without them the child is unleasable and
+             ;; every child intent denies — fail closed, never mint ambient
+             ;; authority.
+             parent-leases (or (:leases authorized-request) [])
+             res (spawn-subagent! db parent-id child-spec parent-leases)]
          {:child/session-id (:child/session-id res)
           :child/capabilities (:child/capabilities res)})))))
 
 (defn agent-status-provider
   "Build the kernel-owned :agent/status provider (component).
 
-  `db` — sqlite handle. normalize validates args, execute returns the
-  session map's public fields + child/depth info when available."
+  `db` — sqlite handle. normalize validates args and binds the requesting
+  session (the intent's :session/id) as :requester/session-id. execute
+  returns the session map's public fields + child/depth info when
+  available, but ONLY for descendants of the requester: any other target
+  (self, parent, sibling, unrelated) fails closed with
+  :capability/scope-denied. A missing session still reports {:found
+  false} (the pre-existing contract)."
   [db]
   (reify proto/Provider
     (describe [_] agent-status-tool-descriptor)
-    (normalize-request [_ intent]
-      (let [args (tool-args intent)
-            _ (validate-args! agent-status-tool-descriptor args)]
-        {:tool/id :agent/status
-         :resource {:kind :tool :id :agent/status}
-         :args args}))
-    (execute-request! [_ authorized-request]
-      (let [sid-str (get-in authorized-request [:args :session-id])
-            sid (try (types/session-id sid-str) (catch Exception _ sid-str))
-            sess (try (session/get-session db sid) (catch Exception _ nil))]
-        (if-not sess
-          {:found false :reason :session-not-found :session/id sid}
-          {:found true
-           :session/id (:session/id sess)
-           :state (session-work-state db (:session/id sess))
-           :phenotype/id (:phenotype/id sess)
-           :depth (try (subagent-depth db sid) (catch Exception _ nil))
-           :children (try (child-session-ids db sid) (catch Exception _ []))})))))
+     (normalize-request [_ intent]
+       (let [args (tool-args intent)
+             _ (validate-args! agent-status-tool-descriptor args)]
+         {:tool/id :agent/status
+          :resource {:kind :tool :id :agent/status}
+          :args args
+          :requester/session-id (:session/id intent)}))
+     (execute-request! [_ authorized-request]
+       (let [requester (:requester/session-id authorized-request)]
+         (when-not requester
+           (throw (err/error :provider/request-invalid
+                             "agent/status requires the requesting session id (intent :session/id)"
+                             {:value (err/sanitize authorized-request)})))
+         (let [sid-str (get-in authorized-request [:args :session-id])
+               sid (try (types/session-id sid-str) (catch Exception _ sid-str))
+               sess (try (session/get-session db sid) (catch Exception _ nil))]
+           (if-not sess
+             {:found false :reason :session-not-found :session/id sid}
+             (let [descendants (try (set (list-descendants db requester))
+                                    (catch Exception _ #{}))]
+               (when-not (contains? descendants sid)
+                 (throw (err/error :capability/scope-denied
+                                   "agent/status is descendant-scoped: the target is not a descendant of the requesting session"
+                                   {:requester/session-id requester
+                                    :target/session-id sid})))
+               {:found true
+                :session/id (:session/id sess)
+                :state (or (session-work-state db (:session/id sess)) (:state sess))
+                :phenotype/id (:phenotype/id sess)
+                :depth (try (subagent-depth db sid) (catch Exception _ nil))
+                :children (try (child-session-ids db sid) (catch Exception _ []))})))))))

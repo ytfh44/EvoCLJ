@@ -136,13 +136,19 @@
   [:fn cas-ref?])
 
 (def PayloadSubagentSpawnSchema
-  "A subagent-spawn payload: the parent session id, an open child spec
+  "A subagent-spawn payload: the parent session id, the parent Work id
+  the spawn is attributed to (W2: every spawn is caused by one parent
+  Work — the child Work's :work/parent-work-id), an open child spec
   map (e.g. {:genome/id string? :task any?}), and a vector of
-  CapabilityLease maps (may be empty). All keys use malli
+  CapabilityLease maps (may be empty). :parent/session-id must equal
+  the intent's :session/id (I2 principal binding, checked at dispatch);
+  :parent/work-id must exist and belong to the parent session (checked
+  at dispatch against the works table). All keys use malli
   string/uuid/keyword/vector/map checks only (GC-22: EDN-safe, no raw
   objects). The map is open to further keys."
   [:map {:closed false}
    [:parent/session-id uuid?]
+   [:parent/work-id uuid?]
    [:child/spec [:map {:closed false}]]
    [:child/capabilities [:vector [:map {:closed false}]]]])
 

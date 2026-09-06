@@ -3,8 +3,8 @@
   validate -> lookup -> normalize -> authorize -> execute (with retry)
   -> validate-output pipeline.
 
-  The pipeline is the ONLY place that turns an Intent into a provider
-  effect. It handles both intent families through one function:
+  The pipeline is the ONLY place that turns an Intent into an effect.
+  It handles every intent family through one function:
 
   - :intent/model-call — resolved through the kernel-owned model registry
     (payload :model/id), normalized to the canonical {:kind :model ...}
@@ -12,6 +12,11 @@
   - :intent/tool-call, :intent/memory-read, :intent/memory-write —
     resolved through the kernel-owned provider registry under a tool id.
     Memory intents resolve the fixed :memory/kv provider.
+  - :intent/subagent-spawn, :intent/subagent-result,
+    :intent/subagent-cancel — kernel-executed against :db
+    (principal-bound, no provider effect, no CallBinding).
+  - :intent/finish, :intent/fail — terminal control signals, rejected:
+    the node loop consumes them, the broker never executes them.
 
   Tool intents capture a CallBinding (ToolSurface current entry ->
   capture-tool-binding -> CallBinding) before normalization; the frozen
@@ -41,6 +46,7 @@
             [evoclj.provider.model-registry :as model-registry]
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]
+            [evoclj.runtime.subagent :as subagent]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m])
   (:import (java.nio.charset StandardCharsets)))
@@ -317,8 +323,15 @@
         lease-id (:lease-id decision)]
     (loop [attempt 1]
       (swap! usage-atom constraint/bump-calls lease-id)
-      (let [outcome (try
-                      {:value (proto/execute-request! provider normalized)}
+      ;; The authorizing leases travel on the normalized request so
+      ;; lease-attenuating providers (e.g. :agent/spawn, which derives
+      ;; child leases from the broker's grants) inherit exactly what the
+      ;; broker authorized — never ambient authority, never empty by
+      ;; accident. Providers that ignore leases see one extra key.
+      (let [leased-request (cond-> normalized
+                             (map? normalized) (assoc :leases (:leases broker-context)))
+            outcome (try
+                      {:value (proto/execute-request! provider leased-request)}
                       (catch clojure.lang.ExceptionInfo e
                         (cond
                           (ambiguous-error? e) {:ambiguous e}
@@ -514,6 +527,156 @@
                                        decision @usage-atom)
                          binding** decision)))))))))))))
 
+;; --- subagent intents (kernel-executed, no provider effect) -----------------
+;;
+;; :intent/subagent-spawn, :intent/subagent-result, and
+;; :intent/subagent-cancel are executed directly against the session store
+;; (:db in the broker context). They carry no lease-authorized provider
+;; resource — their authorization IS the principal binding below:
+;; spawn/result require the payload parent to equal the intent's session
+;; (I2 exact principal equality); result additionally requires the child
+;; to be linked to that parent; cancel requires the requester to be the
+;; target's parent-or-ancestor. Anything else fails closed with
+;; :capability/principal-mismatch or :capability/scope-denied.
+
+(defn- dispatch-subagent-spawn!
+  [broker-context intent]
+  (let [usage-atom (:usage broker-context)
+        db (:db broker-context)
+        emit (fn [result] (attach-journal result nil intent nil))]
+    (if-not db
+      (emit (result-error intent :intent/dispatch-invalid
+                          "subagent spawn requires :db in broker context"
+                          {:intent/type (:intent/type intent)}
+                          nil @usage-atom))
+      (let [payload (:payload intent)
+            parent-id (:parent/session-id payload)
+            requester (:session/id intent)]
+        (if (not= parent-id requester)
+          (emit (result-error intent :capability/principal-mismatch
+                              "subagent spawn parent must equal the intent's session (I2 principal binding)"
+                              {:parent/session-id parent-id
+                               :session/id requester}
+                              nil @usage-atom))
+          (try
+            (let [res (subagent/spawn-subagent!
+                       db parent-id
+                       (or (:child/spec payload) {})
+                       (:leases broker-context)
+                       {:parent/work-id (:parent/work-id payload)})]
+              (emit (result-ok intent {:child/session-id (:child/session-id res)
+                                       :child/capabilities (:child/capabilities res)}
+                               nil @usage-atom)))
+            (catch clojure.lang.ExceptionInfo e
+              (let [edata (ex-data e)]
+                (emit (result-error intent (or (:error/type edata) :intent/dispatch-failed)
+                                    (ex-message e) edata nil @usage-atom))))
+            (catch Throwable t
+              (emit (result-error intent :intent/dispatch-failed
+                                  (str "subagent spawn threw " (.getName (class t)))
+                                  {:cause (err/error-data t)} nil @usage-atom)))))))))
+
+(defn- dispatch-subagent-result!
+  [broker-context intent]
+  (let [usage-atom (:usage broker-context)
+        db (:db broker-context)
+        emit (fn [result] (attach-journal result nil intent nil))]
+    (if-not db
+      (emit (result-error intent :intent/dispatch-invalid
+                          "subagent result requires :db in broker context"
+                          {:intent/type (:intent/type intent)}
+                          nil @usage-atom))
+      (let [payload (:payload intent)
+            parent-id (:parent/session-id payload)
+            child-id (:child/session-id payload)
+            cas-ref (:result/cas-ref payload)
+            requester (:session/id intent)]
+        (cond
+          (not= parent-id requester)
+          (emit (result-error intent :capability/principal-mismatch
+                              "subagent result parent must equal the intent's session (I2 principal binding)"
+                              {:parent/session-id parent-id
+                               :session/id requester}
+                              nil @usage-atom))
+          (let [actual-parent (try (subagent/get-parent-session-id db child-id)
+                                   (catch Exception _ nil))]
+            (and actual-parent (not= parent-id actual-parent)))
+          (emit (result-error intent :capability/scope-denied
+                              "subagent result child is not linked to the parent session"
+                              {:parent/session-id parent-id
+                               :child/session-id child-id}
+                              nil @usage-atom))
+          :else
+          (try
+            (subagent/deliver-result! db parent-id child-id cas-ref)
+            (emit (result-ok intent {:parent/session-id parent-id
+                                     :child/session-id child-id
+                                     :result/cas-ref cas-ref}
+                             nil @usage-atom))
+            (catch clojure.lang.ExceptionInfo e
+              (let [edata (ex-data e)]
+                (emit (result-error intent (or (:error/type edata) :intent/dispatch-failed)
+                                    (ex-message e) edata nil @usage-atom))))
+            (catch Throwable t
+              (emit (result-error intent :intent/dispatch-failed
+                                  (str "subagent result threw " (.getName (class t)))
+                                  {:cause (err/error-data t)} nil @usage-atom)))))))))
+
+(defn- ancestor-or-self?
+  "True when `ancestor` equals `sid` or appears on its parent chain."
+  [db ancestor sid]
+  (loop [cur sid seen #{}]
+    (cond
+      (nil? cur) false
+      (= ancestor cur) true
+      (contains? seen cur) false
+      :else (recur (try (subagent/get-parent-session-id db cur)
+                         (catch Exception _ nil))
+                    (conj seen cur)))))
+
+(defn- dispatch-subagent-cancel!
+  [broker-context intent]
+  (let [usage-atom (:usage broker-context)
+        db (:db broker-context)
+        emit (fn [result] (attach-journal result nil intent nil))]
+    (if-not db
+      (emit (result-error intent :intent/dispatch-invalid
+                          "subagent cancel requires :db in broker context"
+                          {:intent/type (:intent/type intent)}
+                          nil @usage-atom))
+      (let [payload (:payload intent)
+            requester (:session/id intent)
+            target-id (:target/session-id payload)
+            reason (:reason payload)]
+        (if-not (ancestor-or-self? db requester target-id)
+          (emit (result-error intent :capability/scope-denied
+                              "subagent cancel is ancestor-scoped: the requester is not the target's parent-or-ancestor"
+                              {:session/id requester
+                               :target/session-id target-id}
+                              nil @usage-atom))
+          (try
+            (let [res (subagent/cancel-subagent! db requester target-id reason)]
+              (emit (result-ok intent {:child/session-id (:child/session-id res)
+                                       :cancelled (:cancelled res)
+                                       :already-cancelled? (:already-cancelled? res)}
+                               nil @usage-atom)))
+            (catch clojure.lang.ExceptionInfo e
+              (let [edata (ex-data e)]
+                (emit (result-error intent (or (:error/type edata) :intent/dispatch-failed)
+                                    (ex-message e) edata nil @usage-atom))))
+            (catch Throwable t
+              (emit (result-error intent :intent/dispatch-failed
+                                  (str "subagent cancel threw " (.getName (class t)))
+                                  {:cause (err/error-data t)} nil @usage-atom)))))))))
+
+(defn- terminal-intent-rejection
+  [broker-context intent]
+  (attach-journal (result-error intent :intent/terminal-control
+                                "terminal control intents are consumed by the node loop, never executed by the broker"
+                                {:intent/type (:intent/type intent)}
+                                nil @(:usage broker-context))
+                  nil intent nil))
+
 ;; --- public pipeline -------------------------------------------------------
 
 (defn pipeline
@@ -525,10 +688,14 @@
     -> authorize -> execute once/retry per policy -> validate output
 
   broker-context is the map produced by evoclj.intent.dispatch/make-broker-context.
-  intent is a v0 Intent. Both :intent/model-call and :intent/tool-call
-  (plus :intent/memory-read / :intent/memory-write) are handled via the
-  tool-id lookup branch; model intents resolve through the model registry
-  while tool/memory intents resolve through the provider registry.
+  intent is a v0 Intent. :intent/model-call resolves through the model
+  registry while :intent/tool-call (plus :intent/memory-read /
+  :intent/memory-write) resolve through the provider registry.
+  :intent/subagent-spawn, :intent/subagent-result, and
+  :intent/subagent-cancel execute directly against :db (principal-bound,
+  no provider effect). :intent/finish and :intent/fail are terminal
+  control signals and are rejected — the node loop consumes them, the
+  broker never executes them.
 
   Returns a typed result map; throws typed ExceptionInfo for host-side
   bugs (malformed intent, malformed broker context)."
@@ -543,8 +710,15 @@
     :intent/memory-write
     (dispatch-tool broker-context intent :memory/kv false)
     :intent/model-call (dispatch-model broker-context intent)
-    (result-error intent :intent/unsupported-dispatch
-                  "the v0 dispatcher executes :intent/tool-call, :intent/memory-read, :intent/memory-write, and :intent/model-call intents only"
+    :intent/subagent-spawn (dispatch-subagent-spawn! broker-context intent)
+    :intent/subagent-result (dispatch-subagent-result! broker-context intent)
+    :intent/subagent-cancel (dispatch-subagent-cancel! broker-context intent)
+    :intent/finish (terminal-intent-rejection broker-context intent)
+    :intent/fail (terminal-intent-rejection broker-context intent)
+    ;; Unreachable: validate-intent rejects unknown types above. Fail
+    ;; closed rather than return nil.
+    (result-error intent :intent/unknown-type
+                  "unknown intent type reached the pipeline"
                   {:intent/type (:intent/type intent)}
                   nil @(:usage broker-context))))
 

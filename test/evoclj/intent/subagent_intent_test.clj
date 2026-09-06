@@ -8,8 +8,9 @@
 ;; --- fixtures ---------------------------------------------------------------
 
 (def ^:private intent-id #uuid "22222222-2222-4222-8222-222222222222")
-(def ^:private session-id #uuid "11111111-1111-4111-8111-111111111111")
-(def ^:private child-session-id #uuid "33333333-3333-4333-8333-333333333333")
+ (def ^:private session-id #uuid "11111111-1111-4111-8111-111111111111")
+ (def ^:private parent-work-id #uuid "44444444-4444-4444-8444-444444444444")
+ (def ^:private child-session-id #uuid "33333333-3333-4333-8333-333333333333")
 (def ^:private phenotype-id
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 (def ^:private cas-ref
@@ -51,6 +52,7 @@
 (deftest new-subagent-types-valid-with-minimal-payloads
   (testing "subagent-spawn minimal + open keys"
     (let [payload {:parent/session-id session-id
+                   :parent/work-id parent-work-id
                    :child/spec {:genome/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                 :task {:op :echo :text "hi"}}
                    :child/capabilities []}
@@ -60,6 +62,7 @@
       (is (= result (edn/read-string (pr-str result))) "EDN round-trip")))
   (testing "subagent-spawn with lease maps and extra key (open payload)"
     (let [payload {:parent/session-id session-id
+                   :parent/work-id parent-work-id
                    :child/spec {:genome/id "genome-1" :task "do work"}
                    :child/capabilities [{:cap/id (random-uuid) :resource {:kind :tool :id :fixture/echo}}]
                    :extra "allowed"}
@@ -107,7 +110,14 @@
   (testing "missing parent/session-id on spawn"
     (is-schema-invalid
      (base-intent :intent/subagent-spawn
-                  {:child/spec {:genome/id "g1"}
+                  {:parent/work-id parent-work-id
+                   :child/spec {:genome/id "g1"}
+                   :child/capabilities []})))
+  (testing "missing parent/work-id on spawn"
+    (is-schema-invalid
+     (base-intent :intent/subagent-spawn
+                  {:parent/session-id session-id
+                   :child/spec {:genome/id "g1"}
                    :child/capabilities []})))
   (testing "missing parent/session-id on result"
     (is-schema-invalid
@@ -122,6 +132,14 @@
     (is-schema-invalid
      (base-intent :intent/subagent-spawn
                   {:parent/session-id "not-a-uuid"
+                   :parent/work-id parent-work-id
+                   :child/spec {}
+                   :child/capabilities []})))
+  (testing "wrong type for parent/work-id (not uuid)"
+    (is-schema-invalid
+     (base-intent :intent/subagent-spawn
+                  {:parent/session-id session-id
+                   :parent/work-id "not-a-uuid"
                    :child/spec {}
                    :child/capabilities []})))
   (testing "invalid cas-ref format fails"
@@ -139,10 +157,10 @@
     (is-not-edn-safe
      (base-intent :intent/subagent-spawn
                   {:parent/session-id session-id
+                   :parent/work-id parent-work-id
                    :child/spec {:genome/id "g1"}
                    :child/capabilities []
                    :raw (java.io.File. "/tmp/x")}))))
-
 ;; ============================================================================
 ;; Group 3 — regression: existing types still valid + unknown rejected
 ;; ============================================================================
