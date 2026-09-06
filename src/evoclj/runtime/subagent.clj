@@ -36,6 +36,7 @@
   the broker with the child's attenuated leases."
    (:require [clojure.java.jdbc :as jdbc]
              [clojure.string :as str]
+             [evoclj.capability.grant :as grant]
              [evoclj.capability.mint :as mint]
              [evoclj.compiler.topology :as topology]
              [evoclj.genome.types :as types]
@@ -107,11 +108,13 @@
                             (str (types/session-id parent-session-id))])]
     (mapv #(types/session-id (:child_session_id %)) rows)))
 (def ^:const max-subagent-depth
-  "Maximum nesting depth for subagent chains (S6). Parent depth +1 must be <= this."
+  "Maximum nesting depth for subagent chains (S6). Parent depth +1 must be <= this.
+  Fail-closed backstop; task-level planning (:task + :capabilities) is primary."
   5)
 
 (def ^:const max-spawns-per-parent
-  "Budget cap: maximum direct children per parent (maps to :tool/budget {:max-calls 10})."
+  "Budget cap: maximum direct children per parent (maps to :tool/budget {:max-calls 10}).
+  Fail-closed backstop; task-level planning (:task + :capabilities) is primary."
   10)
 
 (defn subagent-depth
@@ -182,6 +185,128 @@
 
 
 ;; ---------------------------------------------------------------------------
+;; Capability narrowing for spawn (meet, not identity)
+;; ---------------------------------------------------------------------------
+;; The model's :capabilities arg (vector of hint strings on :agent/spawn,
+;; carried into child-spec) is a NARROWING request, not audit metadata:
+;; each parent lease meets the request via Grant meet and disjoint leases
+;; are dropped, so requesting fewer caps yields fewer child leases.
+;; Default derivation is meet, not identity: the implicit spawn right
+;; {:kind :tool :id :agent/spawn} is denied unless explicitly requested.
+;; Depth (5) and fanout (10) remain as fail-closed backstops; task-level
+;; planning (the :task + :capabilities request) is primary.
+
+(def ^:private spawn-tool-id
+  "Tool id whose inheritance is denied by default (must be explicitly requested)."
+  :agent/spawn)
+
+(defn- parse-capability-hint
+  "Parse one model capability hint string into a narrowing request map
+  {:resource {...} :actions (set-or-nil)}; nil actions means resource-only
+  narrowing (keep the parent's actions). Returns nil for unparseable hints
+  (fail-closed: unknown hints match nothing).
+  Grammar: \"<kind>:<id>[:<action>[,<action>...]]\" where kind is one of
+  tool, memory, model, filesystem; a bare \"ns/name\" is a tool id."
+  [s]
+  (when (and (string? s) (seq (str/trim s)))
+    (let [trimmed (str/trim s)
+          parts (str/split trimmed #":")
+          kw-id (fn [id] (when (seq id) (keyword id)))
+          actions-of (fn [a] (when (seq a)
+                               (into #{} (comp (map str/trim)
+                                               (filter seq)
+                                               (map keyword))
+                                         (str/split a #","))))]
+      (cond
+        (= 1 (count parts))
+        (when-let [id (kw-id (first parts))]
+          {:resource {:kind :tool :id id} :actions nil})
+        :else
+        (let [[kind id & rest] parts
+              actions (when (seq rest) (actions-of (str/join ":" rest)))]
+          (cond
+            (and (= kind "tool") (seq id))
+            (when-let [tid (kw-id id)]
+              {:resource {:kind :tool :id tid} :actions actions})
+            (and (= kind "memory") (seq id))
+            (when-let [mid (kw-id id)]
+              {:resource {:kind :memory :id mid} :actions actions})
+            (and (= kind "model") (seq id))
+            {:resource {:kind :model :id id} :actions actions}
+            (and (= kind "filesystem") (seq id))
+            {:resource {:kind :filesystem :path id} :actions actions}
+            :else nil))))))
+
+(defn- capability-requests
+  "Narrowing requests from child-spec's :capabilities (vector of hint
+  strings, or already-structured {:resource _} maps for compat).
+  Unparseable entries match nothing and are dropped."
+  [child-spec]
+  (let [caps (:capabilities (or child-spec {}))]
+    (when (sequential? caps)
+      (into []
+            (comp (map (fn [c]
+                         (cond
+                           (string? c) (parse-capability-hint c)
+                           (and (map? c) (map? (:resource c)))
+                           {:resource (:resource c)
+                            :actions (when (:actions c)
+                                       (if (set? (:actions c)) (:actions c) (set (:actions c))))}
+                           :else nil)))
+                  (filter some?))
+            caps))))
+
+(defn- meet-child-grant
+  "Meet one parent lease's grant with one narrowing request via Grant meet.
+  A nil request :actions means resource-only narrowing (parent actions kept).
+  Returns {:resource _ :actions _} or nil when disjoint."
+  [parent-lease request]
+  (let [pres (:resource parent-lease)
+        pacts (or (:actions parent-lease) #{})
+        racts (:actions request)]
+    (if (nil? racts)
+      (when-let [rm (grant/resource-meet pres (:resource request))]
+        {:resource rm :actions pacts})
+      (when-let [g (grant/meet {:resource pres :actions pacts}
+                               {:resource (:resource request) :actions racts})]
+        {:resource (:resource g) :actions (:actions g)}))))
+
+(defn- spawn-requested?
+  "True when the narrowing requests explicitly name the spawn right."
+  [requests]
+  (boolean (some #(= {:kind :tool :id spawn-tool-id} (:resource %)) requests)))
+
+(defn- derive-child-leases
+  "Derive child leases from parent leases narrowed by the child-spec
+  :capabilities request (Grant meet, not identity).
+  - The spawn right is denied unless explicitly requested.
+  - With no parsable request: one attenuated child lease per (non-spawn)
+  parent lease (same grant, child principal).
+  - With a request: each parent lease meets the same-kind requests in
+  order; the first non-nil meet is derived, disjoint parents are dropped."
+  [db registry parent-leases child-spec child-principal]
+  (let [requests (capability-requests child-spec)
+        keep-spawn? (spawn-requested? requests)
+        eligible (remove #(and (= {:kind :tool :id spawn-tool-id} (:resource %))
+                               (not keep-spawn?))
+                         (or parent-leases []))]
+    (if (empty? requests)
+      (mapv (fn [pl]
+              (mint/derive-lease! db registry pl {:principal child-principal
+                                                  :actions (:actions pl)}))
+            eligible)
+      (into []
+            (comp (map (fn [pl]
+                         (let [cands (filter #(= (:kind (:resource pl)) (:kind (:resource %))) requests)
+                               hit (some #(meet-child-grant pl %) cands)]
+                           (when hit
+                             (mint/derive-lease! db registry pl {:principal child-principal
+                                                                 :resource (:resource hit)
+                                                                 :actions (:actions hit)})))))
+                  (filter some?))
+            eligible))))
+
+;; ---------------------------------------------------------------------------
 ;; Spawn
 ;; ---------------------------------------------------------------------------
 
@@ -218,6 +343,12 @@
   `db`              — sqlite spec, string path, or SessionStore handle (must be migrated).
   `parent-session-id` — UUID of the parent session (must exist).
   `child-spec`      — map, kept for audit in the parent event metadata :child/spec (may be empty).
+  Its :capabilities (vector of hint strings, e.g. [\"tool:fixture/echo\"]) is a
+  NARROWING request: each parent lease meets the request via Grant meet and
+  disjoint leases are dropped. The spawn right (:agent/spawn) is denied
+  unless explicitly requested. Task-level planning (:task + :capabilities)
+  is primary; depth/fanout caps are fail-closed backstops.
+
   `parent-leases`   — collection of sealed CapabilityLease values granted to the parent (may be empty/nil).
 
   Returns {:child/session-id uuid
@@ -228,10 +359,11 @@
   - inserts a new sessions row with status :created, same :genome/id, :resolution/id,
     :phenotype/id, :generation/id as the parent (pinned identity, never assumes).
   - appends a :session/created root event for the child (so its chain is valid).
-  - derives one child lease per parent lease via mint/derive-lease! with
-    subject {:principal/type :session :session/id child-id} and the
-    same actions/resource (attenuation: actions ⊆ parent is enforced by
-    derive-lease!; same actions is the minimal attenuation).
+  - derives child leases via derive-child-leases (Grant meet, not identity)
+  with subject {:principal/type :session :session/id child-id}: with no
+  parsable request one attenuated lease per (non-spawn) parent lease;
+  with a request only the meets survive (fewer requested caps = fewer
+  child leases; attenuation ⊆ parent enforced by derive-lease!).
   - appends a :subagent/spawned event to the parent's chain (cause = parent's
     latest event id) carrying {:child/session-id child-id :child/spec child-spec}
     in its :metadata.
@@ -241,8 +373,8 @@
   :store/work-not-found when an explicit :parent/work-id is missing,
   :store/work-invalid when it belongs to another session,
   :store/event-invalid for causal failures, :capability/attenuation-invalid
-  when a parent lease cannot be attenuated (should not happen for identity
-  attenuation).
+  when a parent lease cannot be attenuated (should not happen for meet
+  derivation, which narrows by construction).
 
   `opts` (optional) carries :parent/work-id — the parent Work the spawn
   is attributed to. The 4-arity keeps the legacy latest-Work fallback."
@@ -278,11 +410,9 @@
                                   :prev/event-id nil
                                   :payload-ref nil
                                   :metadata {}})
-          ;; P1: derive child leases durably — DB INSERT before cache (attenuated)
-          derived (mapv (fn [pl]
-                          (mint/derive-lease! db subagent-lease-registry pl {:principal child-principal
-                                                                              :actions (:actions pl)}))
-                        parent-leases)
+          ;; P1: derive child leases durably — DB INSERT before cache (meet, narrowed)
+          derived (derive-child-leases db subagent-lease-registry parent-leases
+                                       child-spec child-principal)
           ;; keep session index in sync with durable leases (versioned cache mirror)
           _ (when (seq derived)
               (swap! leases-by-session update child-id (fnil into []) derived))
@@ -895,15 +1025,17 @@
                                              "agent/spawn requires parent session id (intent :session/id or closed-over parent)"
                                              {:value (err/sanitize authorized-request)})))
              task (:task args)
-             ;; child-spec carries the task text; extra keys are passed through for audit
-             child-spec (merge {:task task} (dissoc args :task))
-             ;; Attenuate the broker's leases into the child (P1 durable
-             ;; derive). The pipeline carries the authorizing leases on the
-             ;; authorized request; without them the child is unleasable and
-             ;; every child intent denies — fail closed, never mint ambient
-             ;; authority.
-             parent-leases (or (:leases authorized-request) [])
-             res (spawn-subagent! db parent-id child-spec parent-leases)]
+            ;; child-spec carries the task text plus the :capabilities narrowing
+            ;; request (Grant meet in spawn-subagent!, not audit metadata)
+            child-spec (cond-> {:task task}
+                         (:capabilities args) (assoc :capabilities (:capabilities args)))
+            ;; Narrow the broker's leases into the child (P1 durable meet
+            ;; derive). The pipeline carries the authorizing leases on the
+            ;; authorized request; without them the child is unleasable and
+            ;; every child intent denies — fail closed, never mint ambient
+            ;; authority.
+            parent-leases (or (:leases authorized-request) [])
+            res (spawn-subagent! db parent-id child-spec parent-leases)]
          {:child/session-id (:child/session-id res)
           :child/capabilities (:child/capabilities res)})))))
 
