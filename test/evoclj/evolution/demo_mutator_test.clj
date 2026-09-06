@@ -175,11 +175,11 @@
                       (assoc candidate :programs [(route-descriptor)])
                       (fixture-catalog))]
         (is (some? compiled))
-        (is (some? (:compiled/resolution-id compiled)))
-        (is (not= (:genome/id parent) (:compiled/genome-id compiled))
+        (is (some? (:code/resolution-id compiled)))
+        (is (not= (:genome/id parent) (:code/genome-id compiled))
             "G2 is a new content address, not G1")
         (testing "the candidate bundle reloads to its content address"
-          (is (= (:compiled/genome-id compiled)
+          (is (= (:code/genome-id compiled)
                  (:genome/id (load/load-genome (:genome/root candidate))))))))))
 
 ;; ============================================================================
@@ -295,8 +295,8 @@
         _ (migrate/migrate! db)
         loaded (seed-loaded-genome)
         compiled (compiler/compile-genome loaded (fixture-catalog))
-        genome-id (:compiled/genome-id compiled)
-        resolution-id (:compiled/resolution-id compiled)
+        genome-id (:code/genome-id compiled)
+        resolution-id (:code/resolution-id compiled)
         cas-root (str dir "/cas")
         cas-store (cas/->cas cas-root)]
     (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)

@@ -92,7 +92,8 @@
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
-            [evoclj.store.sqlite :as sqlite])
+            [evoclj.store.sqlite :as sqlite]
+            [evoclj.store.work :as work-store])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file FileVisitOption Files LinkOption Paths)
            (java.nio.file.attribute FileAttribute)
@@ -358,8 +359,8 @@
     (migrate/migrate! db)
     ;; ensure artifacts for generation BEFORE insert - use compiled identities (real FK targets)
     (let [genome-id (:genome/id g1)
-          resolution-id (:compiled/resolution-id compiled)
-          phenotype-id (:compiled/phenotype-id compiled)]
+          resolution-id (:code/resolution-id compiled)
+          phenotype-id (:code/id compiled)]
       (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
       (artifact/ensure-artifact! db resolution-id "application/edn" 0)
       (artifact/ensure-artifact! db phenotype-id "application/octet-stream" 0)
@@ -399,14 +400,16 @@
                    {})))
 
 (defn- leases-for
-  "One CapabilityLease per tool id, granting the exact phenotype id
-  the tool's :invoke action."
-  [phenotype-id tool-ids]
+  "One CapabilityLease per tool id, bound to the LIVE session id.
+  Authorization keys on the session principal (I2 exact equality):
+  a lease binds ONE exact session, so leases are minted after the
+  session exists (mirrors the cycle CLI fixture path)."
+  [session-id tool-ids]
   (let [now (java.util.Date.)
         expires (java.util.Date. (+ (.getTime now) 60000))]
     (mapv (fn [tool-id]
             {:cap/id (random-uuid)
-             :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+             :principal {:principal/type :session :session/id session-id}
              :resource {:kind :tool :id tool-id}
              :actions #{:invoke}
              :constraints {:max-calls 10000}
@@ -414,17 +417,24 @@
              :expires-at expires})
           tool-ids)))
 
+(declare create-pinned-session!)
+
 (defn- build-executor
-  "Assemble a scheduler executor for one Genome bundle root: compile
-  from scratch, instantiate a fresh Phenotype, register both fixture
-  tools, grant both leases. Returns {:executor ... :compiled ...}."
-  [store bundle-root]
+  "Assemble a scheduler executor for one Genome bundle root under
+  generation `gen`: compile from scratch, create the pinned session
+  FIRST, then register both fixture tools and grant both leases bound
+  to the live session id (I2 exact equality — a lease binds ONE exact
+  session, so the session must exist before the executor). Returns
+  {:executor ... :compiled ... :session/id ...}."
+  [store bundle-root gen]
   (let [{:keys [loaded compiled]} (compile-bundle bundle-root)
+        db (:sqlite store)
+        sid (create-pinned-session! db compiled gen)
         reg (registry/create-registry)
         _ (registry/register! reg (fixture/echo-provider {}))
         _ (registry/register! reg (echo-b-provider))
         usage (atom {})
-        leases (leases-for (:compiled/phenotype-id compiled)
+        leases (leases-for sid
                            [:fixture/echo :fixture/echo-b])
         ph (phenotype/instantiate
             compiled
@@ -436,43 +446,51 @@
                 :stores store
                 :dispatch (dispatch/make-broker-context
                            {:registry reg :leases leases :usage usage})}
-     :compiled compiled}))
-
+     :compiled compiled
+     :session/id sid}))
 (defn- create-pinned-session!
   "create-session! pinned to `compiled`'s identity under `gen`, then
   append the :session/created root event (the host's job). Returns the
   session id."
   [db compiled gen]
   ;; ensure FK targets for session (011) - idempotent, handles recompiled identities
-  (artifact/ensure-artifact! db (:compiled/genome-id compiled) "application/octet-stream" 0)
-  (artifact/ensure-artifact! db (:compiled/resolution-id compiled) "application/edn" 0)
-  (artifact/ensure-artifact! db (:compiled/phenotype-id compiled) "application/octet-stream" 0)
-  (artifact/ensure-genome! db (:compiled/genome-id compiled))
+  (artifact/ensure-artifact! db (:code/genome-id compiled) "application/octet-stream" 0)
+  (artifact/ensure-artifact! db (:code/resolution-id compiled) "application/edn" 0)
+  (artifact/ensure-artifact! db (:code/id compiled) "application/octet-stream" 0)
+  (artifact/ensure-genome! db (:code/genome-id compiled))
   (let [sid (:session/id
              (session/create-session!
               db
-              {:genome/id (:compiled/genome-id compiled)
-               :resolution/id (:compiled/resolution-id compiled)
-               :phenotype/id (:compiled/phenotype-id compiled)
+              {:genome/id (:code/genome-id compiled)
+               :resolution/id (:code/resolution-id compiled)
+               :phenotype/id (:code/id compiled)
                :generation/id gen}))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id gen
-                          :phenotype/id (:compiled/phenotype-id compiled)
+                          :phenotype/id (:code/id compiled)
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
                           :metadata {}})
     sid))
 (defn- run-episode!
-  "Run one G1 session through the scheduler and materialize its
+  "Run the pre-created session `sid` (whose leases already bind it —
+  see build-executor) through the scheduler and materialize its
   Episode. Returns {:result ... :session/id ... :episode ...}."
-  [executor db compiled task]
-  (let [sid (create-pinned-session! db compiled generation-id)
-        result (scheduler/run-session! executor sid task)
+  [executor db sid task]
+  (let [result (scheduler/run-session! executor sid task)
         ep (episode/materialize-episode! {:sqlite db :cas (:cas (:stores executor))}
                                          sid)]
     {:result result :session/id sid :episode ep}))
+
+(defn- session-work-state
+  "The session's sole execution Work state (W2: Work is the sole
+  durable lifecycle — a Session row carries no runtime state of its
+  own and stays :created; mirrors the scheduler component tests)."
+  [db sid]
+  (some-> (last (work-store/list-works db sid))
+          :work/state))
 
 (defn- candidate-bundle-root
   "The finalized candidate bundle directory under :candidates-dir
@@ -577,22 +595,24 @@
         cas-store (:cas store)
         g1-loaded (loaded-route-a)
         g1-id (:genome/id g1-loaded)
-        g1-ctx (build-executor store (route-a-root))
-        g1-compiled (:compiled g1-ctx)
-        g1-executor (:executor g1-ctx)
+        ;; one executor per session: each session's leases bind its own
+        ;; live session id (I2 exact equality)
+        g1-a (build-executor store (route-a-root) generation-id)
+        g1-b1 (build-executor store (route-a-root) generation-id)
+        g1-b2 (build-executor store (route-a-root) generation-id)
+        g1-compiled (:compiled g1-a)
+        task-a {:op :echo-a :text "hi"}
+        task-b1 {:op :echo-b :text "bo"}
+        task-b2 {:op :echo-b :text "go"}
+        run-a (run-episode! (:executor g1-a) db (:session/id g1-a) task-a)
+        run-b1 (run-episode! (:executor g1-b1) db (:session/id g1-b1) task-b1)
+        run-b2 (run-episode! (:executor g1-b2) db (:session/id g1-b2) task-b2)
         _ (is (re-matches #"^sha256:[0-9a-f]{64}$" g1-id)
             "G1 is content-addressed")
         _ (is (= g1-id (store-genome-body! cas-store g1-loaded))
             "the host stores G1's canonical body under its own content address")
-        _ (is (= g1-id (:compiled/genome-id g1-compiled))
-            "the compiled G1 names the loaded bundle's address")
-        ;; ---------------- the Evolution-set episodes (G1 runs) ------------
-        task-a {:op :echo-a :text "hi"}
-        task-b1 {:op :echo-b :text "bo"}
-        task-b2 {:op :echo-b :text "go"}
-        run-a (run-episode! g1-executor db g1-compiled task-a)
-        run-b1 (run-episode! g1-executor db g1-compiled task-b1)
-        run-b2 (run-episode! g1-executor db g1-compiled task-b2)]
+        _ (is (= g1-id (:code/genome-id g1-compiled))
+            "the compiled G1 names the loaded bundle's address")]
 
     (testing "the scenario preamble — G1 chooses tool A for every request;
               class-B requests FAIL under that policy"
@@ -836,7 +856,7 @@
                         without corrupting the winning branch"
                 (let [op-session-a (create-pinned-session! db g1-compiled generation-id)
                       op-session-c (create-pinned-session! db g1-compiled generation-id)
-                      g2-resolution (:compiled/resolution-id
+                      g2-resolution (:code/resolution-id
                                      (compiler/compile-genome
                                       (assoc (load/load-genome
                                               (candidate-bundle-root
@@ -865,9 +885,9 @@
                       g2-ctx (build-executor store
                                              (candidate-bundle-root
                                               candidates-dir
-                                              (:candidate/genome-id g2)))
-                      new-sid (create-pinned-session! db (:compiled g2-ctx)
-                                                      g2-gen)
+                                              (:candidate/genome-id g2))
+                                             g2-gen)
+                      new-sid (:session/id g2-ctx)
                       new-result (scheduler/run-session! (:executor g2-ctx)
                                                          new-sid task-b1)]
                   (testing "the promotion CAS changed CURRENT G1 → G2"
@@ -914,12 +934,14 @@
                   (testing "an already-running G1 session remains on G1; a new
                             session receives G2 (canary routing + a real G2 run)"
                     (let [g1-session (session/get-session db (:session/id run-a))]
-                      (is (= :completed (:state g1-session)))
+                      (is (= :succeeded (session-work-state db (:session/id run-a)))
+                          "the run's Work terminal state is :succeeded")
+                      (is (= :created (:state g1-session))
+                          "session identity default :created — Work owns the lifecycle")
                       (is (= generation-id (:generation/id g1-session)))
                       (is (= g1-id (:genome/id g1-session)))
                       (is (= (:session/id run-a) (:session/id g1-session)))
-                      (is (= :failed (:state (session/get-session db
-                                                                  (:session/id run-b1))))
+                      (is (= :failed (session-work-state db (:session/id run-b1)))
                           "the failed G1 session stays pinned too"))
                     (let [ds {:current-generation g2-gen
                               :canary {:generation g2-gen :allocation 1.0
@@ -982,7 +1004,7 @@
                   (testing "STEP 5 — close and REOPEN the store from disk;
                             lineage/current checks re-run cleanly"
                     (let [reopened-db (sqlite/spec (:db-path fx))
-                          _ (is (= {:status :noop :version 13}
+                          _ (is (= {:status :noop :version migrate/latest-version}
                                    (migrate/migrate! reopened-db)))
                           reopened-store {:sqlite reopened-db
                                           :cas (cas/->cas (:cas-root fx))}]
@@ -1003,10 +1025,9 @@
                         (is (= g2-gen (get-in g2-lineage [:generation :generation/id])))
                         (is (= generation-id (get-in g2-lineage [:parent :generation/id])))
                         (is (empty? (:children g2-lineage))))
-                      (is (= :completed
-                             (:state (session/get-session reopened-db
-                                                          (:session/id run-a))))
-                          "the G1 session pin survives the restart")
+                      (is (= :succeeded
+                             (session-work-state reopened-db (:session/id run-a)))
+                          "the G1 run's terminal Work state survives the restart")
                       (is (= g2-gen
                              (:generation/id (session/get-session reopened-db
                                                                   new-sid)))

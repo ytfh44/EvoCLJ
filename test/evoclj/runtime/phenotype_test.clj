@@ -5,7 +5,7 @@
   runtime-deps — the map of stores/providers/capabilities/program
   sources the HOST injects — into a live Phenotype:
 
-    {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id ...
+    {:session/id <uuid> :phenotype/id ...
      :compiled <CompiledGenome>   ; the SAME immutable value, shared
      :sci-runtime ...             ; a FRESH isolated SCI runtime
      :providers ...               ; host's registry, by reference
@@ -118,7 +118,7 @@
     {:stores {:sqlite :poison
               :cas {:root :poison}}
      :providers {:registry registry}
-     :capabilities {:leases [(echo-lease (:compiled/phenotype-id compiled-genome))]
+     :capabilities {:leases [(echo-lease (:code/id compiled-genome))]
                     :usage (atom {})}
      :program-sources (genome-program-sources (seed-loaded-genome))}))
 
@@ -155,10 +155,10 @@
     (testing "both phenotypes share the SAME immutable CompiledGenome value"
       (is (identical? compiled (:compiled p1)))
       (is (identical? (:compiled p1) (:compiled p2))))
-    (testing "both carry the same canonical phenotype id, from the compiled value"
-      (is (= (:compiled/phenotype-id compiled) (:phenotype/id p1)))
-      (is (= (:phenotype/id p1) (:phenotype/id p2)))
-      (is (re-matches #"^sha256:[0-9a-f]{64}$" (:phenotype/id p1))))
+    (testing "both carry the same canonical code id, from the compiled value"
+      (is (= (:code/id compiled) (:code/id p1)))
+      (is (= (:code/id p1) (:code/id p2)))
+      (is (re-matches #"^sha256:[0-9a-f]{64}$" (:code/id p1))))
     (testing "each owns a DISTINCT isolated SCI runtime and context"
       (is (not (identical? (:sci-runtime p1) (:sci-runtime p2))))
       (is (not (identical? (get-in p1 [:sci-runtime :context])
@@ -188,10 +188,10 @@
                  (:value (execute/invoke! (:sci-runtime p2) :program/route
                                           {:op :echo :text "hi"})))))))
     (testing "neither phenotype modified the shared immutable genome"
-      (is (= (:compiled/genome-id compiled)
-             (:compiled/genome-id (:compiled p1))))
-      (is (= (:compiled/genome-id compiled)
-             (:compiled/genome-id (:compiled p2)))))))
+      (is (= (:code/genome-id compiled)
+             (:code/genome-id (:compiled p1))))
+      (is (= (:code/genome-id compiled)
+             (:code/genome-id (:compiled p2)))))))
 
 ;; ============================================================================
 ;; Step 2 — halt! is idempotent and leaves host resources alone
@@ -242,7 +242,7 @@
         p (phenotype/instantiate compiled deps)]
     (testing "a deps map whose stores could never open still instantiates"
       (is (map? p))
-      (is (= (:compiled/phenotype-id compiled) (:phenotype/id p))))
+      (is (= (:code/id compiled) (:code/id p))))
     (testing "the host's registry and usage atoms are referenced by identity, never replaced"
       (is (identical? registry (get-in p [:providers :registry])))
       (is (identical? usage (get-in p [:capabilities :usage])))
@@ -315,9 +315,9 @@
                                            :not-a-string))]
         (is (= :runtime/source-missing (:error/type (ex-data e))))))
     (testing "a CompiledGenome without a canonical phenotype id is rejected"
-      (let [e (instantiate-error (dissoc compiled :compiled/phenotype-id) deps)]
+      (let [e (instantiate-error (dissoc compiled :code/id) deps)]
         (is (= :runtime/invalid-compiled (:error/type (ex-data e)))))
-      (let [e (instantiate-error (assoc compiled :compiled/phenotype-id "G42") deps)]
+      (let [e (instantiate-error (assoc compiled :code/id "G42") deps)]
         (is (= :runtime/invalid-compiled (:error/type (ex-data e))))))
     (testing "a non-atom provider registry is rejected"
       (let [e (instantiate-error compiled
@@ -330,7 +330,7 @@
         (is (= :runtime/deps-invalid (:error/type (ex-data e))))
         (is (= :usage-missing (:reason (ex-data e))))))
     (testing "a malformed lease is rejected at construction"
-      (let [bad-lease (dissoc (echo-lease (:compiled/phenotype-id compiled))
+      (let [bad-lease (dissoc (echo-lease (:code/id compiled))
                               :actions)
             e (instantiate-error compiled
                                  (assoc-in deps [:capabilities :leases] [bad-lease]))]

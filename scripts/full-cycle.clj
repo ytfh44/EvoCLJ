@@ -210,8 +210,8 @@
         {:keys [loaded compiled]} (compile-bundle (fixture-path "test" "fixtures"
                                                                 "evolution-e2e"
                                                                 "route-a"))
-        genome-id (:compiled/genome-id compiled)
-        resolution-id (:compiled/resolution-id compiled)
+        genome-id (:code/genome-id compiled)
+        resolution-id (:code/resolution-id compiled)
         cas-root (str state-dir "/cas")
         cas-store (cas/->cas cas-root)
         genome-body (.getBytes (genome-index-bytes loaded)
@@ -224,7 +224,7 @@
     (artifact/ensure-artifact! db genome-id "application/octet-stream"
                                 (alength genome-body))
     (artifact/ensure-artifact! db resolution-id "application/edn" 0)
-    (artifact/ensure-artifact! db (:compiled/phenotype-id compiled)
+    (artifact/ensure-artifact! db (:code/id compiled)
                                 "application/edn" 0)
     (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
@@ -246,10 +246,10 @@
 ;; recording the Evolution set + the replay case (fixture path)
 ;; ============================================================================
 
-(defn- echo-lease [phenotype-id]
+(defn- echo-lease [session-id]
   (let [now (Date.)]
     {:cap/id (random-uuid)
-     :subject {:phenotype/id phenotype-id}
+     :principal {:principal/type :session :session/id session-id}
      :resource {:kind :tool :id :fixture/echo}
      :actions #{:invoke}
      :constraints {:max-calls 100}
@@ -258,15 +258,32 @@
 
 (defn- run-fixture-session!
   "Run ONE fixture session pinned to the seed generation through the
-  real pipeline (load -> compile -> instantiate -> pinned session ->
-  run-session! -> materialize Episode). Returns {:session/id :result}."
+  real pipeline (pinned session -> session-bound lease -> instantiate
+  -> run-session! -> materialize Episode). The session is created
+  FIRST so its lease binds the live session id (I2 exact equality).
+  Returns {:session/id :result}."
   [ctx task]
   (let [{:keys [db cas-store compiled loaded]} ctx
+        sid (:session/id
+             (session-store/create-session!
+              db
+              {:genome/id (:code/genome-id compiled)
+               :resolution/id (:code/resolution-id compiled)
+               :phenotype/id (:code/id compiled)
+               :generation/id "generation-1"}))
+        _ (event/append-event! db
+                               {:session/id sid
+                                :generation/id "generation-1"
+                                :phenotype/id (:code/id compiled)
+                                :event/type :session/created
+                                :prev/event-id nil
+                                :payload-ref nil
+                                :metadata {}})
         reg (registry/create-registry)
         _ (registry/register! reg (fixture/echo-provider {}))
         _ (registry/register! reg (fixture/non-idempotent-provider {}))
         usage (atom {})
-        lease (echo-lease (:compiled/phenotype-id compiled))
+        lease (echo-lease sid)
         ph (phenotype/instantiate
             compiled
             {:stores {:sqlite :poison :cas {:root :poison}}
@@ -276,22 +293,7 @@
         executor {:phenotype ph
                   :stores {:sqlite db :cas cas-store}
                   :dispatch (dispatch/make-broker-context
-                             {:registry reg :leases [lease] :usage usage})}
-        sid (:session/id
-             (session-store/create-session!
-              db
-              {:genome/id (:compiled/genome-id compiled)
-               :resolution/id (:compiled/resolution-id compiled)
-               :phenotype/id (:compiled/phenotype-id compiled)
-               :generation/id "generation-1"}))]
-    (event/append-event! db
-                         {:session/id sid
-                          :generation/id "generation-1"
-                          :phenotype/id (:compiled/phenotype-id compiled)
-                          :event/type :session/created
-                          :cause/event-id nil
-                          :payload-ref nil
-                          :metadata {}})
+                             {:registry reg :leases [lease] :usage usage})}]
     (let [result (scheduler/run-session! executor sid task)]
       (episode/materialize-episode! {:sqlite db :cas cas-store} sid)
       {:session/id sid :result result :executor executor})))
@@ -545,7 +547,7 @@
   "The compiled ResolutionId of a candidate Genome bundle (compilation
   is the host's job — promote! never compiles)."
   [bundle-root]
-  (:compiled/resolution-id
+  (:code/resolution-id
    (compiler/compile-genome (cli-session/load-genome-for-execution bundle-root)
                             cli-session/provider-catalog)))
 
