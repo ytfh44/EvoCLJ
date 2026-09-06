@@ -118,15 +118,23 @@
 (defn- echo-lease
   "A valid CapabilityLease granting this phenotype's exact id the
   :fixture/echo :invoke action for the next minute."
-  []
-  (let [now (java.util.Date.)]
-    {:cap/id (random-uuid)
-     :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
-     :resource {:kind :tool :id :fixture/echo}
-     :actions #{:invoke}
-     :constraints {:max-calls 1000}
-     :issued-at now
-     :expires-at (java.util.Date. (+ (.getTime now) 60000))}))
+   []
+   (let [now (java.util.Date.)]
+     {:cap/id (random-uuid)
+    :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+    :resource {:kind :tool :id :fixture/echo}
+    :actions #{:invoke}
+    :constraints {:max-calls 1000}
+    :issued-at now
+    :expires-at (java.util.Date. (+ (.getTime now) 60000))}))
+
+(defn- session-lease
+   "A :fixture/echo grant bound to one live session id (I2 exact
+   equality). The shared store's sessions keep distinct ids (one store,
+   N concurrent sessions), so each executor carries its own grant next
+   to the shared placeholder lease."
+   [sid]
+   (assoc (echo-lease) :principal {:principal/type :session :session/id sid}))
 
 (defn- shared-store
   "ONE migrated sqlite db, ONE CAS root, ONE provider registry (with a
@@ -241,7 +249,11 @@
   "A minimal CompiledGenome value carrying the stress topology —
   constructed directly, exactly as the component scheduler tests do."
   [fixture-topology]
-  {:compiled/genome-id genome-id
+  {:code/id phenotype-id
+   :code/genome-id genome-id
+   :code/resolution-id resolution-id
+   :compiled/code-id phenotype-id
+   :compiled/genome-id genome-id
    :compiled/resolution-id resolution-id
    :compiled/phenotype-id phenotype-id
    :abi {}
@@ -282,7 +294,8 @@
                                                       (compiled-genome
                                                        (tool-chain-topology tool-count)))
                            task {:op :echo :text (str "s" i)}
-                           sid (create-pinned-session executor)]
+                           sid (create-pinned-session executor)
+                           executor (update-in executor [:dispatch :leases] conj (session-lease sid))]
                        {:task-index i
                         :executor executor
                         :session/id sid
@@ -366,13 +379,14 @@
                             (or (nil? c) (contains? own-ids c))))
                         evs)
                 (str "every cause of " sid " resolves inside " sid))))))
-    (testing "the session rows stayed pinned to the fixture identity (Global Constraint 2)"
-      (doseq [o outcomes]
-        (let [s (session/get-session db (:session/id o))]
-          (is (= genome-id (:genome/id s)))
-          (is (= resolution-id (:resolution/id s)))
-          (is (= phenotype-id (:phenotype/id s)))
-          (is (= :completed (:state s))))))
+     (testing "the session rows stayed pinned to the fixture identity (Global Constraint 2)"
+       (doseq [o outcomes]
+         (let [s (session/get-session db (:session/id o))]
+           (is (= genome-id (:genome/id s)))
+           (is (= resolution-id (:resolution/id s)))
+           (is (= phenotype-id (:phenotype/id s)))
+           (is (= :created (:state s))
+               "W2: the row keeps identity only — completion lives in Work + :session/completed"))))
     (testing "each session's final outputs contain EXACTLY that session's own task text (no cross-session value leakage)"
       (let [by-session (into {} (map (fn [{:keys [task-index executor result]}]
                                        [(str "s" task-index)

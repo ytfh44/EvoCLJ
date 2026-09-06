@@ -646,6 +646,9 @@
       ;; into the executor's runtime registries BEFORE the session leaves
       ;; :created (see restore-session-runtime! for the failure
       ;; discipline — verdicts abort typed, infrastructure degrades).
+      ;; The restore (or a pre-run activate!) may have appended to the log
+      ;; (degraded marker / :binding/activated): :session/started chains to
+      ;; the CURRENT head below — never the stale root.
       (restore-session-runtime! executor pin root)
       (let [work-id (if work-id
                       (do (when-not (work-store/fetch-work db work-id)
@@ -659,7 +662,7 @@
                       ;; spawn-time digest bind and is left untouched.
                       (create-session-work! db (:session/id pin) (payload-ref executor task-input)))
             _work-running (try-work-transition! db work-id work-store/dispatch-work!)]
-        (let [started (append-event! executor pin (:event/id root) :session/started
+        (let [started (append-event! executor pin (:event/id (last (event/events-for-session db (:session/id pin)))) :session/started
                                      (put-payload! executor task-input)
                                      {:entry entry :work/id work-id})
             outcome

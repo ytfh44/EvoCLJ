@@ -68,7 +68,8 @@
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
-            [evoclj.store.sqlite :as sqlite])
+             [evoclj.store.sqlite :as sqlite]
+             [evoclj.store.work :as work-store])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file FileVisitOption Files LinkOption Paths)
            (java.nio.file.attribute FileAttribute)))
@@ -192,7 +193,11 @@
   "A minimal CompiledGenome value carrying a loop fixture topology —
   constructed directly (see the namespace docstring)."
   [fixture-topology]
-  {:compiled/genome-id genome-id
+  {:code/id phenotype-id
+   :code/genome-id genome-id
+   :code/resolution-id resolution-id
+   :compiled/code-id phenotype-id
+   :compiled/genome-id genome-id
    :compiled/resolution-id resolution-id
    :compiled/phenotype-id phenotype-id
    :abi {}
@@ -219,6 +224,20 @@
      :constraints {:max-calls 100}
      :issued-at now
      :expires-at (java.util.Date. (+ (.getTime now) 60000))}))
+
+(defn- session-work-state
+   "The session's sole execution Work state (W2: Work is the sole durable
+   lifecycle — a Session carries no runtime state of its own; see
+   scheduler-test)."
+   [executor sid]
+   (some-> (last (work-store/list-works (:sqlite (:stores executor)) sid))
+           :work/state))
+
+(defn- session-lease
+   "A :fixture/echo grant bound to one live session id (I2 exact
+   equality) — for executors shared by sessions that keep distinct ids."
+   [sid]
+   (assoc (echo-lease) :principal {:principal/type :session :session/id sid}))
 
 (defn- build-executor
   "Build the executor map for a loop fixture topology: a live phenotype
@@ -250,18 +269,26 @@
      :executions executions}))
 
 (defn- create-pinned-session
-  "create-session! pinned to the fixture identity, then append the
-  :session/created root event (the host's job — the scheduler anchors
-  its causal chain on it). Returns the session id."
+   "create-session! pinned to the fixture identity, then append the
+   :session/created root event (the host's job — the scheduler anchors
+   its causal chain on it). The row id is rewritten to the placeholder
+   the fixture lease principal binds (I2 exact equality — see
+   scheduler-test). Returns the session id."
   [executor]
-  (let [db (:sqlite (:stores executor))
-        sid (:session/id
-             (session/create-session!
-              db
-              {:genome/id genome-id
-               :resolution/id resolution-id
-               :phenotype/id phenotype-id
-               :generation/id generation-id}))]
+   (let [db (:sqlite (:stores executor))
+         placeholder #uuid "00000000-0000-4000-a000-000000000000"
+         sid (:session/id
+              (session/create-session!
+               db
+               {:genome/id genome-id
+                :resolution/id resolution-id
+                :phenotype/id phenotype-id
+                :generation/id generation-id}))
+         sid (try
+               (sqlite/with-db [conn db]
+                 (jdbc/execute! conn ["UPDATE sessions SET id = ? WHERE id = ?" (str placeholder) (str sid)]))
+               placeholder
+               (catch Exception _ sid))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id
@@ -322,10 +349,12 @@
         loop-starts (fn [] (count (filter #(= :node/loop
                                               (get-in % [:metadata :node/id]))
                                           (:node/started by-type))))]
-    (testing "the loop terminates normally after three body iterations"
-      (is (= :completed (:status result)))
-      (is (= :completed (:state (session/get-session
-                                 (:sqlite (:stores executor)) sid)))))
+     (testing "the loop terminates normally after three body iterations"
+       (is (= :completed (:status result)))
+       (is (= :succeeded (session-work-state executor sid))
+           "W2: Work owns the lifecycle; the session row stays :created")
+       (is (= :created (:state (session/get-session
+                                (:sqlite (:stores executor)) sid)))))
     (testing "the body ran exactly three times — one per iteration"
       (is (= 3 @executions))
       (is (= 3 (count (:provider/call-completed by-type)))))
@@ -351,10 +380,10 @@
         loop-starts (fn [] (count (filter #(= :node/loop
                                               (get-in % [:metadata :node/id]))
                                           (:node/started by-type))))]
-    (testing "the run terminates at :max-iterations with the typed budget outcome"
-      (is (= :budget-exhausted (:status result)))
-      (is (= :budget-exhausted
-             (:state (session/get-session (:sqlite (:stores executor)) sid)))))
+     (testing "the run terminates at :max-iterations with the typed budget outcome"
+       (is (= :budget-exhausted (:status result)))
+       (is (= :timed-out (session-work-state executor sid))
+           "W2: the budget cap times the Work out; the session row stays :created"))
     (testing "the body ran exactly :max-iterations times, then the cap fired"
       (is (= 3 @executions))
       (is (= 3 (count (:provider/call-completed by-type))))
@@ -433,14 +462,15 @@
 ;; ============================================================================
 
 (deftest step-4-loop-state-is-session-local-not-a-sci-global
-  (let [{:keys [executor executions]} (build-executor
-                                        (loop-topology {:until :program/done?
-                                                        :max-iterations 8}))
-        db (:sqlite (:stores executor))
-        sid1 (create-pinned-session executor)
-        result1 (scheduler/run-session! executor sid1 {:text "one"})
-        sid2 (create-pinned-session executor)
-        result2 (scheduler/run-session! executor sid2 {:text "two"})
+   (let [{:keys [executor executions]} (build-executor
+                                         (loop-topology {:until :program/done?
+                                                         :max-iterations 8}))
+         db (:sqlite (:stores executor))
+         sid1 (create-pinned-session executor)
+         result1 (scheduler/run-session! executor sid1 {:text "one"})
+         sid2 (create-pinned-session executor)
+         executor (update-in executor [:dispatch :leases] conj (session-lease sid2))
+         result2 (scheduler/run-session! executor sid2 {:text "two"})
         provider-events (fn [sid]
                           (count (filter #(= :provider/call-completed (:event/type %))
                                          (event/events-for-session db sid))))]

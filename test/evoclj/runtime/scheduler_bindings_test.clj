@@ -183,7 +183,11 @@
 
 (defn- compiled-genome
   []
-  {:compiled/genome-id genome-id
+  {:code/id phenotype-id
+   :code/genome-id genome-id
+   :code/resolution-id resolution-id
+   :compiled/code-id phenotype-id
+   :compiled/genome-id genome-id
    :compiled/resolution-id resolution-id
    :compiled/phenotype-id phenotype-id
    :abi {}
@@ -220,13 +224,19 @@
 
 (defn- create-pinned-session
   [executor]
-  (let [db (:sqlite (:stores executor))
-        sid (:session/id
-             (session/create-session!
-              db {:genome/id genome-id
-                  :resolution/id resolution-id
-                  :phenotype/id phenotype-id
-                  :generation/id generation-id}))]
+   (let [db (:sqlite (:stores executor))
+         placeholder #uuid "00000000-0000-4000-a000-000000000000"
+         sid (:session/id
+              (session/create-session!
+               db {:genome/id genome-id
+                   :resolution/id resolution-id
+                   :phenotype/id phenotype-id
+                   :generation/id generation-id}))
+         sid (try
+               (sqlite/with-db [conn db]
+                 (jdbc/execute! conn ["UPDATE sessions SET id = ? WHERE id = ?" (str placeholder) (str sid)]))
+               placeholder
+               (catch Exception _ sid))]
     (event/append-event! db {:session/id sid
                              :generation/id generation-id
                              :phenotype/id phenotype-id

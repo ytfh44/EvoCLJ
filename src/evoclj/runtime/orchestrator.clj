@@ -113,14 +113,17 @@
                  {:degradation :bindings-fetch
                   :error (err/error-data t)}))
 
-(defn- fetch-bindings
-  "Current active ContextBindings for the session; degrades with counted event on failure."
-  [executor pin cause]
-  (try
-    (binding-store/active-bindings (:sqlite (:stores executor)) (:session/id pin))
-    (catch Throwable t
-      (record-bindings-degradation! executor pin cause t)
-      [])))
+ (defn- fetch-bindings
+   "Current active ContextBindings for the session; degrades with counted event on failure.
+   Returns [bindings cause-id]: when the degradation marker is appended the
+   cause-id advances to it, so the next append chains to the log head and
+   never to a stale predecessor (E1 prev-must-be-immediate)."
+   [executor pin cause]
+   (try
+     [(binding-store/active-bindings (:sqlite (:stores executor)) (:session/id pin)) cause]
+     (catch Throwable t
+       (let [marked (record-bindings-degradation! executor pin cause t)]
+         [[] (:event/id marked)]))))
 
 (defn- base-call-from-intent*
   "Extract BaseModelCall from an intent, tolerating legacy shapes."
@@ -333,8 +336,8 @@
                rounds rounds
                pinned pinned
                pinned-surface pinned-surface]
-          (let [cause-id (if (map? cause) (:event/id cause) cause)
-                bindings (fetch-bindings executor pin cause-id)
+             (let [cause-id (if (map? cause) (:event/id cause) cause)
+                   [bindings cause-id] (fetch-bindings executor pin cause-id)
                 cas (:cas (:stores executor))
                 _refreshed (try (tool-surface/refresh-context pinned-surface bindings cas
                                                               {:catalog {} :history ""})
@@ -439,8 +442,8 @@
                    rounds rounds
                    pinned pinned
                    pinned-surface pinned-surface]
-              (let [cause-id (if (map? cause) (:event/id cause) cause)
-                    bindings (fetch-bindings executor pin cause-id)
+               (let [cause-id (if (map? cause) (:event/id cause) cause)
+                     [bindings cause-id] (fetch-bindings executor pin cause-id)
                     cas (:cas (:stores executor))
                     _refreshed (try (tool-surface/refresh-context pinned-surface bindings cas
                                                                   {:catalog {} :history ""})
