@@ -818,207 +818,6 @@
                                :error/message (ex-message t)}))))))
            queued)))))
 
-;; ---------------------------------------------------------------------------
-;; Work-graph navigation (W2: parent_work_id is the durable spawn graph;
-;; subagent_links is the session-level mirror kept for compat)
-;; ---------------------------------------------------------------------------
-
-(defn get-parent-work-id
-  "The parent Work id for `work-id`, or nil when `work-id` is a root Work.
-  Delegates to evoclj.store.work/get-parent-work-id (fail closed on missing)."
-  [db work-id]
-  (work-store/get-parent-work-id (db-spec db) work-id))
-
-(defn child-work-ids
-  "Direct child Work ids of `work-id` (oldest first, empty when childless).
-  Delegates to evoclj.store.work/child-work-ids (fail closed on missing)."
-  [db work-id]
-  (work-store/child-work-ids (db-spec db) work-id))
-
-(defn work-descendants
-  "All transitive descendant Work ids of `root-work-id` (BFS, excluding root).
-  Delegates to evoclj.store.work/work-descendants."
-  [db root-work-id]
-  (work-store/work-descendants (db-spec db) root-work-id))
-
-(defn work-depth
-  "Depth of `work-id` in the Work graph (root Work has depth 0).
-  Delegates to evoclj.store.work/work-depth."
-  [db work-id]
-  (work-store/work-depth (db-spec db) work-id))
-
-(defn work-fanout
-  "Number of direct child Works of `work-id`.
-  Delegates to evoclj.store.work/work-fanout."
-  [db work-id]
-  (work-store/work-fanout (db-spec db) work-id))
-
-(defn- work-subtree-session-ids
-  "Session ids owning `work-id` and all its transitive Work descendants.
-  Resolves each Work to its :work/session-id; unresolvable rows are skipped
-  (a Work whose session row is gone revokes nothing, but must not abort
-  the cascade)."
-  [db work-id]
-  (let [spec (db-spec db)
-        ids (into [work-id] (try (work-store/work-descendants spec work-id)
-                                 (catch Exception _ [])))]
-    (into []
-           (comp (map (fn [wid] (try (work-store/fetch-work spec wid) (catch Exception _ nil))))
-                 (filter some?)
-                 (map :work/session-id)
-                 (filter some?)
-                 (distinct))
-           ids)))
-
-;; ---------------------------------------------------------------------------
-;; S4 — cancellation and cascade revoke
-;; ---------------------------------------------------------------------------
-
-(defn list-descendants
-  "Return all descendant session ids (UUIDs) transitively spawned from
-  `root-id` via subagent_links (BFS, not including `root-id`). Static
-  dispatch into evoclj.store.session/list-descendants; returns an empty
-  vector on failure so the cancel path keeps sweeping other targets."
-  [db root-id]
-  (try
-    (session/list-descendants db root-id)
-    (catch Exception _ [])))
-
-(defn- cancel-targets
-  "Transitive session cancel targets for `child-id`: `child-id` itself,
-  followed by every session reached by work-graph descendants and session descendants."
-  [db child-id]
-  (let [works (try (work-store/list-works db child-id) (catch Exception _ []))
-        work-kids (mapcat #(try (work-subtree-session-ids db (:work/id %))
-                                (catch Exception _ []))
-                          works)
-        link-kids (try (list-descendants db child-id)
-                       (catch Exception _ []))]
-    (vec (distinct (concat [child-id] work-kids link-kids)))))
-
-(defn- resolve-cancel-session!
-  "Accept a session id or a first-class Work id; Work ids resolve to
-  their owning session (the cancel path is Work-addressable). Unknown
-  ids pass through untouched so the caller's existence check reports
-  them (:subagent/not-found / :store/session-not-found)."
-  [db id]
-  (let [uuid (try (types/session-id id) (catch Exception _ id))
-        w (try (work-store/fetch-work (db-spec db) uuid) (catch Exception _ nil))]
-    (if w (:work/session-id w) uuid)))
-
-(defn- target-cap-ids
-  "Revocable capability row ids (strings) plus in-memory leases for
-  `session-id`: the union of the session's non-revoked capabilities rows
-  and every registry lease indexed under the session."
-  [db session-id]
-  (let [sid (try (types/session-id session-id) (catch Exception _ session-id))
-        registry-leases (try (mint/leases-for-session subagent-lease-registry sid)
-                             (catch Exception _ []))
-        all-leases (distinct registry-leases)
-        cap-ids (mapv :cap/id all-leases)
-        db-cap-ids (try (mapv #(:id %) (sqlite/query (db-spec db) ["SELECT id FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0" (str sid)]))
-                        (catch Exception _ []))]
-    {:all-db-ids (vec (distinct (concat (mapv str cap-ids) db-cap-ids)))
-     :leases (vec all-leases)}))
-
-(defn- tombstone-memory-leases!
-  "Apply the in-memory half of durable-first revocation AFTER the DB
-  transaction commits: tombstone every revoked row id and lease in the
-  registry. The DB is truth, memory is versioned cache — this never runs
-  before commit."
-  [cap-ids leases]
-  (doseq [id cap-ids]
-    (let [cap-id (try (UUID/fromString (str id)) (catch Exception _ id))]
-      (mint/revoke-lease! subagent-lease-registry cap-id)))
-  (doseq [l leases]
-    (when-let [cap-id (:cap/id l)]
-      (mint/revoke-lease! subagent-lease-registry cap-id)))
-  nil)
-
-(defn- cancel-subtree-tx!
-  "Atomically cancel `targets` (session-id UUIDs, `direct-id` first) in
-  ONE BEGIN IMMEDIATE transaction on a single connection. Per target:
-  revoke its capability rows (UPDATE WHERE revoked = 0), CAS its Works
-  to :cancelled (queued|running|waiting only — other terminals are left
-  as-is), append its :session/cancelled event, and append the
-  :subagent/cancelled edge on its immediate parent chain (`parent-id`
-  for the direct target with the supplied `reason`, the link parent with
-  :parent-cancel for deeper targets). Either the whole subtree cancels
-  or nothing does — revoke and cancel events can never separate across
-  a crash. Strict: any failure rolls back and throws (only the
-  already-cancelled short-circuit in cancel-subagent! skips the tx).
-  Returns {:cap-ids [...] :leases [...]} for the caller to tombstone in
-  memory AFTER commit (durable-first)."
-  [db direct-id parent-id targets reason]
-  (let [spec (db-spec db)
-        link-parent (into {} (map (fn [tid] [tid (try (get-parent-session-id db tid)
-                                                     (catch Exception _ nil))])
-                                  targets))
-        parent-set (vec (distinct (filter some? (cons parent-id (vals link-parent)))))
-        sessions (into {} (map (fn [tid] [tid (session/get-session db tid)])
-                               (distinct (concat targets parent-set))))
-        caps (mapv #(target-cap-ids db %) targets)
-        cap-ids (vec (distinct (mapcat :all-db-ids caps)))
-        leases (vec (distinct (mapcat :leases caps)))
-        work-ids (vec (mapcat (fn [tid]
-                                (try (mapv :work/id (work-store/list-works db tid))
-                                     (catch Exception _ [])))
-                              targets))
-        plan (->CancelPlan work-ids {:cap-ids cap-ids :leases leases} link-parent)]
-    (sqlite/with-write-tx [conn spec]
-      ;; 1. durable revoke first: every capability row, WHERE revoked = 0
-      (let [now (str (java.time.Instant/now))]
-        (doseq [id (get-in plan [:revoke-set :cap-ids])]
-          (sqlite/insert-raw! conn "UPDATE capabilities SET revoked = 1, revoked_at = ? WHERE id = ? AND revoked = 0"
-                               [now (str id)])))
-      ;; 2. CAS every target Work to :cancelled (non-terminal only)
-      (let [now (str (java.time.Instant/now))]
-        (doseq [wid (:target-work-closure plan)]
-          (sqlite/insert-raw! conn "UPDATE works SET state = 'cancelled', updated_at = ? WHERE id = ? AND state IN ('queued','running','waiting')"
-                               [now (str wid)])))
-      ;; 3. cancel events: :session/cancelled per target + :subagent/cancelled
-      ;;    on the immediate parent chain, sequenced inside the same tx
-      (doseq [tid targets]
-        (let [sess (get sessions tid)
-              last-id (:id (last (sqlite/query-raw! conn "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq"
-                                                    [(str tid)])))
-              edge-reason (if (= tid direct-id) reason :parent-cancel)
-              edge-parent (if (= tid direct-id) parent-id (get (:event-edges plan) tid))]
-          (when (and sess last-id)
-            (let [req {:session/id tid
-                       :generation/id (:generation/id sess)
-                       :phenotype/id (:phenotype/id sess)
-                       :event/type :session/cancelled
-                       :prev/event-id last-id
-                       :payload-ref nil
-                       :causal-links #{}
-                       :metadata {:reason edge-reason}}]
-              (es/validate-append-request req)
-              (event/append-event-on-conn! conn req)))
-          (when-let [psess (and edge-parent (get sessions edge-parent))]
-            (let [plast-id (:id (last (sqlite/query-raw! conn "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq"
-                                                         [(str edge-parent)])))]
-              (when plast-id
-                (let [req {:session/id edge-parent
-                           :generation/id (:generation/id psess)
-                           :phenotype/id (:phenotype/id psess)
-                           :event/type :subagent/cancelled
-                           :prev/event-id plast-id
-                           :payload-ref nil
-                           :causal-links #{}
-                           :metadata {:child/session-id tid
-                                      :reason edge-reason}}]
-                  (es/validate-append-request req)
-                  (event/append-event-on-conn! conn req))))))))
-    (:revoke-set plan)))
-
-(defn- session-work-state
-  "The session's sole execution Work state, or nil when it has no Work yet
-  (W2: Work is the sole durable lifecycle — a Session carries no runtime
-  state of its own)."
-  [db session-id]
-  (some-> (last (work-store/list-works db session-id)) :work/state))
-
 (defn cancel-subagent!
   "Cancel a single child subagent session `child-session-id` spawned from
   `parent-session-id`. Delegates to evoclj.runtime.subagent-cancel/cancel-subagent!."
@@ -1615,7 +1414,7 @@
           (if-not sess
             (cond-> {:found false :reason :session-not-found :session/id sid}
               (:work/id target) (assoc :work/id (:work/id target)))
-            (let [descendants (try (set (list-descendants db requester))
+            (let [descendants (try (set (cancel/list-descendants db requester))
                                    (catch Exception _ #{}))]
               (when-not (contains? descendants sid)
                 (throw (err/error :capability/scope-denied
@@ -1624,7 +1423,7 @@
                                    :target/session-id sid})))
               (cond-> {:found true
                        :session/id (:session/id sess)
-                       :state (or (session-work-state db (:session/id sess)) (:state sess))
+                       :state (or (some-> (last (work-store/list-works (db-spec db) (:session/id sess))) :work/state) (:state sess))
                        :phenotype/id (:phenotype/id sess)
                        :depth (try (subagent-depth db sid) (catch Exception _ nil))
                        :children (try (child-session-ids db sid) (catch Exception _ []))}
@@ -1683,7 +1482,7 @@
                             {:value (err/sanitize authorized-request)})))
         (let [target (resolve-cancel-target db (:args authorized-request))
               sid (:session/id target)
-              descendants (try (set (list-descendants db requester))
+              descendants (try (set (cancel/list-descendants db requester))
                                (catch Exception _ #{}))]
           (when-not (contains? descendants sid)
             (throw (err/error :capability/scope-denied
