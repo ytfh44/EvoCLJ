@@ -45,7 +45,8 @@
   drive Session), but new code should drive Work; scheduler mirrors
   Session transitions to Work for the 48->7 collapse."
 ;; E1: Event prev vs causal-links — session creation uses :prev/event-id nil + :causal-links #{}, no :cause.
-  (:require [clojure.java.jdbc :as jdbc]
+  (:require [clojure.edn :as edn]
+            [clojure.java.jdbc :as jdbc]
             [malli.core :as m]
             [malli.error :as me]
             [evoclj.genome.types :as types]
@@ -244,24 +245,11 @@
 ;; ---------------------------------------------------------------------------
 ;; Subagent graph helpers (S4)
 ;; ---------------------------------------------------------------------------
-
-(defn- ensure-subagent-link-table*
-  [db]
-  (let [spec (if (instance? evoclj.store.session_store.SessionStore db)
-               (.-db ^evoclj.store.session_store.SessionStore db)
-               (if (string? db) db db))]
-    (try
-      (evoclj.store.sqlite/with-db [conn spec]
-        (clojure.java.jdbc/execute! conn
-                       ["CREATE TABLE IF NOT EXISTS subagent_links (child_session_id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, created_at TEXT NOT NULL)"])
-        (clojure.java.jdbc/execute! conn
-                       ["CREATE INDEX IF NOT EXISTS subagent_links_parent_idx ON subagent_links(parent_session_id)"]))
-      (catch Exception _))))
+;; subagent_links is owned by 020-subagent-links — no runtime DDL.
 
 (defn list-descendants
   [db root-id]
-  (ensure-subagent-link-table* db)
-  (let [root-uuid (try (evoclj.genome.types/session-id root-id) (catch Exception _ root-id))
+  (let [root-uuid (try (types/session-id root-id) (catch Exception _ root-id))
         spec (if (instance? evoclj.store.session_store.SessionStore db)
                (.-db ^evoclj.store.session_store.SessionStore db)
                db)]
@@ -273,10 +261,32 @@
           (if (contains? visited cur)
             (recur rest-q visited result)
             (let [visited2 (conj visited cur)
-                  children (try
-                             (mapv #(evoclj.genome.types/session-id (:child_session_id %))
-                                   (evoclj.store.sqlite/query spec ["SELECT child_session_id FROM subagent_links WHERE parent_session_id = ? ORDER BY created_at" (str cur)]))
-                             (catch Exception _ []))
+                  cur-str (str cur)
+                  work-kids (try
+                              (mapv #(types/session-id (:child_session_id %))
+                                    (sqlite/query spec
+                                      ["SELECT w1.session_id AS child_session_id
+                                        FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
+                                        WHERE w2.session_id = ?
+                                        ORDER BY w1.created_at" cur-str]))
+                              (catch Exception _ []))
+                  event-kids (try
+                               (let [rows (sqlite/query spec
+                                            ["SELECT payload FROM events
+                                              WHERE session_id = ? AND event_type = 'subagent/spawned'
+                                              ORDER BY id" cur-str])]
+                                 (into []
+                                       (keep (fn [r]
+                                               (when-let [m (some-> (:payload r) edn/read-string)]
+                                                 (some-> (:child/session-id m) types/session-id))))
+                                       rows))
+                               (catch Exception _ []))
+                  link-kids (try
+                              (mapv #(types/session-id (:child_session_id %))
+                                    (sqlite/query spec
+                                      ["SELECT child_session_id FROM subagent_links WHERE parent_session_id = ? ORDER BY created_at" cur-str]))
+                              (catch Exception _ []))
+                  children (into [] (distinct (concat work-kids event-kids link-kids)))
                   new-result (into result children)
                   new-queue (into rest-q children)]
               (recur new-queue visited2 new-result))))))))

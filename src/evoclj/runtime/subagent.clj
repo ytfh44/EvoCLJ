@@ -34,7 +34,8 @@
   :subagent/spawned event links to the child. Synchronous for tests;
   async callers may wrap in future/command. Child intents go through
   the broker with the child's attenuated leases."
-   (:require [clojure.java.jdbc :as jdbc]
+   (:require [clojure.edn :as edn]
+             [clojure.java.jdbc :as jdbc]
              [clojure.string :as str]
              [evoclj.capability.grant :as grant]
              [evoclj.capability.mint :as mint]
@@ -60,6 +61,14 @@
            (java.util Date UUID)))
 
 ;; ---------------------------------------------------------------------------
+;; Plans and delivery records (F1)
+;; ---------------------------------------------------------------------------
+
+(defrecord SpawnPlan [child-pin derived-grants task-bind deadline])
+(defrecord CancelPlan [target-work-closure revoke-set event-edges])
+(defrecord Delivery [child-terminal parent-work causal-link payload-ref])
+
+;; ---------------------------------------------------------------------------
 ;; Helpers
 ;; ---------------------------------------------------------------------------
 
@@ -76,41 +85,63 @@
 
 (declare auto-deliver-child-terminal!)
 
-(defn- ensure-subagent-link-table!
-  "Ensure the helper table for parent->child links exists (idempotent)."
-  [db]
-  (let [spec (db-spec db)]
-    (sqlite/with-db [conn spec]
-      (jdbc/execute! conn
-                     ["CREATE TABLE IF NOT EXISTS subagent_links (
-                        child_session_id TEXT PRIMARY KEY,
-                        parent_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                        created_at TEXT NOT NULL
-                      )"])
-      (jdbc/execute! conn
-                     ["CREATE INDEX IF NOT EXISTS subagent_links_parent_idx ON subagent_links(parent_session_id)"]))))
 
 (defn get-parent-session-id
   "Return the parent session id (UUID) for `child-session-id`, or nil.
   `db` is a sqlite spec or SessionStore handle."
   [db child-session-id]
-  (ensure-subagent-link-table! db)
   (let [spec (db-spec db)
-        row (first (sqlite/query spec
-                                 ["SELECT parent_session_id FROM subagent_links WHERE child_session_id = ?"
-                                  (str (types/session-id child-session-id))]))]
-    (when row
-      (types/session-id (:parent_session_id row)))))
+        sid (str (types/session-id child-session-id))]
+    (or (when-let [row (first (sqlite/query spec
+                                            ["SELECT session_id FROM events
+                                              WHERE event_type = 'subagent/spawned'
+                                                AND payload LIKE ?
+                                              LIMIT 1"
+                                             (str "%" sid "%")]))]
+          (types/session-id (:session_id row)))
+        (when-let [row (first (sqlite/query spec
+                                            ["SELECT w2.session_id AS parent_session_id
+                                              FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
+                                              WHERE w1.session_id = ?
+                                              LIMIT 1"
+                                             sid]))]
+          (types/session-id (:parent_session_id row)))
+        (when-let [row (first (try (sqlite/query spec
+                                                 ["SELECT parent_session_id FROM subagent_links WHERE child_session_id = ?"
+                                                  sid])
+                                   (catch Exception _ nil)))]
+          (types/session-id (:parent_session_id row))))))
 
 (defn child-session-ids
   "All child session ids spawned from `parent-session-id`."
   [db parent-session-id]
-  (ensure-subagent-link-table! db)
   (let [spec (db-spec db)
-        rows (sqlite/query spec
-                           ["SELECT child_session_id FROM subagent_links WHERE parent_session_id = ? ORDER BY created_at"
-                            (str (types/session-id parent-session-id))])]
-    (mapv #(types/session-id (:child_session_id %)) rows)))
+        pid (str (types/session-id parent-session-id))
+        work-kids (try
+                    (mapv #(types/session-id (:child_session_id %))
+                          (sqlite/query spec
+                                        ["SELECT w1.session_id AS child_session_id
+                                          FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
+                                          WHERE w2.session_id = ?
+                                          ORDER BY w1.created_at" pid]))
+                    (catch Exception _ []))
+        event-kids (try
+                     (let [rows (sqlite/query spec
+                                              ["SELECT payload FROM events
+                                                WHERE session_id = ? AND event_type = 'subagent/spawned'
+                                                ORDER BY id" pid])]
+                       (into []
+                             (keep (fn [r]
+                                     (when-let [m (some-> (:payload r) edn/read-string)]
+                                       (some-> (:child/session-id m) types/session-id))))
+                             rows))
+                     (catch Exception _ []))
+        link-kids (try
+                    (mapv #(types/session-id (:child_session_id %))
+                          (sqlite/query spec
+                                        ["SELECT child_session_id FROM subagent_links WHERE parent_session_id = ? ORDER BY created_at" pid]))
+                    (catch Exception _ []))]
+    (into [] (distinct (concat work-kids event-kids link-kids)))))
 (def ^:const max-subagent-depth
   "Maximum nesting depth for subagent chains (S6). Parent depth +1 must be <= this.
   Fail-closed backstop; task-level planning (:task + :capabilities) is primary."
@@ -162,29 +193,11 @@
 (defonce subagent-lease-registry
   (mint/create-lease-registry))
 
-(defonce ^:private leases-by-session
-  (atom {}))
-
-(defn subagent-leases
-  "Return the derived leases for `session-id` (UUID or string-coerced),
-  or empty vector when none. Reads from the in-memory index populated
-  by spawn-subagent!."
-  [session-id]
-  (let [sid (try (types/session-id session-id) (catch Exception _ session-id))]
-    (get @leases-by-session sid [])))
-
-(defn leased-session-ids
-  "Return the set of session ids that currently have registered leases
-  in the subagent index."
-  []
-  (set (keys @leases-by-session)))
-
 (defn clear-subagent-lease-state!
-  "Test helper — clear the global subagent lease registry and index.
+  "Test helper — clear the global subagent lease registry.
   Safe to call between fixtures."
   []
   (reset! subagent-lease-registry {:evoclj.capability.mint/version 0})
-  (reset! leases-by-session {})
   nil)
 
 
@@ -260,55 +273,57 @@
                   (filter some?))
             caps))))
 
-(defn- meet-child-grant
-  "Meet one parent lease's grant with one narrowing request via Grant meet.
-  A nil request :actions means resource-only narrowing (parent actions kept).
-  Returns {:resource _ :actions _} or nil when disjoint."
-  [parent-lease request]
-  (let [pres (:resource parent-lease)
-        pacts (or (:actions parent-lease) #{})
-        racts (:actions request)]
-    (if (nil? racts)
-      (when-let [rm (grant/resource-meet pres (:resource request))]
-        {:resource rm :actions pacts})
-      (when-let [g (grant/meet {:resource pres :actions pacts}
-                               {:resource (:resource request) :actions racts})]
-        {:resource (:resource g) :actions (:actions g)}))))
 
 (defn- spawn-requested?
   "True when the narrowing requests explicitly name the spawn right."
   [requests]
   (boolean (some #(= {:kind :tool :id spawn-tool-id} (:resource %)) requests)))
 
-(defn- derive-child-leases
-  "Derive child leases from parent leases narrowed by the child-spec
-  :capabilities request (Grant meet, not identity).
-  - The spawn right is denied unless explicitly requested.
-  - With no parsable request: one attenuated child lease per (non-spawn)
-  parent lease (same grant, child principal).
-  - With a request: each parent lease meets the same-kind requests in
-  order; the first non-nil meet is derived, disjoint parents are dropped."
+(defn- keep-spawn-lease?
+  "True unless `parent-lease` carries the spawn tool right and the request
+  did not name it (the spawn right is denied by default)."
+  [parent-lease keep-spawn?]
+  (or keep-spawn?
+      (not= spawn-tool-id (:id (:resource parent-lease)))))
+
+(defn- narrow-one-parent
+  "Apply the child-grant = parent-grant ⊓ request algebra to one parent.
+  With no requests, returns [identity child lease]. With requests, returns
+  one child lease per non-nil meet (or [] when every meet is nil)."
+  [db registry parent-lease child-principal requests]
+  (if (empty? requests)
+    [(mint/derive-lease! db registry parent-lease {:principal child-principal})]
+    (let [cands (filter #(= (:kind (:resource parent-lease))
+                            (:kind (:resource %)))
+                        requests)]
+      (into []
+            (keep (fn [request]
+                    (when-let [g (grant/meet {:resource (:resource parent-lease)
+                                              :actions  (or (:actions parent-lease) #{})}
+                                             {:resource (:resource request)
+                                              :actions  (or (:actions request)
+                                                           (:actions parent-lease))})]
+                      (mint/derive-lease! db registry parent-lease
+                                           {:principal child-principal
+                                            :resource (:resource g)
+                                            :actions  (:actions g)}))))
+            cands))))
+
+(defn derive-child-leases
+  "Derive child leases from parent leases narrowed by child-spec :capabilities.
+  Algebra: child = parent ⊓ request, one lease per non-nil meet (grant/meet).
+  With no parsable request, the child is the parent itself (identity).
+  Disjoint parents (no non-nil meet against any request) produce nothing.
+  The spawn right is denied by default unless the model explicitly requested it."
   [db registry parent-leases child-spec child-principal]
   (let [requests (capability-requests child-spec)
-        keep-spawn? (spawn-requested? requests)
-        eligible (remove #(and (= {:kind :tool :id spawn-tool-id} (:resource %))
-                               (not keep-spawn?))
-                         (or parent-leases []))]
-    (if (empty? requests)
-      (mapv (fn [pl]
-              (mint/derive-lease! db registry pl {:principal child-principal
-                                                  :actions (:actions pl)}))
-            eligible)
-      (into []
-            (comp (map (fn [pl]
-                         (let [cands (filter #(= (:kind (:resource pl)) (:kind (:resource %))) requests)
-                               hit (some #(meet-child-grant pl %) cands)]
-                           (when hit
-                             (mint/derive-lease! db registry pl {:principal child-principal
-                                                                 :resource (:resource hit)
-                                                                 :actions (:actions hit)})))))
-                  (filter some?))
-            eligible))))
+        keep-spawn? (spawn-requested? requests)]
+    (into []
+          (mapcat (fn [pl]
+                    (if (keep-spawn-lease? pl keep-spawn?)
+                      (narrow-one-parent db registry pl child-principal requests)
+                      [])))
+          parent-leases)))
 
 ;; ---------------------------------------------------------------------------
 ;; Task digest bind + deadline (W2: the child Work carries the spawn-time
@@ -432,7 +447,6 @@
       (throw (ex-info (str "parent session not found: " parent-id)
                       {:error/type :store/session-not-found
                        :session/id parent-id})))
-    (ensure-subagent-link-table! db)
     (let [child-spec (or child-spec {})
           parent-leases (or parent-leases [])
           ;; S6 — enforce depth/budget caps before creating the child
@@ -456,9 +470,6 @@
           ;; P1: derive child leases durably — DB INSERT before cache (meet, narrowed)
           derived (derive-child-leases db subagent-lease-registry parent-leases
                                        child-spec child-principal)
-          ;; keep session index in sync with durable leases (versioned cache mirror)
-          _ (when (seq derived)
-              (swap! leases-by-session update child-id (fnil into []) derived))
           parent-events (event/events-for-session db parent-id)
           latest (last parent-events)
           _ (when-not latest
@@ -467,6 +478,8 @@
                                :session/id parent-id})))
           cause-id (:event/id latest)
           spawn-digest (task-digest (:task child-spec))
+          deadline (coerce-deadline (or (:deadline child-spec) (:deadline opts)))
+          plan (->SpawnPlan child-request derived spawn-digest deadline)
           _ (event/append-event! db
                                  {:session/id parent-id
                                   :generation/id (:generation/id parent)
@@ -476,15 +489,8 @@
                                   :payload-ref nil
                                   :metadata {:child/session-id child-id
                                              :child/spec child-spec
-                                             :task/digest spawn-digest}})
-          ;; Record parent link
-          spec (db-spec db)
-          ts (.format (java.time.format.DateTimeFormatter/ISO_INSTANT) (java.time.Instant/now))]
-      (sqlite/with-db [conn spec]
-        (jdbc/insert! conn :subagent_links
-                      {:child_session_id (str child-id)
-                       :parent_session_id (str parent-id)
-                       :created_at ts}))
+                                             :task/digest (:task-bind plan)}})
+          spec (db-spec db)]
       ;; W2: durable child Work (queued) — the SOLE execution identity for
       ;; this child. parent-work-id is the explicit :parent/work-id when
       ;; supplied, else the parent's latest Work (nil only for the root
@@ -492,16 +498,15 @@
       ;; the run/status/cancel/replay paths resolve this row and never
       ;; mint a second one.
       (let [parent-work-id (resolve-parent-work-id! db parent-id (:parent/work-id opts))
-            wid (java.util.UUID/randomUUID)
-            deadline (coerce-deadline (or (:deadline child-spec) (:deadline opts)))]
+            wid (java.util.UUID/randomUUID)]
         (work-store/create-work! spec (cond-> {:work/id wid
-                                                              :work/type :subagent/run
-                                                              :work/state :queued
-                                                              :work/session-id child-id
-                                                              :work/parent-work-id parent-work-id
-                                                              :work/created-at (java.util.Date.)}
-                                                       spawn-digest (assoc :work/payload-ref spawn-digest)
-                                                       deadline (assoc :work/deadline deadline)))
+                                               :work/type :subagent/run
+                                               :work/state :queued
+                                               :work/session-id child-id
+                                               :work/parent-work-id parent-work-id
+                                               :work/created-at (java.util.Date.)}
+                                        (:task-bind plan) (assoc :work/payload-ref (:task-bind plan))
+                                        (:deadline plan) (assoc :work/deadline (:deadline plan))))
         ;; the spawn event above was appended before the Work id existed;
         ;; the returned map (and the Work row itself) is the durable handle.
         ;; create-work! returns the raw works row (keys :id, not :work/id);
@@ -509,7 +514,7 @@
         {:child/session-id child-id
          :child/work-id wid
          :child/session child-session
-         :child/capabilities derived})))))
+         :child/capabilities (:derived-grants plan)})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Child execution (S3)
@@ -869,47 +874,25 @@
 
 (defn list-descendants
   "Return all descendant session ids (UUIDs) transitively spawned from
-  `root-id` via subagent_links (BFS, not including `root-id`).
-  Delegates to evoclj.store.session/list-descendants when available."
+  `root-id` via subagent_links (BFS, not including `root-id`). Static
+  dispatch into evoclj.store.session/list-descendants; returns an empty
+  vector on failure so the cancel path keeps sweeping other targets."
   [db root-id]
   (try
-    (let [f (requiring-resolve 'evoclj.store.session/list-descendants)]
-      (@f db root-id))
-    (catch Exception _
-      ;; fallback local BFS
-      (ensure-subagent-link-table! db)
-      (let [root-uuid (try (types/session-id root-id) (catch Exception _ root-id))
-            spec (db-spec db)]
-        (loop [queue [root-uuid] visited #{} result []]
-          (if (empty? queue)
-            result
-            (let [cur (first queue)
-                  rest-q (vec (rest queue))]
-              (if (contains? visited cur)
-                (recur rest-q visited result)
-                (let [children (try
-                                 (mapv #(types/session-id (:child_session_id %))
-                                       (sqlite/query spec
-                                                     ["SELECT child_session_id FROM subagent_links WHERE parent_session_id = ? ORDER BY created_at"
-                                                      (str cur)]))
-                                 (catch Exception _ []))
-                      visited' (conj visited cur)]
-                  (recur (into rest-q children) visited' (into result children)))))))))))
+    (session/list-descendants db root-id)
+    (catch Exception _ [])))
 
 (defn- cancel-targets
-  "Union of the session-link subtree (child + transitive descendants via
-  subagent_links) and the Work-graph subtree (every session owning the
-  child's Works or their transitive Work descendants). The Work graph is
-  the durable truth; the link table is the compat mirror — cancelling the
-  union keeps both views consistent when either lags."
+  "Transitive session cancel targets for `child-id`: `child-id` itself,
+  followed by every session reached by work-graph descendants and session descendants."
   [db child-id]
-  (let [link-targets (into [child-id] (try (list-descendants db child-id)
-                                           (catch Exception _ [])))
-        works (try (work-store/list-works db child-id) (catch Exception _ []))
-        work-targets (mapcat #(try (work-subtree-session-ids db (:work/id %))
-                                   (catch Exception _ []))
-                             works)]
-    (vec (distinct (concat link-targets work-targets)))))
+  (let [works (try (work-store/list-works db child-id) (catch Exception _ []))
+        work-kids (mapcat #(try (work-subtree-session-ids db (:work/id %))
+                                (catch Exception _ []))
+                          works)
+        link-kids (try (list-descendants db child-id)
+                       (catch Exception _ []))]
+    (vec (distinct (concat [child-id] work-kids link-kids)))))
 
 (defn- resolve-cancel-session!
   "Accept a session id or a first-class Work id; Work ids resolve to
@@ -924,15 +907,13 @@
 (defn- target-cap-ids
   "Revocable capability row ids (strings) plus in-memory leases for
   `session-id`: the union of the session's non-revoked capabilities rows
-  and every in-memory/registry lease indexed under the session. Reading
-  both views keeps the DB-first cascade consistent when either lags."
+  and every registry lease indexed under the session."
   [db session-id]
   (let [sid (try (types/session-id session-id) (catch Exception _ session-id))
-        mem-leases (get @leases-by-session sid [])
         registry-leases (try (mint/leases-for-session subagent-lease-registry sid)
                              (catch Exception _ []))
-        all-leases (distinct (concat mem-leases registry-leases))
-        cap-ids (distinct (concat (mapv :cap/id all-leases) (mapv :cap/id mem-leases)))
+        all-leases (distinct registry-leases)
+        cap-ids (mapv :cap/id all-leases)
         db-cap-ids (try (mapv #(:id %) (sqlite/query (db-spec db) ["SELECT id FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0" (str sid)]))
                         (catch Exception _ []))]
     {:all-db-ids (vec (distinct (concat (mapv str cap-ids) db-cap-ids)))
@@ -967,7 +948,6 @@
   Returns {:cap-ids [...] :leases [...]} for the caller to tombstone in
   memory AFTER commit (durable-first)."
   [db direct-id parent-id targets reason]
-  (ensure-subagent-link-table! db)
   (let [spec (db-spec db)
         link-parent (into {} (map (fn [tid] [tid (try (get-parent-session-id db tid)
                                                      (catch Exception _ nil))])
@@ -981,16 +961,17 @@
         work-ids (vec (mapcat (fn [tid]
                                 (try (mapv :work/id (work-store/list-works db tid))
                                      (catch Exception _ [])))
-                              targets))]
+                              targets))
+        plan (->CancelPlan work-ids {:cap-ids cap-ids :leases leases} link-parent)]
     (sqlite/with-write-tx [conn spec]
       ;; 1. durable revoke first: every capability row, WHERE revoked = 0
       (let [now (str (java.time.Instant/now))]
-        (doseq [id cap-ids]
+        (doseq [id (get-in plan [:revoke-set :cap-ids])]
           (sqlite/insert-raw! conn "UPDATE capabilities SET revoked = 1, revoked_at = ? WHERE id = ? AND revoked = 0"
                                [now (str id)])))
       ;; 2. CAS every target Work to :cancelled (non-terminal only)
       (let [now (str (java.time.Instant/now))]
-        (doseq [wid work-ids]
+        (doseq [wid (:target-work-closure plan)]
           (sqlite/insert-raw! conn "UPDATE works SET state = 'cancelled', updated_at = ? WHERE id = ? AND state IN ('queued','running','waiting')"
                                [now (str wid)])))
       ;; 3. cancel events: :session/cancelled per target + :subagent/cancelled
@@ -1000,7 +981,7 @@
               last-id (:id (last (sqlite/query-raw! conn "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq"
                                                     [(str tid)])))
               edge-reason (if (= tid direct-id) reason :parent-cancel)
-              edge-parent (if (= tid direct-id) parent-id (get link-parent tid))]
+              edge-parent (if (= tid direct-id) parent-id (get (:event-edges plan) tid))]
           (when (and sess last-id)
             (let [req {:session/id tid
                        :generation/id (:generation/id sess)
@@ -1027,7 +1008,7 @@
                                       :reason edge-reason}}]
                   (es/validate-append-request req)
                   (event/append-event-on-conn! conn req))))))))
-    {:cap-ids cap-ids :leases leases}))
+    (:revoke-set plan)))
 
 (defn- session-work-state
   "The session's sole execution Work state, or nil when it has no Work yet
@@ -1062,7 +1043,6 @@
   [db parent-session-id child-session-id reason]
   (when (nil? db)
     (throw (ex-info "cancel-subagent! requires a db/store handle" {:error/type :store/session-invalid})))
-  (ensure-subagent-link-table! db)
   (let [child-id (resolve-cancel-session! db child-session-id)
         parent-id (when parent-session-id
                     (resolve-cancel-session! db parent-session-id))
@@ -1096,7 +1076,6 @@
   [db root-session-id reason]
   (when (nil? db)
     (throw (ex-info "cancel-subagent-tree! requires a db/store handle" {:error/type :store/session-invalid})))
-  (ensure-subagent-link-table! db)
   (let [root-id (resolve-cancel-session! db root-session-id)
         root (session/get-session db root-id)]
     (when-not root
@@ -1109,6 +1088,7 @@
             {:keys [cap-ids leases]} (cancel-subtree-tx! db root-id nil targets (or reason :user-request))]
         (tombstone-memory-leases! cap-ids leases)
         {:cancelled targets :already-cancelled? false :root/session-id root-id}))))
+
 (defn cancel-non-terminal-children!
   "Structured-concurrency enforcement: cancel every live child of
   `session-id` so children never outlive their parent's terminal step.
@@ -1121,7 +1101,6 @@
   ([db session-id] (cancel-non-terminal-children! db session-id :parent-cancel))
   ([db session-id reason]
    (when db
-     (ensure-subagent-link-table! db)
      (let [sid (try (types/session-id session-id) (catch Exception _ session-id))
            link-kids (try (child-session-ids db sid) (catch Exception _ []))
            works (try (work-store/list-works db sid) (catch Exception _ []))
@@ -1135,12 +1114,13 @@
                                             (distinct (cons cid (try (list-descendants db cid)
                                                                      (catch Exception _ [])))))))
                      (catch Exception _ false)))]
-       {:cancelled (vec (distinct (mapcat (fn [cid]
+       {:cancelled (vec (distinct (reduce (fn [acc cid]
                                             (try
                                               (if (live? cid)
-                                                (:cancelled (cancel-subagent! db sid cid (or reason :parent-cancel)))
-                                                [])
-                                              (catch Exception _ [])))
+                                                (into acc (:cancelled (cancel-subagent! db sid cid (or reason :parent-cancel))))
+                                                acc)
+                                              (catch Exception _ acc)))
+                                          []
                                           (distinct (concat link-kids work-kids)))))}))))
 ;; ---------------------------------------------------------------------------
 ;; S5 — result delivery to parent chain
@@ -1298,14 +1278,17 @@
                                 {:work/id child-work-id
                                  :work/payload-ref bound
                                  :result/cas-ref cas-ref}))))
-          (if-let [existing (delivered-result-event db parent-id terminal-event-id)]
-            existing
-            (append-result-event-tx! db parent child-work-id terminal-event-id :succeeded
-                                     {:child/session-id child-id
-                                      :child/work-id child-work-id
-                                      :terminal/event-id terminal-event-id
-                                      :result/cas-ref cas-ref
-                                      :result/status :succeeded})))))))
+          (let [delivery (->Delivery terminal-event-id parent-work-id
+                                    {:from terminal-event-id :type :subagent/result}
+                                    cas-ref)]
+            (if-let [existing (delivered-result-event db parent-id (:child-terminal delivery))]
+              existing
+              (append-result-event-tx! db parent child-work-id (:child-terminal delivery) :succeeded
+                                       {:child/session-id child-id
+                                        :child/work-id child-work-id
+                                        :terminal/event-id (:child-terminal delivery)
+                                        :result/cas-ref (:payload-ref delivery)
+                                        :result/status :succeeded}))))))))
 
 (defn deliver-failure-for-works!
   "Canonical Work-handle failure delivery: link child Work `child-work-id`
@@ -1360,14 +1343,17 @@
                                              (assoc :error/caller fallback))
                              (some? fallback) fallback
                              :else {:error/type :subagent/child-failed})]
-             (if-let [existing (delivered-result-event db parent-id terminal-event-id)]
-               existing
-               (append-result-event-tx! db parent child-work-id terminal-event-id :failed
-                                        {:child/session-id child-id
-                                         :child/work-id child-work-id
-                                         :terminal/event-id terminal-event-id
-                                         :result/status :failed
-                                         :error error})))))))))
+            (let [delivery (->Delivery terminal-event-id parent-work-id
+                                      {:from terminal-event-id :type :subagent/result}
+                                      nil)]
+              (if-let [existing (delivered-result-event db parent-id (:child-terminal delivery))]
+                existing
+                (append-result-event-tx! db parent child-work-id (:child-terminal delivery) :failed
+                                         {:child/session-id child-id
+                                          :child/work-id child-work-id
+                                          :terminal/event-id (:child-terminal delivery)
+                                          :result/status :failed
+                                          :error error}))))))))))
 
 (defn deliver-result!
   "Deliver a successful child subagent result to its parent's causal chain

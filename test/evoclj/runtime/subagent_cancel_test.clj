@@ -198,3 +198,31 @@
         (is (not (contains? (set (:cancelled res)) done-id)) "settled child untouched")
         (is (= :cancelled (session-work-state db live)) "live child work cancelled")
         (is (= :succeeded (:work/state (work-store/fetch-work db done-work))) "settled work intact")))))
+
+(deftest cancel-non-terminal-sweeps-past-throwing-child
+  (testing "a child whose cancel throws mid-sweep must not abort the iteration;
+           siblings on either side still get cancelled"
+    (let [db (fresh-db)
+          parent (create-parent-session! db)
+          parent-id (:session/id parent)
+          spawn (fn [task-label]
+                  (subagent/spawn-subagent! db parent-id {:task task-label} []))
+          a (spawn "A") b (spawn "B") c (spawn "C")
+          a-id (:child/session-id a)
+          b-id (:child/session-id b)
+          c-id (:child/session-id c)
+          ;; Real cancel would also persist :cancelled state; we want the
+          ;; sweep itself to call into cancel-subagent! for A and C while
+          ;; only B throws — so we wrap and forward all but B.
+          original subagent/cancel-subagent!
+          wrapped (fn [db parent-id child-id reason]
+                    (if (= child-id b-id)
+                      (throw (ex-info "boom" {:child/session-id child-id}))
+                      (original db parent-id child-id reason)))
+          res (with-redefs [subagent/cancel-subagent! wrapped]
+                (subagent/cancel-non-terminal-children! db parent-id))]
+      (is (contains? (set (:cancelled res)) a-id) "A cancelled despite B's throw")
+      (is (contains? (set (:cancelled res)) c-id) "C cancelled despite B's throw")
+      (is (not (contains? (set (:cancelled res)) b-id))
+          "B (which threw) is swallowed, not surfaced"))))
+
