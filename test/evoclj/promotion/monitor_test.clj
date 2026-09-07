@@ -30,8 +30,8 @@
     (deactivate-canary routes every new key to the current generation
     while a pre-existing candidate session stays pinned); what happens
     to already-running candidate sessions follows the profile
-    (:cancel marks them :cancelled via the store transition, :finish
-    leaves them running) and is recorded per session.
+    (:cancel drives their active Work to :cancelled, :finish leaves
+    Work untouched) and is recorded per session.
   - Step 4: the stop reason and observed metrics are persisted as
     promotion evidence: a :promotion/canary-stopped event whose
     metadata carries the reason and whose :payload-ref points at a CAS
@@ -51,6 +51,7 @@
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
+            [evoclj.store.work :as work-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file Files Paths)
@@ -161,8 +162,8 @@
 
 (defn- running-session!
   "Create a candidate session pinned to the CANARY generation G43 and
-  transition it :created → :resolving → :running (an already-running
-  candidate session). Returns the session id."
+  give it an active Work (the Work row, not the immutable Session row,
+  owns the running lifecycle). Returns the session id."
   [db]
   (let [sid (:session/id
              (session/create-session!
@@ -171,9 +172,17 @@
                :resolution/id resolution
                :phenotype/id phenotype
                :generation/id g43}))]
-    (session/transition-session! db sid :created :resolving nil)
-    (session/transition-session! db sid :resolving :running nil)
+    (work-store/create-work! db {:work/id (java.util.UUID/randomUUID)
+                                 :work/type :session/run
+                                 :work/state :running
+                                 :work/session-id sid
+                                 :work/created-at (java.util.Date.)})
     sid))
+
+(defn- session-work-state
+  "Return the latest Work state for a session."
+  [db sid]
+  (some-> (last (work-store/list-works db sid)) :work/state))
 
 (defn- deployment-state
   "The component deployment-state shape with an ACTIVE G43 canary;
@@ -368,9 +377,11 @@
         result (monitor/stop-canary!
                 (stop-system db cas-root operator-sid running-sids)
                 decision :cancel)]
-    (testing "every already-running candidate session was marked :cancelled"
+    (testing "every already-running candidate session's Work was marked :cancelled"
       (doseq [sid running-sids]
-        (is (= :cancelled (:state (session/get-session db sid))))))
+        (is (= :cancelled (session-work-state db sid)))
+        (is (= :created (:state (session/get-session db sid)))
+            "Session remains immutable identity; Work owns cancellation")))
     (testing "the per-session action is recorded"
       (is (= (set (map #(hash-map :session/id % :action :cancelled) running-sids))
              (set (:running/actions result)))))
@@ -386,8 +397,9 @@
         result (monitor/stop-canary!
                 (stop-system db cas-root operator-sid running-sids)
                 (hard-stop-decision) :finish)]
-    (testing "running candidate sessions are left running under :finish"
-      (is (= :running (:state (session/get-session db (first running-sids))))))
+    (testing "running candidate Work is left running under :finish"
+      (is (= :running (session-work-state db (first running-sids))))
+      (is (= :created (:state (session/get-session db (first running-sids))))))
     (testing "the recorded action says :finish"
       (is (= [{:session/id (first running-sids) :action :finish}]
              (:running/actions result))))))
@@ -398,17 +410,18 @@
         _ (seed-generations! db)
         operator-sid (operator-session! db)
         finished-sid (running-session! db)
-        _ (session/transition-session! db finished-sid :running :waiting nil)
-        _ (session/transition-session! db finished-sid :waiting :completed nil)
+        finished-work-id (-> (work-store/list-works db finished-sid) first :work/id)
+        _ (work-store/succeed-work! db finished-work-id nil)
         result (monitor/stop-canary!
                 (stop-system db cas-root operator-sid [finished-sid])
                 (hard-stop-decision) :cancel)]
-    (testing "an already-completed session is recorded :skipped, not cancelled"
+    (testing "a session with completed Work is recorded :skipped, not cancelled"
       (is (= [{:session/id finished-sid :action :skipped
-               :actual-state :completed}]
+               :actual-state :succeeded}]
              (:running/actions result))))
-    (testing "the completed session stays completed"
-      (is (= :completed (:state (session/get-session db finished-sid)))))))
+    (testing "the completed Work stays succeeded and the Session stays immutable"
+      (is (= :succeeded (session-work-state db finished-sid)))
+      (is (= :created (:state (session/get-session db finished-sid)))))))
 
 ;; ============================================================================
 ;; Step 4 — persist the stop reason and observed metrics as promotion evidence

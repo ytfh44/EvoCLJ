@@ -346,6 +346,24 @@
        :phenotype/id (:phenotype_id sess)
        :prev/event-id (:id newest)})))
 
+(def ^:private active-work-states
+  #{:queued :running :waiting})
+
+(defn- cancel-work-result!
+  "Cancel one Work and return the canonical persisted Work row.
+
+  A racing worker may win the CAS after the initial list-works snapshot.
+  In that case, re-read the Work: the durable row, not the exception or
+  Session row, determines the cancellation result."
+  [db work-id]
+  (try
+    (work-store/cancel-work! db work-id)
+    (catch clojure.lang.ExceptionInfo e
+      (if (= :work/invalid-transition (:error/type (ex-data e)))
+        (or (work-store/fetch-work db work-id)
+            (throw e))
+        (throw e)))))
+
 (defn- cancel-session!
   "The :cancel profile action for ONE already-running candidate session:
   drive its active Work (queued/running/waiting) to :cancelled via
@@ -358,12 +376,13 @@
     (if-not (session/get-session db sid)
       {:session/id sid :action :missing}
       (let [works (work-store/list-works db sid)
-            active (filter #(contains? #{:queued :running :waiting} (:work/state %)) works)]
+            active (filter #(contains? active-work-states (:work/state %)) works)]
         (if (seq active)
-          (do (doseq [w active]
-                (try (work-store/cancel-work! db (:work/id w))
-                     (catch Exception _ nil)))
-              {:session/id sid :action :cancelled})
+          (let [settled (mapv #(cancel-work-result! db (:work/id %)) active)]
+            (if (every? #(= :cancelled (:work/state %)) settled)
+              {:session/id sid :action :cancelled}
+              {:session/id sid :action :skipped
+               :actual-state (some-> (last settled) :work/state)}))
           {:session/id sid :action :skipped
            :actual-state (some-> (last works) :work/state)})))))
 
@@ -386,11 +405,11 @@
   `deactivate-canary` on their deployment state. Existing sessions are
   never rewritten.
 
-  Running sessions (Step 3): :cancel transitions each :running
-  candidate session to :cancelled through the store (sessions no
-  longer :running are recorded :skipped with their actual state);
-  :finish leaves them running. Every session's outcome is returned in
-  :running/actions.
+  Running sessions (Step 3): :cancel drives each active
+  candidate session's Work to canonical :cancelled through the Work
+  store; sessions with no active Work are recorded :skipped with their
+  terminal Work state. The :finish profile leaves Work untouched.
+  Every session's outcome is returned in :running/actions.
 
   Returns {:stop/event <event> :metrics/artifact {:artifact/id ...}
   :running/actions [...] :routing {:canary-active? false}}.
