@@ -426,8 +426,6 @@
   [opts]
   (make-tool-entry opts))
 
-(def ^:private legacy-registry (atom {}))
-
 (defn refresh-provider!
   "Deprecated: previously mutated descriptor-atom in place. Now returns a new
    immutable ToolEntry with bumped :mcp/generation and nil :mcp/last-refreshed.
@@ -461,18 +459,7 @@
                 :mcp/server-id (:mcp/server-id desc)}]
       (let [new-entry (make-tool-entry (merge opts {:mcp/input-schema (:mcp/input-schema desc)
                                                     :mcp/output-schema (:mcp/output-schema desc)}))]
-        (let [bumped (assoc new-entry :descriptor new-desc)]
-          (swap! legacy-registry assoc tool-id bumped)
-          bumped)))))
-
-(defn refresh-all-mcp-providers!
-  "Deprecated: previously mutated each descriptor. Now returns map of tool-id -> new descriptor."
-  []
-  (reduce-kv (fn [m k v]
-               (let [new-entry (refresh-provider! v)]
-                 (assoc m k (:descriptor new-entry))))
-             {}
-             @legacy-registry))
+        (assoc new-entry :descriptor new-desc)))))
 (defn dispose!
   "Release this entry's pooled connection back to the manager it was BUILT
    with. WO-M5: the ToolEntry record carries its own :manager atom and

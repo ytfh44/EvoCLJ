@@ -982,12 +982,13 @@
   generic source refresh."
   [opts]
   (let [system (build-system opts)
-        legacy (mcp-bridge/refresh-all-mcp-providers!)
-        reg (:provider/registry system)
-        from-registry (when reg
-                        (into {}
-                              (keep (fn [[tool-id {:keys [descriptor]}]]
-                                      (when (= :remote (:effect descriptor))
-                                        [tool-id descriptor]))
-                                    @reg)))]
-    (merge legacy from-registry)))
+        reg (:provider/registry system)]
+    (if reg
+      (into {}
+            (keep (fn [[tool-id entry]]
+                    (let [desc (proto/describe entry)]
+                      (when (= :remote (:effect desc))
+                        (let [bumped (mcp-bridge/refresh-provider! entry)]
+                          [tool-id (proto/describe bumped)]))))
+                  @reg))
+      {})))
