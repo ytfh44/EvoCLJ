@@ -62,19 +62,26 @@
 ;; produce the map shape, so the flat form disappears on next write.
 ;; ---------------------------------------------------------------------------
 
-(defn- entry-calls
-  "Calls carried by one usage-map entry: a number entry is a legacy flat
-  call count; a map entry reads :calls; anything else is 0."
+(defn normalize-usage-entry
+  "Normalize an entry into the canonical {:calls <n> :bytes <b>} shape.
+  Tolerates legacy non-negative number as call count with 0 bytes."
   [entry]
-  (cond (number? entry) (long entry)
-        (map? entry) (long (get entry :calls 0))
-        :else 0))
+  (cond
+    (map? entry)    {:calls (long (get entry :calls 0))
+                     :bytes (long (get entry :bytes 0))}
+    (number? entry) {:calls (long entry)
+                     :bytes 0}
+    :else           {:calls 0 :bytes 0}))
+
+(defn- entry-calls
+  "Calls carried by one usage-map entry."
+  [entry]
+  (:calls (normalize-usage-entry entry)))
 
 (defn- entry-bytes
-  "Bytes carried by one usage-map entry: a legacy flat number entry
-  carried no byte accounting, so it reads 0; a map entry reads :bytes."
+  "Bytes carried by one usage-map entry."
   [entry]
-  (if (map? entry) (long (get entry :bytes 0)) 0))
+  (:bytes (normalize-usage-entry entry)))
 
 (defn used-calls
   "Calls already consumed under `lease-id` in the usage map. A missing
@@ -106,32 +113,17 @@
 
 (defn bump-calls
   "Increment the :calls counter for `lease-id` in a usage map. Pure; the
-  caller swaps it into the usage atom. A legacy flat number entry is
-  first normalized to {:calls <n> :bytes 0} so the flat form disappears
-  on next write. Every written entry carries BOTH :calls and :bytes, so
-  the map always satisfies the usage schema (a {:calls 1}-without-:bytes
-  entry would fail validation on the next authorization)."
+  caller swaps it into the usage atom. Normalized to canonical {:calls N :bytes B}."
   [usage lease-id]
-  (let [entry (get (or usage {}) lease-id)]
-    (if (number? entry)
-      (assoc (or usage {}) lease-id {:calls (inc (long entry)) :bytes 0})
-      (-> (or usage {})
-          (update-in [lease-id :calls] (fnil inc 0))
-          (update-in [lease-id :bytes] #(or % 0))))))
+  (let [entry (normalize-usage-entry (get (or usage {}) lease-id))]
+    (assoc (or usage {}) lease-id (update entry :calls inc))))
 
 (defn add-bytes
   "Add `n` to the :bytes counter for `lease-id` in a usage map. Pure;
-  the caller swaps it into the usage atom. A legacy flat number entry
-  is first normalized to {:calls <n> :bytes 0} before adding. The :calls
-  key is defaulted to 0 when absent, preserving the both-keys invariant."
+  the caller swaps it into the usage atom. Normalized to canonical {:calls N :bytes B}."
   [usage lease-id n]
-  (let [entry (get (or usage {}) lease-id)]
-    (if (number? entry)
-      (assoc (or usage {}) lease-id {:calls (long entry) :bytes (long n)})
-      (-> (or usage {})
-          (update-in [lease-id :bytes] (fnil + 0) (long n))
-          (update-in [lease-id :calls] #(or % 0))))))
-
+  (let [entry (normalize-usage-entry (get (or usage {}) lease-id))]
+    (assoc (or usage {}) lease-id (update entry :bytes + (long n)))))
 ;; ---------------------------------------------------------------------------
 ;; Built-in descriptors
 ;; ---------------------------------------------------------------------------
