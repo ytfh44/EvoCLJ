@@ -122,10 +122,10 @@
              (:behavior/resource p))))))
 
 (deftest status-derivation
-  (testing "budget-exhausted maps from :session/state as a string"
+  (testing "timed-out Work state maps to budget-exhausted"
     (let [p (behavior/profile-events
              [{:event/seq 1 :event/type :session/budget-exhausted
-               :metadata {:session/state "budget-exhausted"}}])]
+               :metadata {:work/state :timed-out}}])]
       (is (= :budget-exhausted (:behavior/status p)))))
   (testing "failed maps from the :status keyword"
     (let [p (behavior/profile-events
