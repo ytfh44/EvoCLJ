@@ -205,7 +205,8 @@
 
 (deftest orchestrator-make-tool-fns-crosses-broker
   (testing "make-tool-fns factory builds fns that cross broker via pipeline"
-    (let [reg (registry/create-registry)
+    (let [session-id #uuid "00000000-0000-4000-a000-000000000000"
+          reg (registry/create-registry)
           _ (registry/register! reg
                 (reify proto/Provider
                   (describe [_] {:tool/id :echo :effect :pure :input-schema [:map [:text :string]] :output-schema [:map [:text :string] [:echoed :boolean]] :required-action :invoke :retry {:safe? true}})
@@ -213,14 +214,14 @@
                   (execute-request! [_ norm] (assoc (:args norm) :echoed true))))
           broker (dispatch/make-broker-context {:registry reg
                                                 :leases [{:cap/id (random-uuid)
-                                                          :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+                                                          :principal {:principal/type :session :session/id session-id}
                                                           :resource {:kind :tool :id :echo}
                                                           :actions #{:invoke}
                                                           :constraints {:max-calls 10}
                                                           :issued-at (java.util.Date. 0)
                                                           :expires-at (java.util.Date. 4102444800000)}]})
           executor {:dispatch broker}
-          pin {:session/id (random-uuid)
+          pin {:session/id session-id
                :phenotype/id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                :node/id :sandbox}
           cause 1
