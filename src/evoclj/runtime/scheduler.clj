@@ -145,6 +145,7 @@
             [evoclj.kernel.error :as err]
             [evoclj.runtime.orchestrator :as orchestrator]
             [evoclj.runtime.node :as node]
+            [evoclj.runtime.subagent-cancel :as subagent-cancel]
             [evoclj.runtime.work :as work]
             [evoclj.sci.boundary :as boundary]
             [evoclj.store.binding :as binding-store]
@@ -823,7 +824,6 @@
           ;; fails the already-determined outcome. The join half is
           ;; await-child! (parent polls the child Work row); this is the
           ;; cancel half, enforced at the terminal step.
-          (try ((requiring-resolve 'evoclj.runtime.subagent/cancel-non-terminal-children!)
-                db (:session/id pin))
+          (try (subagent-cancel/cancel-non-terminal-children! db (:session/id pin))
                (catch Throwable _ nil))
           (assoc outcome :event/count (event-count executor pin) :work/id work-id))))))))

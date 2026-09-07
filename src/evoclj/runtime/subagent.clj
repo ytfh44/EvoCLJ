@@ -47,6 +47,7 @@
              [evoclj.provider.protocol :as proto]
              [evoclj.provider.registry :as registry]
              [evoclj.runtime.phenotype :as phenotype]
+             [evoclj.runtime.subagent-cancel :as cancel]
              [evoclj.store.cas :as cas]
              [evoclj.store.event :as event]
              [evoclj.store.event-schema :as es]
@@ -677,7 +678,8 @@
     (let [child-work-id (resolve-child-work-id! db child-id work-id)]
       (enforce-child-deadline! db child-work-id)
       (let [executor (build-child-executor db child)
-            run-session! @(requiring-resolve 'evoclj.runtime.scheduler/run-session!)
+            run-session! (or (resolve 'evoclj.runtime.scheduler/run-session!)
+                             @(requiring-resolve 'evoclj.runtime.scheduler/run-session!))
             ;; W2: reuse the Work the spawn created — never mint a second one.
             ;; The child's sole execution identity is the :subagent/run Work
             ;; spawn-subagent! persisted (queued); scheduler dispatches it to
@@ -1019,109 +1021,21 @@
 
 (defn cancel-subagent!
   "Cancel a single child subagent session `child-session-id` spawned from
-  `parent-session-id`. Cascade: also cancels all transitive descendants
-  (union of the session-link BFS and the Work-graph BFS from the child's Works).
-  Both ids accept session ids or first-class Work ids (a Work id resolves
-  to its owning session).
-
-  The whole subtree cancels in ONE BEGIN IMMEDIATE transaction
-  (cancel-subtree-tx!): capability-row revoke, Work CAS to :cancelled
-  (idempotent: already :cancelled is a no-op, other terminal Work states
-  are left as-is), :session/cancelled per target, and :subagent/cancelled
-  on the immediate parent chain. Either everything commits or nothing
-  does — revoke and cancel events never separate. In-memory registry
-  tombstones apply after commit (durable-first: next broker authorize
-  with a revoked lease yields :capability/revoked). No Session transition
-  is written — Work is the sole lifecycle.
-
-  `reason` is a keyword :user-request | :parent-cancel | :timeout or
-  any EDN-safe value, stored in event metadata.
-
-  Returns {:cancelled [session-ids] :already-cancelled? bool}.
-  Throws :subagent/not-found when child missing, :store/session-not-found
-  when parent missing (if parent-id supplied)."
+  `parent-session-id`. Delegates to evoclj.runtime.subagent-cancel/cancel-subagent!."
   [db parent-session-id child-session-id reason]
-  (when (nil? db)
-    (throw (ex-info "cancel-subagent! requires a db/store handle" {:error/type :store/session-invalid})))
-  (let [child-id (resolve-cancel-session! db child-session-id)
-        parent-id (when parent-session-id
-                    (resolve-cancel-session! db parent-session-id))
-        child (session/get-session db child-id)]
-    (when-not child
-      (throw (ex-info (str "child session not found: " child-id)
-                      {:error/type :subagent/not-found
-                       :session/id child-id})))
-    (when (and parent-session-id parent-id (not (session/get-session db parent-id)))
-      (throw (ex-info (str "parent session not found: " parent-id)
-                      {:error/type :store/session-not-found
-                       :session/id parent-id})))
-    ;; idempotent: if child already cancelled, no-op (still return)
-    (if (= :cancelled (session-work-state db child-id))
-      {:cancelled [] :already-cancelled? true :child/session-id child-id}
-      (let [targets (cancel-targets db child-id)
-            {:keys [cap-ids leases]} (cancel-subtree-tx! db child-id parent-id targets (or reason :user-request))]
-        (tombstone-memory-leases! cap-ids leases)
-        {:cancelled targets :already-cancelled? false :child/session-id child-id}))))
+  (cancel/cancel-subagent! db parent-session-id child-session-id reason))
 
 (defn cancel-subagent-tree!
-  "Cascade-cancel the entire subtree rooted at `root-session-id`
-  (including root and all transitive descendants — union of the session-link
-  BFS and the Work-graph BFS from the root's Works). The root id accepts a
-  session id or a first-class Work id. One atomic transaction
-  (cancel-subtree-tx!): revoke + Work CAS + cancel events commit together;
-  memory tombstones follow commit (durable-first).
-
-  `reason` stored in event metadata (default :user-request).
-  Returns {:cancelled [session-ids]}. Throws when root not found."
+  "Cascade-cancel the entire subtree rooted at `root-session-id`.
+  Delegates to evoclj.runtime.subagent-cancel/cancel-subagent-tree!."
   [db root-session-id reason]
-  (when (nil? db)
-    (throw (ex-info "cancel-subagent-tree! requires a db/store handle" {:error/type :store/session-invalid})))
-  (let [root-id (resolve-cancel-session! db root-session-id)
-        root (session/get-session db root-id)]
-    (when-not root
-      (throw (ex-info (str "root session not found: " root-id)
-                      {:error/type :store/session-not-found
-                       :session/id root-id})))
-    (if (= :cancelled (session-work-state db root-id))
-      {:cancelled [] :already-cancelled? true :root/session-id root-id}
-      (let [targets (cancel-targets db root-id)
-            {:keys [cap-ids leases]} (cancel-subtree-tx! db root-id nil targets (or reason :user-request))]
-        (tombstone-memory-leases! cap-ids leases)
-        {:cancelled targets :already-cancelled? false :root/session-id root-id}))))
+  (cancel/cancel-subagent-tree! db root-session-id reason))
 
 (defn cancel-non-terminal-children!
   "Structured-concurrency enforcement: cancel every live child of
-  `session-id` so children never outlive their parent's terminal step.
-  A child is live when its subtree (itself plus link descendants, plus
-  the sessions owning its Works' transitive descendants) owns any
-  non-terminal Work (:queued, :running, or :waiting). Each live direct
-  child is cancelled via cancel-subagent! (atomic revoke + Work CAS +
-  events, :parent-cancel). Never throws for a single bad child — the
-  sweep continues. Returns {:cancelled [session-ids]}."
-  ([db session-id] (cancel-non-terminal-children! db session-id :parent-cancel))
-  ([db session-id reason]
-   (when db
-     (let [sid (try (types/session-id session-id) (catch Exception _ session-id))
-           link-kids (try (child-session-ids db sid) (catch Exception _ []))
-           works (try (work-store/list-works db sid) (catch Exception _ []))
-           work-kids (distinct (mapcat #(try (work-subtree-session-ids db (:work/id %))
-                                             (catch Exception _ []))
-                                       works))
-           live? (fn [cid]
-                   (try
-                     (boolean (some #(contains? #{:queued :running :waiting} (:work/state %))
-                                    (mapcat #(try (work-store/list-works db %) (catch Exception _ []))
-                                            (distinct (cons cid (try (list-descendants db cid)
-                                                                     (catch Exception _ [])))))))
-                     (catch Exception _ false)))]
-       {:cancelled (vec (distinct (reduce (fn [acc cid]
-                                            (try
-                                              (if (live? cid)
-                                                (into acc (:cancelled (cancel-subagent! db sid cid (or reason :parent-cancel))))
-                                                acc)
-                                              (catch Exception _ acc)))
-                                          []
-                                          (distinct (concat link-kids work-kids)))))}))))
+  `session-id`. Delegates to evoclj.runtime.subagent-cancel/cancel-non-terminal-children!."
+  ([db session-id] (cancel/cancel-non-terminal-children! db session-id :parent-cancel cancel-subagent!))
+  ([db session-id reason] (cancel/cancel-non-terminal-children! db session-id reason cancel-subagent!)))
 ;; ---------------------------------------------------------------------------
 ;; S5 — result delivery to parent chain
 ;; ---------------------------------------------------------------------------
