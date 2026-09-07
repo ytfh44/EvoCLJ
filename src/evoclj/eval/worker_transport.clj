@@ -66,18 +66,3 @@
   [task-runner]
   (->LocalWorkerTransport task-runner
                           (java.util.concurrent.Executors/newSingleThreadExecutor)))
-
-(def ^:const remote-transport-owner
-  "Owner of the remote worker transport backend (triage target for S3 follow-ups)."
-  :eval/workers)
-
-(defrecord RemoteWorkerTransport [endpoint client]
-  WorkerTransport
-  (submit-task [_ task]
-    {:task/id (:task/id task)
-     :status :failed
-     :error/type :eval/remote-transport-unsupported
-     :error/message (str "remote worker transport is not implemented (endpoint " endpoint
-                         "); use LocalWorkerTransport or own this backend (" remote-transport-owner ")")
-     :error/data {:owner remote-transport-owner
-                  :endpoint endpoint}}))

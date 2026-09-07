@@ -29,13 +29,3 @@
     (is (= :test/boom (:error/type result)))
     (.shutdown (:executor transport))))
 
-(deftest remote-worker-transport-returns-explicit-unsupported-failure
-  (testing "remote submit is an explicit owned failure, never a silent :skipped completion"
-    (let [transport (wt/->RemoteWorkerTransport "http://example.com" nil)
-          result (wt/submit-task transport {:task/id :t0})]
-      (is (= :t0 (:task/id result)))
-      (is (= :failed (:status result)))
-      (is (= :eval/remote-transport-unsupported (:error/type result)))
-      (is (= :eval/workers (get-in result [:error/data :owner])) "owner attributed for triage")
-      (is (= "http://example.com" (get-in result [:error/data :endpoint])))
-      (is (string? (:error/message result))))))
