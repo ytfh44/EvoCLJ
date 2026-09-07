@@ -51,7 +51,7 @@
             [evoclj.runtime.episode :as episode]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
-            [evoclj.sci.execute :as execute]
+            [evoclj.sci.computation :as execute]
             [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.candidate-store :as candidate-store]

@@ -4,7 +4,7 @@
   A :loop node {:node/type :loop :body :node/body :until :program/done?
   :max-iterations 8 :exit :node/finish} iterates its :body until the
   :until program (a SCI program invoked inside the phenotype's isolated
-  SCI runtime — the same evoclj.sci.execute/invoke! boundary the :sci
+  SCI runtime — the same evoclj.sci.computation/invoke! boundary the :sci
   node uses, Global Constraint 7) returns a boolean done? flag, hard
   capped at :max-iterations.
 
@@ -70,7 +70,7 @@
   :node/transition-invalid (a result that fails the shared schema)."
   (:require [evoclj.kernel.error :as err]
             [evoclj.runtime.node :as node]
-            [evoclj.sci.execute :as execute]))
+            [evoclj.sci.computation :as computation]))
 
 (defn- validate-max-iterations!
   "The handler-side guard for the :max-iterations cap (defense in
@@ -147,7 +147,7 @@
             outputs (if (empty? (:outputs runtime-state)) [payload] [])]
         (if (>= iterations max-iterations)
           (loop-exhausted iterations max-iterations)
-          (let [result (execute/invoke! (:sci-runtime runtime-state)
+          (let [result (computation/invoke! (:sci-runtime runtime-state)
                                         (:until node)
                                         (until-input iterations payload)
                                         (:limits runtime-state))]

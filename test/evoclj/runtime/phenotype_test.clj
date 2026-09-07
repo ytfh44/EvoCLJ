@@ -43,7 +43,7 @@
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.system :as system]
-            [evoclj.sci.execute :as execute]
+            [evoclj.sci.computation :as execute]
             [integrant.core :as ig])
   (:import (java.nio.charset StandardCharsets)))
 

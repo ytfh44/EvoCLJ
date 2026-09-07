@@ -51,7 +51,7 @@
             [evoclj.genome.path :as gpath]
             [evoclj.genome.types :as types]
             [evoclj.sci.context :as context]
-            [evoclj.sci.execute :as execute])
+            [evoclj.sci.computation :as execute])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file Files LinkOption OpenOption Path Paths)
            (java.nio.file.attribute FileAttribute)))

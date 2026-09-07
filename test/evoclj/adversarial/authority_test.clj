@@ -52,7 +52,7 @@
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.runtime.scheduler :as scheduler]
             [evoclj.sci.context :as sci-ctx]
-            [evoclj.sci.execute :as execute]
+            [evoclj.sci.computation :as execute]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]

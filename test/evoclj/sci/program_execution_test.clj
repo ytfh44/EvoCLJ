@@ -36,7 +36,7 @@
             [evoclj.genome.hash :as hash]
             [evoclj.genome.load :as load]
             [evoclj.sci.context :as context]
-            [evoclj.sci.execute :as execute])
+            [evoclj.sci.computation :as execute])
   (:import (java.nio.charset StandardCharsets)))
 
 ;; --- fixture and helper functions ------------------------------------------

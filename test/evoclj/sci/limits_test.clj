@@ -24,7 +24,7 @@
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [evoclj.sci.context :as context]
-            [evoclj.sci.execute :as execute]))
+            [evoclj.sci.computation :as execute]))
 
 ;; --- fixtures --------------------------------------------------------------
 

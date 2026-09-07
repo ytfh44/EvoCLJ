@@ -33,7 +33,7 @@
   THE PHENOTYPE OWNS ONE THING: its isolated SCI runtime. instantiate
   builds a fresh closed SCI context (evoclj.sci.context/make-context)
   and loads every compiled program into it via
-  evoclj.sci.execute/load-program!, so the mutable SCI state (SCI Vars,
+  evoclj.sci.computation/load-program!, so the mutable SCI state (SCI Vars,
   the :programs registry, the :evoclj/interrupt-state atom) belongs to
   this Phenotype alone: two Phenotypes from one Genome share the SAME
   immutable CompiledGenome value while keeping fully isolated SCI
@@ -87,7 +87,7 @@
             [evoclj.compiler.core :as compiler-core]
             [evoclj.kernel.error :as err]
             [evoclj.sci.context :as context]
-            [evoclj.sci.execute :as execute]))
+            [evoclj.sci.computation :as computation]))
 (def ^:private code-id-pattern #"^sha256:[0-9a-f]{64}$")
 
 (defn- validate-compiled!
@@ -201,7 +201,7 @@
   :programs. Each program's source is looked up in :program-sources; a
   missing or non-string source fails closed with
   :runtime/source-missing carrying the :program/id (extra sources are
-  ignored). Returns the runtime map evoclj.sci.execute/load-program!
+  ignored). Returns the runtime map evoclj.sci.computation/load-program!
   built."
   [programs program-sources]
   (reduce-kv
@@ -211,7 +211,7 @@
          (throw (err/error :runtime/source-missing
                            "no source declared in runtime-deps for a compiled program"
                            {:program/id program-id})))
-       (execute/load-program! runtime descriptor source)))
+       (computation/load-program! runtime descriptor source)))
    {:context (context/make-context {})
     :programs {}}
    programs))
@@ -233,7 +233,7 @@
   CAS handle, no provider registration, no lease issuance — the only
   mutable state created is the Phenotype's OWN isolated SCI runtime,
   built from a fresh closed context (evoclj.sci.context) and every
-  compiled program loaded into it (evoclj.sci.execute/load-program!).
+  compiled program loaded into it (evoclj.sci.computation/load-program!).
   Host-owned values (:providers :registry, :capabilities :usage) are
   referenced by identity, never copied or replaced, and the declared
   :stores pass through untouched.

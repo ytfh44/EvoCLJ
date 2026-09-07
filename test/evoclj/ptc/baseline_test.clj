@@ -7,7 +7,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.runtime.assembler :as assembler]
             [evoclj.sci.context :as sci-ctx]
-            [evoclj.sci.execute :as sci-exec]))
+            [evoclj.sci.computation :as sci-exec]))
 
 ;; ---------------------------------------------------------------------------
 ;; 1. dispatch-with-tools!  max-tool-rounds=4

@@ -29,7 +29,7 @@
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.node :as node]
             [evoclj.sci.context :as context]
-            [evoclj.sci.execute :as execute]
+            [evoclj.sci.computation :as execute]
             [malli.core :as m]))
 
 ;; --- fixture helpers --------------------------------------------------------

@@ -2,7 +2,7 @@
   "The :sci node handler (component).
 
   A :sci node invokes the node's :program inside the phenotype's
-  isolated SCI runtime (evoclj.sci.execute/invoke!) with the
+  isolated SCI runtime (evoclj.sci.computation/invoke!) with the
   input-event's :payload as input, then converts the program's
   decision value into validated, fully attributed intents via the pure
   evoclj.intent.core constructors. The handler performs NO external
@@ -33,7 +33,7 @@
   (:require [evoclj.intent.core :as intent]
             [evoclj.kernel.error :as err]
             [evoclj.runtime.node :as node]
-            [evoclj.sci.execute :as execute]))
+            [evoclj.sci.computation :as computation]))
 
 (defn- decision-requests
   "Extract the vector of intent requests from a program decision value
@@ -137,7 +137,7 @@
         (throw (err/error :node/runtime-invalid
                           "runtime-state must carry :sci-runtime for a :sci node"
                           {:reason :sci-runtime-missing})))
-      (let [result (execute/invoke! (:sci-runtime runtime-state)
+      (let [result (computation/invoke! (:sci-runtime runtime-state)
                                     (:program node)
                                     (:payload input-event)
                                     (:limits runtime-state))]
