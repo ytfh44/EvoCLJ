@@ -49,13 +49,19 @@
   []
   (hash/text-digest "evoclj/evolution"))
 
+(defn- evolution-session-id
+  "The deterministic session id used by the kernel's evolution model Intent."
+  []
+  (UUID/nameUUIDFromBytes
+   (.getBytes "evoclj/evolution/session" StandardCharsets/UTF_8)))
+
 (defn- model-lease
   "A valid capability lease granting the deterministic evolution
   phenotype the 'lmstudio/*' model resource for the next hour."
   []
   (let [now (Date.)]
     {:cap/id (UUID/randomUUID)
-     :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+     :principal {:principal/type :session :session/id (evolution-session-id)}
      :resource {:kind :model :id "lmstudio/*"}
      :actions #{:invoke}
      :constraints {:max-calls 100}
