@@ -92,7 +92,11 @@
           intent {:payload {:tool/id :mcp/echo :args {:text "hello"}}}
           nr (proto/normalize-request p intent)]
       (is (= :mcp/echo (:tool/id nr)))
-      (is (= {:kind :tool :id :mcp/echo :mcp/remote-effect :invoke} (:resource nr)))
+      (is (= {:kind :tool
+              :id :mcp/echo
+              :mcp/remote-effect :invoke
+              :mcp/classification :invoke-fallback}
+             (:resource nr)))
       ;; canonicalized args are string-keyed JSON-like EDN
       (is (= {"text" "hello"} (:args nr))))))
 
