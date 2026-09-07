@@ -12,7 +12,7 @@
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]))
 
-(def ^:private session-id #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+(def ^:private session-id #uuid "00000000-0000-4000-a000-000000000000")
 (def ^:private phenotype "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 (def ^:private issued (java.util.Date. 0))
 (def ^:private expires (java.util.Date. 4102444800000))

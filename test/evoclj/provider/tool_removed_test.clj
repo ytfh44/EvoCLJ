@@ -28,7 +28,7 @@
 
 ;; --- shared fixtures -------------------------------------------------------
 
-(def ^:private session-id #uuid "11111111-1111-4111-8111-111111111111")
+(def ^:private session-id #uuid "00000000-0000-4000-a000-000000000000")
 (def ^:private phenotype
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 (def ^:private cause-event-id 42)

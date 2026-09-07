@@ -71,6 +71,8 @@
   [fx]
   (update-vals fake-index #(assoc % :model/base-url (:base-url fx))))
 
+(def ^:private session-id #uuid "00000000-0000-4000-a000-000000000000")
+
 (defn- phenotype-id
   []
   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
@@ -129,7 +131,7 @@
                           :issued-at (java.util.Date. 0)
                           :expires-at (java.util.Date. 9999999999999)}]})
           i (intent/model-call
-             (java.util.UUID/randomUUID) (phenotype-id) :node/planner 7
+             session-id (phenotype-id) :node/planner 7
              {:model/id "deepseek/deepseek-v4-flash"
               :messages [{:role :user :content "hello"}]}
              {:wall-ms 5000})
