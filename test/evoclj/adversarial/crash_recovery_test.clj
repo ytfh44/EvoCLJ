@@ -409,7 +409,7 @@
         _ (registry/register! reg provider)
         now-ms (.getTime (java.util.Date.))
         lease {:cap/id (random-uuid)
-               :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+               :principal {:principal/type :session :session/id sid}
                :resource {:kind :tool :id :fixture/non-idempotent}
                :actions #{:invoke}
                :constraints {:max-calls 10000}
@@ -467,8 +467,7 @@
                                                  :tool/id :fixture/non-idempotent
                                                  :idempotency/key "ambig-call-1"}})
         ;; perform the EXTERNAL EFFECT through the REAL dispatcher
-        result (dispatch/dispatch! broker (assoc intent
-                                                 :prev/event-id (:event/id started)))]
+        result (dispatch/dispatch! broker intent)]
     (is (= :ok (:result/status result)))
     (is (= 1 @execution-count)
         "the irreversible external effect really happened once")
