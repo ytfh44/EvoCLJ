@@ -122,10 +122,13 @@
                     :server-side-search :off :extra-params {}}
     :model/cost {:input 0 :output 0}}})
 
+(def ^:private judge-session-id
+  #uuid "00000000-0000-0000-0000-0000000000cc")
+
 (defn- model-lease [phenotype-id]
   (let [now (Date.)]
     {:cap/id (UUID/randomUUID)
-     :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
+     :principal {:principal/type :session :session/id judge-session-id}
      :resource {:kind :model :id "lmstudio/*"}
      :actions #{:invoke}
      :constraints {:max-calls 1000}
@@ -142,7 +145,7 @@
   [broker model-registry lease phenotype-id]
   (let [ctx (assoc broker :model-registry model-registry
                    :leases (conj (:leases broker) lease))
-        session-id (UUID/fromString "00000000-0000-0000-0000-0000000000cc")]
+        session-id judge-session-id]
     (fn [model-id messages options]
       (let [intent (intent/model-call
                     session-id phenotype-id :node/judge 0
