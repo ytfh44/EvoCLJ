@@ -253,6 +253,10 @@
         ;; INVARIANT: no ownerless resurrection
         (is (nil? (snap-entry mgr ck))
             "a draining reopen NEVER lands as an ownerless :ready entry")
+        ;; The draining outcome is harvested asynchronously. Establish the
+        ;; reaper barrier before counting children for the next generation,
+        ;; otherwise the orphaned reopen child can race that diagnostic.
+        (quiesce! mgr)
         ;; M more LATE releases after everything settled
         (doseq [_ (range 4)]
           (manager/release mgr ck :t))
