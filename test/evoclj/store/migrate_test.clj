@@ -403,7 +403,16 @@
       (is (some? e))
       (is (= :store/schema-mismatch (:error/type (ex-data e))))
       (is (= :missing-migration-record (:reason (ex-data e)))))))
-
+(deftest extra-applied-migration-fails-cleanly-on-current-schema
+  (let [db (fresh-db)
+        applied (meta-value db "applied_migrations")
+        _ (set-meta! db "applied_migrations" (str applied " 999-unknown.sql"))
+        e (migrate-error db)]
+    (is (some? e))
+    (is (= :store/schema-mismatch (:error/type (ex-data e))))
+    (is (= :unknown-migration-record (:reason (ex-data e))))
+    (is (= "999-unknown.sql" (last (re-find #"unknown applied migrations: (.*)" (:actual (ex-data e))))))
+    (is (= "25" (meta-value db "schema_version")))))
 ;; ============================================================================
 ;; Step 6 — the version-reconciliation matrix (B0)
 ;;

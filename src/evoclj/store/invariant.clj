@@ -261,9 +261,9 @@
 (defn verify-disable-row! [store row]
   (let [decoded (decode-artifact! store (:disable_digest row)
                                   {:table :invariant_disables :column :disable_digest :proposal/id (:proposal_id row)})
-        activations (sqlite/query (:sqlite store)
-                                  ["SELECT * FROM invariant_activations WHERE proposal_id = ? AND status = 'active'"
-                                   (str (:proposal_id row))])]
+         activations (sqlite/query (:sqlite store)
+                                   ["SELECT * FROM invariant_activations WHERE proposal_id = ?"
+                                    (str (:proposal_id row))])]
     (when-not (and (= (str (:proposal/id decoded)) (str (:proposal_id row)))
                    (= (str (:reviewer decoded)) (str (:reviewer row)))
                    (= (str (:reason decoded)) (str (:reason row)))
@@ -280,6 +280,10 @@
 
 (defn verify-activation! [store row]
   "Verify one activation row and all of its durable evidence bindings."
+  (when-not (= "active" (:status row))
+    (throw (err/error :invariant/activation-invalid
+                      "only active activation rows may be verified for publication"
+                      {:activation/id (:id row) :status (:status row)})))
   (let [p (get-proposal store (:proposal_id row))
         decision (first (sqlite/query (:sqlite store)
                                       ["SELECT * FROM invariant_decisions WHERE id = ? AND proposal_id = ?"
@@ -388,6 +392,10 @@
         decoded (decode-artifact! store (:run_digest r) {:table :invariant_runs :column :run_digest :run/id (:id r)})]
     (when-not (and (map? result-value) (map? decoded))
       (throw (err/error :invariant/run-invalid "run and result artifacts must be maps" {:run/id (:id r)})))
+    (when-not (= (:result-ref decoded) (:result_ref r))
+      (throw (err/error :invariant/run-invalid
+                        "run digest result ref does not match durable SQL row"
+                        {:run/id (:id r)})))
     (let [normalized (invariant/run decoded)
           result (verify-target! store (:result normalized))
           detail-refs (distinct (remove nil? [(:details-ref result) (:details/ref result)]))

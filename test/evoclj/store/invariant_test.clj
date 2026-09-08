@@ -226,3 +226,42 @@
                                       ["SELECT id FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'"
                                        aid])))
             "activation-id mismatch is durably quarantined")))))
+
+(deftest run-digest-result-ref-must-match-sql-row
+  (let [s (setup-approved)
+        row (first (sqlite/query (:sqlite s)
+                                 ["SELECT * FROM invariant_runs WHERE proposal_id = 'p1' AND kind = 'replay'"]))
+        decoded (edn/read-string (String. (cas/get-bytes (:cas s) (:run_digest row)) StandardCharsets/UTF_8))
+        rebound (first (sqlite/query (:sqlite s)
+                                     ["SELECT * FROM invariant_runs WHERE proposal_id = 'p1' AND kind = 'adversarial'"]))
+        forged (assoc decoded :result-ref (:result_ref rebound))
+        forged-digest (existence/digest-of (proof! s forged))]
+    (sqlite/exec! (:sqlite s) ["DROP TRIGGER invariant_runs_no_update"])
+    (sqlite/exec! (:sqlite s) ["UPDATE invariant_runs SET run_digest = ? WHERE id = ?"
+                                forged-digest (:id row)])
+    (sqlite/exec! (:sqlite s) ["CREATE TRIGGER invariant_runs_no_update
+                                BEFORE UPDATE ON invariant_runs BEGIN SELECT RAISE(ABORT, 'invariant runs are immutable'); END"])
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (recovery/startup-integrity-scan (:sqlite s) (:cas s)))
+        "startup scan rejects a run digest rebound to another SQL result")))
+
+(deftest terminal-status-without-evidence-is-hard-finding
+  (let [s (setup-approved)]
+    (invariant-store/activate! s "p1" "reviewer")
+    (let [activation (first (sqlite/query (:sqlite s)
+                                          ["SELECT * FROM invariant_activations WHERE proposal_id = 'p1'"]))
+          aid (:id activation)]
+      (sqlite/exec! (:sqlite s) ["DROP TRIGGER invariant_activations_no_update"])
+      (sqlite/exec! (:sqlite s) ["UPDATE invariant_activations SET status = 'disabled' WHERE id = ?" aid])
+      (sqlite/exec! (:sqlite s) ["CREATE TRIGGER invariant_activations_no_update
+                                  BEFORE UPDATE ON invariant_activations BEGIN SELECT RAISE(ABORT, 'invariant activations are immutable'); END"])
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (invariant-store/verify-activation! s (assoc activation :status "disabled")))
+          "non-active rows cannot pass active activation verification")
+      (let [report (recovery/startup-integrity-scan (:sqlite s) (:cas s) {:strict? false})
+            findings (get-in report [:invariant-state :terminal-evidence-missing])]
+        (is (= [aid] (mapv :activation/id findings))
+            "terminal rows without evidence remain visible to integrity scans")
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (recovery/startup-integrity-scan (:sqlite s) (:cas s)))
+            "malformed terminal status is hard in strict startup mode")))))

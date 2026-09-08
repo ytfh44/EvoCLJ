@@ -175,6 +175,55 @@
             {:status :corrupt :generation/id gen-id :genome/id genome-id
              :reason (:error/type (ex-data e))}))))))
 
+(defn- terminal-activation-findings
+  "Return hard findings for terminal activation rows whose terminal evidence is incomplete."
+  [store]
+  (into []
+        (keep (fn [row]
+                (let [status (:status row)
+                      aid (:id row)
+                      disable-rows (sqlite/query store
+                                                  ["SELECT id FROM invariant_disables WHERE proposal_id = ?"
+                                                   (:proposal_id row)])
+                      disabled-events (sqlite/query store
+                                                     ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'disabled'"
+                                                      aid])
+                      disabled-outbox (sqlite/query store
+                                                     ["SELECT * FROM invariant_outbox WHERE activation_id = ? AND event_type = 'disabled'"
+                                                      aid])
+                      quarantine-events (sqlite/query store
+                                          ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'"
+                                           aid])
+                      quarantine-outbox (sqlite/query store
+                                          ["SELECT * FROM invariant_outbox WHERE activation_id = ? AND event_type = 'quarantined'"
+                                           aid])
+                      outbox-valid? (fn [events outbox event-type]
+                                      (and (= 1 (count events))
+                                           (= 1 (count outbox))
+                                           (= (:id (first events)) (:event_id (first outbox)))
+                                           (= event-type (:event_type (first outbox)))
+                                           (= (:activation_digest row) (:payload_ref (first events)))))
+                      missing (case status
+                                "disabled"
+                                (vec (concat
+                                      (when (not= 1 (count disable-rows)) [:disable-decision])
+                                      (when-not (outbox-valid? disabled-events disabled-outbox "disabled") [:disabled-event-outbox])
+                                      (when (or (seq quarantine-events) (seq quarantine-outbox)) [:quarantine-conflict])))
+                                "quarantined"
+                                (vec (concat
+                                      (when (seq disable-rows) [:disable-conflict])
+                                      (when-not (outbox-valid? quarantine-events quarantine-outbox "quarantined") [:quarantined-event-outbox])
+                                      (when (or (seq disabled-events) (seq disabled-outbox)) [:disabled-conflict])))
+                                [:unknown-terminal-status])]
+                  (when (seq missing)
+                    {:table :invariant_activations
+                     :activation/id aid
+                     :status :terminal-evidence-missing
+                     :terminal/status (keyword status)
+                     :missing missing}))))
+        (sqlite/query store
+                       ["SELECT * FROM invariant_activations WHERE status IN ('disabled','quarantined')"])))
+
 ;; --- generated-invariant integrity -----------------------------------------
 
 (defn- invariant-integrity
@@ -247,7 +296,7 @@
                     (catch Throwable e
                       {:table :invariant_activations :activation/id (:id row)
                        :status :authority-mismatch :error (err/error-data e)})))
-                (sqlite/query store ["SELECT * FROM invariant_activations"]))
+                (sqlite/query store ["SELECT * FROM invariant_activations WHERE status = 'active'"]))
           (keep (fn [row]
                   (try
                     (invariant-store/verify-disable-row! authority-store row)
@@ -263,17 +312,19 @@
                                       LEFT JOIN invariant_events e ON e.activation_id = a.id AND e.event_type = 'activated'
                                       LEFT JOIN invariant_outbox o ON o.activation_id = a.id AND o.event_id = e.id AND o.event_type = 'activated'
                                       WHERE a.status = 'active' AND (e.id IS NULL OR o.id IS NULL)"]))
-        quarantined (mapv #(assoc % :status :quarantined)
-                          (sqlite/query store
-                                        ["SELECT DISTINCT a.id AS activation_id
-                                          FROM invariant_activations a
-                                          JOIN invariant_events q ON q.activation_id = a.id AND q.event_type = 'quarantined'"]))]
+         quarantined (mapv #(assoc % :status :quarantined)
+                           (sqlite/query store
+                                         ["SELECT DISTINCT a.id AS activation_id
+                                           FROM invariant_activations a
+                                           JOIN invariant_events q ON q.activation_id = a.id AND q.event_type = 'quarantined'"]))
+         terminal (terminal-activation-findings store)]
     {:dangling-cas-refs (vec (remove #(= :malformed-ref (:status %)) refs))
      :malformed-refs (vec (filter #(= :malformed-ref (:status %)) refs))
      :malformed (vec (concat malformed malformed-runs))
      :authority-mismatches authority-mismatches
      :partial-activations partial
-     :quarantined quarantined}))
+     :quarantined quarantined
+     :terminal-evidence-missing terminal}))
 (defn scan-recovery-state
   "The normative recovery scan (component interface). Read-only: it
   classifies crash residue and reports corruption; it never appends,
@@ -283,8 +334,8 @@
   [store cas]
   (let [inv (try (invariant-integrity store cas)
                  (catch java.sql.SQLException _
-                   {:dangling-cas-refs [] :malformed [] :partial-activations []
-                    :quarantined [] :status :unavailable}))]
+                    {:dangling-cas-refs [] :malformed [] :partial-activations []
+                     :quarantined [] :terminal-evidence-missing [] :status :unavailable}))]
     {:missing-artifacts (missing-artifacts store cas)
      :invalid-event-chains (invalid-event-chains store)
      :stale-candidates (stale-candidates store)
@@ -305,7 +356,8 @@
                     (concat (:authority-mismatches inv) (:malformed-refs inv))
                     (:malformed inv)
                     (:partial-activations inv)
-                    (:quarantined inv)))
+                     (:quarantined inv)
+                     (:terminal-evidence-missing inv)))
           (when-let [cg (:current-generation report)]
             (when (contains? #{:missing :corrupt :missing-current :ambiguous}
                              (:status cg))

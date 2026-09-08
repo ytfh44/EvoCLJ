@@ -281,13 +281,20 @@
       ;; every migration file on the classpath, then no-op.
       (= version latest-version)
       (let [applied (applied-migrations db)
-            missing (remove applied files)]
+            missing (remove applied files)
+            extra (remove (set files) applied)]
         (when (seq missing)
           (mismatch! :missing-migration-record
                      (str "applied_migrations covers: "
                           (str/join " " (sort applied)))
                      (str "unrecorded on classpath: "
                           (str/join " " missing))))
+        (when (seq extra)
+          (mismatch! :unknown-migration-record
+                     (str "classpath migrations: "
+                          (str/join " " files))
+                     (str "unknown applied migrations: "
+                          (str/join " " (sort extra)))))
         {:status :noop :version latest-version})
 
       ;; A known older version: apply ONLY the pending migrations (an
