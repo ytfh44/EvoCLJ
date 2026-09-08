@@ -183,7 +183,7 @@
                 (let [status (:status row)
                       aid (:id row)
                       disable-rows (sqlite/query store
-                                                  ["SELECT id FROM invariant_disables WHERE proposal_id = ?"
+                                                  ["SELECT * FROM invariant_disables WHERE proposal_id = ?"
                                                    (:proposal_id row)])
                       disabled-events (sqlite/query store
                                                      ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'disabled'"
@@ -197,22 +197,28 @@
                       quarantine-outbox (sqlite/query store
                                           ["SELECT * FROM invariant_outbox WHERE activation_id = ? AND event_type = 'quarantined'"
                                            aid])
-                      outbox-valid? (fn [events outbox event-type]
+                      outbox-valid? (fn [events outbox event-type payload-ref]
                                       (and (= 1 (count events))
                                            (= 1 (count outbox))
                                            (= (:id (first events)) (:event_id (first outbox)))
                                            (= event-type (:event_type (first outbox)))
-                                           (= (:activation_digest row) (:payload_ref (first events)))))
+                                           (some? payload-ref)
+                                           (= payload-ref (:payload_ref (first events)))))
                       missing (case status
                                 "disabled"
                                 (vec (concat
                                       (when (not= 1 (count disable-rows)) [:disable-decision])
-                                      (when-not (outbox-valid? disabled-events disabled-outbox "disabled") [:disabled-event-outbox])
+                                      (when-not (and (= 1 (count disable-rows))
+                                                     (outbox-valid? disabled-events disabled-outbox "disabled"
+                                                                    (:disable_digest (first disable-rows))))
+                                        [:disabled-event-outbox])
                                       (when (or (seq quarantine-events) (seq quarantine-outbox)) [:quarantine-conflict])))
                                 "quarantined"
                                 (vec (concat
                                       (when (seq disable-rows) [:disable-conflict])
-                                      (when-not (outbox-valid? quarantine-events quarantine-outbox "quarantined") [:quarantined-event-outbox])
+                                      (when-not (outbox-valid? quarantine-events quarantine-outbox "quarantined"
+                                                              (:activation_digest row))
+                                        [:quarantined-event-outbox])
                                       (when (or (seq disabled-events) (seq disabled-outbox)) [:disabled-conflict])))
                                 [:unknown-terminal-status])]
                   (when (seq missing)

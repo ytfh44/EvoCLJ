@@ -102,6 +102,17 @@
     (is (= 1 (count-rows s "invariant_disables")))
     (is (= 2 (count-rows s "invariant_events")))
     (is (thrown? clojure.lang.ExceptionInfo (invariant-store/activate! s "p1" "reviewer")))))
+(deftest disabled-terminal-activation-passes-recovery-scan
+  (let [s (setup-approved)]
+    (invariant-store/activate! s "p1" "reviewer")
+    (invariant-store/disable! s "p1" "reviewer" "retired")
+    (is (= :disabled (:status (invariant-store/get-proposal s "p1"))))
+    (let [disable (first (sqlite/query (:sqlite s) ["SELECT * FROM invariant_disables WHERE proposal_id = 'p1'"]))
+          event (first (sqlite/query (:sqlite s) ["SELECT * FROM invariant_events WHERE activation_id = (SELECT id FROM invariant_activations WHERE proposal_id = 'p1') AND event_type = 'disabled'"]))
+          report (recovery/startup-integrity-scan (:sqlite s) (:cas s))]
+      (is (= (:disable_digest disable) (:payload_ref event)))
+      (is (true? (:ok? report)))
+      (is (empty? (get-in report [:invariant-state :terminal-evidence-missing]))))))
 (deftest durable-row-and-cas-authority-fails-closed
   (let [s (setup-approved)
         row (first (sqlite/query (:sqlite s) ["SELECT * FROM invariant_proposals WHERE id = 'p1'"]))
