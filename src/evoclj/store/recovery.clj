@@ -48,9 +48,13 @@
   plus a re-hashing read). Tree-level Genome loading and manifest
   milestone the store enforces the durable half of Invariant 7."
   (:require [clojure.java.jdbc :as jdbc]
+            [clojure.edn :as edn]
+            [clojure.string :as str]
+            [evoclj.evolution.invariant :as invariant]
             [evoclj.kernel.error :as err]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
+            [evoclj.store.invariant :as invariant-store]
             [evoclj.store.work :as work-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
@@ -167,19 +171,70 @@
             {:status :corrupt :generation/id gen-id :genome/id genome-id
              :reason (:error/type (ex-data e))}))))))
 
-;; --- public API -------------------------------------------------------------
+;; --- generated-invariant integrity -----------------------------------------
 
+(defn- invariant-integrity
+  "Read-only invariant scan: dangling CAS refs, malformed descriptors, and
+  activation rows missing their event/outbox half."
+  [store cas]
+  (let [refs (mapcat (fn [[table column kind]]
+                       (mapcat (fn [row]
+                                 (let [ref (get row (keyword column))]
+                                   (cond
+                                     (not (and (string? ref) (re-matches #"^sha256:[0-9a-f]{64}$" ref)))
+                                     [{:table table :column column :status :malformed-ref :value (err/sanitize ref) :kind kind}]
+                                     (not (cas/exists? cas ref))
+                                     [{:table table :column column :artifact/id ref :kind kind}])))
+                               (sqlite/query store [(str "SELECT " column " FROM " table)])))
+                     [["invariant_proposals" "predicate_digest" :predicate]
+                      ["invariant_proposals" "proposal_digest" :proposal]
+                      ["invariant_runs" "result_ref" :result]
+                      ["invariant_runs" "run_digest" :run]
+                      ["invariant_decisions" "decision_digest" :decision]
+                      ["invariant_activations" "activation_digest" :activation]])
+        malformed (into [] (keep (fn [row]
+                                   (try
+                                     (let [p (edn/read-string (:predicate_json row))]
+                                       (invariant/validate-predicate! p)
+                                       nil)
+                                     (catch Exception e
+                                       {:table :invariant_proposals :proposal/id (:id row)
+                                        :status :malformed :error (err/error-data e)}))))
+                    (sqlite/query store ["SELECT id,predicate_json FROM invariant_proposals"]))
+        malformed-runs (into [] (keep (fn [row]
+                                        (try
+                                          (invariant/run (edn/read-string (:run_json row)))
+                                          nil
+                                          (catch Exception e
+                                            {:table :invariant_runs :run/id (:id row)
+                                             :status :malformed :error (err/error-data e)}))))
+                          (sqlite/query store ["SELECT id,run_json FROM invariant_runs"]))
+        partial (mapv #(assoc % :status :partial)
+                      (sqlite/query store
+                                    ["SELECT a.id AS activation_id
+                                      FROM invariant_activations a
+                                      LEFT JOIN invariant_events e ON e.activation_id = a.id AND e.event_type = 'activated'
+                                      LEFT JOIN invariant_outbox o ON o.activation_id = a.id
+                                      WHERE a.status = 'active' AND (e.id IS NULL OR o.id IS NULL)"]))]
+    {:dangling-cas-refs (vec (remove #(= :malformed-ref (:status %)) refs))
+     :malformed-refs (vec (filter #(= :malformed-ref (:status %)) refs))
+     :malformed (vec (concat malformed malformed-runs)) :partial-activations partial}))
 (defn scan-recovery-state
   "The normative recovery scan (component interface). Read-only: it
   classifies crash residue and reports corruption; it never appends,
   rewrites, or promotes anything.
 
-  Returns {:missing-artifacts [...] :invalid-event-chains [...]
-  :stale-candidates [...]}."
+  Returns the historical categories plus :invariant-state."
   [store cas]
-  {:missing-artifacts (missing-artifacts store cas)
-   :invalid-event-chains (invalid-event-chains store)
-   :stale-candidates (stale-candidates store)})
+  (let [inv (try (invariant-integrity store cas)
+                 (catch java.sql.SQLException _
+                   {:dangling-cas-refs [] :malformed [] :partial-activations []
+                    :status :unavailable}))]
+    {:missing-artifacts (missing-artifacts store cas)
+     :invalid-event-chains (invalid-event-chains store)
+     :stale-candidates (stale-candidates store)
+     :invariant-state inv
+     :generated-invariants inv}))
 
 (defn- hard-findings
   "The corruption findings strict mode fails closed on: unresolved
@@ -189,27 +244,19 @@
   [report]
   (concat (:missing-artifacts report)
           (:invalid-event-chains report)
+          (let [inv (:invariant-state report)]
+            (concat (:dangling-cas-refs inv)
+                    (:malformed-refs inv)
+                    (:malformed inv)
+                    (:partial-activations inv)))
           (when-let [cg (:current-generation report)]
             (when (contains? #{:missing :corrupt :missing-current :ambiguous}
                              (:status cg))
               [cg]))))
-
 (defn startup-integrity-scan
-  "Startup integrity scan with configurable strict mode (component
-  Step 4). The production default is strict (fail-closed).
-
-  Runs scan-recovery-state, verifies the CURRENT generation (Database
-  Invariants 6 and 7), and — in strict mode (the default, {:strict?
-  false} to disable) — throws :store/integrity-failure carrying the
-  full report (the three normative categories plus :current-generation)
-  when any hard finding exists: a missing payload artifact, an invalid
-  event chain, or a CURRENT generation whose genome artifact is
-  absent/corrupt (or a missing/ambiguous CURRENT). Stale candidates never
-  block startup.
-
-  Returns the report augmented with :current-generation
-  {:status :ok|:none|:missing|:corrupt|:missing-current|:ambiguous ...}
-  and :ok? (true when there are no hard findings)."
+  "Run read-only recovery plus CURRENT and invariant integrity checks.
+  Strict mode fails closed on any hard finding; this function never
+  auto-activates pending invariant proposals."
   [store cas & [opts]]
   (let [{:keys [strict?] :or {strict? true}} opts
         report (scan-recovery-state store cas)
@@ -318,3 +365,10 @@
                       (update :revoked-capabilities into revoked)))))
             {:orphaned-subagents orphans :recovered [] :revoked-capabilities []}
             orphans)))
+
+
+(defn recover-generated-invariants!
+  "Publish only already durable, fully committed invariant activations.
+  Pending proposals and approvals are never activated by recovery."
+  [store cas]
+  (invariant-store/recover-activations! {:sqlite store :cas cas}))
