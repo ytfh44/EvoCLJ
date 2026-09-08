@@ -41,6 +41,7 @@
   (:require [evoclj.binding.call :as binding]
             [evoclj.capability.broker :as broker]
             [evoclj.capability.constraint :as constraint]
+            [evoclj.capability.semantic :as semantic]
             [evoclj.intent.schema :as intent-schema]
             [evoclj.kernel.error :as err]
             [evoclj.provider.model-registry :as model-registry]
@@ -254,16 +255,18 @@
                                       :effect/observed-touches])]
         (assoc (attest-with-evidence resource evidence remote?)
                :mcp/classification classification)))))
-
 (defn- effect-journal
   [binding intent decision final-status]
-  {:effect/proposed {:intent/id (:intent/id intent)}
-   :effect/authorized (or decision {:decision :none})
-   :effect/call-started {:idempotency/key (get-in intent [:metadata :idempotency/key])
-                         :revision/seq (when binding (:revision/seq binding))
-                         :binding/id (when binding (:binding/id binding))}
-   :effect/attestation (attestation-for binding decision)
-   :effect/final final-status})
+  (cond-> {:effect/proposed {:intent/id (:intent/id intent)}
+           :effect/authorized (or decision {:decision :none})
+           :effect/call-started {:idempotency/key (get-in intent [:metadata :idempotency/key])
+                                 :revision/seq (when binding (:revision/seq binding))
+                                 :binding/id (when binding (:binding/id binding))}
+           :effect/attestation (attestation-for binding decision)
+           :effect/final final-status}
+    (:binding/semantic-spec binding)
+    (assoc :effect/semantic {:spec (:binding/semantic-spec binding)
+                             :digest (:binding/semantic-digest binding)})))
 
 (defn- final-status-for
   [result]
@@ -450,6 +453,11 @@
                                           decision @usage-atom)
                             decision))))))))))))
 
+(def ^:private semantic-error-types
+  #{:capability/semantic-invalid
+    :capability/semantic-stale
+    :capability/semantic-unknown
+    :capability/semantic-mismatch})
 (defn- dispatch-tool
   [broker-context intent tool-id require-idempotency-key?]
   (let [usage-atom (:usage broker-context)
@@ -469,9 +477,21 @@
                       nil @usage-atom))
       (let [provider (:provider entry)
             freshness (or (:freshness broker-context) :best-effort)
-            binding (binding/capture-tool-binding entry {:freshness freshness})
+            capture (try
+                      {:binding (binding/capture-tool-binding entry {:freshness freshness})}
+                      (catch clojure.lang.ExceptionInfo t
+                        (if (contains? semantic-error-types (:error/type (ex-data t)))
+                          {:error t}
+                          (throw t))))
+            binding (:binding capture)
+            capture-error (:error capture)
             stale? (:binding/stale? binding)]
-        (if (and stale? (= freshness :required))
+        (if capture-error
+          (let [data (err/error-data capture-error)]
+            (emit (result-error intent (:error/type data) (:error/message data)
+                               (:error/data data) nil @usage-atom)
+                  nil nil))
+          (if (and stale? (= freshness :required))
           (let [err-result (result-error intent :provider/freshness-required
                                          "descriptor is stale and freshness :required blocks execution"
                                          {:tool/id tool-id
@@ -484,7 +504,15 @@
                 normalized-step (normalize-request! broker-context provider intent)]
             (if-let [error-result (:error-result normalized-step)]
               (emit error-result binding nil)
-              (let [normalized (:normalized normalized-step)
+              (let [normalized0 (:normalized normalized-step)
+                    normalized (if-let [frozen (:binding/semantic-spec binding)]
+                                 (update normalized0 :resource
+                                         (fn [resource]
+                                           (semantic/request-resource
+                                            resource
+                                            {:semantic/spec frozen
+                                             :semantic/digest (:binding/semantic-digest binding)})))
+                                 normalized0)
                     binding* (assoc binding :binding/normalized normalized :contract/normalized normalized)
                     decision (broker/authorize
                               {:intent intent
@@ -526,7 +554,7 @@
                                        (:error-message execution)
                                        (:error-data execution)
                                        decision @usage-atom)
-                         binding** decision)))))))))))))
+                         binding** decision))))))))))))))
 
 ;; --- subagent intents (kernel-executed, no provider effect) -----------------
 ;;

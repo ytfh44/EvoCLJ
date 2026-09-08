@@ -275,6 +275,13 @@
   (max 0 (dec (count (event/events-for-session (:sqlite (:stores executor))
                                                (:session/id pin))))))
 
+(defn- semantic-event-metadata
+  "Project only the frozen semantic identity into durable event metadata."
+  [result]
+  (if-let [spec (get-in result [:effect-journal :effect/semantic :spec])]
+    {:semantic/spec spec
+     :semantic/digest (get-in result [:effect-journal :effect/semantic :digest])}
+    {}))
 ;; --- the intent effect transaction (Transaction Boundaries) ------------------
 
 (defn- dispatch-intent!
@@ -311,39 +318,44 @@
             tool-id (get-in intent [:payload :tool/id])
             authorized (append-event!
                         executor pin (:event/id proposed) :intent/authorized nil
-                        {:intent/id (:intent/id intent)
-                         :intent/type (:intent/type intent)
-                         :authorization {:decision (:decision authorization)
-                                         :lease-id (:lease-id authorization)}})
+                        (merge {:intent/id (:intent/id intent)
+                                :intent/type (:intent/type intent)
+                                :authorization {:decision (:decision authorization)
+                                                :lease-id (:lease-id authorization)}}
+                               (semantic-event-metadata result)))
             started (append-event!
                      executor pin (:event/id authorized) :provider/call-started nil
-                     {:intent/id (:intent/id intent)
-                      :tool/id tool-id
-                      :idempotency/key (get-in intent [:metadata :idempotency/key])})
+                     (merge {:intent/id (:intent/id intent)
+                             :tool/id tool-id
+                             :idempotency/key (get-in intent [:metadata :idempotency/key])}
+                            (semantic-event-metadata result)))
             value-ref (put-payload! executor (:value result))
             completed (append-event!
                        executor pin (:event/id started) :provider/call-completed value-ref
-                       {:intent/id (:intent/id intent)
-                        :tool/id tool-id
-                        :result/status :ok})]
+                       (merge {:intent/id (:intent/id intent)
+                               :tool/id tool-id
+                               :result/status :ok}
+                              (semantic-event-metadata result)))]
         {:last-event completed
          :outputs (conj outputs (:value result))
          :outcome :ok})
       (if (= :capability/denied (:error/type result))
         {:last-event (append-event!
                       executor pin (:event/id proposed) :intent/denied nil
-                      {:intent/id (:intent/id intent)
-                       :intent/type (:intent/type intent)
-                       :error/type :capability/denied
-                       :reason (get-in result [:error/data :reason])})
+                      (merge {:intent/id (:intent/id intent)
+                              :intent/type (:intent/type intent)
+                              :error/type :capability/denied
+                              :reason (get-in result [:error/data :reason])}
+                             (semantic-event-metadata result)))
          :outputs outputs
          :outcome :denied}
         {:last-event (append-event!
                       executor pin (:event/id proposed) :intent/failed
                       (put-payload! executor (dissoc result :usage))
-                      {:intent/id (:intent/id intent)
-                       :intent/type (:intent/type intent)
-                       :error/type (:error/type result)})
+                      (merge {:intent/id (:intent/id intent)
+                              :intent/type (:intent/type intent)
+                              :error/type (:error/type result)}
+                             (semantic-event-metadata result)))
          :outputs outputs
          :outcome :failed}))))
 

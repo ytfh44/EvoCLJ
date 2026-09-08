@@ -77,8 +77,33 @@
             [evoclj.broker.registry :as reg]
             [evoclj.capability.policy :as policy]
             [evoclj.capability.resource-kind :as rk]
+            [evoclj.capability.semantic :as semantic]
             [evoclj.intent.schema :as intent-schema]
             [evoclj.kernel.error :as err]))
+
+(defn- semantic-state
+  "Validate the frozen semantic request identity without allowing malformed
+  semantic data to reach the ordinary provider/resource policy."
+  [resource]
+  (if-not (contains? resource :semantic/spec)
+    {:required? false :valid? true}
+    (try
+      (let [spec (:semantic/spec resource)
+            digest (:semantic/digest resource)]
+        {:required? true
+         :valid? (= digest (semantic/spec-digest spec))
+         :spec spec})
+      (catch clojure.lang.ExceptionInfo _
+        {:required? true :valid? false}))))
+
+(defn- semantic-grant
+  [lease]
+  (or (get-in lease [:resource :semantic/spec])
+      (:semantic/spec lease)))
+
+(defn- semantic-compatible-leases
+  [leases request-spec]
+  (filter #(semantic/subsumes? (semantic-grant %) request-spec) leases))
 
 ;; --- resource-kind registry -------------------------------------------------
 ;;
@@ -161,7 +186,9 @@
     (let [lease-reg (or lease-registry leases-registry revocation-registry)
           revoked? (fn [lease] (when lease-reg (boolean (get-in @lease-reg [(:cap/id lease) :revoked?]))))
           principal (policy/intent-principal intent)
-          kind (:kind (:resource normalized-request))
+          resource (:resource normalized-request)
+          semantic (semantic-state resource)
+          kind (:kind resource)
           targets (rk/authorization-targets-for kind)]
     (if (nil? targets)
       {:decision :deny :reason :capability/unknown-resource-kind}
@@ -175,14 +202,26 @@
                                    (not (keyword? act))
                                    (not (contains? (apply set/union (vals (rk/allowed-actions-by-kind))) act)))
                 all-leases (or leases [])
+                semantic-leases (if (:required? semantic)
+                                  (semantic-compatible-leases all-leases (:spec semantic))
+                                  all-leases)
                 ;; partition leases into non-revoked and revoked for this registry
-                non-revoked (if lease-reg (remove revoked? all-leases) all-leases)
-                d (if unknown-action?
+                non-revoked (if lease-reg (remove revoked? semantic-leases) semantic-leases)
+                d (cond
+                    (and (:required? semantic) (not (:valid? semantic)))
+                    {:decision :deny :reason :capability/semantic-invalid}
+
+                    (and (:required? semantic) (empty? semantic-leases))
+                    {:decision :deny :reason :capability/semantic-denied}
+
+                    unknown-action?
                     {:decision :deny :reason :capability/unknown-action}
+
+                    :else
                     (policy/decide non-revoked principal res act now (or usage {})))
                 d (if (= :deny (:decision d))
                     ;; no non-revoked lease allowed; check if a revoked one would have allowed
-                    (let [revoked-leases (if lease-reg (filter revoked? all-leases) [])
+                    (let [revoked-leases (if lease-reg (filter revoked? semantic-leases) [])
                           rd (when (and (seq revoked-leases) (not unknown-action?))
                                (policy/decide revoked-leases principal res act now (or usage {})))]
                       (if (and rd (= :allow (:decision rd)))
