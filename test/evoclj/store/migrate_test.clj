@@ -2,7 +2,7 @@
   "component tests for the SQLite schema and migration runner.
 
   Step 1: a fresh temporary database applies all migrations once and
-  ends with all 17 normative tables plus a recorded schema version.
+  ends with all 22 normative tables plus a recorded schema version.
   Step 2: a second apply is a safe no-op that verifies the version and
   leaves the schema undamaged. Step 3: the required unique constraints
   hold — generation id, per-session event sequence, the single CURRENT
@@ -34,11 +34,12 @@
 ;; --- shared fixtures -------------------------------------------------------
 
 (def ^:private expected-tables
-  "The 20 normative tables (component + 006 session_bindings + 009 genomes)."
+  "The 22 normative tables (component + 006 session_bindings + 009 genomes + 022 DAG edges)."
   #{"meta" "generations" "candidates" "mutations" "sessions" "events"
     "artifacts" "genomes" "model_calls" "tool_calls" "episodes" "eval_runs"
     "eval_cases" "eval_results" "capability_leases" "promotions"
-    "session_bindings" "kernel_state" "causal_links"})
+    "session_bindings" "kernel_state" "causal_links" "generation_parent_edges"
+    "candidate_parent_edges"})
 
 (def ^:private now "2025-01-01T00:00:00Z")
 (def ^:private g1 "generation-1")
@@ -231,14 +232,14 @@
 
 (deftest fresh-database-applies-all-migrations
   (let [db (sqlite/spec (temp-db-path))]
-    (is (= {:status :applied :version 21} (migrate/migrate! db)))
-    (is (= 21 (migrate/current-version db)))
-    (testing "all 17 normative tables exist"
+    (is (= {:status :applied :version 22} (migrate/migrate! db)))
+    (is (= 22 (migrate/current-version db)))
+    (testing "all 22 normative tables exist"
       (is (every? (table-names db) expected-tables)))
     (testing "schema version and applied migrations are recorded in meta"
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
-      (is (= "21" (meta-value db "schema_version")))
-      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql 017-event-prev-causal-links.sql 018-work.sql 019-p1-authority.sql 020-subagent-links.sql 021-capability-budgets.sql"
+      (is (= "22" (meta-value db "schema_version")))
+      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql 017-event-prev-causal-links.sql 018-work.sql 019-p1-authority.sql 020-subagent-links.sql 021-capability-budgets.sql 022-evolution-dag.sql"
              (meta-value db "applied_migrations"))))
     (testing "003-routing.sql added the session routing audit columns"
       (let [cols (set (map :name (sqlite/query db
@@ -253,10 +254,10 @@
 (deftest second-apply-is-a-safe-noop
   (let [db (fresh-db)
         tables-before (table-names db)]
-    (is (= {:status :noop :version 21} (migrate/migrate! db)))
+    (is (= {:status :noop :version 22} (migrate/migrate! db)))
     (testing "no duplicate/schema damage"
       (is (= tables-before (table-names db)))
-      (is (= "21" (meta-value db "schema_version")))
+      (is (= "22" (meta-value db "schema_version")))
       (is (= 2 (count (sqlite/query db ["SELECT key FROM meta"]))))
       ;; the migrated schema still works
       (insert-generation! db g1 {})
@@ -419,9 +420,9 @@
   ;; files applied and recorded). Rewind only the version stamp.
   (let [db (fresh-db)
         _ (set-meta! db "schema_version" "5")]
-    (is (= {:status :noop :version 21} (migrate/migrate! db)))
+    (is (= {:status :noop :version 22} (migrate/migrate! db)))
     (testing "the version record was brought forward to 9"
-      (is (= "21" (meta-value db "schema_version"))))
+      (is (= "22" (meta-value db "schema_version"))))
     (testing "the schema was not touched"
       (is (every? (table-names db) expected-tables)))))
 
@@ -463,18 +464,18 @@
                      "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql")
         _ (set-meta! db "schema_version" "5")
         result (migrate/migrate! db)]
-    (testing "only 006-009 runs; status :applied at version 9"
-      (is (= {:status :applied :version 21} result)))
+    (testing "all pending migrations run; status :applied at version 22"
+      (is (= {:status :applied :version 22} result)))
     (testing "session_bindings exists again"
       (is (contains? (table-names db) "session_bindings")))
     (testing "the records agree with the classpath"
-      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql 017-event-prev-causal-links.sql 018-work.sql 019-p1-authority.sql 020-subagent-links.sql 021-capability-budgets.sql"
+      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql 017-event-prev-causal-links.sql 018-work.sql 019-p1-authority.sql 020-subagent-links.sql 021-capability-budgets.sql 022-evolution-dag.sql"
              (meta-value db "applied_migrations")))
-      (is (= "21" (meta-value db "schema_version"))))
+      (is (= "22" (meta-value db "schema_version"))))
     (testing "pre-existing data survives the additive upgrade"
       (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
     (testing "a follow-up apply is a verified no-op"
-      (is (= {:status :noop :version 21} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 22} (migrate/migrate! db))))))
 
 (deftest version-three-database-upgrades-additively-through-six
   ;; A version-3 database predates the enrichment store, deploy log,
@@ -516,7 +517,7 @@
         _ (set-meta! db "schema_version" "3")
         result (migrate/migrate! db)]
     (testing "004-010 run; status :applied at version 10"
-      (is (= {:status :applied :version 21} result)))
+      (is (= {:status :applied :version 22} result)))
     (testing "the three later tables are back"
       (let [tables (table-names db)]
         (is (contains? tables "enrichments"))
@@ -527,21 +528,21 @@
                                      ["SELECT id FROM generations WHERE id = 'generation-1'"]))]
         (is (= g1 (:id row)))))
     (testing "the records agree with the classpath"
-      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql 017-event-prev-causal-links.sql 018-work.sql 019-p1-authority.sql 020-subagent-links.sql 021-capability-budgets.sql"
+      (is (= "001-init.sql 002-memory.sql 003-routing.sql 004-enrichment.sql 005-deploy.sql 006-session-bindings.sql 007-singleton-current.sql 008-normalize-candidate.sql 009-cas-fk-existence.sql 010-promotion-outbox.sql 011-session-memory-fk.sql 012-commands.sql 013-capabilities.sql 014-code-image-deployment-execution.sql 015-principal.sql 016-resource-edn.sql 017-event-prev-causal-links.sql 018-work.sql 019-p1-authority.sql 020-subagent-links.sql 021-capability-budgets.sql 022-evolution-dag.sql"
              (meta-value db "applied_migrations")))
-      (is (= "21" (meta-value db "schema_version"))))))
+      (is (= "22" (meta-value db "schema_version"))))))
 
 (deftest version-ahead-of-code-fails-cleanly
   ;; Exactly one past the new latest-version: still never guessed at.
   (let [db (fresh-db)
-        _ (set-meta! db "schema_version" "22")
+        _ (set-meta! db "schema_version" "23")
         e (migrate-error db)]
     (is (some? e))
     (is (= :store/schema-mismatch (:error/type (ex-data e))))
     (is (= :version-ahead (:reason (ex-data e))))
-    (is (= 22 (:actual (ex-data e))))
+    (is (= 23 (:actual (ex-data e))))
     (testing "the failed attempt changed nothing"
-      (is (= "22" (meta-value db "schema_version"))))))
+      (is (= "23" (meta-value db "schema_version"))))))
 
 (deftest mid-chain-failure-leaves-prior-version-intact
   ;; Fault path: a pending migration's SQL fails mid-chain (here 006's
@@ -598,7 +599,7 @@
                                                ["PRAGMA table_info(session_bindings)"]))))))
         (testing "the database still upgrades once the obstruction is cleared"
           (sqlite/exec! db ["DROP TABLE session_bindings"])
-          (is (= {:status :applied :version 21} (migrate/migrate! db)))
+          (is (= {:status :applied :version 22} (migrate/migrate! db)))
           (is (contains? (table-names db) "session_bindings"))
           (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))))))
 
@@ -617,7 +618,7 @@
 (def ^:private full-chain
   ["001-init.sql" "002-memory.sql" "003-routing.sql"
    "004-enrichment.sql" "005-deploy.sql" "006-session-bindings.sql"
-   "007-singleton-current.sql" "008-normalize-candidate.sql" "009-cas-fk-existence.sql" "010-promotion-outbox.sql" "011-session-memory-fk.sql" "012-commands.sql" "013-capabilities.sql" "014-code-image-deployment-execution.sql" "015-principal.sql" "016-resource-edn.sql" "017-event-prev-causal-links.sql" "018-work.sql" "019-p1-authority.sql" "020-subagent-links.sql" "021-capability-budgets.sql"])
+   "007-singleton-current.sql" "008-normalize-candidate.sql" "009-cas-fk-existence.sql" "010-promotion-outbox.sql" "011-session-memory-fk.sql" "012-commands.sql" "013-capabilities.sql" "014-code-image-deployment-execution.sql" "015-principal.sql" "016-resource-edn.sql" "017-event-prev-causal-links.sql" "018-work.sql" "019-p1-authority.sql" "020-subagent-links.sql" "021-capability-budgets.sql" "022-evolution-dag.sql"])
 
 (deftest latest-version-matches-the-migration-file-set
   ;; The three-way reconciliation pin: constant == file set == recorded
@@ -649,8 +650,8 @@
         (is (= :store/migration-chain-invalid (:error/type (ex-data e))))
         (is (= :chain-duplicate (:reason (ex-data e))))))
     (testing "a chain whose top disagrees with latest-version"
-      (let [e-short (chain-error (butlast full-chain))     ; tops out at 18
-            e-long (chain-error (conj full-chain "022-beyond.sql"))] ; tops out at 22 (drift)
+      (let [e-short (chain-error (butlast full-chain))     ; tops out at 21
+            e-long (chain-error (conj full-chain "023-beyond.sql"))] ; tops out at 23 (drift)
         (is (= :store/migration-chain-invalid (:error/type (ex-data e-short))))
         (is (= :latest-version-drift (:reason (ex-data e-short))))
         (is (= :latest-version-drift (:reason (ex-data e-long))))))
@@ -710,6 +711,18 @@
     (sqlite/exec! db ["DROP INDEX IF EXISTS events_prev_idx"])
     (sqlite/exec! db ["DROP INDEX IF EXISTS events_cause_idx"])
     (try (sqlite/exec! db ["ALTER TABLE events DROP COLUMN prev_event_id"]) (catch Exception _ nil)))
+  (when (< n 22)
+    (sqlite/exec! db ["DROP TABLE IF EXISTS candidate_parent_edges"])
+    (sqlite/exec! db ["DROP TABLE IF EXISTS generation_parent_edges"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS candidate_parent_edges_candidate_idx"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS candidate_parent_edges_generation_idx"])
+    (sqlite/exec! db ["DROP INDEX IF EXISTS generation_parent_edges_parent_idx"])
+    (sqlite/exec! db ["DROP TRIGGER IF EXISTS candidate_parent_edges_no_delete"])
+    (sqlite/exec! db ["DROP TRIGGER IF EXISTS candidate_parent_edges_no_update"])
+    (sqlite/exec! db ["DROP TRIGGER IF EXISTS candidate_parent_edges_no_cycle"])
+    (sqlite/exec! db ["DROP TRIGGER IF EXISTS generation_parent_edges_no_delete"])
+    (sqlite/exec! db ["DROP TRIGGER IF EXISTS generation_parent_edges_no_update"])
+    (sqlite/exec! db ["DROP TRIGGER IF EXISTS generation_parent_edges_no_cycle"]))
   (set-meta! db "applied_migrations" (str/join " " (take n full-chain)))
   (set-meta! db "schema_version" (str n)))
 
@@ -717,7 +730,7 @@
   (let [db (fresh-db)]
     (insert-generation! db g1 {})
     (rewind-to-version! db 1)
-    (is (= {:status :applied :version 21} (migrate/migrate! db)))
+    (is (= {:status :applied :version 22} (migrate/migrate! db)))
     (testing "002-memory.sql invariants hold after the incremental apply"
       (insert-session! db "s1" g1)
       (insert! db :episodic_memory
@@ -731,14 +744,14 @@
     (testing "no data loss"
       (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
     (testing "re-running is a verified noop"
-      (is (= {:status :noop :version 21} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 22} (migrate/migrate! db))))))
 
 (deftest incremental-step-2-to-3-adds-session-routing-audit
   (let [db (fresh-db)]
     (insert-generation! db g1 {})
     (insert-session! db "old-s" g1)
     (rewind-to-version! db 2)
-    (is (= {:status :applied :version 21} (migrate/migrate! db)))
+    (is (= {:status :applied :version 22} (migrate/migrate! db)))
     (testing "003-routing.sql invariants: additive audit columns, index present"
       (let [row (first (sqlite/query db
                                      ["SELECT routing_deployment_version, routing_bucket
@@ -762,13 +775,13 @@
     (testing "no data loss"
       (is (= 2 (count (sqlite/query db ["SELECT id FROM sessions"])))))
     (testing "re-running is a verified noop"
-      (is (= {:status :noop :version 21} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 22} (migrate/migrate! db))))))
 
 (deftest incremental-step-3-to-4-adds-append-only-enrichments
   (let [db (fresh-db)]
     (insert-generation! db g1 {})
     (rewind-to-version! db 3)
-    (is (= {:status :applied :version 21} (migrate/migrate! db)))
+    (is (= {:status :applied :version 22} (migrate/migrate! db)))
     (testing "004-enrichment.sql invariants: append-only discipline survives the upgrade"
       (insert! db :enrichments
                {:id "enr-1" :entity_kind ":genome" :entity_id "e1"
@@ -786,13 +799,13 @@
     (testing "no data loss"
       (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
     (testing "re-running is a verified noop"
-      (is (= {:status :noop :version 21} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 22} (migrate/migrate! db))))))
 
 (deftest incremental-step-4-to-5-adds-deployment-decision-log
   (let [db (fresh-db)]
     (insert-generation! db g1 {})
     (rewind-to-version! db 4)
-    (is (= {:status :applied :version 21} (migrate/migrate! db)))
+    (is (= {:status :applied :version 22} (migrate/migrate! db)))
     (testing "005-deploy.sql invariants: constrained decision vocabulary"
       (insert! db :deployment_decisions
                {:id "d1" :generation_id g1 :decision "deployed"
@@ -805,14 +818,14 @@
     (testing "no data loss"
       (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
     (testing "re-running is a verified noop"
-      (is (= {:status :noop :version 21} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 22} (migrate/migrate! db))))))
 
 (deftest incremental-step-5-to-6-adds-durable-session-bindings
   (let [db (fresh-db)]
     (insert-generation! db g1 {})
     (insert-session! db "bound-s" g1)
     (rewind-to-version! db 5)
-    (is (= {:status :applied :version 21} (migrate/migrate! db)))
+    (is (= {:status :applied :version 22} (migrate/migrate! db)))
     (testing "006-session-bindings.sql invariants after the incremental apply"
       (let [binding {:id "b1" :session_id "bound-s" :binding_type "skill"
                      :logical_id "[:skill \"debugging\"]" :revision_id hash1
@@ -835,7 +848,40 @@
       (is (= 1 (count (sqlite/query db ["SELECT id FROM sessions"]))))
       (is (= 1 (count (sqlite/query db ["SELECT id FROM generations"])))))
     (testing "re-running is a verified noop"
-      (is (= {:status :noop :version 21} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 22} (migrate/migrate! db))))))
+
+(deftest incremental-step-21-to-22-adds-evolution-dag-edges
+  (let [db (fresh-db)]
+    (insert-generation! db g1 {})
+    (insert-generation! db g2 {:parent g1})
+    (insert-mutation! db "mutation-1")
+    (insert-candidate! db {:parent g1})
+    (rewind-to-version! db 21)
+    (is (= {:status :applied :version 22} (migrate/migrate! db)))
+    (testing "022 backfills the legacy generation and candidate parents"
+      (is (= [{:child_generation_id g2
+               :parent_generation_id g1
+               :ordinal 0}]
+             (sqlite/query db ["SELECT child_generation_id, parent_generation_id, ordinal
+                                FROM generation_parent_edges"])))
+      (is (= [{:candidate_id "candidate-1"
+               :parent_generation_id g1
+               :parent_genome_id hash1
+               :ordinal 0}]
+             (sqlite/query db ["SELECT candidate_id, parent_generation_id, parent_genome_id, ordinal
+                                FROM candidate_parent_edges"]))))
+    (testing "new edge rows enforce foreign keys and immutability"
+      (is (thrown-with-msg? java.sql.SQLException #"FOREIGN KEY"
+                            (insert! db :generation_parent_edges
+                                     {:child_generation_id g2
+                                      :parent_generation_id "missing-generation"
+                                      :ordinal 1
+                                      :created_at now})))
+      (is (thrown-with-msg? java.sql.SQLException #"immutable"
+                            (sqlite/exec! db ["DELETE FROM generation_parent_edges
+                                               WHERE child_generation_id = ?" g2]))))
+    (testing "re-running is a verified noop"
+      (is (= {:status :noop :version 22} (migrate/migrate! db))))))
 
 ;; ============================================================================
 ;; component — an existing version-1 database upgrades additively
@@ -845,8 +891,8 @@
   ;; Simulate a pre-Task-9.3 database: migrate a fresh db, then rewind
   ;; the 003-routing.sql effects (index + columns) and the meta records
   ;; back to version 1. The runner must then apply every pending
-  ;; migration and bring the version forward to the true latest (8,
-  ;; the top of the eight-file classpath chain).
+  ;; migration and bring the version forward to the true latest (22,
+  ;; the top of the classpath chain).
   (let [db (sqlite/spec (temp-db-path))
         _ (migrate/migrate! db)
         _ (sqlite/exec! db ["DROP INDEX sessions_routing_idx"])
@@ -915,12 +961,12 @@
                                      'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
                                      'created', '2025-01-01T00:00:00Z')"])
         result (migrate/migrate! db)]
-    (testing "only the pending migration runs; the version moves to 9"
-      (is (= {:status :applied :version 21} result)))
+    (testing "only the pending migrations run; the version moves to 22"
+      (is (= {:status :applied :version 22} result)))
     (testing "the old session row survives untouched with NULL routing columns"
       (let [row (first (sqlite/query db ["SELECT routing_deployment_version, routing_bucket
                                           FROM sessions WHERE id = 'old-session'"]))]
         (is (nil? (:routing_deployment_version row)))
         (is (nil? (:routing_bucket row)))))
     (testing "a third apply is a verified no-op"
-      (is (= {:status :noop :version 21} (migrate/migrate! db))))))
+      (is (= {:status :noop :version 22} (migrate/migrate! db))))))

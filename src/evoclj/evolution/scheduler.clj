@@ -32,6 +32,7 @@
   side effects and introduces no global state — every IO it triggers
   lives inside the injected `run-generation` step."
   (:require [evoclj.evolution.core :as evolution]
+             [evoclj.evolution.dag :as dag]
              [evoclj.eval.core :as eval-core]
              [evoclj.eval.cost-guard :as cost-guard]
              [evoclj.eval.workers :as workers]
@@ -150,6 +151,124 @@
                                " exceeds threshold " (:threshold cost-guard))
              :cycles (inc cycles)}
             (recur hist' (inc cycles) cumulative-cost')))))))
+;; --- optional frontier/beam scheduling --------------------------------------
+
+(defn- candidate-id
+  "Stable candidate identifier used by frontier scheduling."
+  [candidate]
+  (or (:candidate/id candidate)
+      (:id candidate)
+      (:candidate/genome-id candidate)
+      (:genome/id candidate)
+      (pr-str candidate)))
+
+(defn- evaluated-score
+  [candidate evaluation]
+  (let [score (if (map? evaluation)
+                (or (:score evaluation)
+                    (:utility evaluation)
+                    (get-in evaluation [:summary :utility :task/success :candidate])
+                    0.0)
+                evaluation)]
+    (assoc candidate :evaluation evaluation :score (double (or score 0.0)))))
+
+(defn run-frontier!
+  "Run bounded deterministic frontier/beam search without touching CURRENT.
+
+  initial is a vector of candidate records. opts requires explicit k,
+  frontier, eval-budget, and seed (defaults are provided for compatibility).
+  expand-fn receives each selected candidate and returns candidate-of-candidate
+  records. evaluate-fn receives each candidate and returns either a numeric
+  score or an evaluation map containing :score or :utility.
+
+  Every evaluated candidate is retained in :levels/:evidence; selected
+  candidates form the next frontier while rejected and evicted candidates
+  remain queryable. Ordering is score-descending then stable genome/id bytes,
+  delegated to evoclj.evolution.dag/deterministic-order. No promotion or
+  store write occurs in this function."
+  [initial {:keys [k frontier eval-budget seed expand-fn evaluate-fn id-fn
+                   max-cycles]
+            :or {k 1 frontier 1 eval-budget 100 seed 0 max-cycles 1000}}]
+  (let [k (long (max 1 k))
+        frontier-limit (long (max 1 (min k frontier)))
+        eval-budget (long (max 0 eval-budget))
+        id-fn (or id-fn candidate-id)
+        evaluate-fn (or evaluate-fn (constantly 0.0))
+        expand-fn (or expand-fn (constantly []))]
+    (loop [level 0
+           frontier* (vec initial)
+           remaining eval-budget
+           levels []
+           evidence []]
+      (if (or (zero? remaining) (empty? frontier*) (>= level max-cycles))
+        {:frontier frontier*
+         :levels levels
+         :evidence evidence
+         :evaluated (- eval-budget remaining)
+         :eval-budget eval-budget
+         :k k
+         :frontier-limit frontier-limit
+         :seed seed
+         :levels-complete? (or (zero? remaining) (empty? frontier*))}
+        (let [ordered (vec (dag/deterministic-order frontier*
+                                                   #(or (:score %) (:utility %) 0.0)))
+              batch (vec (take remaining ordered))
+              budget-exhausted (mapv #(assoc % :evaluation/status :budget-exhausted)
+                                     (drop remaining ordered))
+              scored (mapv #(evaluated-score % (evaluate-fn %)) batch)
+              selected-result (dag/bounded-frontier
+                               scored
+                               {:k frontier-limit
+                                :frontier frontier-limit
+                                :eval-budget remaining
+                                :score-fn :score
+                                :seed seed})
+              selected (:selected selected-result)
+              unselected (into (:unselected selected-result) budget-exhausted)
+              children (vec (mapcat (fn [candidate]
+                                      (map #(assoc % :parent/id (id-fn candidate)
+                                                     :frontier/seed seed)
+                                           (or (expand-fn candidate) [])))
+                                    selected))
+              seen (set (map id-fn (concat selected unselected evidence)))
+              fresh (vec (remove #(contains? seen (id-fn %)) children))
+              level-record {:level level
+                            :selected selected
+                            :unselected unselected
+                            :evaluated scored
+                            :expanded (count children)
+                            :children fresh}
+              remaining' (- remaining (count scored))
+              levels' (conj levels level-record)
+              evidence' (into evidence (concat scored unselected))]
+          (if (or (zero? remaining') (empty? fresh))
+            {:frontier selected
+             :levels levels'
+             :evidence evidence'
+             :evaluated (- eval-budget remaining')
+             :eval-budget eval-budget
+             :k k
+             :frontier-limit frontier-limit
+             :seed seed
+             :levels-complete? true}
+            (recur (inc level)
+                   (vec (take frontier-limit
+                              (dag/deterministic-order fresh
+                                                       #(or (:score %) (:utility %) 0.0))))
+                   remaining'
+                   levels'
+                   evidence')))))))
+
+(defn run-cycles-frontier!
+  "Compatibility wrapper for callers that want frontier scheduling from the
+  cycle controller. run-generation is invoked once per candidate as
+  (run-generation candidate), and its result is used as the evaluation.
+  The wrapper never promotes and therefore never writes CURRENT."
+  [run-generation initial opts]
+  (run-frontier! initial
+                 (assoc opts
+                        :evaluate-fn #(run-generation %)
+                        :expand-fn (or (:expand-fn opts) (constantly [])))))
 
 ;; --- production one-generation wiring (reuses the public APIs) ----------------
 

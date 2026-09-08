@@ -417,8 +417,14 @@
       (is (= 1 (count (sqlite/query (:db store)
                                     ["SELECT * FROM mutations WHERE id = ?"
                                      (str (uuid 1))])))))
-    (testing "read-back round-trips the record"
-      (is (= persisted (candidate/find-candidate (:handle store) (:candidate/id c)))))
+    (testing "read-back round-trips the record and exposes durable parent evidence"
+      (let [found (candidate/find-candidate (:handle store) (:candidate/id c))]
+        (is (= persisted (select-keys found (keys persisted))))
+        (is (= [{:ordinal 0
+                 :parent/generation-id generation-id
+                 :parent/genome-id parent-genome-id}]
+               (mapv #(select-keys % [:ordinal :parent/generation-id :parent/genome-id])
+                     (:parents found))))))
     (testing "the CURRENT pointer is untouched (no activation rights)"
       (is (= 1 (current-flag (:db store)))))))
 

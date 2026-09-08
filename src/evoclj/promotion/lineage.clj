@@ -284,15 +284,30 @@
 
 (declare lineage-node)
 
-(defn- generation-children
-  "The lineage nodes of every generation whose parent is `gen-id`
-  (generations.parent_id), newest last (created_at, then id)."
-  [db v-cas gen-id strict?]
+(defn- generation-parent-edges
+  [db gen-id]
   (mapv (fn [row]
-          (lineage-node db v-cas (:id row) strict?))
+          {:parent/id (:parent_generation_id row)
+           :ordinal (:ordinal row)
+           :role (keyword (:role row))
+           :merge-plan/digest (:merge_plan_digest row)
+           :mutation/hash (:mutation_hash row)})
         (query db
-               "SELECT * FROM generations WHERE parent_id = ? ORDER BY created_at, id"
+               "SELECT * FROM generation_parent_edges WHERE child_generation_id = ? ORDER BY ordinal"
                gen-id)))
+
+(defn- generation-children
+  "The lineage nodes of every generation whose legacy or DAG parent is
+  `gen-id`, newest last (created_at, then id)."
+   [db v-cas gen-id strict?]
+   (mapv (fn [row]
+           (lineage-node db v-cas (:id row) strict?))
+         (query db
+               "SELECT DISTINCT g.* FROM generations g
+                LEFT JOIN generation_parent_edges e ON e.child_generation_id = g.id
+                WHERE g.parent_id = ? OR e.parent_generation_id = ?
+                ORDER BY g.created_at, g.id"
+               gen-id gen-id)))
 
 (defn- rejected-branches
   "The lineage nodes for every rejected candidate branch of `gen-id`:
@@ -352,7 +367,14 @@
                            (first (query db "SELECT * FROM generations WHERE id = ?"
                                          (:parent_id grow)))))
           node {:generation (generation-record grow)
+                ;; :parent is retained as ordinal-zero compatibility view.
                 :parent parent-record
+                :parent-edges (generation-parent-edges db gen-id)
+                :parents (mapv #(assoc % :generation
+                                       (generation-record
+                                        (first (query db "SELECT * FROM generations WHERE id = ?"
+                                                      (:parent/id %)))))
+                                (generation-parent-edges db gen-id))
                 :mutation (when mut (mutation-record mut))
                 :evidence (evidence-record cand)
                 :evaluation (when evl (evaluation-record evl))
