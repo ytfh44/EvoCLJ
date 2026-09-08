@@ -28,7 +28,9 @@
             [evoclj.evolution.candidate :as candidate]
             [evoclj.evolution.scheduler :as scheduler]
             [evoclj.genome.load :as load]
+            [evoclj.genome.path :as gpath]
             [evoclj.store.artifact :as artifact]
+            [evoclj.store.cas :as cas]
             [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -211,6 +213,14 @@
                    (make-array OpenOption 0))))
   dir)
 
+(defn- genome-index-body
+  "The canonical CAS body for a loaded Genome's content address."
+  [loaded]
+  (apply str
+         (map (fn [[p {:keys [digest]}]]
+                (str p "\u0000" digest "\n"))
+              (sort-by (fn [[p _]] p) gpath/bytewise-compare (:files loaded)))))
+
 (defn- provision-diff-store!
   "A temp state dir provisioned like a real host deployment: migrated
   db, the generation-1 row, real parent/candidate Genome bundles in
@@ -228,8 +238,24 @@
         candidate-root (write-bundle! (str scratch "/candidate") candidate-files)
         parent (load/load-genome parent-root)
         candidate (load/load-genome candidate-root)
-        parent-id (:genome/id parent)
-        candidate-id (:genome/id candidate)
+        parent-loaded-id (:genome/id parent)
+        candidate-loaded-id (:genome/id candidate)
+        parent-body (genome-index-body parent)
+        candidate-body (genome-index-body candidate)
+        parent-bytes (.getBytes parent-body StandardCharsets/UTF_8)
+        candidate-bytes (.getBytes candidate-body StandardCharsets/UTF_8)
+        cas-root (str dir "/cas")
+        cas-store (cas/->cas cas-root)
+        parent-id (:artifact/id
+                   (cas/put-bytes! cas-store parent-bytes {}))
+        candidate-id (:artifact/id
+                      (cas/put-bytes! cas-store candidate-bytes {}))
+        _ (when-not (= parent-loaded-id parent-id)
+            (throw (ex-info "parent Genome CAS id mismatch"
+                            {:loaded parent-loaded-id :cas parent-id})))
+        _ (when-not (= candidate-loaded-id candidate-id)
+            (throw (ex-info "candidate Genome CAS id mismatch"
+                            {:loaded candidate-loaded-id :cas candidate-id})))
         _ (Files/createDirectories (Paths/get (str dir "/genomes") (make-array String 0))
                                    (make-array FileAttribute 0))
         _ (Files/createDirectories (Paths/get (str dir "/candidates") (make-array String 0))
@@ -246,13 +272,13 @@
         resolution-id (str "sha256:" (apply str (repeat 64 "c")))
         hypothesis-id (str (UUID/randomUUID))
         ;; FK existence: generations/candidates reference artifacts/genomes.
-        ;; Fake hashes use size 0 artifacts (no CAS body); ensure before inserts.
-        _ (doseq [[artifact-id media-type]
-                  [[parent-id "application/octet-stream"]
-                   [candidate-id "application/octet-stream"]
-                   [resolution-id "application/edn"]
-                   [evidence-id "application/edn"]]]
-            (artifact/ensure-artifact! db artifact-id media-type 0))
+        ;; The Genome identities above are backed by their canonical CAS bodies.
+        _ (doseq [[artifact-id media-type size]
+                  [[parent-id "application/octet-stream" (alength ^bytes parent-bytes)]
+                   [candidate-id "application/octet-stream" (alength ^bytes candidate-bytes)]
+                   [resolution-id "application/edn" 0]
+                   [evidence-id "application/edn" 0]]]
+            (artifact/ensure-artifact! db artifact-id media-type size))
         _ (doseq [genome-id [parent-id candidate-id]]
             (artifact/ensure-genome! db genome-id))]
     (sqlite/with-db [conn db]
