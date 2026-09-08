@@ -16,7 +16,8 @@
   Cross-persistence/audit boundary only writes pure data:
     {:binding/id ... :tool/id ... :revision/id ... :revision/seq ...}
   No live objects cross the boundary."
-  (:require [evoclj.kernel.error :as err]
+  (:require [evoclj.capability.semantic :as semantic]
+            [evoclj.kernel.error :as err]
             [evoclj.provider.protocol :as proto]
             [malli.core :as m]))
 
@@ -37,6 +38,9 @@
     :binding/descriptor :binding/provider :binding/freshness
     :binding/stale? :binding/captured-at})
 
+(def semantic-binding-keys
+  #{:binding/semantic-spec :binding/semantic-digest})
+
 ;; Closed schema: rejects any key outside the canonical set (fail-closed).
 (def CallBindingSchema
   [:map {:closed true}
@@ -49,14 +53,19 @@
    [:binding/provider {:optional true} any?]
    [:binding/freshness FreshnessSchema]
    [:binding/stale? boolean?]
-   [:binding/captured-at int?]])
+   [:binding/captured-at int?]
+   [:binding/semantic-spec {:optional true} [:maybe map?]]
+   [:binding/semantic-digest {:optional true} [:maybe string?]]])
 
 (defn valid-freshness? [v] (contains? freshness-values v))
 
 (defn- validate-canonical-keys
-  "Fail-closed check: every key on the binding must belong to the canonical set."
+  "Fail-closed check: every key on the binding must belong to the canonical set,
+  or to the explicit semantic extension set."
   [b]
-  (let [extra (remove canonical-binding-keys (keys b))]
+  (let [extra (remove #(or (contains? canonical-binding-keys %)
+                           (contains? semantic-binding-keys %))
+                      (keys b))]
     (when (seq extra)
       (throw (err/error :binding/unknown-key
                         "CallBinding record carries a non-canonical key"
@@ -226,26 +235,22 @@
          ;; Also handle case where descriptor came from MCP but has no revision: use mcp field
          ;; For fixture with no mcp/last-refreshed and no revision, stale true (matches old)
          binding-id (or (:binding/id opts) (:id opts) (:contract/id opts) (random-uuid))
-         binding {:binding/id binding-id
-                  :tool/id tool-id
-                  :revision/id revision-id
-                  :revision/seq (int revision-seq)
-                  :source/id source-id
-                  :binding/descriptor descriptor
-                  :binding/provider provider
-                  :binding/freshness freshness
-                  :binding/stale? (boolean stale)
-                  :binding/captured-at (long captured)
-                  ;; Canonical record: ONLY canonical :binding/* + :revision/* keys; compat projected by binding->audit.
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  
-                  }]
+         semantic-frozen (semantic/freeze-descriptor descriptor)
+         base-binding {:binding/id binding-id
+                       :tool/id tool-id
+                       :revision/id revision-id
+                       :revision/seq (int revision-seq)
+                       :source/id source-id
+                       :binding/descriptor descriptor
+                       :binding/provider provider
+                       :binding/freshness freshness
+                       :binding/stale? (boolean stale)
+                       :binding/captured-at (long captured)}
+         binding (if semantic-frozen
+                   (assoc base-binding
+                          :binding/semantic-spec (:semantic/spec semantic-frozen)
+                          :binding/semantic-digest (:semantic/digest semantic-frozen))
+                   base-binding)]
      (validate-binding binding)
      binding)))
 
@@ -271,22 +276,24 @@
   (apply capture args))
 
 (defn binding->audit
-  "Project binding generation/staleness into an audit map fragment.
-  Includes both generic and MCP-compatible keys for backward compatibility."
+  "Project binding generation/staleness and semantic identity into an audit map."
   [binding]
-  {:binding/id (:binding/id binding)
-   :tool/id (:tool/id binding)
-   :revision/id (:revision/id binding)
-   :revision/seq (:revision/seq binding)
-   :binding/stale? (:binding/stale? binding)
-   :binding/freshness (:binding/freshness binding)
-   ;; MCP/contract compat
-   :mcp/generation (:revision/seq binding)
-   :mcp/stale? (:binding/stale? binding)
-   :mcp/freshness (:binding/freshness binding)
-   :contract/id (:binding/id binding)
-   :contract/generation (:revision/seq binding)
-   :contract/stale? (:binding/stale? binding)})
+  (cond-> {:binding/id (:binding/id binding)
+           :tool/id (:tool/id binding)
+           :revision/id (:revision/id binding)
+           :revision/seq (:revision/seq binding)
+           :binding/stale? (:binding/stale? binding)
+           :binding/freshness (:binding/freshness binding)
+           ;; MCP/contract compat
+           :mcp/generation (:revision/seq binding)
+           :mcp/stale? (:binding/stale? binding)
+           :mcp/freshness (:binding/freshness binding)
+           :contract/id (:binding/id binding)
+           :contract/generation (:revision/seq binding)
+           :contract/stale? (:binding/stale? binding)}
+    (:binding/semantic-spec binding)
+    (assoc :semantic/spec (:binding/semantic-spec binding)
+           :semantic/digest (:binding/semantic-digest binding))))
 
 (defn contract->audit
   "Alias for binding->audit, kept for contract delegation."
@@ -296,10 +303,13 @@
 (defn binding->persisted
   "Pure data for cross-persistence/audit boundary. No live objects."
   [binding]
-  {:binding/id (:binding/id binding)
-   :tool/id (:tool/id binding)
-   :revision/id (:revision/id binding)
-   :revision/seq (:revision/seq binding)})
+  (cond-> {:binding/id (:binding/id binding)
+           :tool/id (:tool/id binding)
+           :revision/id (:revision/id binding)
+           :revision/seq (:revision/seq binding)}
+    (:binding/semantic-spec binding)
+    (assoc :semantic/spec (:binding/semantic-spec binding)
+           :semantic/digest (:binding/semantic-digest binding))))
 
 (defn binding->pure-data
   "Alias for binding->persisted."

@@ -154,7 +154,13 @@
    [:mcp/status {:optional true} keyword?]
    [:mcp/removed-at {:optional true} int?]
    [:mcp/retry-safe? {:optional true} boolean?]
-   [:mcp/output-schema-kind {:optional true} keyword?]])
+   [:mcp/output-schema-kind {:optional true} keyword?]
+   ;; Explicit opt-in for the closed semantic capability registry. The
+   ;; semantic spec is checked against the static mapping at binding time;
+   ;; these fields remain part of the raw provider descriptor.
+   [:semantic/validation {:optional true} [:enum :required]]
+   [:semantic/mapping-version {:optional true} pos-int?]
+   [:semantic/spec {:optional true} map?]])
 
 ;; ---------------------------------------------------------------------------
 ;; ToolSurface
