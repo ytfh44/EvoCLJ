@@ -450,8 +450,11 @@
   {:sqlite :cas} maps are rejected."
   [store candidate-id]
   (validate-store! store)
-  (some-> (candidate-store/find-candidate store candidate-id)
-          validate-candidate!))
+  (let [candidate (some-> (candidate-store/find-candidate store candidate-id)
+                          validate-candidate!)]
+    (when candidate
+      (let [edges (candidate-store/find-parent-edges store candidate-id)]
+        (assoc candidate :parent-edges edges :parents edges)))))
 
 (defn find-candidates-by-parent
   "Every Candidate record whose parent Genome is `parent-genome-id`,
@@ -462,5 +465,8 @@
   {:sqlite :cas} maps are rejected."
   [store parent-genome-id]
   (validate-store! store)
-  (->> (candidate-store/find-candidates-by-parent store parent-genome-id)
-       (mapv validate-candidate!)))
+  (mapv (fn [candidate]
+          (let [candidate (validate-candidate! candidate)
+                edges (candidate-store/find-parent-edges store (:candidate/id candidate))]
+            (assoc candidate :parent-edges edges :parents edges)))
+        (candidate-store/find-candidates-by-parent store parent-genome-id)))

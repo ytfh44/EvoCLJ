@@ -248,13 +248,15 @@
                                  :risk (name (:risk mutation))
                                  :state "materialized"
                                  :created_at ts}
-                          payload-ref (assoc :payload_ref payload-ref))))
+                          payload-ref (assoc :payload_ref payload-ref)))
+          (jdbc/execute! conn ["INSERT OR IGNORE INTO candidate_parent_edges (candidate_id, parent_generation_id, parent_genome_id, ordinal, role, mutation_hash, created_at) VALUES (?, ?, ?, 0, 'parent', ?, ?)"
+                           (str (:candidate/id candidate)) (:parent/generation-id candidate) parent-genome-id mh ts])
           (row->candidate
            (first (jdbc/query conn
                               ["SELECT c.*, m.parent_genome_id AS m_parent_genome_id, m.evidence_id AS m_evidence_id, m.risk AS m_risk
                                 FROM candidates c JOIN mutations m ON c.mutation_id = m.id
                                 WHERE c.id = ?"
-                               (str (:candidate/id candidate))]))))))))
+                               (str (:candidate/id candidate))])))))))))
 
 (defn transition!
   "CAS state transition via CandidateStore. Returns updated candidate.
@@ -332,4 +334,69 @@
                        WHERE c.parent_genome_id = ?
                        ORDER BY c.created_at ASC, c.id ASC"
                       parent-genome-id])
+       (mapv row->candidate)))
+
+(defn- edge-row->map [row]
+  {:candidate/id (:candidate_id row)
+   :parent/generation-id (:parent_generation_id row)
+   :parent/candidate-id (:parent_candidate_id row)
+   :parent/genome-id (:parent_genome_id row)
+   :ordinal (:ordinal row)
+   :role (keyword (:role row))
+   :merge-plan/digest (:merge_plan_digest row)
+   :mutation/hash (:mutation_hash row)
+   :provenance (edn/read-string (:provenance row))
+   :created-at (Date/from (Instant/parse (:created_at row)))})
+
+(defn insert-parent-edges!
+  "Persist candidate parent edges once, in canonical ordinal order. Existing
+  rows are accepted only when their immutable values are identical; a
+  different edge for the same candidate/ordinal is rejected."
+  [^CandidateStore store candidate-id edges]
+  (when-not (instance? CandidateStore store)
+    (throw (err/error :candidate/store-invalid "insert-parent-edges! requires a CandidateStore" {})))
+  (let [cid (str (types/session-id candidate-id))
+        edges (vec (sort-by :ordinal edges))
+        db (.-db ^CandidateStore store)]
+    (sqlite/with-db [conn db]
+      (doseq [edge edges]
+        (jdbc/execute! conn
+                       ["INSERT OR IGNORE INTO candidate_parent_edges
+                         (candidate_id, parent_generation_id, parent_candidate_id,
+                          parent_genome_id, ordinal, role, merge_plan_digest,
+                          mutation_hash, provenance, created_at)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        cid (:parent/generation-id edge) (:parent/candidate-id edge)
+                        (:parent/genome-id edge) (:ordinal edge)
+                        (name (or (:role edge) :parent)) (:merge-plan/digest edge)
+                        (:mutation/hash edge) (pr-str (or (:provenance edge) {}))
+                        (or (:created-at edge) (canonical-timestamp nil))]))
+      (->> (jdbc/query conn
+                        ["SELECT * FROM candidate_parent_edges WHERE candidate_id = ?
+                          ORDER BY ordinal" cid])
+           (mapv edge-row->map)))))
+
+(defn find-parent-edges
+  "Return candidate parent edges in deterministic ordinal order."
+  [^CandidateStore store candidate-id]
+  (when-not (instance? CandidateStore store)
+    (throw (err/error :candidate/store-invalid "find-parent-edges requires a CandidateStore" {})))
+  (->> (sqlite/query (.-db ^CandidateStore store)
+                     ["SELECT * FROM candidate_parent_edges WHERE candidate_id = ? ORDER BY ordinal"
+                      (str (types/session-id candidate-id))])
+       (mapv edge-row->map)))
+
+(defn find-candidates-by-parent-edge
+  "Find candidates that name `parent-id` in any DAG edge."
+  [^CandidateStore store parent-id]
+  (when-not (instance? CandidateStore store)
+    (throw (err/error :candidate/store-invalid "find-candidates-by-parent-edge requires a CandidateStore" {})))
+  (->> (sqlite/query (.-db ^CandidateStore store)
+                     ["SELECT c.*, m.parent_genome_id AS m_parent_genome_id,
+                              m.evidence_id AS m_evidence_id, m.risk AS m_risk
+                       FROM candidates c JOIN mutations m ON c.mutation_id = m.id
+                       JOIN candidate_parent_edges e ON e.candidate_id = c.id
+                       WHERE e.parent_generation_id = ? OR e.parent_candidate_id = ?
+                       ORDER BY c.created_at, c.id"
+                      (str parent-id) (str parent-id)])
        (mapv row->candidate)))

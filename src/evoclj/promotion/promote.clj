@@ -780,6 +780,15 @@
                 parent-gen
                 ts]))
 
+
+(defn- insert-generation-parent-edges!
+  "Persist canonical generation parent edges inside the promotion transaction."
+  [conn child-generation-id parent-generation-id ts]
+  (raw-update! conn
+               "INSERT OR IGNORE INTO generation_parent_edges
+                  (child_generation_id, parent_generation_id, ordinal, role, created_at)
+                VALUES (?, ?, 0, 'parent', ?)"
+               [child-generation-id parent-generation-id ts]))
 ;; --- the public entry point --------------------------------------------------------
 
 (defn promote!
@@ -877,6 +886,7 @@
               ;; same transaction)
               (insert-new-generation! conn candidate resolution-id
                                       expected-parent new-gen ts)
+              (insert-generation-parent-edges! conn new-gen expected-parent ts)
               ;; insert promotion decision
               (insert-promotion-row! conn promotion-id candidate evaluation
                                      expected-parent new-gen reason ts)
