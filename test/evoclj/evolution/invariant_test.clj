@@ -21,14 +21,22 @@
 
 (defn- run [id kind & {:keys [gate deterministic fresh passed model-policy]
                        :or {deterministic true fresh false passed true
-                            model-policy :recorded}}]
+                            model-policy :recorded-only}}]
   (invariant/run {:run/id id
                   :proposal/id "proposal-1"
                   :kind kind
                   :result-ref (case kind :replay ref-b :adversarial ref-c (str "result-" id))
-                  :result {:gate/id (if (= gate :g3) :G3-deterministic-suites (or gate :G3-deterministic-suites))
+                  :result {:proposal/id "proposal-1"
+                           :predicate/digest (:predicate/digest (invariant/validate-predicate! (:predicate proposal)))
+                           :registry/revision "revision-1"
+                           :run/kind kind
+                           :target/digest (str "sha256:" (apply str (repeat 64 "0")))
+                           :evaluation/id nil
+                           :candidate/id nil
+                           :gate/id (if (= gate :g3) :G3-deterministic-suites (or gate :G3-deterministic-suites))
                            :status (if passed :pass :fail)
                            :details-ref (str "details-" id)
+                           :details/ref nil
                            :model/policy model-policy
                            :deterministic? deterministic
                            :fresh-model? fresh

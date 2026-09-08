@@ -227,7 +227,7 @@
            :deterministic? (:deterministic? result)
            :fresh-model? (:fresh-model? result)
            :passed? (:passed? result)
-           :activation-qualified? (and (= :recorded (:model/policy result))
+           :activation-qualified? (and (= :recorded-only (:model/policy result))
                                       (= :pass (:status result))
                                       (true? (:deterministic? result))
                                       (not (true? (:fresh-model? result)))
@@ -262,7 +262,7 @@
         (when run
           (when-not (= (:proposal/id p) (get-in run [:result :proposal/id]))
             (fail! :proposal-mismatch "selected evidence belongs to another proposal" {:evidence label}))
-          (when-not (= (:predicate/digest p) (get-in run [:result :predicate/digest]))
+          (when-not (= (get-in p [:predicate :predicate/digest]) (get-in run [:result :predicate/digest]))
             (fail! :predicate-mismatch "selected evidence belongs to another predicate" {:evidence label}))
           (when-not (= (:registry/revision p) (get-in run [:result :registry/revision]))
             (fail! :registry-revision-mismatch "selected evidence belongs to another registry revision" {:evidence label}))))

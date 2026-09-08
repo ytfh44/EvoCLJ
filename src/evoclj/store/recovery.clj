@@ -222,11 +222,18 @@
                                     ["SELECT a.id AS activation_id
                                       FROM invariant_activations a
                                       LEFT JOIN invariant_events e ON e.activation_id = a.id AND e.event_type = 'activated'
-                                      LEFT JOIN invariant_outbox o ON o.activation_id = a.id
-                                      WHERE a.status = 'active' AND (e.id IS NULL OR o.id IS NULL)"]))]
+                                      LEFT JOIN invariant_outbox o ON o.activation_id = a.id AND o.event_id = e.id AND o.event_type = 'activated'
+                                      WHERE a.status = 'active' AND (e.id IS NULL OR o.id IS NULL)"]))
+        quarantined (mapv #(assoc % :status :quarantined)
+                          (sqlite/query store
+                                        ["SELECT DISTINCT a.id AS activation_id
+                                          FROM invariant_activations a
+                                          JOIN invariant_events q ON q.activation_id = a.id AND q.event_type = 'quarantined'"]))]
     {:dangling-cas-refs (vec (remove #(= :malformed-ref (:status %)) refs))
      :malformed-refs (vec (filter #(= :malformed-ref (:status %)) refs))
-     :malformed (vec (concat malformed malformed-runs)) :partial-activations partial}))
+     :malformed (vec (concat malformed malformed-runs))
+     :partial-activations partial
+     :quarantined quarantined}))
 (defn scan-recovery-state
   "The normative recovery scan (component interface). Read-only: it
   classifies crash residue and reports corruption; it never appends,
@@ -237,7 +244,7 @@
   (let [inv (try (invariant-integrity store cas)
                  (catch java.sql.SQLException _
                    {:dangling-cas-refs [] :malformed [] :partial-activations []
-                    :status :unavailable}))]
+                    :quarantined [] :status :unavailable}))]
     {:missing-artifacts (missing-artifacts store cas)
      :invalid-event-chains (invalid-event-chains store)
      :stale-candidates (stale-candidates store)
@@ -257,7 +264,8 @@
                     (:dangling-cas-refs inv)
                     (:malformed-refs inv)
                     (:malformed inv)
-                    (:partial-activations inv)))
+                    (:partial-activations inv)
+                    (:quarantined inv)))
           (when-let [cg (:current-generation report)]
             (when (contains? #{:missing :corrupt :missing-current :ambiguous}
                              (:status cg))

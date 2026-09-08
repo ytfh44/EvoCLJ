@@ -37,12 +37,13 @@
   (let [s (fresh-store)
         e (proof! s {:evidence :input})
         d (proof! s {:details :g3})
+        t (proof! s {:target :candidate})
         pd (:predicate/digest (evolution/validate-predicate! (base-predicate)))
         revision (static/registry-revision)
         envelope (fn [kind] {:proposal/id "p1" :predicate/digest pd :registry/revision revision
-                             :run/kind kind :target/digest "sha256:0000000000000000000000000000000000000000000000000000000000000000" :evaluation/id nil :candidate/id nil
+                             :run/kind kind :target/digest (existence/digest-of t) :evaluation/id nil :candidate/id nil
                              :gate/id :G3-deterministic-suites :status :pass :details-ref (existence/digest-of d) :details/ref nil
-                             :model/policy :recorded :deterministic? true :fresh-model? false :passed? true})
+                             :model/policy :recorded-only :deterministic? true :fresh-model? false :passed? true})
         r (proof! s (envelope :replay))
         a (proof! s (envelope :adversarial))
         p (invariant-store/propose! s (proposal e r a))]
@@ -63,7 +64,9 @@
 (deftest decisions-are-terminal-and-idempotent
   (let [s (fresh-store) e (proof! s {}) r (proof! s {}) a (proof! s {})]
     (invariant-store/propose! s (proposal e r a))
+    (is (= :proposed (:status (invariant-store/get-proposal s "p1"))))
     (is (invariant-store/reject! s "p1" "reviewer" "no"))
+    (is (= :rejected (:status (invariant-store/get-proposal s "p1"))))
     (is (thrown? clojure.lang.ExceptionInfo (invariant-store/approve! s "p1" "reviewer" {})))
     (is (invariant-store/reject! s "p1" "reviewer" "no"))
     (is (= 1 (count-rows s "invariant_decisions")))))
@@ -72,8 +75,11 @@
     (is (thrown? clojure.lang.ExceptionInfo (static/publish-active-invariant! d)))))
 (deftest activation-disable-and-reactivation
   (let [s (setup-approved)]
+    (is (= :approved (:status (invariant-store/get-proposal s "p1"))))
     (invariant-store/activate! s "p1" "reviewer")
+    (is (= :active (:status (invariant-store/get-proposal s "p1"))))
     (is (invariant-store/disable! s "p1" "reviewer" "retired"))
+    (is (= :disabled (:status (invariant-store/get-proposal s "p1"))))
     (is (invariant-store/disable! s "p1" "reviewer" "retired"))
     (is (= 1 (count-rows s "invariant_disables")))
     (is (= 2 (count-rows s "invariant_events")))
@@ -96,4 +102,5 @@
     (static/clear-suites!)
     (let [result (invariant-store/recover-activations! s)]
       (is (= :quarantined (:status (first result))))
+      (is (= :quarantined (:status (invariant-store/get-proposal s "p1"))))
       (is (empty? (static/active-invariants))))))
