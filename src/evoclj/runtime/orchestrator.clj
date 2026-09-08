@@ -36,6 +36,21 @@
                    (.getBytes (pr-str value) StandardCharsets/UTF_8)
                    {})))
 
+(defn- replay-evidence-ref!
+  "Persist one immutable replay-evidence envelope and return its CAS id."
+  [executor intent result]
+  (put-payload! executor
+                (merge {:replay/version 1
+                        :raw-intent intent
+                        :canonicalization/version 1}
+                       (:replay/evidence result))))
+
+(defn- replay-event-metadata
+  [evidence-ref]
+  (cond-> {:replay/evidence-ref evidence-ref
+           :replay/evidence-digest evidence-ref}
+    (nil? evidence-ref) (assoc :replay/evidence-missing? true)))
+
 (defn- append-event!
   "Append one event to the session append-only log."
   [executor pin cause-event-id type payload-ref metadata]
@@ -53,49 +68,60 @@
   "Persist one validated intent through the broker and feed the result back.
   Mirrors scheduler/dispatch-intent! exactly — single implementation in this namespace."
   [executor pin cause intent outputs]
-  (let [proposed (append-event! executor pin cause :intent/proposed nil
-                                {:intent/id (:intent/id intent)
-                                 :intent/type (:intent/type intent)
-                                 :node/id (:node/id intent)})
-        result (dispatch/dispatch! (:dispatch executor) intent)]
+  (let [raw-evidence-ref (replay-evidence-ref! executor intent nil)
+        proposed (append-event! executor pin cause :intent/proposed nil
+                                (merge {:intent/id (:intent/id intent)
+                                        :intent/type (:intent/type intent)
+                                        :node/id (:node/id intent)}
+                                       (replay-event-metadata raw-evidence-ref)))
+        result (dispatch/dispatch! (:dispatch executor) intent)
+        evidence-ref (replay-evidence-ref! executor intent result)
+        evidence-metadata (replay-event-metadata evidence-ref)]
     (if (= :ok (:result/status result))
       (let [authorization (:authorization result)
             tool-id (get-in intent [:payload :tool/id])
             authorized (append-event!
                         executor pin (:event/id proposed) :intent/authorized nil
-                        {:intent/id (:intent/id intent)
-                         :intent/type (:intent/type intent)
-                         :authorization {:decision (:decision authorization)
-                                         :lease-id (:lease-id authorization)}})
+                        (merge {:intent/id (:intent/id intent)
+                                :intent/type (:intent/type intent)
+                                :authorization {:decision (:decision authorization)
+                                                :lease-id (:lease-id authorization)}}
+                               evidence-metadata))
             started (append-event!
                      executor pin (:event/id authorized) :provider/call-started nil
-                     {:intent/id (:intent/id intent)
-                      :tool/id tool-id
-                      :idempotency/key (get-in intent [:metadata :idempotency/key])})
+                     (merge {:intent/id (:intent/id intent)
+                             :tool/id tool-id
+                             :idempotency/key (get-in intent [:metadata :idempotency/key])}
+                            evidence-metadata))
             value-ref (put-payload! executor (:value result))
             completed (append-event!
                        executor pin (:event/id started) :provider/call-completed value-ref
-                       {:intent/id (:intent/id intent)
-                        :tool/id tool-id
-                        :result/status :ok})]
+                       (merge {:intent/id (:intent/id intent)
+                               :tool/id tool-id
+                               :result/status :ok
+                               :replay/provider-result-ref value-ref
+                               :replay/provider-result-digest value-ref}
+                              evidence-metadata))]
         {:last-event completed
          :outputs (conj outputs (:value result))
          :outcome :ok})
       (if (= :capability/denied (:error/type result))
         {:last-event (append-event!
                       executor pin (:event/id proposed) :intent/denied nil
-                      {:intent/id (:intent/id intent)
-                       :intent/type (:intent/type intent)
-                       :error/type :capability/denied
-                       :reason (get-in result [:error/data :reason])})
+                      (merge {:intent/id (:intent/id intent)
+                              :intent/type (:intent/type intent)
+                              :error/type :capability/denied
+                              :reason (get-in result [:error/data :reason])}
+                             evidence-metadata))
          :outputs outputs
          :outcome :denied}
         {:last-event (append-event!
                       executor pin (:event/id proposed) :intent/failed
                       (put-payload! executor (dissoc result :usage))
-                      {:intent/id (:intent/id intent)
-                       :intent/type (:intent/type intent)
-                       :error/type (:error/type result)})
+                      (merge {:intent/id (:intent/id intent)
+                              :intent/type (:intent/type intent)
+                              :error/type (:error/type result)}
+                             evidence-metadata))
          :outputs outputs
          :outcome :failed}))))
 

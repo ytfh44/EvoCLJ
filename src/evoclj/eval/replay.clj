@@ -109,11 +109,13 @@
   :bad-critical, :bad-equiv), :eval/replay-case-not-found,
   :eval/replay-fixture-missing, :eval/replay-equiv-unknown."
   (:require [evoclj.compiler.core :as compiler]
+            [evoclj.genome.hash :as genome-hash]
             [evoclj.genome.load :as load]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]
+            [evoclj.runtime.episode :as episode]
             [evoclj.runtime.node :as node]
             [evoclj.runtime.phenotype :as phenotype])
   (:import (java.nio.charset StandardCharsets)
@@ -122,8 +124,9 @@
 ;; --- the three provider replay modes (Step 2) ------------------------------
 
 (def replay-modes
-  "The three provider replay modes (component Step 2)."
-  #{:fixture :recorded-read :forbid-write})
+  "Provider replay modes. :shadow-write simulates writes from recorded
+  results and never invokes an underlying provider."
+  #{:fixture :recorded-read :shadow-write :forbid-write})
 
 ;; --- canonicalization (Global Constraint 22) -------------------------------
 
@@ -267,17 +270,29 @@
       (throw (case-error :bad-critical
                          ":critical? must be a boolean"
                          critical?)))
-    (let [entries (mapv validate-trace-entry! trace)]
-      {:case/id case-id
-       :episode/id (:episode/id episode)
-       :recorded/status recorded-status
-       :task-input task-input
-       :expected-output expected-output
-       :mode mode
-       :critical? (boolean critical?)
-       :output/equiv? output-equiv
-       :trace entries
-       :responses (responses-table entries)})))
+    (let [entries (mapv validate-trace-entry! trace)
+          replay-case {:case/id case-id
+                       :episode/id (:episode/id episode)
+                       :recorded/status recorded-status
+                       :task-input task-input
+                       :expected-output expected-output
+                       :mode mode
+                       :critical? (boolean critical?)
+                       :output/equiv? output-equiv
+                       :trace entries
+                       :responses (responses-table entries)
+                       :provenance (or (:provenance opts) {})
+                       :profile (or (:profile opts) {})
+                       :candidate (:candidate opts)
+                       :baseline (:baseline opts)
+                       :capability-policy (:capability-policy opts)
+                       :provider-mode mode
+                       :snapshot/digests (or (:snapshot/digests opts) {})
+                       :recorded-read/digests (or (:recorded-read/digests opts) {})}]
+      (assoc replay-case
+             :case/hash
+             (genome-hash/text-digest
+              (pr-str (canonical (dissoc replay-case :output/equiv?))))))))
 
 (defn- validate-replay-case!
   "Validate a case map handed to run-replay! (a built case, or a
@@ -344,7 +359,7 @@
         (proto/normalize-request fixture-provider intent))
       (execute-request! [_ authorized-request]
         (let [args (:args authorized-request)]
-          (when (and write-tool? (not= :fixture mode))
+          (when (and write-tool? (contains? #{:recorded-read :forbid-write} mode))
             (throw (err/error :provider/replay-write-denied
                               "replay denies write-type intents (a replay never repeats a real external write)"
                               {:tool/id (:tool/id descriptor)
@@ -640,7 +655,16 @@
         regression? (and (= :completed (:recorded/status case))
                          (= :fail status))]
     {:case/id (:case/id case)
+     :case/hash (:case/hash case)
      :episode/id (:episode/id case)
+     :provenance (:provenance case)
+     :profile (:profile case)
+     :candidate (:candidate case)
+     :baseline (:baseline case)
+     :capability-policy (:capability-policy case)
+     :provider-mode (or (:provider-mode case) (:mode case))
+     :snapshot/digests (:snapshot/digests case)
+     :recorded-read/digests (:recorded-read/digests case)
      :mode (:mode case)
      :critical? (:critical? case)
      :recorded/status (:recorded/status case)
@@ -709,6 +733,8 @@
      :critical-regressions (count hard)
      :hard-failure? (boolean (seq hard))}))
 
+(declare build-replay-profile)
+
 ;; --- the entry point (G4) --------------------------------------------------
 
 (defn run-replay!
@@ -731,25 +757,177 @@
        :regressions [<regressed outcomes> ...]
        :hard-failure? bool}"
 
-  [evaluator candidate replay-case-ids]
-  (validate-evaluator! evaluator)
-  (when-not (sequential? replay-case-ids)
-    (throw (context-error :case-ids-invalid
-                          "replay-case-ids must be a sequential collection of case ids"
-                          replay-case-ids)))
-  (let [loaded (load/load-genome candidate)
-        compiled (compiler/compile-genome
-                  (assoc loaded :programs (program-registry evaluator loaded))
-                  (:provider/catalog evaluator))
-        outcomes (mapv (fn [case-id]
-                         (let [case-map (lookup-case evaluator case-id)
-                               case-map (validate-replay-case! case-map)
-                               case-map (assoc case-map :output/equiv?
-                                               (resolve-equiv evaluator case-map))]
-                           (run-case! evaluator compiled loaded case-map)))
-                       replay-case-ids)]
-    {:replay/requested (vec replay-case-ids)
-     :replay/cases outcomes
-     :aggregate (aggregate outcomes)
-     :regressions (filterv :regression? outcomes)
-     :hard-failure? (:hard-failure? (aggregate outcomes))}))
+  ([evaluator candidate replay-case-ids]
+   (run-replay! evaluator candidate replay-case-ids nil))
+  ([evaluator candidate replay-case-ids profile]
+   (validate-evaluator! evaluator)
+   (when-not (sequential? replay-case-ids)
+     (throw (context-error :case-ids-invalid
+                           "replay-case-ids must be a sequential collection of case ids"
+                           replay-case-ids)))
+   (let [profile (build-replay-profile
+                   (merge {:candidate candidate}
+                          (or (:replay/profile evaluator) {})
+                          (or profile {})))
+         loaded (load/load-genome candidate)
+         compiled (compiler/compile-genome
+                   (assoc loaded :programs (program-registry evaluator loaded))
+                   (:provider/catalog evaluator))
+         outcomes (mapv (fn [case-id]
+                          (let [case-map (lookup-case evaluator case-id)
+                                case-map (validate-replay-case! case-map)
+                                case-map (assoc case-map
+                                                 :profile profile
+                                                 :candidate candidate
+                                                 :output/equiv?
+                                                 (resolve-equiv evaluator case-map))]
+                            (run-case! evaluator compiled loaded case-map)))
+                        replay-case-ids)
+         summary (aggregate outcomes)
+         stable-outcomes (mapv #(update % :run dissoc :session/id) outcomes)
+         report-hash (genome-hash/text-digest
+                      (pr-str (canonical {:profile/hash (:profile/hash profile)
+                                          :cases stable-outcomes
+                                          :aggregate summary})))]
+     {:replay/requested (vec replay-case-ids)
+      :replay/profile profile
+      :replay/report-hash report-hash
+      :report/hash report-hash
+      :replay/cases outcomes
+      :aggregate summary
+      :regressions (filterv :regression? outcomes)
+      :hard-failure? (:hard-failure? summary)})))
+
+(def default-replay-profile
+  {:model/policy :recorded-only
+   :provider/mode :shadow-write
+   :writes :shadow
+   :activation-qualified? false})
+
+(defn build-replay-profile
+  "Build a deterministic provenance-bearing replay profile. Fresh model calls
+  are opt-in only and are never activation-qualified."
+  [opts]
+  (let [profile (merge default-replay-profile (or opts {}))
+        policy (:model/policy profile)]
+    (when-not (contains? #{:recorded-only :fresh} policy)
+      (throw (err/error :eval/replay-profile-invalid
+                        "model policy must be :recorded-only or :fresh"
+                        {:profile profile})))
+    (when-not (contains? replay-modes (:provider/mode profile))
+      (throw (err/error :eval/replay-profile-invalid
+                        "profile provider mode is not a supported replay mode"
+                        {:profile profile})))
+    (when (and (= :fresh policy)
+               (or (not (true? (:model/allow-fresh? profile)))
+                   (not (sequential? (:model/allowlist profile)))
+                   (not (map? (:model/budget profile)))
+                   (nil? (:model/seed profile))))
+      (throw (err/error :eval/replay-profile-invalid
+                        "fresh model replay requires explicit allowlist, budget, seed, and opt-in"
+                        {:profile profile})))
+    (let [profile (cond-> (assoc profile
+                                  :profile/version 1
+                                  :nondeterministic? (= :fresh policy)
+                                  :activation-qualified? false)
+                    (= :fresh policy) (assoc :model/network? true)
+                    (= :recorded-only policy) (assoc :model/network? false))]
+      (assoc profile :profile/hash
+             (genome-hash/text-digest
+              (pr-str (canonical (dissoc profile :profile/hash))))))))
+
+(defn load-historical-episode!
+  "Kernel-owned read-only historical Episode loader. Old or incomplete
+  sessions throw :episode/replay-ineligible; no guessed inputs are returned."
+  [store session-id]
+  (episode/load-replay-episode! store session-id))
+
+(defn load-historical-replay-case!
+  "Turn a verified historical Episode into the existing replay case shape."
+  [store session-id opts]
+  (let [loaded (load-historical-episode! store session-id)
+        effect-of (fn [entry]
+                    (if (contains? #{:write :remote-write :mutate}
+                                   (get-in entry [:descriptor :effect]))
+                      :write
+                      :read))
+        trace (mapv (fn [entry]
+                      {:intent/type :intent/tool-call
+                       :payload {:tool/id (or (get-in entry [:intent :tool/id])
+                                              (get-in entry [:intent :payload :tool/id])
+                                              (get-in entry [:normalized-request :tool/id]))
+                                 :args (or (get-in entry [:intent :args])
+                                           (get-in entry [:intent :payload :args])
+                                           (get-in entry [:normalized-request :args])
+                                           {})}
+                       :effect (effect-of entry)
+                       :response (:response entry)})
+                    (:trace loaded))
+        opts (merge {:case/id (keyword (str "historical-" session-id))
+                     :recorded/status :completed
+                     :mode :shadow-write
+                     :critical? false
+                     :task-input (:task-input loaded)
+                     :expected-output (:terminal-output loaded)
+                     :provenance (:provenance loaded)
+                     :profile (:profile opts)
+                     :candidate (:candidate opts)
+                     :baseline (:baseline opts)
+                     :capability-policy (:capability-policy opts)
+                     :snapshot/digests (:snapshot/digests opts)}
+                    opts)]
+    (assoc (build-replay-case (:episode loaded) trace opts)
+           :replay/source :historical
+           :replay/session/id (get-in loaded [:provenance :session/id])
+           :replay/eligible? true)))
+
+(defn compare-paired-reports
+  "Compare candidate and baseline outcomes over identical case IDs and case
+  hashes. Better/regression labels are oracle-qualified only for paired cases."
+  [baseline-report candidate-report]
+  (let [b (into {} (map (juxt :case/id identity) (:replay/cases baseline-report)))
+        c (into {} (map (juxt :case/id identity) (:replay/cases candidate-report)))
+        ids (vec (sort (keys b)))]
+    (when-not (= (set ids) (set (keys c)))
+      (throw (err/error :eval/replay-pair-invalid
+                        "paired reports must contain exactly the same case ids"
+                        {:baseline (keys b) :candidate (keys c)})))
+    (let [pairs (mapv (fn [id]
+                        (let [bo (get b id) co (get c id)]
+                          (when-not (= (:case/hash bo) (:case/hash co))
+                            (throw (err/error :eval/replay-pair-invalid
+                                              "paired cases must carry the same case hash"
+                                              {:case/id id
+                                               :baseline/hash (:case/hash bo)
+                                               :candidate/hash (:case/hash co)})))
+                          {:case/id id
+                           :case/hash (:case/hash bo)
+                           :baseline bo
+                           :candidate co
+                           :paired/oracle-qualified? true
+                           :candidate/better? (and (not (:output/match? bo))
+                                                   (:output/match? co))
+                           :candidate/regression? (and (:output/match? bo)
+                                                      (not (:output/match? co)))}))
+                      ids)]
+      {:paired? true
+       :case-ids ids
+       :pairs pairs
+       :better (filterv :candidate/better? pairs)
+       :regressions (filterv :candidate/regression? pairs)
+       :oracle-qualified? true})))
+
+(defn run-paired-replay!
+  "Run baseline and candidate against the same replay cases, then compare
+  only paired oracle outcomes."
+  [evaluator baseline candidate replay-case-ids]
+  (let [profile {:baseline baseline :candidate candidate}
+        baseline-report (run-replay! evaluator baseline replay-case-ids profile)
+        candidate-report (run-replay! evaluator candidate replay-case-ids profile)]
+    (assoc (compare-paired-reports baseline-report candidate-report)
+           :baseline/report baseline-report
+           :candidate/report candidate-report)))
+
+(def load-historical-episode load-historical-episode!)
+(def build-historical-replay-case load-historical-replay-case!)
+(def compare-replay-reports compare-paired-reports)
