@@ -17,10 +17,10 @@
   2. Artifact rename (before DB insert) — the CAS artifact exists and
      verifies but no DB row references it: an orphan, never a valid
      CURRENT generation or payload; the scan reports nothing missing.
-  3. Session state transition (before the transition event) — the row
-     state IS the recoverable state: a non-terminal transition leaves
-     the session :orphaned (never rewound, never completed); a
-     terminal transition closes it (never reported orphaned, and the
+  3. Work state transition (before the transition event) — the Work row
+     state IS the recoverable state: a non-terminal Work remains
+     :running/:waiting residue (never rewound, never completed); a
+     terminal Work closes the session (never reported orphaned, and the
      missing event is never fabricated).
   4. Provider effect (before the result event) — the effect happened
      once, the result event was never persisted: the call is

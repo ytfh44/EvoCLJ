@@ -380,7 +380,7 @@
     (testing "every already-running candidate session's Work was marked :cancelled"
       (doseq [sid running-sids]
         (is (= :cancelled (session-work-state db sid)))
-        (is (= :created (:state (session/get-session db sid)))
+        (is (not (contains? (session/get-session db sid) :state))
             "Session remains immutable identity; Work owns cancellation")))
     (testing "the per-session action is recorded"
       (is (= (set (map #(hash-map :session/id % :action :cancelled) running-sids))
@@ -399,7 +399,7 @@
                 (hard-stop-decision) :finish)]
     (testing "running candidate Work is left running under :finish"
       (is (= :running (session-work-state db (first running-sids))))
-      (is (= :created (:state (session/get-session db (first running-sids))))))
+      (is (not (contains? (session/get-session db (first running-sids)) :state))))
     (testing "the recorded action says :finish"
       (is (= [{:session/id (first running-sids) :action :finish}]
              (:running/actions result))))))
@@ -421,7 +421,7 @@
              (:running/actions result))))
     (testing "the completed Work stays succeeded and the Session stays immutable"
       (is (= :succeeded (session-work-state db finished-sid)))
-      (is (= :created (:state (session/get-session db finished-sid)))))))
+      (is (not (contains? (session/get-session db finished-sid) :state))))))
 
 ;; ============================================================================
 ;; Step 4 — persist the stop reason and observed metrics as promotion evidence

@@ -380,8 +380,9 @@
            :child/capabilities [derived-leases]}
 
   Side effects:
-  - inserts a new sessions row with status :created, same :genome/id, :resolution/id,
-    :phenotype/id, :generation/id as the parent (pinned identity, never assumes).
+  - inserts an immutable Session identity row with the same :genome/id,
+    :resolution/id, :phenotype/id, and :generation/id as the parent
+    (pinned identity, never assumes).
   - appends a :session/created root event for the child (so its chain is valid).
   - derives child leases via derive-child-leases (Grant meet, not identity)
   with subject {:principal/type :session :session/id child-id}: with no
@@ -1394,7 +1395,7 @@
                                    :target/session-id sid})))
               (cond-> {:found true
                        :session/id (:session/id sess)
-                       :state (or (some-> (last (work-store/list-works (db-spec db) (:session/id sess))) :work/state) (:state sess))
+                       :state (some-> (last (work-store/list-works (db-spec db) (:session/id sess))) :work/state)
                        :phenotype/id (:phenotype/id sess)
                        :depth (try (subagent-depth db sid) (catch Exception _ nil))
                        :children (try (child-session-ids db sid) (catch Exception _ []))}

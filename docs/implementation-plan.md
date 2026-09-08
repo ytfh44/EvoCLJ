@@ -1957,7 +1957,7 @@ Inject failure after:
 ```text
 CAS artifact temp write
 artifact rename before DB insert
-session state transition
+Work state transition
 provider effect before result event
 candidate materialization
 final Evaluation persistence

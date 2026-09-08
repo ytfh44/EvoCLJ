@@ -960,7 +960,7 @@
         events (event/events-for-session (db-of system) sid)]
     {:session/id sid
      :session (select-keys s [:genome/id :resolution/id :phenotype/id
-                              :generation/id :state])
+                              :generation/id])
      :capabilities/authorized
      (mapv #(get-in % [:metadata :authorization])
            (filter #(= :intent/authorized (:event/type %)) events))
@@ -986,9 +986,10 @@
     (if reg
       (into {}
             (keep (fn [[tool-id entry]]
-                    (let [desc (proto/describe entry)]
-                      (when (= :remote (:effect desc))
-                        (let [bumped (mcp-bridge/refresh-provider! entry)]
+                    (let [provider (:provider entry)
+                          desc (:descriptor entry)]
+                      (when (and provider (= :remote (:effect desc)))
+                        (let [bumped (mcp-bridge/refresh-provider! provider)]
                           [tool-id (proto/describe bumped)]))))
                   @reg))
       {})))

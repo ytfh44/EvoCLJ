@@ -421,8 +421,8 @@
               "the append-only chain re-verifies after the restart")
           (testing "the session row and its pin survive the restart"
             (let [s (session/get-session reopened-db sid)]
-              (is (= :created (:state s))
-                  "W2: the session row is an immutable pin — completion lives in the terminal Work and the :session/completed event above, never a Session transition")
+              (is (not (contains? s :state))
+                  "W2: the Session row is an immutable pin; completion lives in Work and events")
               (is (= (:code/genome-id compiled) (:genome/id s)))
               (is (= (:code/resolution-id compiled) (:resolution/id s)))
               (is (= (:code/id compiled) (:phenotype/id s))))))))))

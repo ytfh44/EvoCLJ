@@ -352,9 +352,9 @@
      (testing "the loop terminates normally after three body iterations"
        (is (= :completed (:status result)))
        (is (= :succeeded (session-work-state executor sid))
-           "W2: Work owns the lifecycle; the session row stays :created")
-       (is (= :created (:state (session/get-session
-                                (:sqlite (:stores executor)) sid)))))
+           "W2: Work owns the lifecycle; Session identity has no state")
+       (is (not (contains? (session/get-session
+                             (:sqlite (:stores executor)) sid) :state))))
     (testing "the body ran exactly three times — one per iteration"
       (is (= 3 @executions))
       (is (= 3 (count (:provider/call-completed by-type)))))

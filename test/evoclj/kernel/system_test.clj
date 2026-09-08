@@ -259,7 +259,8 @@
             (is (= sid (:session/id rebuilt)))
             (is (= "generation-1" (:generation/id rebuilt)))
             (is (= sha256-id (:genome/id rebuilt)))
-            (is (= :created (:state rebuilt))))
+            (is (not (contains? rebuilt :state))
+                "the rebuilt Session remains immutable identity without lifecycle state"))
           (testing "the generation row survives the restart"
             (is (= [{:current 1}]
                    (sqlite/query db2

@@ -15,9 +15,9 @@
   2. RESTORE! PRODUCTION WIRING. store/binding restore! was only ever
      reachable from tests. run-session! now restores the session's
      durable bindings' runtime state (mount/context registries carried
-     on the executor's :stores) BEFORE the session leaves :created.
+     on the executor's :stores) BEFORE dispatching its Work.
      A pinned binding whose bundle can no longer be verified fails
-     closed: typed :store/binding-invalid, no state transition, no
+     closed: typed :store/binding-invalid, no Work dispatch, no
      :session/started event."
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
@@ -347,10 +347,10 @@
       (testing "fail-closed typed refusal"
         (is (some? thrown) "run-session! must not silently run with an unverifiable binding")
         (is (= :store/binding-invalid (:error/type (ex-data thrown)))))
-      (testing "the session never left :created"
-        (is (= :created (:state pin)))
+      (testing "the immutable Session identity was untouched"
+        (is (not (contains? pin :state)))
         (is (zero? (count (events-of-type db sid :session/started)))
-            "no :session/started — the refusal happened before any transition")))))
+            "no :session/started — refusal happened before Work dispatch")))))
 
 (deftest b1-run-session-without-bindings-is-unaffected-by-wiring
   (let [executor (build-executor)

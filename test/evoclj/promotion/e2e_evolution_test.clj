@@ -936,8 +936,8 @@
                     (let [g1-session (session/get-session db (:session/id run-a))]
                       (is (= :succeeded (session-work-state db (:session/id run-a)))
                           "the run's Work terminal state is :succeeded")
-                      (is (= :created (:state g1-session))
-                          "session identity default :created — Work owns the lifecycle")
+                      (is (not (contains? g1-session :state))
+                          "Session identity has no lifecycle state; Work owns lifecycle")
                       (is (= generation-id (:generation/id g1-session)))
                       (is (= g1-id (:genome/id g1-session)))
                       (is (= (:session/id run-a) (:session/id g1-session)))

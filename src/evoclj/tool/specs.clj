@@ -414,7 +414,7 @@
   first-class Work id. W2: cancel is an atomic durable Work CAS
   (queued|running|waiting -> cancelled) plus cascade revoke and cancel
   events in one transaction, idempotent on already cancelled targets;
-  the session rows stay :created (immutable identity)."
+  Session rows remain immutable identity; Work owns the lifecycle."
   {:tool/id agent-cancel-tool-id
    :tool/description "Cancel a subagent session"
    :tool/parameters {:type "object"

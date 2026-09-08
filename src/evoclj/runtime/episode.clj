@@ -34,13 +34,12 @@
   moved to a newer generation, the session's pin never changes, so the
   episode always names the generation the session actually ran under.
 
-  TERMINAL SESSIONS ONLY: :created/:resolving/:running/:waiting
-  sessions are not evidence yet and are rejected with
-  :episode/not-terminal. EVERY terminal state becomes an episode —
-  :completed, :failed, and :budget-exhausted are all evidence
-  (failures are evidence, not discarded traces). The :outcome map
-  carries the terminal :status (the session's persisted state) and a
-  nil :score (v0 has no scoring; later tasks attach one).
+  TERMINAL WORK ONLY: :queued/:running/:waiting Works are not evidence yet
+  and are rejected with :episode/not-terminal. EVERY terminal Work becomes
+  an episode — :succeeded maps to :completed; :failed, :cancelled, and
+  :timed-out are all evidence (failures are evidence, not discarded traces).
+  The :outcome map carries the terminal Work status and a nil :score (v0
+  has no scoring; later tasks attach one).
 
   IDEMPOTENT: materializing the same session twice returns the same
   :episode/id and never duplicates the row.
@@ -52,7 +51,7 @@
   Error contract (Global Constraint 22 — plain serializable data):
   :episode/store-invalid (:reason :not-a-map :sqlite-missing
   :cas-missing), :episode/session-not-found,
-  :episode/not-terminal (:session/state), :episode/task-ref-missing,
+  :episode/not-terminal (:work/state), :episode/task-ref-missing,
   :episode/task-artifact-missing (:task-ref), :episode/invalid
   (contract violation on the read-back row)."
   (:require [clojure.edn :as edn]
@@ -188,7 +187,7 @@
   Constraint 21). The task artifact is verified to resolve in the CAS
   before the row commits.
 
-  Terminal sessions only: a session with no terminal Work is rejected
+  Terminal Work only: a session with no terminal Work is rejected
   with :episode/not-terminal (W2: Work terminal state is the sole durable
   proof of completion). A terminal Work becomes an episode — its :outcome
   :status maps :succeeded→:completed, :failed→:failed, :cancelled→:cancelled,
@@ -211,7 +210,7 @@
                             {:session/id sid})))
     (when-not tw
       (throw (episode-error :episode/not-terminal
-                            "only terminal sessions become episodes"
+                            "only terminal Work becomes an episode"
                             {:session/id sid
                              :work/state nil})))
     (let [existing (first (sqlite/query db

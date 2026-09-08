@@ -385,8 +385,8 @@
            (is (= genome-id (:genome/id s)))
            (is (= resolution-id (:resolution/id s)))
            (is (= phenotype-id (:phenotype/id s)))
-           (is (= :created (:state s))
-               "W2: the row keeps identity only — completion lives in Work + :session/completed"))))
+           (is (not (contains? s :state))
+               "W2: the row keeps identity only; completion lives in Work and events"))))
     (testing "each session's final outputs contain EXACTLY that session's own task text (no cross-session value leakage)"
       (let [by-session (into {} (map (fn [{:keys [task-index executor result]}]
                                        [(str "s" task-index)
