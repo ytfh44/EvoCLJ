@@ -327,6 +327,43 @@
       (let [r (recovery/startup-integrity-scan db root {:strict? false})]
         (is (false? (:ok? r)))
         (is (= [ghost] (mapv :payload-ref (:missing-artifacts r))))))))
+;; ============================================================================
+;; regression — legacy text session IDs must not abort startup scanning
+;; ============================================================================
+
+(deftest startup-scan-accepts-legacy-text-session-id
+  (let [db (fresh-db)
+        root (temp-root)
+        genome-id (put-genome! root)
+        _ (seed-generation! db genome-id)]
+    ;; The storage schema is TEXT and pre-UUID databases can contain opaque
+    ;; IDs. Startup must remain deterministic for those rows.
+    (sqlite/with-db [conn db]
+      (jdbc/insert! conn :sessions
+                    {:id "s1"
+                     :generation_id gen
+                     :genome_id genome-id
+                     :resolution_id resolution
+                     :phenotype_id phenotype
+                     :state "completed"
+                     :created_at now}))
+    (let [report (recovery/scan-recovery-state db root)
+          startup (recovery/startup-integrity-scan db root)]
+      (is (empty? (:invalid-event-chains report)))
+      (is (true? (:ok? startup))))))
+
+(deftest startup-scan-still-verifies-valid-uuid-session
+  (let [db (fresh-db)
+        root (temp-root)
+        genome-id (put-genome! root)
+        _ (seed-generation! db genome-id)
+        sid (:session/id (session/create-session! db (session-request genome-id)))]
+    (event/append-event! db (base-event sid {:event/type :session/created}))
+    (let [report (recovery/scan-recovery-state db root)
+          startup (recovery/startup-integrity-scan db root)]
+      (is (empty? (:invalid-event-chains report)))
+      (is (true? (:ok? startup)))
+      (is (true? (:valid? (event/verify-event-chain db sid)))))))
 
 ;; ============================================================================
 ;; supplementary — a tampered event row is reported as an invalid chain

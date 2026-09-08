@@ -81,20 +81,25 @@
   reads (every body is re-hashed and compared to its id)."
   [cas]
   (cas/->cas (cas-root cas) {:verify true}))
+(defn- persisted-session-id
+  "Decode a UUID session id while preserving opaque legacy TEXT ids."
+  [raw-id]
+  (try (UUID/fromString raw-id)
+       (catch IllegalArgumentException _ raw-id)))
 
 ;; --- the three normative categories ------------------------------------------
 
 
 (defn- missing-artifacts
   "Events whose :payload-ref content address does not resolve in the
-  CAS: {:session/id uuid, :event/seq int, :event/type kw,
+  CAS: {:session/id uuid-or-string, :event/seq int, :event/type kw,
   :payload-ref string}."
   [store cas]
   (into []
         (keep (fn [row]
                 (let [ref (:payload_ref row)]
                   (when (and ref (not (cas/exists? cas ref)))
-                    {:session/id (UUID/fromString (:session_id row))
+                    {:session/id (persisted-session-id (:session_id row))
                      :event/seq (:event_seq row)
                      :event/type (keyword (:event_type row))
                      :payload-ref ref}))))
@@ -104,14 +109,21 @@
 
 (defn- invalid-event-chains
   "Sessions whose event hash chain fails verification; each entry is the
-  verify-event-chain failure map plus :session/id."
+  verify-event-chain failure map plus :session/id.
+
+  The sessions table stores IDs as TEXT for compatibility with pre-UUID
+  stores and fixtures. The event verifier's public Session contract is
+  UUID-only, so opaque historical IDs are not fed to it: they are
+  outside the strict UUID chain-verification domain, but must not make a
+  read-only startup scan throw."
   [store]
   (into []
         (keep (fn [row]
-                (let [sid (UUID/fromString (:id row))
-                      v (event/verify-event-chain store sid)]
-                  (when-not (:valid? v)
-                    (assoc v :session/id sid)))))
+                (let [sid (persisted-session-id (:id row))]
+                  (when (instance? UUID sid)
+                    (let [v (event/verify-event-chain store sid)]
+                      (when-not (:valid? v)
+                        (assoc v :session/id sid)))))))
         (sqlite/query store ["SELECT id FROM sessions"])))
 (defn- row->candidate
   "A candidates row as the public Candidate contract map."
