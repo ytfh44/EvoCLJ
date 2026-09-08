@@ -5,6 +5,7 @@
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing]]
             [evoclj.cli.cost :as cost]
+            [evoclj.genome.hash :as genome-hash]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite])
@@ -20,12 +21,22 @@
 (defn- temp-cas []
   (str (Files/createTempDirectory "evoclj-cost-cas-" (make-array FileAttribute 0))))
 
+(defn- canonical-genome-body
+  "A minimal canonical Genome index body (path + NUL + file digest + LF)."
+  []
+  (let [manifest "{:genome/format 1}\n"
+        digest (genome-hash/text-digest manifest)]
+    (str "manifest.edn\u0000" digest "\n")))
+
 (defn- seed!
   "A generation with two sessions: one model call (with usage) and one
   tool call (no usage), plus a session in another generation that must
   NOT leak into the report."
   [db cas-store gen-id other-gen-id]
-  (let [genome-id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  (let [genome-body (canonical-genome-body)
+        genome-bytes (.getBytes genome-body java.nio.charset.StandardCharsets/UTF_8)
+        genome-id (:artifact/id
+                   (cas/put-bytes! cas-store genome-bytes {}))
         resolution-id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         phenotype-id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         model-value {:model/output {:text "hi"}
@@ -50,7 +61,9 @@
         (jdbc/insert! conn :artifacts
                       {:hash artifact-id
                        :media_type media-type
-                       :size 0
+                       :size (if (= artifact-id genome-id)
+                               (alength ^bytes genome-bytes)
+                               0)
                        :created_at "2025-01-01T00:00:00Z"}))
       (jdbc/insert! conn :genomes
                     {:id genome-id
