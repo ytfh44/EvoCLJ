@@ -129,7 +129,7 @@
   Returns a closed map. Malformed input throws
   :broker/context-invalid."
   [{:keys [registry leases usage now max-attempts model-registry
-           requested-capabilities effects freshness db]}]
+           requested-capabilities effects freshness db budget-store]}]
   (when-not (instance? clojure.lang.Atom registry)
     (throw (err/error :broker/context-invalid
                       "broker context requires a provider registry atom"
@@ -177,16 +177,18 @@
                             "broker context carries an invalid capability lattice"
                             {:reason :capability-lattice-invalid
                              :cause (err/error-data e)})))))
-    {:registry registry
-     :leases leases
-     :usage usage
-     :now now
-     :max-attempts max-attempts
-     :model-registry model-registry
-     :requested-capabilities requested-capabilities
-     :effects effects
-     :freshness freshness
-     :db db}))
+    (let [budget-store (or budget-store db)]
+      {:registry registry
+       :leases leases
+       :usage usage
+       :now now
+       :max-attempts max-attempts
+       :model-registry model-registry
+       :requested-capabilities requested-capabilities
+       :effects effects
+       :freshness freshness
+       :db db
+       :budget-store budget-store})))
 
 ;; --- freshness / binding helpers ------------------------------------------
 ;; Pipeline delegates to binding/capture-tool-binding via evoclj.intent.pipeline

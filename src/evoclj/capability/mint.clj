@@ -13,10 +13,12 @@
   is deny."
   (:require [clojure.set :as set]
             [evoclj.capability.authority-store :as authority]
+            [evoclj.capability.budget :as budget]
             [evoclj.capability.constraint :as cstr]
             [evoclj.capability.grant :as grant]
             [evoclj.capability.schema :as schema]
-            [evoclj.kernel.error :as err])
+            [evoclj.kernel.error :as err]
+            [evoclj.store.budget-store :as budget-store])
   (:import (java.util Date UUID)))
 
 (def ^:private registry-version-key ::version)
@@ -45,6 +47,12 @@
       (satisfies? authority/AuthorityStore candidate) candidate
       :else (authority/production-store candidate))))
 
+(defn- durable-budget-db
+  [db opts]
+  (let [candidate (or db (:db opts))]
+    (when (and candidate
+               (not (satisfies? authority/AuthorityStore candidate)))
+      candidate)))
 (defn mint*
   "Core minting surface: seal `lease-map` into a CapabilityLease, durably
   commit via `authority` (fail-closed — the in-memory registry is updated
@@ -69,7 +77,7 @@
   Arity [registry opts] with map containing :db — also durable when :db present.
 
   opts keys: :principal (I2 tagged union, required), :resource, :actions,
-  :constraints, :issued-at, :expires-at, :cap-id/:cap/id.
+  :constraints, optional finite :budget, :issued-at, :expires-at, :cap-id/:cap/id.
 
   When registry supplied, the sealed lease is stored as {:lease lease :revoked? false}
   and version is bumped. If durable insert fails, cache is NOT updated and the
@@ -78,6 +86,7 @@
    (mint-lease! nil registry opts))
    ([db registry {:keys [principal resource actions constraints issued-at expires-at cap-id] :as opts}]
    (let [authority (normalize-authority db opts)
+         budget-db (durable-budget-db db opts)
          cap-id-val (or (:cap/id opts) cap-id (UUID/randomUUID))
          issued (or issued-at (Date.))
          expires (or expires-at (Date. (+ (.getTime ^Date issued) 3600000)))
@@ -95,12 +104,20 @@
                             :constraints constraints-val
                             :issued-at issued
                             :expires-at expires}
-                     true identity)]
+                     (contains? opts :budget)
+                     (assoc :budget (budget/canonicalize (:budget opts))))]
      (when-not (.before ^Date ^Date issued ^Date expires)
        (throw (err/error :capability/schema-invalid
                          "capability lease must span positive window: :expires-at after :issued-at"
                          {:value (err/sanitize lease-map)})))
-     (mint* authority registry lease-map))))
+     (let [lease (mint* authority registry lease-map)]
+       (when (and budget-db (contains? opts :budget))
+         (budget-store/create-budget! budget-db
+                                      {:budget/id (or (:budget/id opts) (UUID/randomUUID))
+                                       :lease/id cap-id-val
+                                       :budget (:budget lease-map)
+                                       :expires-at (some-> expires .toInstant str)}))
+       lease))))
 
 (declare lease-revoked?)
 
@@ -119,7 +136,10 @@
   ([registry parent-lease opts]
    (derive-lease! nil registry parent-lease opts))
   ([db registry parent-lease {:keys [principal resource actions constraints issued-at expires-at cap-id] :as opts}]
-   (let [authority (normalize-authority db opts)]
+   (let [authority (normalize-authority db opts)
+         budget-db (durable-budget-db db opts)
+         parent-allocation (when budget-db
+                             (budget-store/budget-for-lease budget-db (:cap/id parent-lease)))]
      (when-not (schema/lease? parent-lease)
        (throw (err/error :capability/attenuation-invalid
                          "derive-lease! requires a sealed CapabilityLease as parent"
@@ -135,6 +155,10 @@
            parent-issued (:issued-at parent-lease)
            parent-expires (:expires-at parent-lease)
            parent-cap-id (:cap/id parent-lease)
+           parent-budget (or (:budget parent-lease) {})
+           child-budget-raw (if (contains? opts :budget) (:budget opts) parent-budget)
+           canon-parent-budget (budget/canonicalize parent-budget)
+           canon-child-budget (budget/canonicalize child-budget-raw)
            child-principal (or principal (:principal opts) parent-principal)
            child-resource (if (contains? (or opts {}) :resource) (:resource opts) parent-resource)
            child-actions-raw (if (contains? (or opts {}) :actions) actions parent-actions)
@@ -148,6 +172,10 @@
            child-issued (or issued-at (:issued-at opts) parent-issued)
            child-expires (or expires-at (:expires-at opts) parent-expires)
            cap-id-val (or (:cap/id opts) cap-id (UUID/randomUUID))]
+       (when (and budget-db (seq canon-parent-budget) (nil? parent-allocation))
+         (throw (err/error :capability/budget-missing
+                           "budgeted parent lease has no durable allocation"
+                           {:parent-cap-id parent-cap-id})))
        (when-not (grant/attenuates? {:resource parent-resource :actions (or parent-actions #{})}
                                      {:resource child-resource :actions (or child-actions-set #{})})
          (throw (err/error :capability/attenuation-invalid
@@ -161,6 +189,11 @@
                            "derived constraints must be <= parent constraints (C3 quota lattice: each dimension narrower)"
                            {:parent-constraints (err/sanitize canon-parent-c)
                             :child-constraints (err/sanitize canon-child-raw)})))
+       (when-not (budget/le? canon-parent-budget canon-child-budget)
+         (throw (err/error :capability/attenuation-invalid
+                           "derived budget must be <= parent budget"
+                           {:parent-budget (err/sanitize canon-parent-budget)
+                            :child-budget (err/sanitize canon-child-budget)})))
        (when (.before ^Date ^Date child-issued ^Date parent-issued)
          (throw (err/error :capability/attenuation-invalid
                            "derived issued-at must be >= parent issued-at"
@@ -179,6 +212,7 @@
                                                   :resource child-resource
                                                   :actions child-actions-set
                                                   :constraints canon-child-raw
+                                                  :budget canon-child-budget
                                                   :issued-at child-issued
                                                   :expires-at child-expires})})))
        (let [quota-meet (cstr/meet-constraints canon-parent-c canon-child-raw)
@@ -186,13 +220,22 @@
              merged-constraints (assoc final-constraints-raw
                                        :cap/attenuated-from parent-cap-id
                                        :attenuated-from parent-cap-id)
-             lease-map {:cap/id cap-id-val
-                        :principal child-principal
-                        :resource child-resource
-                        :actions child-actions-set
-                        :constraints merged-constraints
-                        :issued-at child-issued
-                        :expires-at child-expires}]
+             lease-map (cond-> {:cap/id cap-id-val
+                              :principal child-principal
+                              :resource child-resource
+                              :actions child-actions-set
+                              :constraints merged-constraints
+                              :issued-at child-issued
+                              :expires-at child-expires}
+                         (or (seq canon-child-budget) (contains? opts :budget))
+                         (assoc :budget canon-child-budget))]
+         (when (and budget-db (or (contains? opts :budget) parent-allocation))
+           (budget-store/create-budget! budget-db
+                                        {:budget/id (or (:budget/id opts) (UUID/randomUUID))
+                                         :parent/id (:budget/id parent-allocation)
+                                         :lease/id cap-id-val
+                                         :budget canon-child-budget
+                                         :expires-at (some-> child-expires .toInstant str)}))
          (mint* authority registry lease-map))))))
 
 ;; ---------------------------------------------------------------------------
@@ -221,14 +264,7 @@
   (lease-revoked? registry cap-id))
 
 (defn revoke-lease!
-  "Revoke the recorded lease with :cap/id (fail-closed).
-
-  Arity [registry cap-id] — memory-only, idempotent, tombstones unseen ids.
-  Arity [db registry cap-id] — P1 durable: UPDATE WHERE revoked=0 BEFORE cache tombstone.
-  When durable revocation fails (DB error), cache is not mutated and exception propagates.
-  Idempotent: revoking twice is a no-op (DB WHERE revoked=0 prevents redundant write).
-
-  Returns nil."
+  "Revoke the recorded lease with :cap/id (fail-closed)."
   ([registry cap-id]
    (when-not (true? (get-in @registry [cap-id :revoked?]))
      (swap! registry update cap-id (fn [rec]
@@ -237,7 +273,13 @@
      (bump-version! registry))
    nil)
   ([db registry cap-id]
-   (let [authority (normalize-authority db nil)]
+   (let [authority (normalize-authority db nil)
+         budget-db (durable-budget-db db nil)
+         allocation (when budget-db (budget-store/budget-for-lease budget-db cap-id))]
+     ;; Revoke the durable allocation before the authority/cache tombstone.
+     ;; Any failure leaves the in-memory cache untouched and denies safely.
+     (when allocation
+       (budget-store/revoke-budget! budget-db (:budget/id allocation)))
      (if (true? (get-in @registry [cap-id :revoked?]))
        (when authority (authority/revoke! authority cap-id))
        (do

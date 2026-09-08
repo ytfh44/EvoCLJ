@@ -43,7 +43,8 @@
   :capability/not-edn-safe or :capability/schema-invalid carrying a
   fully serializable Malli explanation (safe for pr-str /
   clojure.edn read-string round-tripping)."
-  (:require [evoclj.kernel.error :as err]
+  (:require [evoclj.capability.budget :as budget]
+            [evoclj.kernel.error :as err]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m]))
 
@@ -136,30 +137,32 @@
       (and (inst? issued) (inst? expires)
            (.before ^java.util.Date issued ^java.util.Date expires)))))
 
+(def ^:private nonnegative-int-schema
+  [:and :int [:fn (fn [x] (>= x 0))]])
+
+(def BudgetSchema
+  "Closed, version-1 capability budget dimensions. Values are integer units;
+  money is fixed-point micro-USD under :money-usd-micros."
+  [:map {:closed true}
+   [:calls {:optional true} nonnegative-int-schema]
+   [:tokens {:optional true} nonnegative-int-schema]
+   [:bytes {:optional true} nonnegative-int-schema]
+   [:money-usd-micros {:optional true} nonnegative-int-schema]])
+
 (def ^:private constraints-schema
   "Closed constraints map: only known quota keys plus audit chain keys.
   Quota keys are registered ConstraintDescriptors (C3). Audit keys
   :cap/attenuated-from and :attenuated-from are allowed for derivation chain.
   Unknown keys fail closed — widening via passthrough is removed."
   [:map {:closed true}
-   [:max-calls {:optional true} [:and :int [:fn (fn [x] (>= x 0))]]]
-   [:max-bytes {:optional true} [:and :int [:fn (fn [x] (>= x 0))]]]
+   [:max-calls {:optional true} nonnegative-int-schema]
+   [:max-bytes {:optional true} nonnegative-int-schema]
    [:cap/attenuated-from {:optional true} uuid?]
    [:attenuated-from {:optional true} uuid?]])
 
 (def CapabilityLeaseSchema
-  "The v0 CapabilityLease contract: a closed map of the seven normative
-  fields. The top level is closed — no field may be missing, renamed,
-  or extended. :principal is the tagged union Principal (I2);
-  :actions is a set of keywords constrained to the closed
-  allowlist #{:invoke :read :list :stat :write :create :delete} and
-  must be non-empty; :resource is an open map (provider-defined);
-  :constraints is a CLOSED map of known quota dimensions (C3) —
-  only :max-calls, :max-bytes and audit keys are allowed, unknown
-  keys are rejected fail-closed; :resource and constraints together
-  with principal and TimeWindow form the full Lease algebra
-  Lease = Grant × Principal × TimeWindow × Quota. The grant must span
-  a positive window (:expires-at after :issued-at)."
+  "The v0 CapabilityLease contract: a closed map of the normative fields,
+  with an optional closed finite-resource budget."
   [:and
    [:map {:closed true}
     [:cap/id uuid?]
@@ -169,6 +172,7 @@
                [:set [:enum :invoke :read :list :stat :write :create :delete]]
                [:fn seq]]]
     [:constraints constraints-schema]
+    [:budget {:optional true} BudgetSchema]
     [:issued-at inst?]
     [:expires-at inst?]]
    [:fn positive-window?]])
@@ -180,7 +184,7 @@
 
 (def ^:private lease-secret (Object.))
 
-(deftype CapabilityLease [capId principal resource actions constraints issued expires ^:private secret]
+(deftype CapabilityLease [capId principal resource actions constraints budget issued expires ^:private secret]
   clojure.lang.ILookup
   (valAt [this k] (.valAt this k nil))
   (valAt [this k notFound]
@@ -190,30 +194,36 @@
       :resource resource
       :actions actions
       :constraints constraints
+      :budget budget
       :issued-at issued
       :expires-at expires
       notFound))
   clojure.lang.Counted
-  (count [this] 7)
+  (count [this] (if (some? budget) 8 7))
   clojure.lang.IPersistentMap
   (assoc [this k v] (throw (UnsupportedOperationException. "CapabilityLease is sealed; use make-lease")))
   (without [this k] (throw (UnsupportedOperationException. "CapabilityLease is sealed")))
   clojure.lang.Seqable
-  (seq [this] (seq {:cap/id capId
-                    :principal principal
-                    :resource resource
-                    :actions actions
-                    :constraints constraints
-                    :issued-at issued
-                    :expires-at expires}))
+  (seq [this]
+    (seq (cond-> {:cap/id capId
+                  :principal principal
+                  :resource resource
+                  :actions actions
+                  :constraints constraints
+                  :issued-at issued
+                  :expires-at expires}
+           (some? budget) (assoc :budget budget))))
   java.lang.Iterable
-  (iterator [this] (.iterator ^java.lang.Iterable (seq {:cap/id capId
-                                                        :principal principal
-                                                        :resource resource
-                                                        :actions actions
-                                                        :constraints constraints
-                                                        :issued-at issued
-                                                        :expires-at expires})))
+  (iterator [this]
+    (.iterator ^java.lang.Iterable
+               (seq (cond-> {:cap/id capId
+                             :principal principal
+                             :resource resource
+                             :actions actions
+                             :constraints constraints
+                             :issued-at issued
+                             :expires-at expires}
+                      (some? budget) (assoc :budget budget)))))
   Object
   (toString [this] (str "CapabilityLease[" capId "]")))
 (alter-meta! #'->CapabilityLease assoc :private true)
@@ -232,13 +242,15 @@
   EDN and round-trips through pr-str / edn/read-string."
   [lease]
   (when (lease? lease)
-    {:cap/id (.-capId ^CapabilityLease lease)
-     :principal (.-principal ^CapabilityLease lease)
-     :resource (.-resource ^CapabilityLease lease)
-     :actions (.-actions ^CapabilityLease lease)
-     :constraints (.-constraints ^CapabilityLease lease)
-     :issued-at (.-issued ^CapabilityLease lease)
-     :expires-at (.-expires ^CapabilityLease lease)}))
+    (cond-> {:cap/id (.-capId ^CapabilityLease lease)
+             :principal (.-principal ^CapabilityLease lease)
+             :resource (.-resource ^CapabilityLease lease)
+             :actions (.-actions ^CapabilityLease lease)
+             :constraints (.-constraints ^CapabilityLease lease)
+             :issued-at (.-issued ^CapabilityLease lease)
+             :expires-at (.-expires ^CapabilityLease lease)}
+      (some? (.-budget ^CapabilityLease lease))
+      (assoc :budget (.-budget ^CapabilityLease lease)))))
 
 
 ;; --- validation entry point ------------------------------------------------
@@ -261,7 +273,9 @@
   [m]
   (cond-> m
     (and (map? m) (contains? m :constraints))
-    (update :constraints canonicalize-constraints)))
+    (update :constraints canonicalize-constraints)
+    (and (map? m) (contains? m :budget))
+    (update :budget budget/canonicalize)))
 
 (defn validate-lease
   "Validate x as a v0 CapabilityLease.
@@ -319,6 +333,7 @@
                         (:resource validated)
                         (:actions validated)
                         (:constraints validated)
+                        (:budget validated)
                         (:issued-at validated)
                         (:expires-at validated)
                         lease-secret))))

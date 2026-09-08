@@ -827,7 +827,8 @@
                       :stores {:sqlite db :cas cas-store}
                       :dispatch (dispatch/make-broker-context
                                  {:registry reg :leases leases :usage usage
-                                  :model-registry model-reg :lease-registry lease-registry})}]
+                                  :model-registry model-reg :lease-registry lease-registry
+                                  :db db})}]
         (event/append-event! db
                              {:session/id sid
                               :generation/id (:generation/id generation)

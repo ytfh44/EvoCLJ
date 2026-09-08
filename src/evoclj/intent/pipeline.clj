@@ -40,6 +40,7 @@
   host-side bugs throw typed ExceptionInfo."
   (:require [evoclj.binding.call :as binding]
             [evoclj.capability.broker :as broker]
+            [evoclj.capability.budget :as budget]
             [evoclj.capability.constraint :as constraint]
             [evoclj.capability.semantic :as semantic]
             [evoclj.intent.schema :as intent-schema]
@@ -49,6 +50,7 @@
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.subagent :as subagent]
             [evoclj.sci.boundary :as boundary]
+            [evoclj.store.budget-store :as budget-store]
             [evoclj.store.work :as work-store]
             [malli.core :as m])
   (:import (java.nio.charset StandardCharsets)))
@@ -319,63 +321,118 @@
                                    {:cause (err/error-data t)}
                                    nil @(:usage broker-context))})))
 
+(defn- budget-attempt
+  "Reserve the finite amount for one provider attempt. Legacy leases or
+  contexts without a budget store return nil and retain the old behavior."
+  [broker-context intent decision attempt]
+  (let [db (:budget-store broker-context)
+        lease-id (:lease-id decision)
+        lease (some #(when (= lease-id (:cap/id %)) %) (:leases broker-context))
+        allocation (when (and db lease-id) (budget-store/budget-for-lease db lease-id))
+        opted? (some? (:budget lease))]
+    (when (and opted? (nil? db))
+      (throw (err/error :capability/budget-authority-unavailable
+                        "budgeted lease requires a durable budget store"
+                        {:lease-id lease-id})))
+    (when (and db opted? (nil? allocation))
+      (throw (err/error :capability/budget-missing
+                        "budgeted lease has no durable allocation"
+                        {:lease-id lease-id})))
+    (when allocation
+      (let [explicit (or (get-in intent [:metadata :budget/charge]) {})
+            auto (select-keys {:calls 1} (keys (:budget allocation)))
+            requested (budget/canonicalize (merge auto explicit))
+            amount requested
+            base-key (or (get-in intent [:metadata :idempotency/key])
+                         (str (:intent/id intent)))
+            key (str base-key ":attempt:" attempt)]
+        (when (seq amount)
+          (budget-store/reserve! db (:budget/id allocation)
+                                 {:intent/id (:intent/id intent)
+                                  :attempt attempt
+                                  :idempotency/key key
+                                  :amount amount})))))
+    )
+
+(defn- budget-settle-attempt!
+  [broker-context reservation value success?]
+  (when reservation
+    (let [db (:budget-store broker-context)
+          actual (if success?
+                   (:amount reservation)
+                   ;; A failed/transient attempt still consumes its call slot;
+                   ;; predicted token/money/byte amounts are released.
+                   (select-keys (:amount reservation) [:calls]))]
+      (budget-store/settle! db (:reservation/id reservation) actual))))
+
 (defn- execute-with-retry!
-  [broker-context provider descriptor decision normalized]
+  [broker-context provider descriptor decision normalized intent]
   (let [max-attempts (:max-attempts broker-context)
         safe? (get-in descriptor [:retry :safe?])
         usage-atom (:usage broker-context)
         lease-id (:lease-id decision)]
     (loop [attempt 1]
-      (swap! usage-atom constraint/bump-calls lease-id)
-      ;; The authorizing leases travel on the normalized request so
-      ;; lease-attenuating providers (e.g. :agent/spawn, which derives
-      ;; child leases from the broker's grants) inherit exactly what the
-      ;; broker authorized — never ambient authority, never empty by
-      ;; accident. Providers that ignore leases see one extra key.
-      (let [leased-request (cond-> normalized
-                             (map? normalized) (assoc :leases (:leases broker-context)))
-            outcome (try
-                      {:value (proto/execute-request! provider leased-request)}
-                      (catch clojure.lang.ExceptionInfo e
-                        (cond
-                          (ambiguous-error? e) {:ambiguous e}
-                          (transient-error? e) {:transient e}
-                          :else {:failed e}))
-                      (catch Throwable t
-                        {:failed t}))]
-        (cond
-          (contains? outcome :value)
-          (let [value (:value outcome)]
-            ;; Bytes accumulate ONLY on a successful provider return: each
-            ;; yielded value's serialized/token size is added to the :bytes
-            ;; counter. Calls (above) accumulate on EVERY attempt, retries
-            ;; included. The two dimensions are independent.
-            (swap! usage-atom constraint/add-bytes lease-id (value-bytes value))
-            {:ok value})
+      (let [reservation (try
+                          (budget-attempt broker-context intent decision attempt)
+                          (catch clojure.lang.ExceptionInfo e
+                            {:budget/error e}))]
+        (if-let [budget-error (:budget/error reservation)]
+          {:error-type (or (:error/type (ex-data budget-error))
+                           :capability/budget-failed)
+           :error-message (ex-message budget-error)
+           :error-data (err/error-data budget-error)}
+          (do
+            (swap! usage-atom constraint/bump-calls lease-id)
+            ;; The authorizing leases travel on the normalized request so
+            ;; lease-attenuating providers inherit exactly what the broker
+            ;; authorized — never ambient authority, never empty by accident.
+            (let [leased-request (cond-> normalized
+                                   (map? normalized)
+                                   (assoc :leases (:leases broker-context)))
+                  outcome (try
+                            {:value (proto/execute-request! provider leased-request)}
+                            (catch clojure.lang.ExceptionInfo e
+                              (cond
+                                (ambiguous-error? e) {:ambiguous e}
+                                (transient-error? e) {:transient e}
+                                :else {:failed e}))
+                            (catch Throwable t
+                              {:failed t}))]
+              (cond
+                (contains? outcome :value)
+                (let [value (:value outcome)]
+                  (budget-settle-attempt! broker-context reservation value true)
+                  (swap! usage-atom constraint/add-bytes lease-id (value-bytes value))
+                  {:ok value})
 
-          (contains? outcome :ambiguous)
-          {:error-type :effect/ambiguous
-           :error-message (ex-message (:ambiguous outcome))
-           :error-data {:cause (err/error-data (:ambiguous outcome))
-                        :attempt attempt}}
+                (contains? outcome :ambiguous)
+                (do
+                  (budget-settle-attempt! broker-context reservation nil false)
+                  {:error-type :effect/ambiguous
+                   :error-message (ex-message (:ambiguous outcome))
+                   :error-data {:cause (err/error-data (:ambiguous outcome))
+                                :attempt attempt}})
 
-          (contains? outcome :transient)
-          (if (and safe? (< attempt max-attempts))
-            (recur (inc attempt))
-            {:error-type provider-transient-type
-             :error-message (ex-message (:transient outcome))
-             :error-data {:cause (err/error-data (:transient outcome))
-                          :attempt attempt}})
+                (contains? outcome :transient)
+                (do
+                  (budget-settle-attempt! broker-context reservation nil false)
+                  (if (and safe? (< attempt max-attempts))
+                    (recur (inc attempt))
+                    {:error-type provider-transient-type
+                     :error-message (ex-message (:transient outcome))
+                     :error-data {:cause (err/error-data (:transient outcome))
+                                  :attempt attempt}}))
 
-          :else
-          (let [t (:failed outcome)]
-            {:error-type :provider/execution-failed
-             :error-message (if (instance? clojure.lang.ExceptionInfo t)
-                              (ex-message t)
-                              (str "provider execute-request! threw "
-                                   (.getName (class t))))
-             :error-data {:cause (err/error-data t)
-                          :attempt attempt}}))))))
+                :else
+                (let [t (:failed outcome)]
+                  (budget-settle-attempt! broker-context reservation nil false)
+                  {:error-type :provider/execution-failed
+                   :error-message (if (instance? clojure.lang.ExceptionInfo t)
+                                    (ex-message t)
+                                    (str "provider execute-request! threw "
+                                         (.getName (class t))))
+                   :error-data {:cause (err/error-data t)
+                                :attempt attempt}})))))))))
 
 (defn- validate-output!
   [intent descriptor decision value usage]
@@ -442,7 +499,7 @@
                         decision)
                   (let [execution (execute-with-retry!
                                    broker-context provider descriptor
-                                   decision normalized)]
+                                   decision normalized intent)]
                     (if-let [value (:ok execution)]
                       (emit (validate-output! intent descriptor decision
                                                value @usage-atom)
@@ -540,7 +597,7 @@
                      binding** decision)
                     (let [execution (execute-with-retry!
                                      broker-context provider frozen-descriptor
-                                     decision normalized)]
+                                     decision normalized intent)]
                       (if-let [value (:ok execution)]
                         (let [tool-error? (binding/tool-error? value)
                               enriched-value (enrich-value-audit value binding**)]
