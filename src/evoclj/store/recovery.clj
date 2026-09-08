@@ -234,6 +234,14 @@
                 (sqlite/query store ["SELECT id FROM invariant_proposals"]))
           (keep (fn [row]
                   (try
+                    (invariant-store/verify-approved-decision! authority-store row)
+                    nil
+                    (catch Throwable e
+                      {:table :invariant_decisions :decision/id (:id row)
+                       :status :authority-mismatch :error (err/error-data e)})))
+                (sqlite/query store ["SELECT * FROM invariant_decisions WHERE decision = 'approved'"]))
+          (keep (fn [row]
+                  (try
                     (invariant-store/verify-activation! authority-store row)
                     nil
                     (catch Throwable e

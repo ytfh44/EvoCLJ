@@ -1,5 +1,6 @@
 (ns evoclj.store.invariant-test
-  (:require [clojure.test :refer [deftest is use-fixtures]]
+  (:require [clojure.edn :as edn]
+            [clojure.test :refer [deftest is use-fixtures]]
             [evoclj.eval.static :as static]
             [evoclj.evolution.invariant :as evolution]
             [evoclj.store.artifact :as artifact]
@@ -61,6 +62,23 @@
   (let [s (setup-approved)]
     (is (thrown? clojure.lang.ExceptionInfo (invariant-store/approve! s "p1" "reviewer2" {:replay/ref (proof! s {:other true}) :adversarial/ref (proof! s {:other true})})))
     (is (= 1 (count-rows s "invariant_decisions")))))
+(deftest forged-approved-decision-selected-ref-rejected-by-scan-and-activation
+  (let [s (setup-approved)
+        row (first (sqlite/query (:sqlite s) ["SELECT * FROM invariant_decisions WHERE proposal_id = 'p1'"]))
+        original (edn/read-string (String. (cas/get-bytes (:cas s) (:decision_digest row)) StandardCharsets/UTF_8))
+        forged (assoc original :replay/ref (:adversarial/ref original))
+        forged-digest (existence/digest-of (proof! s forged))]
+    ;; The append-only trigger is bypassed only inside this throwaway forged-row test.
+    (sqlite/exec! (:sqlite s) ["DROP TRIGGER invariant_decisions_no_update"])
+    (sqlite/exec! (:sqlite s) ["UPDATE invariant_decisions SET decision_digest = ? WHERE id = ?"
+                                forged-digest (:id row)])
+    (sqlite/exec! (:sqlite s) ["CREATE TRIGGER invariant_decisions_no_update
+                                BEFORE UPDATE ON invariant_decisions
+                                BEGIN SELECT RAISE(ABORT, 'invariant decisions are immutable'); END"])
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (recovery/startup-integrity-scan (:sqlite s) (:cas s))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (invariant-store/activate! s "p1" "reviewer")))))
 (deftest decisions-are-terminal-and-idempotent
   (let [s (fresh-store) e (proof! s {}) r (proof! s {}) a (proof! s {})]
     (invariant-store/propose! s (proposal e r a))

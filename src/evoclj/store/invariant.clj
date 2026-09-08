@@ -23,7 +23,8 @@
 (defn- id [] (str (UUID/randomUUID)))
 (declare verify-durable-activation! get-proposal current-state list-runs
          safe-edn-data? read-edn decode-artifact! verify-decision-row!
-         verify-disable-row! verify-event-outbox! verify-activation! verify-target! verify-run-row!)
+         verify-approved-decision! verify-disable-row! verify-event-outbox!
+         verify-activation! verify-target! verify-run-row!)
 
 (defn- stores [store]
   (when-not (map? store) (throw (err/error :invariant/store-invalid "store must be {:sqlite ... :cas ...}" {:reason :not-a-map})))
@@ -173,7 +174,7 @@
     (doseq [run (sqlite/query (:sqlite store) ["SELECT * FROM invariant_runs WHERE proposal_id = ?" (str proposal-id)])]
       (verify-run-row! store run))
     (row->proposal store r)))
-(defn- verify-decision-row! [store row]
+(defn- verify-decision-bindings! [store row]
   (let [decoded (decode-artifact! store (:decision_digest row)
                                   {:table :invariant_decisions :column :decision_digest :decision/id (:id row)})
         expected-status (keyword (:decision row))]
@@ -185,6 +186,57 @@
       (throw (err/error :invariant/decision-invalid
                         "decision CAS artifact does not match durable SQL row"
                         {:decision/id (:id row)})))
+    decoded))
+
+(defn verify-approved-decision!
+  "Verify an approved decision against its proposal and every durable run.
+  Recomputes approval qualification from exact CAS-selected evidence; no
+  decision CAS field or SQL qualification flag is trusted on its own."
+  [store row]
+  (stores store)
+  (let [decoded (verify-decision-bindings! store row)
+        proposal-row (first (sqlite/query (:sqlite store)
+                                          ["SELECT * FROM invariant_proposals WHERE id = ?"
+                                           (str (:proposal_id row))]))]
+    (when-not (= :approved (:status decoded))
+      (throw (err/error :invariant/decision-invalid
+                        "approved decision CAS artifact is not approved"
+                        {:decision/id (:id row)})))
+    (when-not proposal-row
+      (throw (err/error :invariant/proposal-missing
+                        "approved decision proposal row is missing"
+                        {:proposal/id (:proposal_id row)})))
+    (verify-proposal-row! store proposal-row)
+    (let [proposal (row->proposal store proposal-row)
+          runs (list-runs store (:proposal_id row))
+          selected (select-keys decoded [:reviewer :replay/ref :adversarial/ref])
+          recomputed (invariant/approval proposal selected runs)
+          selected-runs [(some #(when (and (= :replay (:kind %))
+                                             (= (:replay/ref decoded) (:result-ref %))) %)
+                               runs)
+                         (some #(when (and (= :adversarial (:kind %))
+                                             (= (:adversarial/ref decoded) (:result-ref %))) %)
+                               runs)]]
+      (when-not (and (= (str (:proposal/id decoded)) (str (:proposal/id proposal)))
+                     (= (:proposal/id recomputed) (:proposal/id decoded))
+                     (= (:replay/ref recomputed) (:replay/ref decoded))
+                     (= (:adversarial/ref recomputed) (:adversarial/ref decoded))
+                     (= (:status decoded) :approved)
+                     (true? (:activation-qualified? decoded))
+                     (= :recorded-only (get-in (first selected-runs) [:result :model/policy]))
+                     (= :recorded-only (get-in (second selected-runs) [:result :model/policy]))
+                     (= :G3-deterministic-suites (get-in (first selected-runs) [:result :gate/id]))
+                     (= :G3-deterministic-suites (get-in (second selected-runs) [:result :gate/id]))
+                     (not-any? #(= :counterexample (:kind %)) runs))
+        (throw (err/error :invariant/decision-invalid
+                          "approved decision evidence is not activation-qualified"
+                          {:decision/id (:id row) :proposal/id (:proposal_id row)})))
+      decoded)))
+
+(defn- verify-decision-row! [store row]
+  (let [decoded (verify-decision-bindings! store row)]
+    (when (= :approved (:status decoded))
+      (verify-approved-decision! store row))
     decoded))
 
 (defn- verify-event-outbox! [store activation-id event-type payload-ref]
@@ -249,7 +301,7 @@
       (throw (err/error :invariant/activation-invalid
                         "activation CAS artifact does not match durable SQL row"
                         {:activation/id (:id row)})))
-    (verify-decision-row! store decision)
+    (verify-approved-decision! store decision)
     (verify-event-outbox! store (:id row) :activated (:activation_digest row))
     (when-let [disable (first (sqlite/query (:sqlite store)
                                             ["SELECT * FROM invariant_disables WHERE proposal_id = ?"
