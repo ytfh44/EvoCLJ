@@ -150,3 +150,79 @@
       (is (= :quarantined (:status (first result))))
       (is (= :quarantined (:status (invariant-store/get-proposal s "p1"))))
       (is (empty? (static/active-invariants))))))
+(deftest stray-disabled-event-outbox-cannot-start-or-recover
+  (let [s (setup-approved)]
+    (invariant-store/activate! s "p1" "reviewer")
+    (let [activation (first (sqlite/query (:sqlite s)
+                                          ["SELECT * FROM invariant_activations WHERE proposal_id = 'p1'"]))
+          stray (existence/digest-of (proof! s {:status :disabled :stray true}))]
+      (sqlite/exec! (:sqlite s)
+                    ["INSERT INTO invariant_events (activation_id,event_type,payload_ref,created_at)
+                      VALUES (?,?,?,?)"
+                     (:id activation) "disabled" stray "2025-01-01T00:00:00Z"])
+      (let [event (first (sqlite/query (:sqlite s)
+                                       ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'disabled'"
+                                        (:id activation)]))]
+        (sqlite/exec! (:sqlite s)
+                      ["INSERT INTO invariant_outbox (id,activation_id,event_id,event_type,dispatched,created_at)
+                        VALUES (?,?,?,?,0,?)"
+                       (str (random-uuid)) (:id activation) (:id event) "disabled" "2025-01-01T00:00:00Z"])
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (recovery/startup-integrity-scan (:sqlite s) (:cas s)))
+            "startup scan rejects disabled evidence without a disable decision")
+        (static/clear-active-invariants!)
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (invariant-store/recover-activations! s))
+            "recovery fails closed instead of publishing the stray-disabled activation")
+        (is (empty? (static/active-invariants)))
+        (is (empty? (sqlite/query (:sqlite s)
+                                  ["SELECT id FROM invariant_disables WHERE proposal_id = 'p1'"]))
+            "the fixture remains a stray event/outbox with no fabricated decision")
+        (is (empty? (sqlite/query (:sqlite s)
+                                  ["SELECT id FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'"
+                                   (:id activation)]))
+            "disabled and quarantined terminal evidence never coexist")))))
+
+(deftest activation-envelope-id-must-match-durable-row
+  (let [s (setup-approved)
+        proposal (first (sqlite/query (:sqlite s)
+                                      ["SELECT * FROM invariant_proposals WHERE id = 'p1'"]))
+        decision (first (sqlite/query (:sqlite s)
+                                      ["SELECT * FROM invariant_decisions WHERE proposal_id = 'p1'"]))
+        aid "activation-id-row"
+        activation-digest (existence/digest-of (proof! s {:activation/id "activation-id-envelope-mismatch"
+                                     :proposal/id "p1"
+                                     :decision/id (:id decision)
+                                     :version 1
+                                     :predicate (edn/read-string (:predicate_json proposal))
+                                     :registry/revision (:registry_revision proposal)
+                                     :reviewer "reviewer"}))]
+    (sqlite/exec! (:sqlite s)
+                  ["INSERT INTO invariant_activations
+                    (id,proposal_id,decision_id,version,predicate_digest,activation_digest,registry_revision,status,committed_at)
+                    VALUES (?,?,?,?,?,?,?,?,?)"
+                   aid "p1" (:id decision) 1 (:predicate_digest proposal) activation-digest
+                   (:registry_revision proposal) "active" "2025-01-01T00:00:00Z"])
+    (sqlite/exec! (:sqlite s)
+                  ["INSERT INTO invariant_events (activation_id,event_type,payload_ref,created_at)
+                    VALUES (?,?,?,?)"
+                   aid "activated" activation-digest "2025-01-01T00:00:00Z"])
+    (let [event (first (sqlite/query (:sqlite s)
+                                     ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'activated'"
+                                      aid]))]
+      (sqlite/exec! (:sqlite s)
+                    ["INSERT INTO invariant_outbox (id,activation_id,event_id,event_type,dispatched,created_at)
+                      VALUES (?,?,?,?,0,?)"
+                     (str (random-uuid)) aid (:id event) "activated" "2025-01-01T00:00:00Z"])
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (recovery/startup-integrity-scan (:sqlite s) (:cas s)))
+          "startup scan rejects an activation envelope bound to another id")
+      (static/clear-active-invariants!)
+      (let [result (invariant-store/recover-activations! s)]
+        (is (= :quarantined (:status (first result))))
+        (is (= aid (:activation/id (first result))))
+        (is (empty? (static/active-invariants)))
+        (is (= 1 (count (sqlite/query (:sqlite s)
+                                      ["SELECT id FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'"
+                                       aid])))
+            "activation-id mismatch is durably quarantined")))))

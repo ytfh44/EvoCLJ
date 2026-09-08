@@ -285,7 +285,22 @@
                                       ["SELECT * FROM invariant_decisions WHERE id = ? AND proposal_id = ?"
                                        (:decision_id row) (str (:proposal_id row))]))
         activation (decode-artifact! store (:activation_digest row)
-                                     {:table :invariant_activations :column :activation_digest :activation/id (:id row)})]
+                                     {:table :invariant_activations :column :activation_digest :activation/id (:id row)})
+        disable-rows (sqlite/query (:sqlite store)
+                                   ["SELECT * FROM invariant_disables WHERE proposal_id = ?"
+                                    (str (:proposal_id row))])
+        disabled-events (sqlite/query (:sqlite store)
+                                      ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'disabled'"
+                                       (str (:id row))])
+        disabled-outbox (sqlite/query (:sqlite store)
+                                      ["SELECT * FROM invariant_outbox WHERE activation_id = ? AND event_type = 'disabled'"
+                                       (str (:id row))])
+        quarantine-events (sqlite/query (:sqlite store)
+                                        ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'"
+                                         (str (:id row))])
+        quarantine-outbox (sqlite/query (:sqlite store)
+                                        ["SELECT * FROM invariant_outbox WHERE activation_id = ? AND event_type = 'quarantined'"
+                                         (str (:id row))])]
     (when-not (and p decision
                    (= (:status p) (current-state store (:proposal_id row)))
                    (= 1 (:activation_qualified decision))
@@ -293,6 +308,7 @@
                    (= (:version row) (:version p))
                    (= (:predicate_digest row) (:predicate/digest (:predicate p)))
                    (= (:registry_revision row) (:registry/revision p))
+                   (= (str (:activation/id activation)) (str (:id row)))
                    (= (:proposal/id activation) (:proposal_id row))
                    (= (:version activation) (:version row))
                    (= (:predicate activation) (:predicate p))
@@ -301,16 +317,26 @@
       (throw (err/error :invariant/activation-invalid
                         "activation CAS artifact does not match durable SQL row"
                         {:activation/id (:id row)})))
+    (when (or (seq disabled-events) (seq disabled-outbox))
+      (when-not (= 1 (count disable-rows))
+        (throw (err/error :invariant/disable-invalid
+                          "disabled event/outbox requires exactly one durable disable decision"
+                          {:activation/id (:id row) :proposal/id (:proposal_id row)})))
+      (when (or (seq quarantine-events) (seq quarantine-outbox))
+        (throw (err/error :invariant/terminal-conflict
+                          "disabled and quarantined terminal evidence cannot coexist"
+                          {:activation/id (:id row)})))
+      (verify-disable-row! store (first disable-rows)))
+    (when (and (seq disable-rows) (empty? disabled-events))
+      ;; The disable row itself must carry a matching disabled event and outbox.
+      (verify-disable-row! store (first disable-rows)))
     (verify-approved-decision! store decision)
     (verify-event-outbox! store (:id row) :activated (:activation_digest row))
-    (when-let [disable (first (sqlite/query (:sqlite store)
-                                            ["SELECT * FROM invariant_disables WHERE proposal_id = ?"
-                                             (str (:proposal_id row))]))]
-      (verify-disable-row! store disable)
-      (verify-event-outbox! store (:id row) :disabled (:disable_digest disable)))
-    (when-let [_q (first (sqlite/query (:sqlite store)
-                                       ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'"
-                                        (str (:id row))]))]
+    (when (or (seq quarantine-events) (seq quarantine-outbox))
+      (when (or (seq disabled-events) (seq disabled-outbox))
+        (throw (err/error :invariant/terminal-conflict
+                          "disabled and quarantined terminal evidence cannot coexist"
+                          {:activation/id (:id row)})))
       (verify-event-outbox! store (:id row) :quarantined (:activation_digest row)))
     true))
 (defn list-proposals [store]
@@ -688,10 +714,24 @@
 (defn- quarantine-activation! [store row]
   (sqlite/with-write-tx [conn (:sqlite store)]
     (let [aid (str (:id row))
-          digest (:activation_digest row)]
-      (sqlite/insert-raw! conn
-        "INSERT INTO invariant_events (activation_id,event_type,payload_ref,created_at) VALUES (?,?,?,?)"
-        [aid "quarantined" digest (now)])
+          digest (:activation_digest row)
+          disabled? (seq (sqlite/query-raw! conn
+                                             "SELECT id FROM invariant_events WHERE activation_id = ? AND event_type = 'disabled' LIMIT 1"
+                                             [aid]))
+          disabled-outbox? (seq (sqlite/query-raw! conn
+                                                    "SELECT id FROM invariant_outbox WHERE activation_id = ? AND event_type = 'disabled' LIMIT 1"
+                                                    [aid]))
+          quarantined? (seq (sqlite/query-raw! conn
+                                                "SELECT id FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined' LIMIT 1"
+                                                [aid]))]
+      (when (or disabled? disabled-outbox?)
+        (throw (err/error :invariant/terminal-conflict
+                          "disabled and quarantined terminal evidence cannot coexist"
+                          {:activation/id aid})))
+      (when-not quarantined?
+        (sqlite/insert-raw! conn
+          "INSERT INTO invariant_events (activation_id,event_type,payload_ref,created_at) VALUES (?,?,?,?)"
+          [aid "quarantined" digest (now)]))
       (let [ev (first (sqlite/query-raw! conn
                                          "SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'"
                                          [aid]))]
@@ -699,9 +739,10 @@
           (throw (err/error :invariant/quarantine-failed
                             "quarantine event was not durably written"
                             {:activation/id aid})))
-        (sqlite/insert-raw! conn
-          "INSERT INTO invariant_outbox (id,activation_id,event_id,event_type,dispatched,created_at) VALUES (?,?,?,?,0,?)"
-          [(id) aid (:id ev) "quarantined" (now)])))))
+        (when-not quarantined?
+          (sqlite/insert-raw! conn
+            "INSERT INTO invariant_outbox (id,activation_id,event_id,event_type,dispatched,created_at) VALUES (?,?,?,?,0,?)"
+            [(id) aid (:id ev) "quarantined" (now)]))))))
 
 (defn- recovery-descriptor [store row]
   (when-not (= "active" (:status row))
