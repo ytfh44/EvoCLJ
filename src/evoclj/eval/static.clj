@@ -77,8 +77,12 @@
       (throw (err/error :invariant/activation-invalid "kernel rule is not registered" {:reason :unknown-kernel-rule :rule/id (:rule/id p)})))
     (let [k (descriptor-key descriptor)
           prior (get @active k)]
-      (when (and prior (not= (:predicate/digest prior) (:predicate/digest p)))
-        (throw (err/error :invariant/activation-conflict "activation version already names another predicate" {:reason :version-conflict :key k})))
+      (let [prior-digest (get-in prior [:predicate :predicate/digest])]
+        (when (and prior (not= prior-digest (:predicate/digest p)))
+          (throw (err/error :invariant/activation-conflict "activation version already names another predicate"
+                            {:reason :version-conflict :key k
+                             :prior-digest prior-digest
+                             :predicate-digest (:predicate/digest p)}))))
       (swap! active assoc k (assoc descriptor :predicate p :published? true))
       (get @active k))))
 

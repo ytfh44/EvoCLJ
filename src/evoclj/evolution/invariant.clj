@@ -129,6 +129,7 @@
   [p]
   (when-not (map? p)
     (fail! :proposal-invalid "proposal must be a map" {:value (err/sanitize p)}))
+  (reject-forbidden! p)
   (doseq [k [:proposer :scope :risk :version :registry/revision]]
     (when-not (contains? p k) (fail! :missing-key "proposal is missing a required key" {:key k})))
   (when-not (ref? (:proposer p)) (fail! :proposer-invalid "proposer must be a stable identity" {:value (err/sanitize (:proposer p))}))

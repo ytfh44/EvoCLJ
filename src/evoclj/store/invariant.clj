@@ -240,9 +240,17 @@
                     desc {:invariant/id (or (:invariant/id p) (:proposal_id row))
                           :proposal/id (:proposal_id row) :version (:version row)
                           :predicate (:predicate p) :registry/revision (:registry_revision row)
-                          :activation/id (:id row) :activation/committed? true}]
-                (static/publish-active-invariant! desc)
-                (conj out {:activation/id (:id row) :status :published}))
+                          :activation/id (:id row) :activation/committed? true}
+                    prior (some #(when (= (:activation/id %) (:id row)) %)
+                                 (static/active-invariants))]
+                (if (and prior
+                         (= (get-in prior [:predicate :predicate/digest])
+                            (get-in desc [:predicate :predicate/digest]))
+                         (= (:version prior) (:version desc)))
+                  out
+                  (do
+                    (static/publish-active-invariant! desc)
+                    (conj out {:activation/id (:id row) :status :published}))))
               (catch Exception e
                 (conj out {:activation/id (:id row) :status :quarantined :error (err/error-data e)}))))
           [] (sqlite/query (:sqlite store) ["SELECT a.* FROM invariant_activations a WHERE a.status = 'active' AND NOT EXISTS (SELECT 1 FROM invariant_disables d WHERE d.proposal_id = a.proposal_id) ORDER BY a.committed_at, a.id"])))
