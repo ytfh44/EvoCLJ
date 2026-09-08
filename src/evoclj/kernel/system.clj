@@ -119,6 +119,7 @@
             [evoclj.runtime.system]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
+            [evoclj.store.recovery :as recovery]
             [evoclj.store.sqlite :as sqlite]
             [integrant.core :as ig])
   (:import (java.nio.charset StandardCharsets)
@@ -309,7 +310,8 @@
       (registry/register! (:provider/registry system)
                           (provider-for entry store (:mcp/manager system)))))
   system)
-
+(declare recover-invariants!)
+;; --- component keys ----------------------------------------------------------
 (defn init
   "Build the host system from `config`: ig/init (refs resolved,
   init-key methods build each component), then the two host-startup
@@ -322,10 +324,20 @@
     (try
       (-> system
           (migrate-schema!)
-          (register-catalog-providers! config))
+          (register-catalog-providers! config)
+          (recover-invariants!))
       (catch Throwable t
         (ig/halt! system)
         (throw t)))))
+(defn- recover-invariants!
+  "Host-startup step 3: verify and publish durable invariant activations.
+  Only fully committed activations with matching proposal, predicate, approval,
+  CAS payload, event, and outbox rows are published. Partial rows are quarantined."
+  [system]
+  (let [sqlite (:store/sqlite system)
+        cas    (:store/cas system)]
+    (recovery/recover-generated-invariants! sqlite cas)
+    system))
 
 (defn halt!
   "Tear the host system down: (ig/halt! system) — which halts every

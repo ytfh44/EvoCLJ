@@ -1,6 +1,7 @@
 (ns evoclj.store.invariant-test
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [evoclj.eval.static :as static]
+            [evoclj.evolution.invariant :as evolution]
             [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.existence :as existence]
@@ -21,9 +22,34 @@
 (use-fixtures :each (fn [f] (static/clear-suites!) (try (f) (finally (static/clear-suites!) (cleanup!)))))
 (defn- fresh-store [] (let [db (sqlite/spec (temp-db)) c (cas/->cas (str (temp-cas)))] (migrate/migrate! db) {:sqlite db :cas c}))
 (defn- count-rows [s table] (:n (first (sqlite/query (:sqlite s) [(str "SELECT count(*) AS n FROM " table)]))))
-(defn- proof! [s x] (let [b (.getBytes (pr-str x) StandardCharsets/UTF_8) o (cas/put-bytes! (:cas s) b {:media-type "application/edn"}) aid (:artifact/id o)] (artifact/ensure-artifact! (:sqlite s) aid "application/edn" (:size o)) (existence/verified-digest (:cas s) aid)))
-(defn- proposal [e r a] {:proposal/id "p1" :proposer "owner" :scope :runtime :risk :low :version 1 :registry/revision (static/registry-revision) :predicate {:predicate/type :dsl :dsl {:op :equals :path [:state] :value :safe}} :evidence/refs [e] :replay/refs [r] :adversarial/refs [a]})
-(defn- setup-approved [] (let [s (fresh-store) e (proof! s {:evidence :input}) d (proof! s {:details :g3}) env {:gate/id :G3-deterministic-suites :status :pass :details-ref (existence/digest-of d) :model/policy :recorded :deterministic? true :fresh-model? false :passed? true} r (proof! s env) a (proof! s env) p (invariant-store/propose! s (proposal e r a))] (invariant-store/append-run! s (:proposal/id p) {:run/id "r" :kind :replay :result/ref r}) (invariant-store/append-run! s (:proposal/id p) {:run/id "a" :kind :adversarial :result/ref a})  (invariant-store/approve! s "p1" "reviewer" {:replay/ref r :adversarial/ref a}) s))
+(defn- proof! [s x]
+  (let [b (.getBytes (pr-str x) StandardCharsets/UTF_8)
+        o (cas/put-bytes! (:cas s) b {:media-type "application/edn"})
+        aid (:artifact/id o)]
+    (artifact/ensure-artifact! (:sqlite s) aid "application/edn" (:size o))
+    (existence/verified-digest (:cas s) aid)))
+(defn- base-predicate [] {:predicate/type :dsl :dsl {:op :equals :path [:state] :value :safe}})
+(defn- proposal [e r a]
+  {:proposal/id "p1" :proposer "owner" :scope :runtime :risk :low :version 1
+   :registry/revision (static/registry-revision) :predicate (base-predicate)
+   :evidence/refs [e] :replay/refs [r] :adversarial/refs [a]})
+(defn- setup-approved []
+  (let [s (fresh-store)
+        e (proof! s {:evidence :input})
+        d (proof! s {:details :g3})
+        pd (:predicate/digest (evolution/validate-predicate! (base-predicate)))
+        revision (static/registry-revision)
+        envelope (fn [kind] {:proposal/id "p1" :predicate/digest pd :registry/revision revision
+                             :run/kind kind :target/digest "sha256:0000000000000000000000000000000000000000000000000000000000000000" :evaluation/id nil :candidate/id nil
+                             :gate/id :G3-deterministic-suites :status :pass :details-ref (existence/digest-of d) :details/ref nil
+                             :model/policy :recorded :deterministic? true :fresh-model? false :passed? true})
+        r (proof! s (envelope :replay))
+        a (proof! s (envelope :adversarial))
+        p (invariant-store/propose! s (proposal e r a))]
+    (invariant-store/append-run! s (:proposal/id p) {:run/id "r" :kind :replay :result/ref r})
+    (invariant-store/append-run! s (:proposal/id p) {:run/id "a" :kind :adversarial :result/ref a})
+    (invariant-store/approve! s "p1" "reviewer" {:replay/ref r :adversarial/ref a})
+    s))
 
 (deftest raw-and-forged-references-cannot-persist
   (let [s (fresh-store)]

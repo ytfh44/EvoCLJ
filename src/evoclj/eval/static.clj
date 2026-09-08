@@ -13,7 +13,16 @@
 (def ^:private suites (atom []))
 (def ^:private active (atom {}))
 (def ^:private activation-secret (Object.))
+(def ^:private durable-verifier (atom nil))
 (deftype DurableActivationProof [activation-digest secret])
+
+(defn install-durable-verifier!
+  "Install the host-owned durable activation checker used at publication."
+  [f]
+  (when-not (fn? f)
+    (throw (err/error :invariant/verifier-invalid "durable verifier must be a function" {})))
+  (reset! durable-verifier f)
+  nil)
 
 (defn- activation-proof [digest]
   (DurableActivationProof. digest activation-secret))
@@ -50,14 +59,18 @@
 (defn registered-suites [] @suites)
 
 (defn registry-revision
-  "Deterministic digest of the kernel rule registry."
+  "Deterministic order-independent digest of the kernel rule registry."
   []
   (hash/text-digest
-   (pr-str (mapv #(select-keys % [:suite/id :suite/type :suite/version]) @suites))))
+   (pr-str (->> @suites
+                (map #(select-keys % [:suite/id :suite/type :suite/version]))
+                (sort-by (juxt :suite/id :suite/type :suite/version))
+                vec))))
 
 (defn clear-suites! []
   (reset! suites [])
   (reset! active {})
+  (reset! durable-verifier nil)
   nil)
 
 (defn- kernel-suite [rule-id]
@@ -65,7 +78,6 @@
 
 (defn- descriptor-key [d]
   [(:invariant/id d) (:version d)])
-
 (defn publish-active-invariant!
   "Publish only with an opaque proof minted by the durable activation path.
   A plain EDN descriptor, including :activation/committed?, can never cross
@@ -80,6 +92,9 @@
    (let [activation-digest (:activation/digest descriptor)]
      (when-not (valid-activation-proof? proof activation-digest)
        (throw (err/error :invariant/activation-invalid "activation requires a sealed durable proof" {:reason :proof-invalid})))
+     (when-not (fn? @durable-verifier)
+       (throw (err/error :invariant/activation-invalid "durable activation state verifier is unavailable" {:reason :durable-state-unavailable})))
+     (@durable-verifier descriptor proof)
      (let [p (invariant/validate-predicate! (:predicate descriptor))
            id (:invariant/id descriptor)
            version (:version descriptor)
@@ -133,6 +148,12 @@
   pre-feature behavior."
   [ctx]
   (mapv (fn [d]
+          (when-not (= (:registry/revision d) (registry-revision))
+            (throw (err/error :kernel/invariant-stale
+                              "active invariant registry revision is stale"
+                              {:invariant/id (:invariant/id d)
+                               :expected (registry-revision)
+                               :actual (:registry/revision d)})))
           (let [p (:predicate d)
                 outcome (if (= :kernel-rule (:predicate/type p))
                           ((:check (kernel-suite (:rule/id p))) ctx)

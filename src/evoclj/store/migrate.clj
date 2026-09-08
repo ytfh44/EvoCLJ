@@ -27,9 +27,8 @@
             [evoclj.store.sqlite :as sqlite]))
 
 (def latest-version
-  "The schema version this codebase knows how to migrate to. Must equal
-  the count of migration files; this is schema version 24."
-  24)
+  "The schema version this codebase knows how to migrate to."
+  25)
 (def ^:private version-key "schema_version")
 (def ^:private applied-key "applied_migrations")
 (def ^:private migrations-dir "migrations")

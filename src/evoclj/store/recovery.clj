@@ -177,14 +177,22 @@
   "Read-only invariant scan: dangling CAS refs, malformed descriptors, and
   activation rows missing their event/outbox half."
   [store cas]
-  (let [refs (mapcat (fn [[table column kind]]
+  (let [cas (verifying-cas cas)
+        refs (mapcat (fn [[table column kind]]
                        (mapcat (fn [row]
                                  (let [ref (get row (keyword column))]
                                    (cond
                                      (not (and (string? ref) (re-matches #"^sha256:[0-9a-f]{64}$" ref)))
                                      [{:table table :column column :status :malformed-ref :value (err/sanitize ref) :kind kind}]
                                      (not (cas/exists? cas ref))
-                                     [{:table table :column column :artifact/id ref :kind kind}])))
+                                     [{:table table :column column :artifact/id ref :kind kind :status :missing}]
+                                     :else
+                                     (try
+                                       (cas/get-bytes cas ref)
+                                       nil
+                                       (catch Exception e
+                                         [{:table table :column column :artifact/id ref :kind kind
+                                           :status :corrupt :error (err/error-data e)}])))))
                                (sqlite/query store [(str "SELECT " column " FROM " table)])))
                      [["invariant_proposals" "predicate_digest" :predicate]
                       ["invariant_proposals" "proposal_digest" :proposal]

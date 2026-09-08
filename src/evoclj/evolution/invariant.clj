@@ -162,8 +162,15 @@
     (fail! :transition-invalid "invariant status transition is not admissible" {:from from :to to}))
   to)
 
-(def ^:private result-claim-keys
-  #{:gate/id :gate :status :details-ref :details/ref :model/policy
+(def ^:private result-envelope-keys
+  #{:proposal/id :predicate/digest :registry/revision :run/kind
+    :target/digest :evaluation/id :candidate/id
+    :gate/id :status :details-ref :details/ref :model/policy
+    :deterministic? :fresh-model? :passed?})
+
+(def ^:private result-required-keys
+  #{:proposal/id :predicate/digest :registry/revision :run/kind
+    :gate/id :status :details-ref :model/policy
     :deterministic? :fresh-model? :passed?})
 
 (defn- result-envelope
@@ -171,16 +178,32 @@
   derived only from this envelope, never from sibling run keys."
   [result]
   (when-not (map? result) (fail! :result-invalid "run result must be a map" {:value (err/sanitize result)}))
-  (when-not (every? result-claim-keys (keys result))
+  (when-not (= result-envelope-keys (set (keys result)))
     (fail! :result-invalid "run result contains an unknown key" {:value (err/sanitize result)}))
-  (let [gate (or (:gate/id result) (:gate result))
+  (when-not (every? #(contains? result %) result-required-keys)
+    (fail! :result-invalid "run result is missing a required envelope field" {:value (err/sanitize result)}))
+  (when-not (or (ref? (:evaluation/id result)) (ref? (:candidate/id result)) (digest? (:target/digest result)))
+    (fail! :identity-invalid "run result requires an evaluation, candidate, or stable target identity" {:value (err/sanitize result)}))
+  (let [gate (:gate/id result)
         details (or (:details-ref result) (:details/ref result))]
     (when-not (= :G3-deterministic-suites gate)
       (fail! :gate-invalid "qualification requires the G3 deterministic-suites gate" {:gate gate}))
-    ;; Failing G3 results are durable evidence but never qualify.
+    (when-not (contains? run-kinds (:run/kind result))
+      (fail! :run-kind-invalid "result envelope run kind is unsupported" {:run/kind (:run/kind result)}))
+    (when-not (and (keyword? (:status result))
+                   (contains? #{:pass :fail :error :not-run} (:status result)))
+      (fail! :status-invalid "result envelope status is unsupported" {:status (:status result)}))
+    (when-not (every? boolean? (map #(get result %) [:deterministic? :fresh-model? :passed?]))
+      (fail! :claim-invalid "result envelope qualification fields must be booleans" {}))
+    (when-not (keyword? (:model/policy result))
+      (fail! :claim-invalid "result envelope model policy must be a keyword" {}))
+    (when (and (= :pass (:status result)) (not (:passed? result)))
+      (fail! :status-inconsistent "a passing result must have passed? true" {}))
+    (when (and (contains? #{:fail :error :not-run} (:status result)) (:passed? result))
+      (fail! :status-inconsistent "a failed, errored, or not-run result cannot have passed? true" {}))
     (when-not (ref? details)
       (fail! :details-ref-invalid "gate result requires a details artifact ref" {:value (err/sanitize details)}))
-    (assoc result :gate/id gate :details-ref details)))
+    (assoc result :details-ref details)))
 
 (defn run
   "Normalize immutable evaluation evidence. Security claims are read only
@@ -194,6 +217,10 @@
   (when-not (contains? run-kinds (:kind r)) (fail! :run-kind-invalid "unknown run kind" {:kind (:kind r)}))
   (when-not (ref? (:result-ref r)) (fail! :malformed-ref "run result ref is malformed" {:value (err/sanitize (:result-ref r))}))
   (let [result (result-envelope (:result r))]
+    (when-not (= (:proposal/id r) (:proposal/id result))
+      (fail! :proposal-mismatch "result envelope is bound to another proposal" {}))
+    (when-not (= (:kind r) (:run/kind result))
+      (fail! :run-kind-mismatch "result envelope is bound to another run kind" {}))
     (when-not (safe-value? r 0) (fail! :run-opaque "run contains non-EDN data" {:value (err/sanitize r)}))
     (assoc r :result result :gate (:gate/id result)
            :model/policy (:model/policy result)
@@ -201,13 +228,14 @@
            :fresh-model? (:fresh-model? result)
            :passed? (:passed? result)
            :activation-qualified? (and (= :recorded (:model/policy result))
+                                      (= :pass (:status result))
                                       (true? (:deterministic? result))
                                       (not (true? (:fresh-model? result)))
                                       (true? (:passed? result))))))
 
 (defn- selected-run [runs kind ref]
   (some #(when (and (= kind (:kind %))
-                    (or (= ref (:result-ref %)) (= ref (:run/digest %)))) %) runs))
+                    (= ref (:result-ref %))) %) runs))
 
 (defn approval
   "Create an immutable approval decision. Selected refs must be exact proposal
@@ -224,10 +252,20 @@
           replay (selected-run runs :replay replay-ref)
           adversarial (selected-run runs :adversarial adversarial-ref)
           counterexample? (some #(= :counterexample (:kind %)) runs)]
+      (when (= replay-ref adversarial-ref)
+        (fail! :evidence-ref-reused "replay and adversarial evidence refs must be distinct" {}))
       (when-not (some #{replay-ref} (:replay/refs p))
         (fail! :replay-ref-mismatch "approval replay ref is not one of the proposal replay refs" {}))
       (when-not (some #{adversarial-ref} (:adversarial/refs p))
         (fail! :adversarial-ref-mismatch "approval adversarial ref is not one of the proposal adversarial refs" {}))
+      (doseq [[label run] [[:replay replay] [:adversarial adversarial]]]
+        (when run
+          (when-not (= (:proposal/id p) (get-in run [:result :proposal/id]))
+            (fail! :proposal-mismatch "selected evidence belongs to another proposal" {:evidence label}))
+          (when-not (= (:predicate/digest p) (get-in run [:result :predicate/digest]))
+            (fail! :predicate-mismatch "selected evidence belongs to another predicate" {:evidence label}))
+          (when-not (= (:registry/revision p) (get-in run [:result :registry/revision]))
+            (fail! :registry-revision-mismatch "selected evidence belongs to another registry revision" {:evidence label}))))
       (when-not (and replay adversarial (:activation-qualified? replay) (:activation-qualified? adversarial)
                      (= :G3-deterministic-suites (get-in replay [:result :gate/id]))
                      (= :G3-deterministic-suites (get-in adversarial [:result :gate/id]))
