@@ -12,6 +12,7 @@
             [evoclj.kernel.error :as err]
             [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
+            [evoclj.store.existence :as existence]
             [evoclj.store.sqlite :as sqlite]
             [evoclj.support.failpoint :as fault])
   (:import (java.nio.charset StandardCharsets)
@@ -33,10 +34,12 @@
     (artifact/ensure-artifact! (:sqlite store) aid media-type (:size out))
     aid))
 (defn- ensure-ref! [store ref]
-  (when (and (string? ref) (str/starts-with? ref "sha256:")
-             (not (cas/exists? (:cas store) ref)))
-    (throw (err/error :invariant/cas-missing "referenced invariant evidence is absent from CAS" {:artifact/id ref})))
-  ref)
+  "Every persisted external reference must arrive as a sealed existence proof."
+  (let [vd (existence/ensure-proof ref)
+        digest (existence/digest-of vd)]
+    (when-not (cas/exists? (:cas store) digest)
+      (throw (err/error :invariant/cas-missing "referenced invariant evidence is absent from CAS" {:artifact/id digest})))
+    digest))
 (defn- json [x] (pr-str x))
 (defn- read-edn [s]
   (try (edn/read-string s) (catch Exception _ nil)))
@@ -68,14 +71,17 @@
   "Persist a normalized proposal as immutable evidence. The proposal and its
   predicate are put in CAS before the foreign-keyed proposal row."
   [store p]
-  (let [p (invariant/proposal p)
+  (let [p (reduce (fn [p k]
+                    (update p k #(mapv (partial ensure-ref! store) (or % []))))
+                  p [:evidence/refs :replay/refs :adversarial/refs])
+        p (invariant/proposal p)
         proposal-id (str (or (:proposal/id p) (:invariant/id p) (id)))
         predicate-id (cas-put! store (dissoc (:predicate p) :predicate/digest) "application/edn")
         predicate (assoc (:predicate p) :predicate/digest predicate-id)
         p (assoc p :proposal/id proposal-id :predicate predicate :predicate/digest predicate-id)
         proposal-id-artifact (cas-put! store p "application/edn")
         refs (concat (:evidence/refs p) (:replay/refs p) (:adversarial/refs p))]
-    (doseq [r refs] (ensure-ref! store r))
+    ;; refs were sealed while normalizing the proposal
     (sqlite/with-write-tx [conn (:sqlite store)]
       (if-let [existing (first (sqlite/query-raw! conn "SELECT * FROM invariant_proposals WHERE id = ?" [proposal-id]))]
         (if (= proposal-id-artifact (:proposal_digest existing))
@@ -102,19 +108,40 @@
 (defn list-runs [store proposal-id]
   (stores store)
   (mapv row->run (sqlite/query (:sqlite store) ["SELECT * FROM invariant_runs WHERE proposal_id = ? ORDER BY created_at, id" (str proposal-id)])))
+(def ^:private caller-claim-keys
+  #{:gate :gate/id :model/policy :deterministic? :fresh-model? :passed?})
+
+(defn- result-artifact [store raw]
+  (when (some #(contains? raw %) caller-claim-keys)
+    (throw (err/error :invariant/unattested-result
+                      "qualification claims must be inside a verified result artifact"
+                      {:reason :caller-only-claim})))
+  (let [provided (or (:result/ref raw) (:result-ref raw))]
+    (if provided
+      (let [result-id (ensure-ref! store provided)
+            result (read-edn (String. (cas/get-bytes (:cas store) result-id) StandardCharsets/UTF_8))]
+        (when-not (map? result)
+          (throw (err/error :invariant/result-invalid "result artifact is not a closed EDN envelope" {})))
+        [result-id result])
+      (let [result (or (:result raw) {})
+            details (or (:details-ref result) (:details/ref result))
+            result (if details (assoc result :details-ref (ensure-ref! store details)) result)]
+        [(cas-put! store result "application/edn") result]))))
+
 (defn append-run!
-  "Append counterexample/replay/adversarial evidence. Repeating the same run
-  id and digest is a no-op; a conflicting reuse fails closed."
+  "Append evidence backed by a closed result artifact. Raw caller booleans or
+  arbitrary result refs never authorize a run; result refs must be sealed
+  VerifiedDigest proofs."
   [store proposal-id r]
   (stores store)
   (when-not (get-proposal store proposal-id)
     (throw (err/error :invariant/proposal-missing "proposal does not exist" {:proposal/id proposal-id})))
-  (let [raw (assoc (if (map? r) r {:result r}) :proposal/id proposal-id)
-        result-id (if (and (string? (:result-ref raw)) (str/starts-with? (:result-ref raw) "sha256:"))
-                    (ensure-ref! store (:result-ref raw))
-                    (cas-put! store (or (:result raw) raw) "application/edn"))
+  (when-not (map? r) (throw (err/error :invariant/run-invalid "run must be a map" {})))
+  (let [[result-id result] (result-artifact store r)
+        raw (-> r (dissoc :result/ref :result-ref :result)
+                (assoc :proposal/id proposal-id :result result :result-ref result-id))
         run-id (str (or (:run/id raw) (id)))
-        r (invariant/run (assoc raw :run/id run-id :result-ref result-id))
+        r (invariant/run (assoc raw :run/id run-id))
         run-id-artifact (cas-put! store r "application/edn")]
     (sqlite/with-write-tx [conn (:sqlite store)]
       (if-let [existing (first (sqlite/query-raw! conn "SELECT * FROM invariant_runs WHERE id = ?" [run-id]))]
@@ -131,18 +158,29 @@
              (if (:passed? r) 1 0) (json r) (now)])
           (assoc r :run/id run-id :result-ref result-id :run/digest run-id-artifact))))))
 
+(defn- current-state [store proposal-id]
+  (if (seq (sqlite/query (:sqlite store) ["SELECT id FROM invariant_disables WHERE proposal_id = ? LIMIT 1" (str proposal-id)]))
+    :disabled
+    (if (seq (sqlite/query (:sqlite store) ["SELECT id FROM invariant_activations WHERE proposal_id = ? AND status = 'active' LIMIT 1" (str proposal-id)]))
+      :active
+      (let [row (first (sqlite/query (:sqlite store) ["SELECT decision FROM invariant_decisions WHERE proposal_id = ? ORDER BY created_at DESC, id DESC LIMIT 1" (str proposal-id)]))
+            d (some-> row :decision str)]
+        (cond (= d "approved") :approved (= d "rejected") :rejected :else nil)))))
+
 (defn- decision [store proposal-id decision reviewer opts]
   (let [p (get-proposal store proposal-id)
         runs (list-runs store proposal-id)
-        a (merge {:reviewer reviewer :replay/ref (or (:replay/ref opts) (-> runs first :result-ref))
-                  :adversarial/ref (or (:adversarial/ref opts) (-> runs second :result-ref))}
-                 opts)]
+        opts (reduce-kv (fn [m k v]
+                          (if (#{:replay/ref :adversarial/ref} k)
+                            (assoc m k (ensure-ref! store v))
+                            (assoc m k v))) {} opts)
+        a (assoc opts :reviewer reviewer)]
     (when-not p (throw (err/error :invariant/proposal-missing "proposal does not exist" {:proposal/id proposal-id})))
+    (when (= (str reviewer) (str (:proposer p)))
+      (throw (err/error :invariant/reviewer-conflict "proposer cannot reject/approve its own proposal" {})))
     (if (= :approved decision)
       (invariant/approval p a runs)
-      (do (when (= (str reviewer) (str (:proposer p)))
-            (throw (err/error :invariant/reviewer-conflict "proposer cannot reject/approve its own proposal" {})))
-          (assoc a :proposal/id (str proposal-id) :status :rejected :activation-qualified? false)))))
+      (assoc a :proposal/id (str proposal-id) :status :rejected :activation-qualified? false))))
 
 (defn approve!
   "Append a reviewer approval. Approval never mutates a proposal row."
@@ -163,13 +201,18 @@
 (defn reject!
   [store proposal-id reviewer reason]
   (stores store)
-  (let [d (decision store proposal-id :rejected reviewer {:reason (str reason)})
-        did (str (id)) digest (cas-put! store d "application/edn")]
-    (sqlite/with-write-tx [conn (:sqlite store)]
-      (sqlite/insert-raw! conn
-        "INSERT INTO invariant_decisions (id,proposal_id,decision,reviewer,decision_digest,activation_qualified,reason,created_at) VALUES (?,?,?,?,?,?,?,?)"
-        [did (str proposal-id) "rejected" (str reviewer) digest 0 (:reason d) (now)]))
-    (assoc d :decision/id did :decision/digest digest)))
+  (if-let [existing (first (sqlite/query (:sqlite store) ["SELECT * FROM invariant_decisions WHERE proposal_id = ? AND decision = 'rejected' LIMIT 1" (str proposal-id)]))]
+    existing
+    (let [state (current-state store proposal-id)]
+      (when (#{:approved :active :disabled} state)
+        (throw (err/error :invariant/decision-conflict "proposal cannot be rejected after approval or disable" {:state state})))
+      (let [d (decision store proposal-id :rejected reviewer {:reason (str reason)})
+            did (str (id)) digest (cas-put! store d "application/edn")]
+        (sqlite/with-write-tx [conn (:sqlite store)]
+          (sqlite/insert-raw! conn
+            "INSERT INTO invariant_decisions (id,proposal_id,decision,reviewer,decision_digest,activation_qualified,reason,created_at) VALUES (?,?,?,?,?,?,?,?)"
+            [did (str proposal-id) "rejected" (str reviewer) digest 0 (:reason d) (now)]))
+        (assoc d :decision/id did :decision/digest digest)))))
 
 (defn- latest-approval [store proposal-id]
   (first (sqlite/query (:sqlite store)
@@ -183,8 +226,10 @@
   ([store proposal-id reviewer opts]
    (stores store)
    (let [p (get-proposal store proposal-id)
-         d (latest-approval store proposal-id)]
+         d (latest-approval store proposal-id)
+         disabled? (seq (sqlite/query (:sqlite store) ["SELECT id FROM invariant_disables WHERE proposal_id = ? LIMIT 1" (str proposal-id)]))]
      (when-not p (throw (err/error :invariant/proposal-missing "proposal does not exist" {:proposal/id proposal-id})))
+     (when disabled? (throw (err/error :invariant/activation-disabled "disabled proposals cannot reactivate" {})))
      (when-not d (throw (err/error :invariant/approval-missing "activation requires an approval decision" {:proposal/id proposal-id})))
      (when (= (str reviewer) (:proposer p)) (throw (err/error :invariant/reviewer-conflict "proposer cannot activate its own proposal" {})))
      (when-not (= 1 (:activation_qualified d)) (throw (err/error :invariant/not-qualified "activation requires deterministic replay and adversarial G3 evidence" {})))
@@ -192,7 +237,7 @@
            activation-digest (cas-put! store {:proposal/id proposal-id :version (:version p) :predicate (:predicate p) :reviewer reviewer} "application/edn")
            desc {:invariant/id (or (:invariant/id p) proposal-id) :proposal/id proposal-id :version (:version p)
                  :predicate (:predicate p) :registry/revision (:registry/revision p)
-                 :activation/id aid :activation/committed? true}]
+                 :activation/id aid :activation/digest activation-digest :activation/committed? true}]
        (let [result (sqlite/with-write-tx [conn (:sqlite store)]
                       (if-let [old (first (sqlite/query-raw! conn "SELECT * FROM invariant_activations WHERE version = ? AND predicate_digest = ?" [(:version p) (:predicate/digest (:predicate p))]))]
                         {:row old :idempotent? true}
@@ -210,47 +255,57 @@
                           (fault/trigger! opts :before-event-append)
                           {:id aid :idempotent? false})))]
          (let [desc (if (:idempotent? result)
-                      (assoc desc :activation/id (or (:id (:row result)) aid))
+                      (assoc desc :activation/id (:id (:row result)) :activation/digest (:activation_digest (:row result)))
                       desc)]
-           (static/publish-active-invariant! desc)
+           (static/publish-active-invariant! desc ((var-get #'static/activation-proof) (:activation/digest desc)))
            (assoc desc :status :active :idempotent? (:idempotent? result))))))))
 
 (defn disable!
   [store proposal-id reviewer reason]
   (stores store)
-  (when (= (str reviewer) (str (:proposer (get-proposal store proposal-id))))
-    (throw (err/error :invariant/reviewer-conflict "proposer cannot disable its own proposal" {})))
-  (let [d (invariant/disable proposal-id reviewer reason)
-        digest (cas-put! store d "application/edn")]
-    (sqlite/with-write-tx [conn (:sqlite store)]
-      (doseq [row (sqlite/query-raw! conn "SELECT id FROM invariant_activations WHERE proposal_id = ? AND status = 'active'" [(str proposal-id)])]
-        (sqlite/insert-raw! conn "INSERT OR IGNORE INTO invariant_disables (id,proposal_id,reviewer,reason,disable_digest,created_at) VALUES (?,?,?,?,?,?)"
-                             [(id) (str proposal-id) (str reviewer) (str reason) digest (now)])))
-    (static/disable-active-invariant! proposal-id)
-    (assoc d :decision/digest digest)))
+  (let [p (get-proposal store proposal-id)]
+    (when-not p (throw (err/error :invariant/proposal-missing "proposal does not exist" {})))
+    (when (= (str reviewer) (str (:proposer p)))
+      (throw (err/error :invariant/reviewer-conflict "proposer cannot disable its own proposal" {})))
+    (if-let [old (first (sqlite/query (:sqlite store) ["SELECT * FROM invariant_disables WHERE proposal_id = ? LIMIT 1" (str proposal-id)]))]
+      (assoc (or (read-edn (String. (cas/get-bytes (:cas store) (:disable_digest old)) StandardCharsets/UTF_8)) {}) :status :disabled :idempotent? true)
+      (let [d (invariant/disable proposal-id reviewer reason) digest (cas-put! store d "application/edn")]
+        (sqlite/with-write-tx [conn (:sqlite store)]
+          (sqlite/insert-raw! conn "INSERT INTO invariant_disables (id,proposal_id,reviewer,reason,disable_digest,created_at) VALUES (?,?,?,?,?,?)" [(id) (str proposal-id) (str reviewer) (str reason) digest (now)])
+          (doseq [row (sqlite/query-raw! conn "SELECT id FROM invariant_activations WHERE proposal_id = ? AND status = 'active'" [(str proposal-id)])]
+            (let [aid (:id row)]
+              (sqlite/insert-raw! conn "INSERT OR IGNORE INTO invariant_events (activation_id,event_type,payload_ref,created_at) VALUES (?,?,?,?)" [aid "disabled" digest (now)])
+              (when-let [ev (first (sqlite/query-raw! conn "SELECT id FROM invariant_events WHERE activation_id = ? AND event_type = 'disabled'" [aid]))]
+                (sqlite/insert-raw! conn "INSERT OR IGNORE INTO invariant_outbox (id,activation_id,event_id,event_type,dispatched,created_at) VALUES (?,?,?,?,0,?)" [(id) aid (:id ev) "disabled" (now)])))))
+        (static/disable-active-invariant! proposal-id)
+        (assoc d :decision/digest digest :status :disabled :idempotent? false)))))
 
 (defn recover-activations!
-  "Publish only activation rows that durably committed. Pending proposals and
-  approvals are never auto-activated. Malformed or missing CAS is reported."
+  "Publish only rows whose proposal, predicate, approval, CAS, event, and outbox
+  evidence are all durable. Any malformed or partial row is quarantined."
   [store]
   (stores store)
   (reduce (fn [out row]
             (try
               (let [p (get-proposal store (:proposal_id row))
-                    desc {:invariant/id (or (:invariant/id p) (:proposal_id row))
-                          :proposal/id (:proposal_id row) :version (:version row)
-                          :predicate (:predicate p) :registry/revision (:registry_revision row)
-                          :activation/id (:id row) :activation/committed? true}
-                    prior (some #(when (= (:activation/id %) (:id row)) %)
-                                 (static/active-invariants))]
-                (if (and prior
-                         (= (get-in prior [:predicate :predicate/digest])
-                            (get-in desc [:predicate :predicate/digest]))
-                         (= (:version prior) (:version desc)))
-                  out
-                  (do
-                    (static/publish-active-invariant! desc)
-                    (conj out {:activation/id (:id row) :status :published}))))
+                    approval (first (sqlite/query (:sqlite store) ["SELECT * FROM invariant_decisions WHERE proposal_id = ? AND decision = 'approved' AND activation_qualified = 1 ORDER BY created_at DESC, id DESC LIMIT 1" (str (:proposal_id row))]))
+                    activated (first (sqlite/query (:sqlite store) ["SELECT e.id FROM invariant_events e JOIN invariant_outbox o ON o.event_id = e.id AND o.activation_id = e.activation_id WHERE e.activation_id = ? AND e.event_type = 'activated' AND o.event_type = 'activated' AND e.payload_ref = ? LIMIT 1" (str (:id row) ) (:activation_digest row)]))
+                    pred-digest (get-in p [:predicate :predicate/digest])
+                    activation-proof (existence/verified-digest (:cas store) (:activation_digest row))]
+                (when-not (and p approval activated
+                               (= (:predicate_digest row) pred-digest)
+                               (= (:registry_revision row) (:registry/revision p))
+                               activation-proof)
+                  (throw (err/error :invariant/recovery-invalid "activation evidence is incomplete or inconsistent" {:activation/id (:id row)})))
+                (let [desc {:invariant/id (or (:invariant/id p) (:proposal_id row))
+                            :proposal/id (:proposal_id row) :version (:version row)
+                            :predicate (:predicate p) :registry/revision (:registry_revision row)
+                            :activation/id (:id row) :activation/digest (existence/digest-of activation-proof)}
+                      prior (some #(when (= (:activation/id %) (:id row)) %) (static/active-invariants))]
+                  (if (and prior (= (get-in prior [:predicate :predicate/digest]) pred-digest) (= (:version prior) (:version desc)))
+                    out
+                    (do (static/publish-active-invariant! desc ((var-get #'static/activation-proof) (:activation/digest desc)))
+                        (conj out {:activation/id (:id row) :status :published})))))
               (catch Exception e
                 (conj out {:activation/id (:id row) :status :quarantined :error (err/error-data e)}))))
           [] (sqlite/query (:sqlite store) ["SELECT a.* FROM invariant_activations a WHERE a.status = 'active' AND NOT EXISTS (SELECT 1 FROM invariant_disables d WHERE d.proposal_id = a.proposal_id) ORDER BY a.committed_at, a.id"])))

@@ -28,8 +28,8 @@
 
 (def latest-version
   "The schema version this codebase knows how to migrate to. Must equal
-  the count of migration files; this is schema version 23."
-  23)
+  the count of migration files; this is schema version 24."
+  24)
 (def ^:private version-key "schema_version")
 (def ^:private applied-key "applied_migrations")
 (def ^:private migrations-dir "migrations")

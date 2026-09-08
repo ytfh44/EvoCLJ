@@ -162,30 +162,56 @@
     (fail! :transition-invalid "invariant status transition is not admissible" {:from from :to to}))
   to)
 
+(def ^:private result-claim-keys
+  #{:gate/id :gate :status :details-ref :details/ref :model/policy
+    :deterministic? :fresh-model? :passed?})
+
+(defn- result-envelope
+  "Validate the closed, persisted gate-result envelope. Qualification is
+  derived only from this envelope, never from sibling run keys."
+  [result]
+  (when-not (map? result) (fail! :result-invalid "run result must be a map" {:value (err/sanitize result)}))
+  (when-not (every? result-claim-keys (keys result))
+    (fail! :result-invalid "run result contains an unknown key" {:value (err/sanitize result)}))
+  (let [gate (or (:gate/id result) (:gate result))
+        details (or (:details-ref result) (:details/ref result))]
+    (when-not (= :G3-deterministic-suites gate)
+      (fail! :gate-invalid "qualification requires the G3 deterministic-suites gate" {:gate gate}))
+    ;; Failing G3 results are durable evidence but never qualify.
+    (when-not (ref? details)
+      (fail! :details-ref-invalid "gate result requires a details artifact ref" {:value (err/sanitize details)}))
+    (assoc result :gate/id gate :details-ref details)))
+
 (defn run
-  "Normalize immutable evaluation evidence. Fresh-model runs never qualify."
+  "Normalize immutable evaluation evidence. Security claims are read only
+  from the closed result envelope."
   [r]
-  (let [r (cond-> r
-            (and (map? r) (contains? r :result/ref) (not (contains? r :result-ref)))
-            (assoc :result-ref (:result/ref r)))]
-    (when-not (map? r) (fail! :run-invalid "run must be a map" {:value (err/sanitize r)}))
-    (doseq [k [:run/id :proposal/id :kind :result-ref]]
-      (when-not (contains? r k) (fail! :missing-key "run is missing a required key" {:key k})))
+  (when-not (map? r) (fail! :run-invalid "run must be a map" {:value (err/sanitize r)}))
+  (doseq [k [:run/id :proposal/id :kind :result-ref :result]]
+    (when-not (contains? r k) (fail! :missing-key "run is missing a required key" {:key k})))
   (when-not (ref? (:run/id r)) (fail! :ref-invalid "run id is malformed" {:key :run/id}))
   (when-not (ref? (:proposal/id r)) (fail! :ref-invalid "proposal id is malformed" {:key :proposal/id}))
   (when-not (contains? run-kinds (:kind r)) (fail! :run-kind-invalid "unknown run kind" {:kind (:kind r)}))
   (when-not (ref? (:result-ref r)) (fail! :malformed-ref "run result ref is malformed" {:value (err/sanitize (:result-ref r))}))
-  (when-not (safe-value? r 0) (fail! :run-opaque "run contains non-EDN data" {:value (err/sanitize r)}))
-  (assoc r :activation-qualified? (and (= :recorded (:model/policy r))
-                                       (true? (:deterministic? r))
-                                       (not (true? (:fresh-model? r)))
-                                       (true? (:passed? r))))))
+  (let [result (result-envelope (:result r))]
+    (when-not (safe-value? r 0) (fail! :run-opaque "run contains non-EDN data" {:value (err/sanitize r)}))
+    (assoc r :result result :gate (:gate/id result)
+           :model/policy (:model/policy result)
+           :deterministic? (:deterministic? result)
+           :fresh-model? (:fresh-model? result)
+           :passed? (:passed? result)
+           :activation-qualified? (and (= :recorded (:model/policy result))
+                                      (true? (:deterministic? result))
+                                      (not (true? (:fresh-model? result)))
+                                      (true? (:passed? result))))))
+
+(defn- selected-run [runs kind ref]
+  (some #(when (and (= kind (:kind %))
+                    (or (= ref (:result-ref %)) (= ref (:run/digest %)))) %) runs))
 
 (defn approval
-  "Create an immutable approval decision. It requires distinct proposer and
-  reviewer, complete evidence, deterministic replay, and adversarial G3 pass.
-  Fresh-model evidence is never activation-qualified unless a signed explicit
-  exception is supplied."
+  "Create an immutable approval decision. Selected refs must be exact proposal
+  refs and exact stored run/result digests."
   [p a runs]
   (let [p (proposal p)]
     (when-not (map? a) (fail! :approval-invalid "approval must be a map" {:value (err/sanitize a)}))
@@ -193,21 +219,23 @@
       (when-not (contains? a k) (fail! :missing-key "approval is missing a required key" {:key k})))
     (when-not (ref? (:reviewer a)) (fail! :reviewer-invalid "reviewer must be a stable identity" {}))
     (when (= (str (:reviewer a)) (str (:proposer p))) (fail! :reviewer-conflict "proposer cannot approve its own invariant" {}))
-    (let [replay (filter #(= :replay (:kind %)) runs)
-          adversarial (filter #(= :adversarial (:kind %)) runs)
-          counterexample? (some #(= :counterexample (:kind %)) runs)
-          deterministic? (some #(and (:activation-qualified? %) (:passed? %)) replay)
-          adversarial? (some #(and (:activation-qualified? %) (:passed? %)
-                                   (= :adversarial (:kind %))
-                                   (= :g3 (:gate %))) adversarial)
-          signed-exception? (and (map? (:signed-exception a))
-                                 (ref? (get-in a [:signed-exception :signature]))
-                                 (true? (get-in a [:signed-exception :allow-fresh?])))]
-      (when-not (and (seq (:evidence/refs p)) deterministic? (or adversarial? signed-exception?) (not counterexample?))
-        (fail! :evidence-insufficient "approval requires passing deterministic replay and adversarial G3 evidence with no passing counterexample" {:deterministic? deterministic? :adversarial? adversarial? :counterexample? counterexample?}))
+    (let [replay-ref (:replay/ref a)
+          adversarial-ref (:adversarial/ref a)
+          replay (selected-run runs :replay replay-ref)
+          adversarial (selected-run runs :adversarial adversarial-ref)
+          counterexample? (some #(= :counterexample (:kind %)) runs)]
+      (when-not (some #{replay-ref} (:replay/refs p))
+        (fail! :replay-ref-mismatch "approval replay ref is not one of the proposal replay refs" {}))
+      (when-not (some #{adversarial-ref} (:adversarial/refs p))
+        (fail! :adversarial-ref-mismatch "approval adversarial ref is not one of the proposal adversarial refs" {}))
+      (when-not (and replay adversarial (:activation-qualified? replay) (:activation-qualified? adversarial)
+                     (= :G3-deterministic-suites (get-in replay [:result :gate/id]))
+                     (= :G3-deterministic-suites (get-in adversarial [:result :gate/id]))
+                     (not (:fresh-model? replay)) (not (:fresh-model? adversarial))
+                     (not counterexample?))
+        (fail! :evidence-insufficient "approval requires the selected passing deterministic replay and adversarial G3 evidence results" {}))
       (assoc a :proposal/id (or (:proposal/id p) (:proposal/id a))
-             :status :approved
-             :activation-qualified? (and deterministic? (or adversarial? signed-exception?))
+             :status :approved :activation-qualified? true
              :decision/digest (hash/text-digest (pr-str (dissoc a :decision/digest)))))))
 
 (defn activation-qualified?

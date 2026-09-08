@@ -245,7 +245,8 @@
   (concat (:missing-artifacts report)
           (:invalid-event-chains report)
           (let [inv (:invariant-state report)]
-            (concat (:dangling-cas-refs inv)
+            (concat (when (= :unavailable (:status inv)) [inv])
+                    (:dangling-cas-refs inv)
                     (:malformed-refs inv)
                     (:malformed inv)
                     (:partial-activations inv)))

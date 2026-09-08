@@ -25,12 +25,14 @@
   (invariant/run {:run/id id
                   :proposal/id "proposal-1"
                   :kind kind
-                  :result-ref (str "result-" id)
-                  :gate gate
-                  :model/policy model-policy
-                  :deterministic? deterministic
-                  :fresh-model? fresh
-                  :passed? passed}))
+                  :result-ref (case kind :replay ref-b :adversarial ref-c (str "result-" id))
+                  :result {:gate/id (if (= gate :g3) :G3-deterministic-suites (or gate :G3-deterministic-suites))
+                           :status (if passed :pass :fail)
+                           :details-ref (str "details-" id)
+                           :model/policy model-policy
+                           :deterministic? deterministic
+                           :fresh-model? fresh
+                           :passed? passed}}))
 
 (deftest proposal-is-closed-data-only
   (doseq [key [:fn :function :code :source :eval :eval-string]]

@@ -12,6 +12,16 @@
   #{:G0-parse :G1-schema-abi :G2-static-policy :G3-deterministic-suites})
 (def ^:private suites (atom []))
 (def ^:private active (atom {}))
+(def ^:private activation-secret (Object.))
+(deftype DurableActivationProof [activation-digest secret])
+
+(defn- activation-proof [digest]
+  (DurableActivationProof. digest activation-secret))
+
+(defn- valid-activation-proof? [proof digest]
+  (and (instance? DurableActivationProof proof)
+       (identical? activation-secret (.-secret ^DurableActivationProof proof))
+       (= digest (.-activation-digest ^DurableActivationProof proof))))
 
 (defn- check-suite-shape! [suite]
   (when-not (map? suite)
@@ -30,6 +40,8 @@
 
 (defn register-suite! [suite]
   (check-suite-shape! suite)
+  (when-not (and (integer? (:suite/version suite)) (pos? (:suite/version suite)))
+    (throw (err/error :eval/suite-invalid "suite requires a positive immutable :suite/version" {:reason :missing-version :suite/id (:suite/id suite)})))
   (when (some #(= (:suite/id suite) (:suite/id %)) @suites)
     (throw (err/error :eval/suite-invalid "a suite with this id is already registered" {:reason :duplicate-id :suite/id (:suite/id suite)})))
   (swap! suites conj suite)
@@ -40,7 +52,8 @@
 (defn registry-revision
   "Deterministic digest of the kernel rule registry."
   []
-  (hash/text-digest (pr-str (mapv #(select-keys % [:suite/id :suite/type]) @suites))))
+  (hash/text-digest
+   (pr-str (mapv #(select-keys % [:suite/id :suite/type :suite/version]) @suites))))
 
 (defn clear-suites! []
   (reset! suites [])
@@ -54,37 +67,42 @@
   [(:invariant/id d) (:version d)])
 
 (defn publish-active-invariant!
-  "Kernel-private publication boundary. The durable activation transaction
-  must have committed first. This function accepts only a closed descriptor,
-  never source code or a function, and never mutates the suite registry."
-  [descriptor]
-  (when-not (map? descriptor)
-    (throw (err/error :invariant/activation-invalid "activation descriptor must be a map" {:reason :not-a-map})))
-  (when-not (true? (:activation/committed? descriptor))
-    (throw (err/error :invariant/activation-invalid "activation is not durably committed" {:reason :not-committed})))
-  (let [p (invariant/validate-predicate! (:predicate descriptor))
-        id (:invariant/id descriptor)
-        version (:version descriptor)
-        revision (:registry/revision descriptor)]
-    (when-not (and (or (string? id) (keyword? id)) (pos-int? version))
-      (throw (err/error :invariant/activation-invalid "activation descriptor identity is malformed" {:reason :identity-invalid})))
-    (when-not (= revision (registry-revision))
-      (throw (err/error :invariant/activation-invalid "kernel rule registry revision is stale" {:reason :registry-revision-stale :expected (registry-revision) :actual revision})))
-    (when (and (= :kernel-rule (:predicate/type p))
-               (contains? protected-gates (:rule/id p)))
-      (throw (err/error :invariant/activation-invalid "generated invariants cannot mutate G0-G3" {:reason :protected-gate :rule/id (:rule/id p)})))
-    (when (and (= :kernel-rule (:predicate/type p)) (nil? (kernel-suite (:rule/id p))))
-      (throw (err/error :invariant/activation-invalid "kernel rule is not registered" {:reason :unknown-kernel-rule :rule/id (:rule/id p)})))
-    (let [k (descriptor-key descriptor)
-          prior (get @active k)]
-      (let [prior-digest (get-in prior [:predicate :predicate/digest])]
-        (when (and prior (not= prior-digest (:predicate/digest p)))
-          (throw (err/error :invariant/activation-conflict "activation version already names another predicate"
-                            {:reason :version-conflict :key k
-                             :prior-digest prior-digest
-                             :predicate-digest (:predicate/digest p)}))))
-      (swap! active assoc k (assoc descriptor :predicate p :published? true))
-      (get @active k))))
+  "Publish only with an opaque proof minted by the durable activation path.
+  A plain EDN descriptor, including :activation/committed?, can never cross
+  this boundary."
+  ([descriptor]
+   (throw (err/error :invariant/activation-invalid
+                     "activation proof is required; committed? is not authority"
+                     {:reason :proof-missing})))
+  ([descriptor proof]
+   (when-not (map? descriptor)
+     (throw (err/error :invariant/activation-invalid "activation descriptor must be a map" {:reason :not-a-map})))
+   (let [activation-digest (:activation/digest descriptor)]
+     (when-not (valid-activation-proof? proof activation-digest)
+       (throw (err/error :invariant/activation-invalid "activation requires a sealed durable proof" {:reason :proof-invalid})))
+     (let [p (invariant/validate-predicate! (:predicate descriptor))
+           id (:invariant/id descriptor)
+           version (:version descriptor)
+           revision (:registry/revision descriptor)]
+       (when-not (and (or (string? id) (keyword? id)) (pos-int? version))
+         (throw (err/error :invariant/activation-invalid "activation descriptor identity is malformed" {:reason :identity-invalid})))
+       (when-not (= revision (registry-revision))
+         (throw (err/error :invariant/activation-invalid "kernel rule registry revision is stale" {:reason :registry-revision-stale :expected (registry-revision) :actual revision})))
+       (when (and (= :kernel-rule (:predicate/type p))
+                  (contains? protected-gates (:rule/id p)))
+         (throw (err/error :invariant/activation-invalid "generated invariants cannot mutate G0-G3" {:reason :protected-gate :rule/id (:rule/id p)})))
+       (when (and (= :kernel-rule (:predicate/type p)) (nil? (kernel-suite (:rule/id p))))
+         (throw (err/error :invariant/activation-invalid "kernel rule is not registered" {:reason :unknown-kernel-rule :rule/id (:rule/id p)})))
+       (let [k (descriptor-key descriptor)
+             prior (get @active k)
+             prior-digest (get-in prior [:predicate :predicate/digest])]
+         (when (and prior (not= prior-digest (:predicate/digest p)))
+           (throw (err/error :invariant/activation-conflict "activation version already names another predicate"
+                             {:reason :version-conflict :key k
+                              :prior-digest prior-digest
+                              :predicate-digest (:predicate/digest p)})))
+         (swap! active assoc k (assoc descriptor :predicate p :published? true))
+         (get @active k))))))
 
 (defn active-invariants []
   (->> @active vals (sort-by (juxt :invariant/id :version)) vec))
