@@ -16,8 +16,11 @@
             [evoclj.evolution.core :as evolution-core]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.load :as load]
+            [evoclj.genome.path :as genome-path]
             [evoclj.kernel.system :as kernel]
             [evoclj.store.artifact :as artifact]
+            [evoclj.store.cas :as cas]
+            [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite]
             [integrant.core :as ig])
@@ -159,6 +162,14 @@
   (doseq [p @temp-paths] (delete-tree! (Paths/get p (make-array String 0))))
   (reset! temp-paths []))
 
+(defn- genome-index-body
+  "Return the canonical CAS body for a loaded Genome fixture."
+  [loaded]
+  (apply str
+         (map (fn [[path {:keys [digest]}]]
+                (str path "\u0000" digest "\n"))
+              (sort-by first genome-path/bytewise-compare (:files loaded)))))
+
 (def ^:private servers (atom []))
 (use-fixtures :each
   (fn [f]
@@ -173,12 +184,20 @@
   "Migrate the db and seed a generation-1 row whose genome_id is the
   real route-a fixture address, plus one completed session + episode so
   the evidence pack is non-empty. Returns {:db :genome-id}."
-  [db episode-id]
+  [db state-dir episode-id]
   (migrate/migrate! db)
   (let [loaded (load/load-genome (route-a-root))
         genome-id (:genome/id loaded)
+        genome-body (.getBytes (genome-index-body loaded) StandardCharsets/UTF_8)
+        cas-store (cas/->cas (str state-dir "/cas"))
+        stored-genome-id (:artifact/id (cas/put-bytes! cas-store genome-body {}))
         resolution-id (str "sha256:" (apply str (repeat 64 "f")))]
-    (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
+    (when-not (= genome-id stored-genome-id)
+      (throw (ex-info "fixture Genome body does not match its identity"
+                      {:genome/id genome-id
+                       :stored-artifact-id stored-genome-id})))
+    (artifact/ensure-artifact! db genome-id "application/octet-stream"
+                                (alength genome-body))
     (artifact/ensure-artifact! db resolution-id "application/edn" 0)
     (artifact/ensure-artifact! db (evolution-phenotype-id) "application/octet-stream" 0)
     (artifact/ensure-genome! db genome-id)
@@ -200,34 +219,34 @@
                      :phenotype_id (evolution-phenotype-id)
                      :state "completed"
                      :created_at "2025-01-02T00:00:00Z"})
-      (doseq [[id type cause]
-              [[1 ":session/created" nil]
-               [2 ":session/completed" 1]]]
-        (jdbc/insert! conn :events
-                      {:id id
+      (let [created (event/append-event!
+                     db {:session/id episode-id
+                         :generation/id generation-id
+                         :phenotype/id (evolution-phenotype-id)
+                         :event/type :session/created
+                         :prev/event-id nil
+                         :payload-ref nil
+                         :metadata {}})
+            completed (event/append-event!
+                       db {:session/id episode-id
+                           :generation/id generation-id
+                           :phenotype/id (evolution-phenotype-id)
+                           :event/type :session/completed
+                           :prev/event-id (:event/id created)
+                           :payload-ref nil
+                           :metadata {}})]
+        (jdbc/insert! conn :episodes
+                      {:id (str (random-uuid))
                        :session_id (str episode-id)
-                       :event_seq id
                        :generation_id generation-id
-                       :phenotype_id (evolution-phenotype-id)
-                       :event_type type
-                       :cause_event_id cause
-                       :payload_ref nil
-                       :payload "{}"
-                       :prev_hash "fixture"
-                       :event_hash (str "fixture-" id)
-                       :created_at "2025-01-02T00:00:00Z"}))
-      (jdbc/insert! conn :episodes
-                    {:id (str (random-uuid))
-                     :session_id (str episode-id)
-                     :generation_id generation-id
-                     :genome_id genome-id
-                     :resolution_id resolution-id
-                     :task_ref (str "sha256:" (apply str (repeat 64 "0")))
-                     :first_event_id 1
-                     :last_event_id 2
-                     :outcome (pr-str {:status :completed})
-                     :usage (pr-str {})
-                     :created_at "2025-01-02T00:00:00Z"}))
+                       :genome_id genome-id
+                       :resolution_id resolution-id
+                       :task_ref (str "sha256:" (apply str (repeat 64 "0")))
+                       :first_event_id (:event/id created)
+                       :last_event_id (:event/id completed)
+                       :outcome (pr-str {:status :completed})
+                       :usage (pr-str {})
+                       :created_at "2025-01-02T00:00:00Z"})))
     {:db db :genome-id genome-id}))
 
 (defn- model-idx-entry
@@ -315,7 +334,7 @@
         state-dir (ensure-dirs! (temp-dir "evoclj-llm-evo-"))
         db-path (str state-dir "/db/evoclj.db")
         db (sqlite/spec db-path)
-        {:keys [genome-id]} (seed-store! db episode-id)
+        {:keys [genome-id]} (seed-store! db state-dir episode-id)
         lease (model-lease)
         system (kernel/init (host-config state-dir base-url lease))
         result (evolution-core/propose-candidates!
