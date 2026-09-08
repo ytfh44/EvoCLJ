@@ -264,3 +264,44 @@
           (is (= 0 @promoted))   ; promote! must NOT be called
           (is (= "generation-1" (:generation/id summary)))
           (is (= 0.8 (:utility summary))))))))
+
+(deftest test-run-frontier-bounded-deterministic-evidence
+  (testing "the optional frontier mode is deterministic, bounded, and retains rejected branches"
+    (let [evaluated (atom [])
+          scores {"a" 0.9 "b" 0.8 "c" 0.7
+                  "a-child" 0.6 "b-child" 0.5}
+          result (scheduler/run-frontier!
+                  [{:id "b" :genome/id "digest-b"}
+                   {:id "a" :genome/id "digest-a"}
+                   {:id "c" :genome/id "digest-c"}]
+                  {:k 2
+                   :frontier 2
+                   :eval-budget 4
+                   :seed 17
+                   :evaluate-fn (fn [{:keys [id]}]
+                                  (swap! evaluated conj id)
+                                  {:score (get scores id 0.0)})
+                   :expand-fn (fn [{:keys [id]}]
+                                (when (contains? #{"a" "b"} id)
+                                  [{:id (str id "-child")
+                                    :genome/id (str "digest-" id "-child")}]))})]
+      (is (= ["a" "b" "c" "a-child"] @evaluated))
+      (is (= 4 (:evaluated result)))
+      (is (= 17 (:seed result)))
+      (is (= ["a-child"] (mapv :id (:frontier result))))
+      (is (some #(= "c" (:id %)) (:evidence result)))
+      (is (some #(= "b-child" (:id %)) (mapcat :unselected (:levels result))))
+      (is (= result
+             (scheduler/run-frontier!
+              [{:id "c" :genome/id "digest-c"}
+               {:id "a" :genome/id "digest-a"}
+               {:id "b" :genome/id "digest-b"}]
+              {:k 2
+               :frontier 2
+               :eval-budget 4
+               :seed 17
+               :evaluate-fn (fn [{:keys [id]}] {:score (get scores id 0.0)})
+               :expand-fn (fn [{:keys [id]}]
+                            (when (contains? #{"a" "b"} id)
+                              [{:id (str id "-child")
+                                :genome/id (str "digest-" id "-child")}]))}))))))

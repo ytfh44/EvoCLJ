@@ -204,12 +204,19 @@
        :parent-edge-key (parent-edge-key (:parents plan) digest)})))
 
 (defn deterministic-order
-  "Stable candidate order: score descending, then digest/id bytewise." 
+  "Stable candidate order: score descending, then digest, genome/id, and id bytewise."
   [candidates score-fn]
   (sort-by (fn [candidate]
              [(- (double (or (score-fn candidate) 0.0)))
-              (bytes-key (or (:genome/id candidate) (:candidate/genome-id candidate)
-                             (:candidate/id candidate) (:id candidate)))]) candidates))
+              (bytes-key (or (:genome/digest candidate)
+                             (:candidate/digest candidate)
+                             (:digest candidate)
+                             (:genome/id candidate)
+                             (:candidate/genome-id candidate)
+                             (:candidate/id candidate)
+                             (:id candidate)
+                             ""))
+              (bytes-key (or (:candidate/id candidate) (:id candidate) ""))]) candidates))
 
 (defn bounded-frontier
   "Select at most K deterministic candidates from a frontier under an eval budget.
