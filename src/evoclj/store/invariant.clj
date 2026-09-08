@@ -140,7 +140,7 @@
     (when-not p (throw (err/error :invariant/proposal-missing "proposal does not exist" {:proposal/id proposal-id})))
     (if (= :approved decision)
       (invariant/approval p a runs)
-      (do (when (= reviewer (:proposer p))
+      (do (when (= (str reviewer) (str (:proposer p)))
             (throw (err/error :invariant/reviewer-conflict "proposer cannot reject/approve its own proposal" {})))
           (assoc a :proposal/id (str proposal-id) :status :rejected :activation-qualified? false)))))
 

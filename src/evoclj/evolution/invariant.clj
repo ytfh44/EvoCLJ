@@ -191,7 +191,7 @@
     (doseq [k [:reviewer :replay/ref :adversarial/ref]]
       (when-not (contains? a k) (fail! :missing-key "approval is missing a required key" {:key k})))
     (when-not (ref? (:reviewer a)) (fail! :reviewer-invalid "reviewer must be a stable identity" {}))
-    (when (= (:reviewer a) (:proposer p)) (fail! :reviewer-conflict "proposer cannot approve its own invariant" {}))
+    (when (= (str (:reviewer a)) (str (:proposer p))) (fail! :reviewer-conflict "proposer cannot approve its own invariant" {}))
     (let [replay (filter #(= :replay (:kind %)) runs)
           adversarial (filter #(= :adversarial (:kind %)) runs)
           counterexample? (some #(= :counterexample (:kind %)) runs)
