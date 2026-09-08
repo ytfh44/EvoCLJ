@@ -330,13 +330,20 @@
         (ig/halt! system)
         (throw t)))))
 (defn- recover-invariants!
-  "Host-startup step 3: verify and publish durable invariant activations.
-  Only fully committed activations with matching proposal, predicate, approval,
-  CAS payload, event, and outbox rows are published. Partial rows are quarantined."
+  "Host-startup step 3: strict integrity scan, then durable activation recovery."
   [system]
   (let [sqlite (:store/sqlite system)
-        cas    (:store/cas system)]
-    (recovery/recover-generated-invariants! sqlite cas)
+        cas    (:store/cas system)
+        scan   (recovery/startup-integrity-scan sqlite cas)
+        report (recovery/recover-generated-invariants! sqlite cas)]
+    (when (some #(= :quarantined (:status %)) report)
+      (throw (err/error :store/integrity-failure
+                        "startup recovery quarantined an activation; refusing to start"
+                        {:startup scan :recovery report})))
+    (when-not (:ok? scan)
+      (throw (err/error :store/integrity-failure
+                        "startup integrity scan did not pass"
+                        {:startup scan :recovery report})))
     system))
 
 (defn halt!

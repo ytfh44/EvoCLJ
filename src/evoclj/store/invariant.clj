@@ -21,7 +21,9 @@
 
 (defn- now [] (str (Instant/now)))
 (defn- id [] (str (UUID/randomUUID)))
-(declare verify-durable-activation! get-proposal current-state list-runs)
+(declare verify-durable-activation! get-proposal current-state list-runs
+         safe-edn-data? read-edn decode-artifact! verify-decision-row!
+         verify-disable-row! verify-event-outbox! verify-activation! verify-target! verify-run-row!)
 
 (defn- stores [store]
   (when-not (map? store) (throw (err/error :invariant/store-invalid "store must be {:sqlite ... :cas ...}" {:reason :not-a-map})))
@@ -46,28 +48,46 @@
         digest (existence/digest-of vd)]
     (cas/get-bytes (verifying-cas store) digest)
     digest))
+(defn- canonical-digest? [x]
+  (and (string? x) (re-matches #"^sha256:[0-9a-f]{64}$" x)))
+
+(defn- decode-artifact!
+  [store ref context]
+  (when-not (canonical-digest? ref)
+    (throw (err/error :invariant/artifact-invalid
+                      "referenced artifact id is not canonical"
+                      (assoc context :artifact/id ref))))
+  (let [bytes (cas/get-bytes (verifying-cas store) ref)
+        value (read-edn (String. bytes StandardCharsets/UTF_8))]
+    (when-not (and (some? value) (safe-edn-data? value 0))
+      (throw (err/error :invariant/artifact-invalid
+                        "referenced artifact is not closed EDN"
+                        (assoc context :artifact/id ref))))
+    value))
 
 (defn- verify-durable-activation!
   [store descriptor _proof]
   (let [aid (:activation/id descriptor)
         digest (:activation/digest descriptor)
-        proposal-id (:proposal/id descriptor)
-        row (first (sqlite/query (:sqlite store) ["SELECT a.* FROM invariant_activations a WHERE a.id = ? AND a.status = 'active' AND NOT EXISTS (SELECT 1 FROM invariant_events q WHERE q.activation_id = a.id AND q.event_type = 'quarantined')" (str aid)]))
-        p (get-proposal store proposal-id)
-        approval (when row (first (sqlite/query (:sqlite store) ["SELECT * FROM invariant_decisions WHERE id = ? AND proposal_id = ? AND decision = 'approved' AND activation_qualified = 1" (:decision_id row) (str proposal-id)])))
-        event (when row (first (sqlite/query (:sqlite store) ["SELECT e.id FROM invariant_events e JOIN invariant_outbox o ON o.event_id = e.id AND o.activation_id = e.activation_id WHERE e.activation_id = ? AND e.event_type = 'activated' AND o.event_type = 'activated' AND e.payload_ref = ?" (str aid) digest])))]
-    (when-not (and row p approval event
-                   (= (str (:proposal_id row)) (str proposal-id))
+        row (first (sqlite/query (:sqlite store)
+                                 ["SELECT * FROM invariant_activations WHERE id = ? AND status = 'active'"
+                                  (str aid)]))]
+    (when-not row
+      (throw (err/error :invariant/activation-invalid
+                        "active activation row is missing"
+                        {:activation/id aid})))
+    (verify-activation! store row)
+    (when-not (and (= (str (:proposal_id row)) (str (:proposal/id descriptor)))
                    (= (:version row) (:version descriptor))
                    (= (:predicate_digest row) (:predicate/digest (:predicate descriptor)))
-                   (= (:predicate_digest row) (:predicate/digest (:predicate p)))
                    (= (:registry_revision row) (:registry/revision descriptor))
-                   (= (:registry_revision row) (:registry/revision p))
-                   (= (:registry_revision row) (static/registry-revision))
                    (= (:activation_digest row) digest)
-                   (nil? (first (sqlite/query (:sqlite store) ["SELECT id FROM invariant_disables WHERE proposal_id = ?" (str proposal-id)]))))
-      (throw (err/error :invariant/activation-invalid "durable activation facts do not match publication" {:reason :durable-state-mismatch :activation/id aid})))
-    (cas/get-bytes (verifying-cas store) digest)
+                   (nil? (first (sqlite/query (:sqlite store)
+                                              ["SELECT id FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'"
+                                               (str aid)]))))
+      (throw (err/error :invariant/activation-invalid
+                        "durable activation facts do not match publication"
+                        {:activation/id aid})))
     true))
 
 (defn- json [x] (pr-str x))
@@ -83,6 +103,48 @@
       (map? x) (and (every? #(or (keyword? %) (string? %)) (keys x))
                  (every? #(safe-edn-data? % (inc depth)) (vals x)))
       :else false)))
+(defn- verify-proposal-row! [store r]
+  (let [proposal (decode-artifact! store (:proposal_digest r) {:table :invariant_proposals :column :proposal_digest :proposal/id (:id r)})
+        predicate (decode-artifact! store (:predicate_digest r) {:table :invariant_proposals :column :predicate_digest :proposal/id (:id r)})
+        predicate-json (read-edn (:predicate_json r))
+        evidence-refs (read-edn (:evidence_refs r))
+        replay-refs (read-edn (:replay_refs r))
+        adversarial-refs (read-edn (:adversarial_refs r))]
+    (when-not (and (map? proposal) (map? predicate)
+                   (every? #(and (vector? %) (every? canonical-digest? %))
+                           [evidence-refs replay-refs adversarial-refs]))
+      (throw (err/error :invariant/proposal-invalid
+                        "proposal or reference columns are malformed"
+                        {:proposal/id (:id r)})))
+    (doseq [[column refs] [[:evidence_refs evidence-refs]
+                           [:replay_refs replay-refs]
+                           [:adversarial_refs adversarial-refs]]
+            ref refs]
+      (decode-artifact! store ref {:table :invariant_proposals :column column :proposal/id (:id r)}))
+    (when-not (invariant/validate-predicate! predicate-json)
+      (throw (err/error :invariant/proposal-invalid
+                        "proposal predicate is invalid"
+                        {:proposal/id (:id r)})))
+    (when-not (and (= (:proposal/id proposal) (:id r))
+                   (= (:proposer proposal) (:proposer r))
+                   (= (:reviewer proposal) (:reviewer r))
+                   (= (:scope proposal) (keyword (:scope r)))
+                   (= (:risk proposal) (keyword (:risk r)))
+                   (= (:version proposal) (:version r))
+                   (= (:registry/revision proposal) (:registry_revision r))
+                   (= (:predicate proposal) predicate-json)
+                   (= (:evidence/refs proposal) evidence-refs)
+                   (= (:replay/refs proposal) replay-refs)
+                   (= (:adversarial/refs proposal) adversarial-refs)
+                   (= (:predicate/digest proposal) (:predicate_digest r))
+                   (= (:predicate/digest predicate-json) (:predicate_digest r))
+                   (= (dissoc predicate-json :predicate/digest) predicate)
+                   (or (nil? (:proposal_json r))
+                       (= proposal (read-edn (:proposal_json r)))))
+      (throw (err/error :invariant/proposal-invalid
+                        "proposal and predicate CAS artifacts do not match durable SQL row"
+                        {:proposal/id (:id r)})))
+    true))
 (defn- row->proposal [store r]
   (when r
     (let [p (invariant/proposal
@@ -93,24 +155,112 @@
               :risk (keyword (:risk r))
               :version (:version r)
               :registry/revision (:registry_revision r)
-              :predicate (or (read-edn (:predicate_json r)) {})
-              :evidence/refs (or (read-edn (:evidence_refs r)) [])
-              :replay/refs (or (read-edn (:replay_refs r)) [])
-              :adversarial/refs (or (read-edn (:adversarial_refs r)) [])})]
+              :predicate (read-edn (:predicate_json r))
+              :evidence/refs (read-edn (:evidence_refs r))
+              :replay/refs (read-edn (:replay_refs r))
+              :adversarial/refs (read-edn (:adversarial_refs r))})]
       (assoc p :proposal/id (:id r)
                :proposal/digest (:proposal_digest r)
                :predicate/digest (:predicate_digest r)
                :status (or (current-state store (:id r)) :proposed)))))
+
 (defn get-proposal [store proposal-id]
   (stores store)
   (when-let [r (first (sqlite/query (:sqlite store) ["SELECT * FROM invariant_proposals WHERE id = ?" (str proposal-id)]))]
-    (let [v (verifying-cas store)]
-      (doseq [k [:predicate_digest :proposal_digest]]
-        (cas/get-bytes v (get r k)))
-      (doseq [k [:evidence_refs :replay_refs :adversarial_refs]]
-        (doseq [ref (or (read-edn (get r k)) [])]
-          (cas/get-bytes v ref)))
-      (row->proposal store r))))
+    (verify-proposal-row! store r)
+    (doseq [d (sqlite/query (:sqlite store) ["SELECT * FROM invariant_decisions WHERE proposal_id = ?" (str proposal-id)])]
+      (verify-decision-row! store d))
+    (doseq [run (sqlite/query (:sqlite store) ["SELECT * FROM invariant_runs WHERE proposal_id = ?" (str proposal-id)])]
+      (verify-run-row! store run))
+    (row->proposal store r)))
+(defn- verify-decision-row! [store row]
+  (let [decoded (decode-artifact! store (:decision_digest row)
+                                  {:table :invariant_decisions :column :decision_digest :decision/id (:id row)})
+        expected-status (keyword (:decision row))]
+    (when-not (and (= (str (:proposal/id decoded)) (str (:proposal_id row)))
+                   (= (str (:reviewer decoded)) (str (:reviewer row)))
+                   (= (:status decoded) expected-status)
+                   (= (boolean (:activation-qualified? decoded)) (= 1 (:activation_qualified row)))
+                   (= (some-> (:reason decoded) str) (some-> (:reason row) str)))
+      (throw (err/error :invariant/decision-invalid
+                        "decision CAS artifact does not match durable SQL row"
+                        {:decision/id (:id row)})))
+    decoded))
+
+(defn- verify-event-outbox! [store activation-id event-type payload-ref]
+  (let [events (sqlite/query (:sqlite store)
+                             ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = ?"
+                              (str activation-id) (name event-type)])
+        event (first events)
+        outbox (when event
+                 (sqlite/query (:sqlite store)
+                               ["SELECT * FROM invariant_outbox WHERE activation_id = ? AND event_id = ? AND event_type = ?"
+                                (str activation-id) (:id event) (name event-type)]))]
+    (when-not (and (= 1 (count events)) (= 1 (count outbox))
+                   (= (str payload-ref) (str (:payload_ref event)))
+                   (= (str activation-id) (str (:activation_id (first outbox))))
+                   (= (:id event) (:event_id (first outbox)))
+                   (= (name event-type) (:event_type (first outbox))))
+      (throw (err/error :invariant/event-invalid
+                        "event and outbox rows do not match durable activation evidence"
+                        {:activation/id activation-id :event/type event-type})))
+    event))
+
+(defn verify-disable-row! [store row]
+  (let [decoded (decode-artifact! store (:disable_digest row)
+                                  {:table :invariant_disables :column :disable_digest :proposal/id (:proposal_id row)})
+        activations (sqlite/query (:sqlite store)
+                                  ["SELECT * FROM invariant_activations WHERE proposal_id = ? AND status = 'active'"
+                                   (str (:proposal_id row))])]
+    (when-not (and (= (str (:proposal/id decoded)) (str (:proposal_id row)))
+                   (= (str (:reviewer decoded)) (str (:reviewer row)))
+                   (= (str (:reason decoded)) (str (:reason row)))
+                   (= :disabled (:status decoded)))
+      (throw (err/error :invariant/disable-invalid
+                        "disable CAS artifact does not match durable SQL row"
+                        {:proposal/id (:proposal_id row)})))
+    (when-not (= 1 (count activations))
+      (throw (err/error :invariant/disable-invalid
+                        "disable row does not have exactly one current activation"
+                        {:proposal/id (:proposal_id row)})))
+    (verify-event-outbox! store (:id (first activations)) :disabled (:disable_digest row))
+    decoded))
+
+(defn verify-activation! [store row]
+  "Verify one activation row and all of its durable evidence bindings."
+  (let [p (get-proposal store (:proposal_id row))
+        decision (first (sqlite/query (:sqlite store)
+                                      ["SELECT * FROM invariant_decisions WHERE id = ? AND proposal_id = ?"
+                                       (:decision_id row) (str (:proposal_id row))]))
+        activation (decode-artifact! store (:activation_digest row)
+                                     {:table :invariant_activations :column :activation_digest :activation/id (:id row)})]
+    (when-not (and p decision
+                   (= (:status p) (current-state store (:proposal_id row)))
+                   (= 1 (:activation_qualified decision))
+                   (= (:proposal_id row) (:proposal/id p))
+                   (= (:version row) (:version p))
+                   (= (:predicate_digest row) (:predicate/digest (:predicate p)))
+                   (= (:registry_revision row) (:registry/revision p))
+                   (= (:proposal/id activation) (:proposal_id row))
+                   (= (:version activation) (:version row))
+                   (= (:predicate activation) (:predicate p))
+                   (= (:registry/revision activation) (:registry_revision row))
+                   (= (:decision/id activation) (:decision_id row)))
+      (throw (err/error :invariant/activation-invalid
+                        "activation CAS artifact does not match durable SQL row"
+                        {:activation/id (:id row)})))
+    (verify-decision-row! store decision)
+    (verify-event-outbox! store (:id row) :activated (:activation_digest row))
+    (when-let [disable (first (sqlite/query (:sqlite store)
+                                            ["SELECT * FROM invariant_disables WHERE proposal_id = ?"
+                                             (str (:proposal_id row))]))]
+      (verify-disable-row! store disable)
+      (verify-event-outbox! store (:id row) :disabled (:disable_digest disable)))
+    (when-let [_q (first (sqlite/query (:sqlite store)
+                                       ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'"
+                                        (str (:id row))]))]
+      (verify-event-outbox! store (:id row) :quarantined (:activation_digest row)))
+    true))
 (defn list-proposals [store]
   (stores store)
   (mapv (fn [r]
@@ -156,22 +306,21 @@
              :kind (keyword (:kind r)) :result-ref (:result_ref r)
              :run/digest (:run_digest r)))))
 (defn- verify-run-row! [store r]
-  (let [v (verifying-cas store)
-        result-bytes (cas/get-bytes v (:result_ref r))
-        run-bytes (cas/get-bytes v (:run_digest r))
-        result-value (read-edn (String. result-bytes StandardCharsets/UTF_8))
-        decoded (read-edn (String. run-bytes StandardCharsets/UTF_8))]
-    (when-not (and (map? result-value) (safe-edn-data? result-value 0))
-      (throw (err/error :invariant/result-invalid "persisted result artifact is not closed EDN" {:run/id (:id r)})))
-    (when-not (and (map? decoded) (safe-edn-data? decoded 0))
-      (throw (err/error :invariant/run-invalid "persisted run digest is not closed EDN" {:run/id (:id r)})))
+  (let [result-value (decode-artifact! store (:result_ref r) {:table :invariant_runs :column :result_ref :run/id (:id r)})
+        decoded (decode-artifact! store (:run_digest r) {:table :invariant_runs :column :run_digest :run/id (:id r)})]
+    (when-not (and (map? result-value) (map? decoded))
+      (throw (err/error :invariant/run-invalid "run and result artifacts must be maps" {:run/id (:id r)})))
     (let [normalized (invariant/run decoded)
+          result (verify-target! store (:result normalized))
+          detail-refs (distinct (remove nil? [(:details-ref result) (:details/ref result)]))
           sql-values {:run/id (:id r) :proposal/id (:proposal_id r) :kind (keyword (:kind r))
                       :result-ref (:result_ref r) :gate (some-> (:gate r) keyword)
                       :model/policy (some-> (:model_policy r) keyword)
                       :deterministic? (= 1 (:deterministic r)) :fresh-model? (= 1 (:fresh_model r))
                       :passed? (= 1 (:passed r))}]
-      (when-not (= result-value (:result normalized))
+      (doseq [ref detail-refs]
+        (decode-artifact! store ref {:table :invariant_runs :column :details_ref :run/id (:id r)}))
+      (when-not (= result-value result)
         (throw (err/error :invariant/run-invalid "run digest result does not match result artifact" {:run/id (:id r)})))
       (when-not (= (json decoded) (:run_json r))
         (throw (err/error :invariant/run-invalid "run_json does not match run digest" {:run/id (:id r)})))
@@ -349,8 +498,11 @@
           (assoc d :decision/id did :decision/digest digest))))))
 
 (defn- latest-approval [store proposal-id]
-  (first (sqlite/query (:sqlite store)
-                       ["SELECT * FROM invariant_decisions WHERE proposal_id = ? AND decision = 'approved' ORDER BY created_at DESC, id DESC LIMIT 1" (str proposal-id)])))
+  (when-let [row (first (sqlite/query (:sqlite store)
+                                      ["SELECT * FROM invariant_decisions WHERE proposal_id = ? AND decision = 'approved' ORDER BY created_at DESC, id DESC LIMIT 1"
+                                       (str proposal-id)]))]
+    (verify-decision-row! store row)
+    row))
 
 (defn activate!
   "Commit an approved invariant and its event/outbox atomically, then publish
@@ -366,7 +518,11 @@
      (when (= (str reviewer) (:proposer p)) (throw (err/error :invariant/reviewer-conflict "proposer cannot activate its own invariant" {})))
      (when-not (= 1 (:activation_qualified d)) (throw (err/error :invariant/not-qualified "activation requires deterministic replay and adversarial G3 evidence" {})))
      (let [aid (str (id))
-           activation-digest (cas-put! store {:proposal/id proposal-id :version (:version p) :predicate (:predicate p) :reviewer reviewer} "application/edn")
+           activation-digest (cas-put! store {:activation/id aid :proposal/id proposal-id
+                                              :decision/id (:id d) :version (:version p)
+                                              :predicate (:predicate p)
+                                              :registry/revision (:registry/revision p)
+                                              :reviewer reviewer} "application/edn")
            desc {:invariant/id (or (:invariant/id p) proposal-id) :proposal/id proposal-id :version (:version p)
                  :predicate (:predicate p) :registry/revision (:registry/revision p)
                  :decision/id (:id d) :activation/id aid :activation/digest activation-digest :activation/committed? true}]
@@ -402,43 +558,106 @@
     (when-not p (throw (err/error :invariant/proposal-missing "proposal does not exist" {})))
     (when (= (str reviewer) (str (:proposer p)))
       (throw (err/error :invariant/reviewer-conflict "proposer cannot disable its own proposal" {})))
-    (let [d (invariant/disable proposal-id reviewer reason)
-          digest (cas-put! store d "application/edn")
-          result (sqlite/with-write-tx [conn (:sqlite store)]
-                   (if-let [old (first (sqlite/query-raw! conn "SELECT * FROM invariant_disables WHERE proposal_id = ? LIMIT 1" [(str proposal-id)]))]
-                     (if (= digest (:disable_digest old))
-                       {:row old :idempotent? true}
-                       (throw (err/error :invariant/idempotency-conflict "proposal is already disabled with different evidence" {:proposal/id proposal-id})))
-                     (let [disable-id (id)]
-                       (sqlite/insert-raw! conn "INSERT INTO invariant_disables (id,proposal_id,reviewer,reason,disable_digest,created_at) VALUES (?,?,?,?,?,?)" [disable-id (str proposal-id) (str reviewer) (str reason) digest (now)])
-                       (doseq [row (sqlite/query-raw! conn "SELECT id FROM invariant_activations WHERE proposal_id = ? AND status = 'active'" [(str proposal-id)])]
-                         (let [aid (:id row)]
-                           (sqlite/insert-raw! conn "INSERT OR IGNORE INTO invariant_events (activation_id,event_type,payload_ref,created_at) VALUES (?,?,?,?)" [aid "disabled" digest (now)])
-                           (when-let [ev (first (sqlite/query-raw! conn "SELECT id FROM invariant_events WHERE activation_id = ? AND event_type = 'disabled'" [aid]))]
-                             (sqlite/insert-raw! conn "INSERT OR IGNORE INTO invariant_outbox (id,activation_id,event_id,event_type,dispatched,created_at) VALUES (?,?,?,?,0,?)" [(id) aid (:id ev) "disabled" (now)]))))
-                       {:id disable-id :idempotent? false}))) ]
-      (static/disable-active-invariant! proposal-id)
-      (assoc d :decision/digest (or (:disable_digest (:row result)) digest)
-             :status :disabled :idempotent? (:idempotent? result)))))
+    (let [state (:status p)
+           existing (first (sqlite/query (:sqlite store)
+                                         ["SELECT * FROM invariant_disables WHERE proposal_id = ? LIMIT 1"
+                                         (str proposal-id)]))
+          d (when (contains? #{:active :disabled} state)
+              (invariant/disable proposal-id reviewer reason))
+          digest (when d (cas-put! store d "application/edn"))]
+      (cond
+        (= :disabled state)
+        (do
+          (when-not existing
+            (throw (err/error :invariant/disable-invalid-state
+                              "disabled invariant is missing its durable disable decision"
+                              {:proposal/id proposal-id})))
+          (verify-disable-row! store existing)
+          (when-not (= digest (:disable_digest existing))
+            (throw (err/error :invariant/idempotency-conflict
+                              "already-disabled invariant has a different durable decision"
+                              {:proposal/id proposal-id})))
+          (let [activations (sqlite/query (:sqlite store)
+                                          ["SELECT * FROM invariant_activations WHERE proposal_id = ? AND status = 'active'"
+                                           (str proposal-id)])]
+            (when-not (= 1 (count activations))
+              (throw (err/error :invariant/disable-invalid-state
+                                "disabled invariant must retain exactly one current active activation"
+                                {:proposal/id proposal-id :activation/count (count activations)})))
+            (verify-activation! store (first activations))
+            (static/disable-active-invariant! proposal-id))
+          (assoc d :decision/digest (:disable_digest existing) :status :disabled :idempotent? true))
+
+        (not= :active state)
+        (throw (err/error :invariant/disable-invalid-state
+                          "disable is only valid for the current active activation"
+                          {:proposal/id proposal-id :status state}))
+
+        existing
+        (throw (err/error :invariant/disable-invalid-state
+                          "active invariant already has a durable disable decision"
+                          {:proposal/id proposal-id}))
+
+        :else
+        (let [activations (sqlite/query (:sqlite store)
+                                         ["SELECT * FROM invariant_activations WHERE proposal_id = ? AND status = 'active'"
+                                          (str proposal-id)])
+              _ (when-not (= 1 (count activations))
+                  (throw (err/error :invariant/disable-invalid-state
+                                    "disable requires exactly one current active activation"
+                                    {:proposal/id proposal-id :activation/count (count activations)})))
+              _ (verify-activation! store (first activations))
+              result (sqlite/with-write-tx [conn (:sqlite store)]
+                       (let [activations (sqlite/query-raw! conn
+                                                            "SELECT * FROM invariant_activations WHERE proposal_id = ? AND status = 'active'"
+                                                            [(str proposal-id)])]
+                         (when-not (= 1 (count activations))
+                           (throw (err/error :invariant/disable-invalid-state
+                                             "disable requires exactly one current active activation"
+                                             {:proposal/id proposal-id :activation/count (count activations)})))
+                         (let [activation (first activations)
+                               disable-id (id)]
+                           (sqlite/insert-raw! conn
+                             "INSERT INTO invariant_disables (id,proposal_id,reviewer,reason,disable_digest,created_at) VALUES (?,?,?,?,?,?)"
+                             [disable-id (str proposal-id) (str reviewer) (str reason) digest (now)])
+                           (sqlite/insert-raw! conn
+                             "INSERT INTO invariant_events (activation_id,event_type,payload_ref,created_at) VALUES (?,?,?,?)"
+                             [(:id activation) "disabled" digest (now)])
+                           (let [ev (first (sqlite/query-raw! conn
+                                                              "SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'disabled'"
+                                                              [(:id activation)]))]
+                             (sqlite/insert-raw! conn
+                               "INSERT INTO invariant_outbox (id,activation_id,event_id,event_type,dispatched,created_at) VALUES (?,?,?,?,0,?)"
+                               [(id) (:id activation) (:id ev) "disabled" (now)]))
+                           {:id disable-id :activation activation})))]
+          (static/disable-active-invariant! proposal-id)
+          (assoc d :decision/digest digest :status :disabled :idempotent? false))))))
 
 (defn- quarantine-activation! [store row]
   (sqlite/with-write-tx [conn (:sqlite store)]
     (let [aid (str (:id row))
           digest (:activation_digest row)]
-      (sqlite/insert-raw! conn "INSERT OR IGNORE INTO invariant_events (activation_id,event_type,payload_ref,created_at) VALUES (?,?,?,?)" [aid "quarantined" digest (now)])
-      (when-let [ev (first (sqlite/query-raw! conn "SELECT id FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'" [aid]))]
-        (sqlite/insert-raw! conn "INSERT OR IGNORE INTO invariant_outbox (id,activation_id,event_id,event_type,dispatched,created_at) VALUES (?,?,?,?,0,?)" [(id) aid (:id ev) "quarantined" (now)])))))
+      (sqlite/insert-raw! conn
+        "INSERT INTO invariant_events (activation_id,event_type,payload_ref,created_at) VALUES (?,?,?,?)"
+        [aid "quarantined" digest (now)])
+      (let [ev (first (sqlite/query-raw! conn
+                                         "SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'"
+                                         [aid]))]
+        (when-not ev
+          (throw (err/error :invariant/quarantine-failed
+                            "quarantine event was not durably written"
+                            {:activation/id aid})))
+        (sqlite/insert-raw! conn
+          "INSERT INTO invariant_outbox (id,activation_id,event_id,event_type,dispatched,created_at) VALUES (?,?,?,?,0,?)"
+          [(id) aid (:id ev) "quarantined" (now)])))))
 
 (defn- recovery-descriptor [store row]
-  (let [p (get-proposal store (:proposal_id row))
-        approval (first (sqlite/query (:sqlite store) ["SELECT * FROM invariant_decisions WHERE id = ? AND proposal_id = ? AND decision = 'approved' AND activation_qualified = 1" (:decision_id row) (str (:proposal_id row))]))
-        activated (first (sqlite/query (:sqlite store) ["SELECT e.id FROM invariant_events e JOIN invariant_outbox o ON o.event_id = e.id AND o.activation_id = e.activation_id WHERE e.activation_id = ? AND e.event_type = 'activated' AND o.event_type = 'activated' AND e.payload_ref = ? LIMIT 1" (str (:id row)) (:activation_digest row)]))
-        pred-digest (get-in p [:predicate :predicate/digest])]
-    (cas/get-bytes (verifying-cas store) (:activation_digest row))
-    (when-not (and p approval activated
-                   (= (:predicate_digest row) pred-digest)
-                   (= (:registry_revision row) (:registry/revision p)))
-      (throw (err/error :invariant/recovery-invalid "activation evidence is incomplete or inconsistent" {:activation/id (:id row)})))
+  (when-not (= "active" (:status row))
+    (throw (err/error :invariant/recovery-invalid
+                      "only active activation rows may be recovered"
+                      {:activation/id (:id row) :status (:status row)})))
+  (verify-activation! store row)
+  (let [p (get-proposal store (:proposal_id row))]
     {:invariant/id (or (:invariant/id p) (:proposal_id row))
      :proposal/id (:proposal_id row) :version (:version row)
      :predicate (:predicate p) :registry/revision (:registry_revision row)

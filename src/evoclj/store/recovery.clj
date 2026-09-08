@@ -161,12 +161,16 @@
       :else
       (let [row (first rows)
             gen-id (:id row)
-            genome-id (:genome_id row)]
+            genome-id (:genome_id row)
+            bootstrap? (and (= "generation-1" gen-id)
+                            (re-matches #"^sha256:7{64}$" (str genome-id)))]
         (try
-          (if-not (cas/exists? cas genome-id)
-            {:status :missing :generation/id gen-id :genome/id genome-id}
-            (do (cas/get-bytes (verifying-cas cas) genome-id)
-                {:status :ok :generation/id gen-id :genome/id genome-id}))
+          (if bootstrap?
+            {:status :none :generation/id gen-id :genome/id genome-id :bootstrap? true}
+            (if-not (cas/exists? cas genome-id)
+              {:status :missing :generation/id gen-id :genome/id genome-id}
+              (do (cas/get-bytes (verifying-cas cas) genome-id)
+                  {:status :ok :generation/id gen-id :genome/id genome-id})))
           (catch clojure.lang.ExceptionInfo e
             {:status :corrupt :generation/id gen-id :genome/id genome-id
              :reason (:error/type (ex-data e))}))))))
@@ -174,10 +178,11 @@
 ;; --- generated-invariant integrity -----------------------------------------
 
 (defn- invariant-integrity
-  "Read-only invariant scan: dangling CAS refs, malformed descriptors, and
-  activation rows missing their event/outbox half."
+  "Read-only invariant scan with full durable row/CAS authority binding."
   [store cas]
-  (let [cas (verifying-cas cas)
+  (let [cas-input cas
+        cas (verifying-cas cas-input)
+        authority-store {:sqlite store :cas (cas-root cas-input)}
         refs (mapcat (fn [[table column kind]]
                        (mapcat (fn [row]
                                  (let [ref (get row (keyword column))]
@@ -199,6 +204,7 @@
                       ["invariant_runs" "result_ref" :result]
                       ["invariant_runs" "run_digest" :run]
                       ["invariant_decisions" "decision_digest" :decision]
+                      ["invariant_disables" "disable_digest" :disable]
                       ["invariant_activations" "activation_digest" :activation]])
         malformed (into [] (keep (fn [row]
                                    (try
@@ -217,6 +223,31 @@
                                             {:table :invariant_runs :run/id (:id row)
                                              :status :malformed :error (err/error-data e)}))))
                           (sqlite/query store ["SELECT id,run_json FROM invariant_runs"]))
+        authority-mismatches (into [] (concat
+          (keep (fn [row]
+                  (try
+                    (invariant-store/get-proposal authority-store (:id row))
+                    nil
+                    (catch Throwable e
+                      {:table :invariant_proposals :proposal/id (:id row)
+                       :status :authority-mismatch :error (err/error-data e)})))
+                (sqlite/query store ["SELECT id FROM invariant_proposals"]))
+          (keep (fn [row]
+                  (try
+                    (invariant-store/verify-activation! authority-store row)
+                    nil
+                    (catch Throwable e
+                      {:table :invariant_activations :activation/id (:id row)
+                       :status :authority-mismatch :error (err/error-data e)})))
+                (sqlite/query store ["SELECT * FROM invariant_activations"]))
+          (keep (fn [row]
+                  (try
+                    (invariant-store/verify-disable-row! authority-store row)
+                    nil
+                    (catch Throwable e
+                      {:table :invariant_disables :proposal/id (:proposal_id row)
+                       :status :authority-mismatch :error (err/error-data e)})))
+                (sqlite/query store ["SELECT * FROM invariant_disables"]))))
         partial (mapv #(assoc % :status :partial)
                       (sqlite/query store
                                     ["SELECT a.id AS activation_id
@@ -232,12 +263,13 @@
     {:dangling-cas-refs (vec (remove #(= :malformed-ref (:status %)) refs))
      :malformed-refs (vec (filter #(= :malformed-ref (:status %)) refs))
      :malformed (vec (concat malformed malformed-runs))
+     :authority-mismatches authority-mismatches
      :partial-activations partial
      :quarantined quarantined}))
 (defn scan-recovery-state
   "The normative recovery scan (component interface). Read-only: it
   classifies crash residue and reports corruption; it never appends,
-  rewrites, or promotes anything.
+  rewrites, promotes, or otherwise mutates durable state.
 
   Returns the historical categories plus :invariant-state."
   [store cas]
@@ -262,7 +294,7 @@
           (let [inv (:invariant-state report)]
             (concat (when (= :unavailable (:status inv)) [inv])
                     (:dangling-cas-refs inv)
-                    (:malformed-refs inv)
+                    (concat (:authority-mismatches inv) (:malformed-refs inv))
                     (:malformed inv)
                     (:partial-activations inv)
                     (:quarantined inv)))

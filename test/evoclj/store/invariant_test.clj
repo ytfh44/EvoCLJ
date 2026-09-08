@@ -84,6 +84,34 @@
     (is (= 1 (count-rows s "invariant_disables")))
     (is (= 2 (count-rows s "invariant_events")))
     (is (thrown? clojure.lang.ExceptionInfo (invariant-store/activate! s "p1" "reviewer")))))
+(deftest durable-row-and-cas-authority-fails-closed
+  (let [s (setup-approved)
+        row (first (sqlite/query (:sqlite s) ["SELECT * FROM invariant_proposals WHERE id = 'p1'"]))
+        unrelated (proof! s {:unrelated true})
+        verify (deref (var invariant-store/verify-proposal-row!))]
+    (is (thrown? clojure.lang.ExceptionInfo (verify s (assoc row :proposer "tampered"))))
+    (is (thrown? clojure.lang.ExceptionInfo (verify s (assoc row :proposal_digest unrelated))))))
+
+(deftest disable-only-current-active-and-exactly-idempotent
+  (let [s (setup-approved)]
+    (is (thrown? clojure.lang.ExceptionInfo (invariant-store/disable! s "p1" "reviewer" "before activation")))
+    (invariant-store/activate! s "p1" "reviewer")
+    (invariant-store/disable! s "p1" "reviewer" "retired")
+    (is (thrown? clojure.lang.ExceptionInfo (invariant-store/disable! s "p1" "reviewer" "different")))))
+
+(deftest disable-rejects-rejected-and-quarantined-terminal-states
+  (let [s (fresh-store)
+        e (proof! s {}) r (proof! s {}) a (proof! s {})]
+    (invariant-store/propose! s (proposal e r a))
+    (invariant-store/reject! s "p1" "reviewer" "no")
+    (is (thrown? clojure.lang.ExceptionInfo (invariant-store/disable! s "p1" "reviewer" "late"))))
+  (let [s (setup-approved)]
+    (invariant-store/activate! s "p1" "reviewer")
+    (let [row (first (sqlite/query (:sqlite s) ["SELECT * FROM invariant_activations WHERE proposal_id = 'p1'" ]))
+          quarantine (deref (var invariant-store/quarantine-activation!))]
+      (quarantine s row)
+      (is (= :quarantined (:status (invariant-store/get-proposal s "p1"))))
+      (is (thrown? clojure.lang.ExceptionInfo (invariant-store/disable! s "p1" "reviewer" "late"))))))
 (deftest unavailable-scan-is-hard-in-strict-startup
   (let [s (fresh-store)]
     (with-redefs-fn {#'recovery/invariant-integrity (fn [_ _] (throw (java.sql.SQLException. "offline")))}
