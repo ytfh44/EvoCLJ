@@ -282,6 +282,23 @@
     {:semantic/spec spec
      :semantic/digest (get-in result [:effect-journal :effect/semantic :digest])}
     {}))
+
+(defn- replay-evidence-ref!
+  "Persist one immutable replay-evidence envelope and return its CAS id.
+  A raw-intent envelope is written before dispatch; a later envelope with
+  normalized request and frozen descriptor is written after dispatch."
+  [executor intent result]
+  (put-payload! executor
+                (merge {:replay/version 1
+                        :raw-intent intent
+                        :canonicalization/version 1}
+                       (:replay/evidence result))))
+
+(defn- replay-event-metadata
+  [evidence-ref]
+  (cond-> {:replay/evidence-ref evidence-ref
+           :replay/evidence-digest evidence-ref}
+    (nil? evidence-ref) (assoc :replay/evidence-missing? true)))
 ;; --- the intent effect transaction (Transaction Boundaries) ------------------
 
 (defn- dispatch-intent!
@@ -308,11 +325,15 @@
   :outputs <the updated accumulated outputs>
   :outcome :ok | :denied | :failed}."
   [executor pin cause intent outputs]
-  (let [proposed (append-event! executor pin cause :intent/proposed nil
-                                {:intent/id (:intent/id intent)
-                                 :intent/type (:intent/type intent)
-                                 :node/id (:node/id intent)})
-        result (dispatch/dispatch! (:dispatch executor) intent)]
+  (let [raw-evidence-ref (replay-evidence-ref! executor intent nil)
+        proposed (append-event! executor pin cause :intent/proposed nil
+                                (merge {:intent/id (:intent/id intent)
+                                        :intent/type (:intent/type intent)
+                                        :node/id (:node/id intent)}
+                                       (replay-event-metadata raw-evidence-ref)))
+        result (dispatch/dispatch! (:dispatch executor) intent)
+        evidence-ref (replay-evidence-ref! executor intent result)
+        evidence-metadata (replay-event-metadata evidence-ref)]
     (if (= :ok (:result/status result))
       (let [authorization (:authorization result)
             tool-id (get-in intent [:payload :tool/id])
@@ -322,19 +343,24 @@
                                 :intent/type (:intent/type intent)
                                 :authorization {:decision (:decision authorization)
                                                 :lease-id (:lease-id authorization)}}
+                               evidence-metadata
                                (semantic-event-metadata result)))
             started (append-event!
                      executor pin (:event/id authorized) :provider/call-started nil
                      (merge {:intent/id (:intent/id intent)
                              :tool/id tool-id
                              :idempotency/key (get-in intent [:metadata :idempotency/key])}
+                            evidence-metadata
                             (semantic-event-metadata result)))
             value-ref (put-payload! executor (:value result))
             completed (append-event!
                        executor pin (:event/id started) :provider/call-completed value-ref
                        (merge {:intent/id (:intent/id intent)
                                :tool/id tool-id
-                               :result/status :ok}
+                               :result/status :ok
+                               :replay/provider-result-ref value-ref
+                               :replay/provider-result-digest value-ref}
+                              evidence-metadata
                               (semantic-event-metadata result)))]
         {:last-event completed
          :outputs (conj outputs (:value result))
@@ -346,6 +372,7 @@
                               :intent/type (:intent/type intent)
                               :error/type :capability/denied
                               :reason (get-in result [:error/data :reason])}
+                             evidence-metadata
                              (semantic-event-metadata result)))
          :outputs outputs
          :outcome :denied}
@@ -355,6 +382,7 @@
                       (merge {:intent/id (:intent/id intent)
                               :intent/type (:intent/type intent)
                               :error/type (:error/type result)}
+                             evidence-metadata
                              (semantic-event-metadata result)))
          :outputs outputs
          :outcome :failed}))))

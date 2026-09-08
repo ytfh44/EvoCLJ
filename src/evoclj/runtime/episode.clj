@@ -258,3 +258,185 @@
               (first (sqlite/query db
                                    ["SELECT * FROM episodes WHERE id = ?"
                                     (str eid)]))))))))))
+
+(defn- replay-ineligible!
+  [message data]
+  (throw (episode-error :episode/replay-ineligible message data)))
+
+(defn- verified-cas
+  [handle]
+  (if (map? handle)
+    (assoc handle :verify true)
+    (cas/->cas handle {:verify true})))
+
+(defn- verified-edn-artifact!
+  [cas-handle ref label]
+  (when-not (string? ref)
+    (replay-ineligible! (str label " is missing") {:artifact/ref ref :label label}))
+  (try
+    (edn/read-string (String. ^bytes (cas/get-bytes cas-handle ref)
+                              java.nio.charset.StandardCharsets/UTF_8))
+    (catch clojure.lang.ExceptionInfo e
+      (replay-ineligible! (str label " failed CAS verification")
+                          {:artifact/ref ref
+                           :label label
+                           :cause (err/error-data e)}))
+    (catch Throwable t
+      (replay-ineligible! (str label " is not valid EDN")
+                          {:artifact/ref ref :label label
+                           :cause (err/sanitize t)}))))
+
+(defn- event-terminal?
+  [e]
+  (contains? #{:session/completed :session/failed :session/budget-exhausted}
+             (:event/type e)))
+
+(defn- required-replay-evidence
+  [events]
+  (doseq [e events
+          :when (contains? #{:intent/proposed :intent/authorized
+                             :provider/call-started :provider/call-completed
+                             :intent/denied :intent/failed}
+                            (:event/type e))]
+    (when-not (get-in e [:metadata :replay/evidence-ref])
+      (replay-ineligible! "session is missing replay evidence metadata"
+                          {:event/id (:event/id e)
+                           :event/type (:event/type e)
+                           :reason :evidence-missing})))
+  true)
+
+(defn- evidence-complete?
+  [evidence]
+  (and (map? evidence)
+       (= 1 (:replay/version evidence))
+       (map? (:raw-intent evidence))
+       (map? (:normalized-request evidence))
+       (map? (:descriptor evidence))
+       (= 1 (:canonicalization/version evidence))))
+
+(defn- replay-trace
+  [events evidence-by-ref cas-handle]
+  (let [starts (filter #(= :provider/call-started (:event/type %)) events)
+        completed (filter #(= :provider/call-completed (:event/type %)) events)]
+    (mapv
+     (fn [started]
+       (let [sid (:intent/id (:metadata started))
+             done (first (filter #(= sid (:intent/id (:metadata %))) completed))
+             ref (get-in started [:metadata :replay/evidence-ref])
+             evidence (get evidence-by-ref ref)
+             result-ref (or (get-in done [:metadata :replay/provider-result-ref])
+                            (:payload-ref done))]
+         (when-not done
+           (replay-ineligible! "provider call has no completed result"
+                               {:event/id (:event/id started) :intent/id sid}))
+         (when-not (evidence-complete? evidence)
+           (replay-ineligible! "provider call has incomplete replay evidence"
+                               {:event/id (:event/id started) :intent/id sid
+                                :evidence/ref ref}))
+         (when-not (= result-ref (:payload-ref done))
+           (replay-ineligible! "provider result reference does not match event payload"
+                               {:event/id (:event/id done)
+                                :expected (:payload-ref done)
+                                :actual result-ref}))
+         {:intent/id sid
+          :intent (:raw-intent evidence)
+          :normalized-request (:normalized-request evidence)
+          :descriptor (:descriptor evidence)
+          :response (verified-edn-artifact! cas-handle result-ref "provider result")
+          :evidence-ref ref
+          :provider-result-ref result-ref}))
+     starts)))
+
+(defn load-replay-episode!
+  "Load a historical Episode without mutating its session, events, or episode row.
+
+  The full event chain and every referenced CAS body are verified before the
+  Episode bounds are sliced. Sessions written before replay evidence capture,
+  or sessions with incomplete provider evidence, fail closed as
+  :episode/replay-ineligible."
+  [store session-id]
+  (validate-store! store)
+  (let [sid (types/session-id session-id)
+        db (:sqlite store)
+        cas-handle (verified-cas (:cas store))
+        chain (event/verify-event-chain db sid)]
+    (when-not (:valid? chain)
+      (replay-ineligible! "event chain failed verification"
+                          {:session/id sid :reason (:reason chain)
+                           :event/seq (:event/seq chain)}))
+    (let [s (session/get-session db sid)
+          row (first (sqlite/query db
+                                   ["SELECT * FROM episodes WHERE session_id = ?"
+                                    (str sid)]) )
+          all-events (event/events-for-session db sid)]
+      (when-not s
+        (replay-ineligible! "historical session does not exist" {:session/id sid}))
+      (when-not row
+        (replay-ineligible! "historical session has no materialized Episode"
+                            {:session/id sid :reason :episode-missing}))
+      (let [episode (validate-episode! (row->episode row))
+            first-id (get-in episode [:trace :first-event])
+            last-id (get-in episode [:trace :last-event])
+            events (vec (filter #(and (<= first-id (:event/id %))
+                                      (<= (:event/id %) last-id)) all-events))
+            started (first (filter #(= :session/started (:event/type %)) events))
+            terminal (last (filter event-terminal? events))
+            refs (->> events
+                      (mapcat (fn [e]
+                                (keep identity
+                                      [(:payload-ref e)
+                                       (get-in e [:metadata :replay/evidence-ref])
+                                       (get-in e [:metadata :replay/provider-result-ref])
+                                       (get-in e [:metadata :error/artifact-ref])
+                                       (get-in e [:metadata :output/ref])])))
+                      set)]
+        (when (or (nil? first-id) (nil? last-id) (empty? events)
+                  (not= first-id (:event/id (first events)))
+                  (not= last-id (:event/id (last events)))
+                  (nil? started) (nil? terminal))
+          (replay-ineligible! "Episode bounds do not identify a complete terminal trace"
+                              {:session/id sid :first-event first-id :last-event last-id}))
+        (when-not (:payload-ref started)
+          (replay-ineligible! "session task input has no CAS reference"
+                              {:session/id sid :event/id (:event/id started)}))
+        (required-replay-evidence events)
+        ;; Touch every referenced body with verification enabled before parsing
+        ;; any of the selected artifacts. This catches tampering even for an
+        ;; otherwise unused failure payload.
+        (doseq [ref refs]
+          (cas/get-bytes cas-handle ref))
+        (let [evidence-by-ref
+              (into {} (for [ref (set (keep #(get-in % [:metadata :replay/evidence-ref]) events))]
+                         [ref (verified-edn-artifact! cas-handle ref "replay evidence")]))
+              task-input (verified-edn-artifact! cas-handle (:payload-ref started) "session task input")
+              trace (replay-trace events evidence-by-ref cas-handle)
+              terminal-output (when (:payload-ref terminal)
+                                (verified-edn-artifact! cas-handle (:payload-ref terminal)
+                                                        "terminal output") )]
+          {:eligible? true
+           :episode episode
+           :session s
+           :events events
+           :task-input task-input
+           :terminal-output terminal-output
+           :terminal/event terminal
+           :trace trace
+           :provenance {:event-chain chain
+                        :cas/verified? true
+                        :episode/id (:episode/id episode)
+                        :session/id sid
+                        :event-range [first-id last-id]
+                        :evidence-refs (set (keys evidence-by-ref))}})))))
+
+(defn load-replay-episode
+  "Return a typed eligibility result instead of throwing for old/incomplete data."
+  [store session-id]
+  (try
+    (load-replay-episode! store session-id)
+    (catch clojure.lang.ExceptionInfo e
+      (if (= :episode/replay-ineligible (:error/type (ex-data e)))
+        {:eligible? false
+         :error/type :episode/replay-ineligible
+         :error/message (ex-message e)
+         :error/data (err/error-data e)}
+        (throw e)))))

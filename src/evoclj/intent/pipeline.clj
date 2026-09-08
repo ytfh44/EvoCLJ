@@ -278,10 +278,28 @@
       :effect/ambiguous
       :effect/rejected)))
 
-(defn- attach-journal
-  [result binding intent decision]
+(defn- attach-journal [result binding intent decision]
   (assoc result :effect-journal
          (effect-journal binding intent decision (final-status-for result))))
+
+(defn- attach-replay-evidence
+  "Expose immutable provider-boundary data for historical replay."
+  [result intent descriptor normalized binding]
+  (assoc result :replay/evidence
+         (cond-> {:replay/version 1
+                  :raw-intent intent
+                  :normalized-request normalized
+                  :descriptor descriptor
+                  :canonicalization/version 1}
+           binding
+           (assoc :binding (select-keys binding
+                                        [:binding/id :tool/id :revision/id
+                                         :revision/seq :binding/freshness
+                                         :binding/stale?]))
+           (:binding/semantic-spec binding)
+           (assoc :semantic/effect-snapshot
+                  {:spec (:binding/semantic-spec binding)
+                   :digest (:binding/semantic-digest binding)}))))
 
 (defn- result-error
   [intent type message data authorization usage]
@@ -501,14 +519,17 @@
                                    broker-context provider descriptor
                                    decision normalized intent)]
                     (if-let [value (:ok execution)]
-                      (emit (validate-output! intent descriptor decision
-                                               value @usage-atom)
-                            decision)
-                      (emit (result-error intent (:error-type execution)
-                                          (:error-message execution)
-                                          (:error-data execution)
-                                          decision @usage-atom)
-                            decision))))))))))))
+                      (emit (attach-replay-evidence
+                                                   (validate-output! intent descriptor decision value @usage-atom)
+                                                   intent descriptor normalized nil)
+                                                decision)
+                      (emit (attach-replay-evidence
+                                                   (result-error intent (:error-type execution)
+                                                                 (:error-message execution)
+                                                                 (:error-data execution)
+                                                                 decision @usage-atom)
+                                                   intent descriptor normalized nil)
+                                                decision))))))))))))
 
 (def ^:private semantic-error-types
   #{:capability/semantic-invalid
@@ -602,16 +623,23 @@
                         (let [tool-error? (binding/tool-error? value)
                               enriched-value (enrich-value-audit value binding**)]
                           (if tool-error?
-                            (emit (result-ok intent enriched-value decision @usage-atom) binding** decision)
+                            (emit (attach-replay-evidence
+                                                             (result-ok intent enriched-value decision @usage-atom)
+                                                             intent frozen-descriptor normalized binding**)
+                                                          binding** decision)
                             (let [ok-result (validate-output! intent frozen-descriptor decision
                                                                enriched-value @usage-atom)]
-                              (emit ok-result binding** decision))))
+                              (emit (attach-replay-evidence ok-result
+                                                                 intent frozen-descriptor normalized binding**)
+                                                              binding** decision))))
                         (emit
-                         (result-error intent (:error-type execution)
-                                       (:error-message execution)
-                                       (:error-data execution)
-                                       decision @usage-atom)
-                         binding** decision))))))))))))))
+                                                 (attach-replay-evidence
+                                                  (result-error intent (:error-type execution)
+                                                                (:error-message execution)
+                                                                (:error-data execution)
+                                                                decision @usage-atom)
+                                                  intent frozen-descriptor normalized binding**)
+                                                 binding** decision))))))))))))))
 
 ;; --- subagent intents (kernel-executed, no provider effect) -----------------
 ;;
