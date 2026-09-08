@@ -9,10 +9,11 @@
   row is the truth; a future is only an internal await inside run-subagent!.
   No ::last-refresh-future is stored and no raw future is leaked.
 
-  spawn-subagent! creates a child session pinned to the parent's
+  spawn-subagent! creates a child Session pinned to the parent's
   Genome/Resolution/Phenotype/Generation (Global Constraint 2, same
-  genome/resolution as parent), a new UUID, and status :created.  The
-  child's subject is {:principal/type :session :session/id child-id}.
+  genome/resolution as parent), a new UUID, and one queued child Work.
+  Session is immutable identity; the child Work is the lifecycle handle.
+  The child's subject is {:principal/type :session :session/id child-id}.
 
   Child capabilities are derived leases via mint/derive-lease! attenuated
   from the parent's leases (actions ⊆ parent, [W-08..W-11]).  A
