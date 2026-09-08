@@ -48,9 +48,13 @@
   plus a re-hashing read). Tree-level Genome loading and manifest
   milestone the store enforces the durable half of Invariant 7."
   (:require [clojure.java.jdbc :as jdbc]
+            [clojure.edn :as edn]
+            [clojure.string :as str]
+            [evoclj.evolution.invariant :as invariant]
             [evoclj.kernel.error :as err]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
+            [evoclj.store.invariant :as invariant-store]
             [evoclj.store.work :as work-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
@@ -157,29 +161,192 @@
       :else
       (let [row (first rows)
             gen-id (:id row)
-            genome-id (:genome_id row)]
+            genome-id (:genome_id row)
+            bootstrap? (and (= "generation-1" gen-id)
+                            (re-matches #"^sha256:7{64}$" (str genome-id)))]
         (try
-          (if-not (cas/exists? cas genome-id)
-            {:status :missing :generation/id gen-id :genome/id genome-id}
-            (do (cas/get-bytes (verifying-cas cas) genome-id)
-                {:status :ok :generation/id gen-id :genome/id genome-id}))
+          (if bootstrap?
+            {:status :none :generation/id gen-id :genome/id genome-id :bootstrap? true}
+            (if-not (cas/exists? cas genome-id)
+              {:status :missing :generation/id gen-id :genome/id genome-id}
+              (do (cas/get-bytes (verifying-cas cas) genome-id)
+                  {:status :ok :generation/id gen-id :genome/id genome-id})))
           (catch clojure.lang.ExceptionInfo e
             {:status :corrupt :generation/id gen-id :genome/id genome-id
              :reason (:error/type (ex-data e))}))))))
 
-;; --- public API -------------------------------------------------------------
+(defn- terminal-activation-findings
+  "Return hard findings for terminal activation rows whose terminal evidence is incomplete."
+  [store]
+  (into []
+        (keep (fn [row]
+                (let [status (:status row)
+                      aid (:id row)
+                      disable-rows (sqlite/query store
+                                                  ["SELECT * FROM invariant_disables WHERE proposal_id = ?"
+                                                   (:proposal_id row)])
+                      disabled-events (sqlite/query store
+                                                     ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'disabled'"
+                                                      aid])
+                      disabled-outbox (sqlite/query store
+                                                     ["SELECT * FROM invariant_outbox WHERE activation_id = ? AND event_type = 'disabled'"
+                                                      aid])
+                      quarantine-events (sqlite/query store
+                                          ["SELECT * FROM invariant_events WHERE activation_id = ? AND event_type = 'quarantined'"
+                                           aid])
+                      quarantine-outbox (sqlite/query store
+                                          ["SELECT * FROM invariant_outbox WHERE activation_id = ? AND event_type = 'quarantined'"
+                                           aid])
+                      outbox-valid? (fn [events outbox event-type payload-ref]
+                                      (and (= 1 (count events))
+                                           (= 1 (count outbox))
+                                           (= (:id (first events)) (:event_id (first outbox)))
+                                           (= event-type (:event_type (first outbox)))
+                                           (some? payload-ref)
+                                           (= payload-ref (:payload_ref (first events)))))
+                      missing (case status
+                                "disabled"
+                                (vec (concat
+                                      (when (not= 1 (count disable-rows)) [:disable-decision])
+                                      (when-not (and (= 1 (count disable-rows))
+                                                     (outbox-valid? disabled-events disabled-outbox "disabled"
+                                                                    (:disable_digest (first disable-rows))))
+                                        [:disabled-event-outbox])
+                                      (when (or (seq quarantine-events) (seq quarantine-outbox)) [:quarantine-conflict])))
+                                "quarantined"
+                                (vec (concat
+                                      (when (seq disable-rows) [:disable-conflict])
+                                      (when-not (outbox-valid? quarantine-events quarantine-outbox "quarantined"
+                                                              (:activation_digest row))
+                                        [:quarantined-event-outbox])
+                                      (when (or (seq disabled-events) (seq disabled-outbox)) [:disabled-conflict])))
+                                [:unknown-terminal-status])]
+                  (when (seq missing)
+                    {:table :invariant_activations
+                     :activation/id aid
+                     :status :terminal-evidence-missing
+                     :terminal/status (keyword status)
+                     :missing missing}))))
+        (sqlite/query store
+                       ["SELECT * FROM invariant_activations WHERE status IN ('disabled','quarantined')"])))
 
+;; --- generated-invariant integrity -----------------------------------------
+
+(defn- invariant-integrity
+  "Read-only invariant scan with full durable row/CAS authority binding."
+  [store cas]
+  (let [cas-input cas
+        cas (verifying-cas cas-input)
+        authority-store {:sqlite store :cas (cas-root cas-input)}
+        refs (mapcat (fn [[table column kind]]
+                       (mapcat (fn [row]
+                                 (let [ref (get row (keyword column))]
+                                   (cond
+                                     (not (and (string? ref) (re-matches #"^sha256:[0-9a-f]{64}$" ref)))
+                                     [{:table table :column column :status :malformed-ref :value (err/sanitize ref) :kind kind}]
+                                     (not (cas/exists? cas ref))
+                                     [{:table table :column column :artifact/id ref :kind kind :status :missing}]
+                                     :else
+                                     (try
+                                       (cas/get-bytes cas ref)
+                                       nil
+                                       (catch Exception e
+                                         [{:table table :column column :artifact/id ref :kind kind
+                                           :status :corrupt :error (err/error-data e)}])))))
+                               (sqlite/query store [(str "SELECT " column " FROM " table)])))
+                     [["invariant_proposals" "predicate_digest" :predicate]
+                      ["invariant_proposals" "proposal_digest" :proposal]
+                      ["invariant_runs" "result_ref" :result]
+                      ["invariant_runs" "run_digest" :run]
+                      ["invariant_decisions" "decision_digest" :decision]
+                      ["invariant_disables" "disable_digest" :disable]
+                      ["invariant_activations" "activation_digest" :activation]])
+        malformed (into [] (keep (fn [row]
+                                   (try
+                                     (let [p (edn/read-string (:predicate_json row))]
+                                       (invariant/validate-predicate! p)
+                                       nil)
+                                     (catch Exception e
+                                       {:table :invariant_proposals :proposal/id (:id row)
+                                        :status :malformed :error (err/error-data e)}))))
+                    (sqlite/query store ["SELECT id,predicate_json FROM invariant_proposals"]))
+        malformed-runs (into [] (keep (fn [row]
+                                        (try
+                                          (invariant/run (edn/read-string (:run_json row)))
+                                          nil
+                                          (catch Exception e
+                                            {:table :invariant_runs :run/id (:id row)
+                                             :status :malformed :error (err/error-data e)}))))
+                          (sqlite/query store ["SELECT id,run_json FROM invariant_runs"]))
+        authority-mismatches (into [] (concat
+          (keep (fn [row]
+                  (try
+                    (invariant-store/get-proposal authority-store (:id row))
+                    nil
+                    (catch Throwable e
+                      {:table :invariant_proposals :proposal/id (:id row)
+                       :status :authority-mismatch :error (err/error-data e)})))
+                (sqlite/query store ["SELECT id FROM invariant_proposals"]))
+          (keep (fn [row]
+                  (try
+                    (invariant-store/verify-approved-decision! authority-store row)
+                    nil
+                    (catch Throwable e
+                      {:table :invariant_decisions :decision/id (:id row)
+                       :status :authority-mismatch :error (err/error-data e)})))
+                (sqlite/query store ["SELECT * FROM invariant_decisions WHERE decision = 'approved'"]))
+          (keep (fn [row]
+                  (try
+                    (invariant-store/verify-activation! authority-store row)
+                    nil
+                    (catch Throwable e
+                      {:table :invariant_activations :activation/id (:id row)
+                       :status :authority-mismatch :error (err/error-data e)})))
+                (sqlite/query store ["SELECT * FROM invariant_activations WHERE status = 'active'"]))
+          (keep (fn [row]
+                  (try
+                    (invariant-store/verify-disable-row! authority-store row)
+                    nil
+                    (catch Throwable e
+                      {:table :invariant_disables :proposal/id (:proposal_id row)
+                       :status :authority-mismatch :error (err/error-data e)})))
+                (sqlite/query store ["SELECT * FROM invariant_disables"]))))
+        partial (mapv #(assoc % :status :partial)
+                      (sqlite/query store
+                                    ["SELECT a.id AS activation_id
+                                      FROM invariant_activations a
+                                      LEFT JOIN invariant_events e ON e.activation_id = a.id AND e.event_type = 'activated'
+                                      LEFT JOIN invariant_outbox o ON o.activation_id = a.id AND o.event_id = e.id AND o.event_type = 'activated'
+                                      WHERE a.status = 'active' AND (e.id IS NULL OR o.id IS NULL)"]))
+         quarantined (mapv #(assoc % :status :quarantined)
+                           (sqlite/query store
+                                         ["SELECT DISTINCT a.id AS activation_id
+                                           FROM invariant_activations a
+                                           JOIN invariant_events q ON q.activation_id = a.id AND q.event_type = 'quarantined'"]))
+         terminal (terminal-activation-findings store)]
+    {:dangling-cas-refs (vec (remove #(= :malformed-ref (:status %)) refs))
+     :malformed-refs (vec (filter #(= :malformed-ref (:status %)) refs))
+     :malformed (vec (concat malformed malformed-runs))
+     :authority-mismatches authority-mismatches
+     :partial-activations partial
+     :quarantined quarantined
+     :terminal-evidence-missing terminal}))
 (defn scan-recovery-state
   "The normative recovery scan (component interface). Read-only: it
   classifies crash residue and reports corruption; it never appends,
-  rewrites, or promotes anything.
+  rewrites, promotes, or otherwise mutates durable state.
 
-  Returns {:missing-artifacts [...] :invalid-event-chains [...]
-  :stale-candidates [...]}."
+  Returns the historical categories plus :invariant-state."
   [store cas]
-  {:missing-artifacts (missing-artifacts store cas)
-   :invalid-event-chains (invalid-event-chains store)
-   :stale-candidates (stale-candidates store)})
+  (let [inv (try (invariant-integrity store cas)
+                 (catch java.sql.SQLException _
+                    {:dangling-cas-refs [] :malformed [] :partial-activations []
+                     :quarantined [] :terminal-evidence-missing [] :status :unavailable}))]
+    {:missing-artifacts (missing-artifacts store cas)
+     :invalid-event-chains (invalid-event-chains store)
+     :stale-candidates (stale-candidates store)
+     :invariant-state inv
+     :generated-invariants inv}))
 
 (defn- hard-findings
   "The corruption findings strict mode fails closed on: unresolved
@@ -189,27 +356,22 @@
   [report]
   (concat (:missing-artifacts report)
           (:invalid-event-chains report)
+          (let [inv (:invariant-state report)]
+            (concat (when (= :unavailable (:status inv)) [inv])
+                    (:dangling-cas-refs inv)
+                    (concat (:authority-mismatches inv) (:malformed-refs inv))
+                    (:malformed inv)
+                    (:partial-activations inv)
+                     (:quarantined inv)
+                     (:terminal-evidence-missing inv)))
           (when-let [cg (:current-generation report)]
             (when (contains? #{:missing :corrupt :missing-current :ambiguous}
                              (:status cg))
               [cg]))))
-
 (defn startup-integrity-scan
-  "Startup integrity scan with configurable strict mode (component
-  Step 4). The production default is strict (fail-closed).
-
-  Runs scan-recovery-state, verifies the CURRENT generation (Database
-  Invariants 6 and 7), and — in strict mode (the default, {:strict?
-  false} to disable) — throws :store/integrity-failure carrying the
-  full report (the three normative categories plus :current-generation)
-  when any hard finding exists: a missing payload artifact, an invalid
-  event chain, or a CURRENT generation whose genome artifact is
-  absent/corrupt (or a missing/ambiguous CURRENT). Stale candidates never
-  block startup.
-
-  Returns the report augmented with :current-generation
-  {:status :ok|:none|:missing|:corrupt|:missing-current|:ambiguous ...}
-  and :ok? (true when there are no hard findings)."
+  "Run read-only recovery plus CURRENT and invariant integrity checks.
+  Strict mode fails closed on any hard finding; this function never
+  auto-activates pending invariant proposals."
   [store cas & [opts]]
   (let [{:keys [strict?] :or {strict? true}} opts
         report (scan-recovery-state store cas)
@@ -318,3 +480,10 @@
                       (update :revoked-capabilities into revoked)))))
             {:orphaned-subagents orphans :recovered [] :revoked-capabilities []}
             orphans)))
+
+
+(defn recover-generated-invariants!
+  "Publish only already durable, fully committed invariant activations.
+  Pending proposals and approvals are never activated by recovery."
+  [store cas]
+  (invariant-store/recover-activations! {:sqlite store :cas cas}))

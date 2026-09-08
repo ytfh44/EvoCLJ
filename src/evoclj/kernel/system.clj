@@ -119,6 +119,7 @@
             [evoclj.runtime.system]
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
+            [evoclj.store.recovery :as recovery]
             [evoclj.store.sqlite :as sqlite]
             [integrant.core :as ig])
   (:import (java.nio.charset StandardCharsets)
@@ -309,7 +310,8 @@
       (registry/register! (:provider/registry system)
                           (provider-for entry store (:mcp/manager system)))))
   system)
-
+(declare recover-invariants!)
+;; --- component keys ----------------------------------------------------------
 (defn init
   "Build the host system from `config`: ig/init (refs resolved,
   init-key methods build each component), then the two host-startup
@@ -322,10 +324,27 @@
     (try
       (-> system
           (migrate-schema!)
-          (register-catalog-providers! config))
+          (register-catalog-providers! config)
+          (recover-invariants!))
       (catch Throwable t
         (ig/halt! system)
         (throw t)))))
+(defn- recover-invariants!
+  "Host-startup step 3: strict integrity scan, then durable activation recovery."
+  [system]
+  (let [sqlite (:store/sqlite system)
+        cas    (:store/cas system)
+        scan   (recovery/startup-integrity-scan sqlite cas)
+        report (recovery/recover-generated-invariants! sqlite cas)]
+    (when (some #(= :quarantined (:status %)) report)
+      (throw (err/error :store/integrity-failure
+                        "startup recovery quarantined an activation; refusing to start"
+                        {:startup scan :recovery report})))
+    (when-not (:ok? scan)
+      (throw (err/error :store/integrity-failure
+                        "startup integrity scan did not pass"
+                        {:startup scan :recovery report})))
+    system))
 
 (defn halt!
   "Tear the host system down: (ig/halt! system) — which halts every

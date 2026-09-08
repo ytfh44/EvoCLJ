@@ -27,9 +27,8 @@
             [evoclj.store.sqlite :as sqlite]))
 
 (def latest-version
-  "The schema version this codebase knows how to migrate to. Must equal
-  the count of migration files; this is schema version 22."
-  22)
+  "The schema version this codebase knows how to migrate to."
+  25)
 (def ^:private version-key "schema_version")
 (def ^:private applied-key "applied_migrations")
 (def ^:private migrations-dir "migrations")
@@ -264,7 +263,15 @@
   nothing."
   [db]
   (let [files (migration-files)
-        version (current-version db)]
+        applied (applied-migrations db)
+        version (current-version db)
+        extra (remove (set files) applied)]
+    (when (seq extra)
+      (mismatch! :unknown-migration-record
+                 (str "classpath migrations: "
+                      (str/join " " files))
+                 (str "unknown applied migrations: "
+                      (str/join " " (sort extra)))))
     (cond
       ;; A blank database: no tables, no version record.
       (and (zero? version) (not (table-exists? db "generations")))
@@ -281,8 +288,7 @@
       ;; Already current: verify the applied-migration record covers
       ;; every migration file on the classpath, then no-op.
       (= version latest-version)
-      (let [applied (applied-migrations db)
-            missing (remove applied files)]
+      (let [missing (remove applied files)]
         (when (seq missing)
           (mismatch! :missing-migration-record
                      (str "applied_migrations covers: "

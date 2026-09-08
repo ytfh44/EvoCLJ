@@ -283,12 +283,14 @@
     (static/register-suite!
      {:suite/id :unit/validity
       :suite/type :unit
+      :suite/version 1
       :check (fn [candidate]
                (when-not (map? (get-in candidate [:candidate/loaded :manifest]))
                  {:check :not-loaded}))})
     (static/register-suite!
      {:suite/id :unit/workspace-materialized
       :suite/type :unit
+      :suite/version 1
       :check (fn [candidate]
                (let [ws-root (get-in candidate [:workspace :workspace/root])
                      manifest (slurp (str ws-root "/manifest.edn"))]
@@ -304,6 +306,7 @@
     (static/register-suite!
      {:suite/id :unit/always-fails
       :suite/type :unit
+      :suite/version 1
       :check (fn [_candidate] {:check :synthetic-failure})})
     (let [[ctx store] (ctx-with-capture root)
           result (gates/g3-deterministic-suites ctx)]
@@ -317,6 +320,7 @@
     (static/register-suite!
      {:suite/id :unit/explodes
       :suite/type :property
+      :suite/version 1
       :check (fn [_candidate] (throw (ex-info "boom" {:synthetic true})))})
     (let [[ctx store] (ctx-with-capture root)
           result (gates/g3-deterministic-suites ctx)]
@@ -336,9 +340,11 @@
                         #"already registered"
                         (do (static/register-suite!
                              {:suite/id :unit/dup :suite/type :unit
+                              :suite/version 1
                               :check (fn [_] nil)})
                             (static/register-suite!
                              {:suite/id :unit/dup :suite/type :unit
+                              :suite/version 1
                               :check (fn [_] nil)})))))
 
 ;; --- gate result schema ----------------------------------------------------

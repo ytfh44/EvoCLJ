@@ -41,7 +41,7 @@
            (set (map :name
                      (sqlite/query db
                                    ["SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'capability_budget%' "])))))
-    (is (= 21 (migrate/current-version db)))))
+    (is (= 25 (migrate/current-version db)))))
 
 (deftest child-allocation-reserves-parent-and-prevents-oversubscription
   (let [db (fresh-db)

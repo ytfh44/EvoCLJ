@@ -190,6 +190,22 @@
         (Files/deleteIfExists tmp)
         (throw t)))))
 
+(defn- atomic-write-if-absent!
+  "Write a CAS entry once, treating a concurrent winner as success.
+
+  CAS writes are serialized per root within this process. On Windows, an atomic
+  replace can report AccessDenied when another writer has just installed the
+  same target; if the target now exists, that writer won the race and this put
+  is complete."
+  [^Path dir ^String name ^bytes ba]
+  (let [target (.resolve dir name)]
+    (when-not (path-exists? target)
+      (try
+        (atomic-write! dir name ba)
+        (catch java.nio.file.FileAlreadyExistsException e
+          (if (path-exists? target) nil (throw e)))
+        (catch java.nio.file.AccessDeniedException e
+          (if (path-exists? target) nil (throw e)))))))
 ;; --- meta ---------------------------------------------------------------------
 
 (defn- parse-meta
@@ -248,20 +264,19 @@
         media-type (or (:media-type opts) default-media-type)
         dir (artifact-dir root id)
         meta-file (meta-path root id)]
-    (when-not (path-exists? (body-path root id))
-      (atomic-write! dir body-name ba))
-    (let [existing (when (path-exists? meta-file)
-                     (parse-meta root id))]
-      (when (or (nil? existing)
-                (not= media-type (:media-type existing))
-                (not= size (:size existing)))
-        (atomic-write! dir meta-name
-                       (.getBytes (pr-str {:artifact/id id
-                                           :size size
-                                           :media-type media-type})
-                                  StandardCharsets/UTF_8))))
-    {:artifact/id id :size size :media-type media-type}))
-
+    (locking root
+      (atomic-write-if-absent! dir body-name ba)
+      (let [existing (when (path-exists? meta-file)
+                       (parse-meta root id))]
+        (when (or (nil? existing)
+                  (not= media-type (:media-type existing))
+                  (not= size (:size existing)))
+          (atomic-write! dir meta-name
+                         (.getBytes (pr-str {:artifact/id id
+                                             :size size
+                                             :media-type media-type})
+                                    StandardCharsets/UTF_8))))
+      {:artifact/id id :size size :media-type media-type})))
 (defn get-bytes
   "Return the body of `artifact-id` as a byte array.
 
