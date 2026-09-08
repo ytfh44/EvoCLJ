@@ -20,22 +20,16 @@
   (GC-20) with :prev/event-id = parent's latest event id and
   :metadata {:child/session-id child-id}.
 
-  Parent link is stored in the `subagent_links` helper table
-  (child_session_id PRIMARY KEY, parent_session_id FK) when the sessions
-  table has no parent_session_id column — created lazily via
-  CREATE TABLE IF NOT EXISTS so the helper is idempotent across restarts.
-  If a future migration adds sessions.parent_session_id, that column would
-  be preferred (FK if exists), but S2 does not depend on it.
 
   run-subagent! (S3) executes a child session synchronously in its own
   isolated SCI runtime (new phenotype instance, not shared) via the
   scheduler's run-session! with the child's derived leases. The child's
   event chain is independent (per-session seq 1..M) while the parent's
-  :subagent/spawned event links to the child. Synchronous for tests;
+  event records the spawn cause and task bind; the Work.parent_work_id edge
+  is the sole durable topology link. Synchronous for tests;
   async callers may wrap in future/command. Child intents go through
   the broker with the child's attenuated leases."
-   (:require [clojure.edn :as edn]
-             [clojure.java.jdbc :as jdbc]
+   (:require [clojure.java.jdbc :as jdbc]
              [clojure.string :as str]
              [evoclj.capability.grant :as grant]
              [evoclj.capability.mint :as mint]
@@ -89,60 +83,38 @@
 
 (defn get-parent-session-id
   "Return the parent session id (UUID) for `child-session-id`, or nil.
-  `db` is a sqlite spec or SessionStore handle."
+  Uses Work graph (works.parent_work_id) — the single durable spawn truth."
   [db child-session-id]
   (let [spec (db-spec db)
-        sid (str (types/session-id child-session-id))]
-    (or (when-let [row (first (sqlite/query spec
-                                            ["SELECT session_id FROM events
-                                              WHERE event_type = 'subagent/spawned'
-                                                AND payload LIKE ?
-                                              LIMIT 1"
-                                             (str "%" sid "%")]))]
-          (types/session-id (:session_id row)))
-        (when-let [row (first (sqlite/query spec
-                                            ["SELECT w2.session_id AS parent_session_id
-                                              FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
-                                              WHERE w1.session_id = ?
-                                              LIMIT 1"
-                                             sid]))]
-          (types/session-id (:parent_session_id row)))
-        (when-let [row (first (try (sqlite/query spec
-                                                 ["SELECT parent_session_id FROM subagent_links WHERE child_session_id = ?"
-                                                  sid])
-                                   (catch Exception _ nil)))]
-          (types/session-id (:parent_session_id row))))))
-
+        cid (types/session-id child-session-id)
+        sid (str cid)]
+    (when-let [row (first (sqlite/query spec
+                                        ["SELECT w2.session_id AS parent_session_id
+                                          FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
+                                          WHERE w1.session_id = ?
+                                            AND w1.parent_work_id IS NOT NULL
+                                          ORDER BY w1.created_at, w1.id
+                                          LIMIT 1"
+                                         sid]))]
+      (types/session-id (:parent_session_id row)))))
 (defn child-session-ids
-  "All child session ids spawned from `parent-session-id`."
+  "All child session ids spawned from `parent-session-id` via Work graph."
   [db parent-session-id]
   (let [spec (db-spec db)
         pid (str (types/session-id parent-session-id))
-        work-kids (try
-                    (mapv #(types/session-id (:child_session_id %))
-                          (sqlite/query spec
-                                        ["SELECT w1.session_id AS child_session_id
-                                          FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
-                                          WHERE w2.session_id = ?
-                                          ORDER BY w1.created_at" pid]))
-                    (catch Exception _ []))
-        event-kids (try
-                     (let [rows (sqlite/query spec
-                                              ["SELECT payload FROM events
-                                                WHERE session_id = ? AND event_type = 'subagent/spawned'
-                                                ORDER BY id" pid])]
-                       (into []
-                             (keep (fn [r]
-                                     (when-let [m (some-> (:payload r) edn/read-string)]
-                                       (some-> (:child/session-id m) types/session-id))))
-                             rows))
-                     (catch Exception _ []))
-        link-kids (try
-                    (mapv #(types/session-id (:child_session_id %))
-                          (sqlite/query spec
-                                        ["SELECT child_session_id FROM subagent_links WHERE parent_session_id = ? ORDER BY created_at" pid]))
-                    (catch Exception _ []))]
-    (into [] (distinct (concat work-kids event-kids link-kids)))))
+        rows (try
+               (sqlite/query spec
+                             ["SELECT w1.session_id AS child_session_id
+                               FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
+                               WHERE w2.session_id = ?
+                               ORDER BY w1.created_at, w1.id"
+                              pid])
+               (catch Exception _ []))]
+    (->> rows
+         (map :child_session_id)
+         (map types/session-id)
+         distinct
+         vec)))
 (def ^:const max-subagent-depth
   "Maximum nesting depth for subagent chains (S6). Parent depth +1 must be <= this.
   Fail-closed backstop; task-level planning (:task + :capabilities) is primary."
@@ -155,7 +127,7 @@
 
 (defn subagent-depth
   "Depth of session `sid` in the subagent tree. Root (no parent) has depth 0,
-  its child has depth 1, etc. Walks subagent_links via get-parent-session-id."
+  its child has depth 1, etc. Walks the Work graph via get-parent-session-id."
   [db sid]
   (loop [cur sid depth 0 seen #{}]
     (if (contains? seen cur)
@@ -419,7 +391,6 @@
   - appends a :subagent/spawned event to the parent's chain (cause = parent's
     latest event id) carrying {:child/session-id child-id :child/spec
     child-spec :task/digest <sha256-or-nil>} in its :metadata.
-  - records the parent->child link in subagent_links.
   - creates exactly ONE child Work (:subagent/run, :queued) carrying the
     spawn-time task digest as :work/payload-ref and the spawn deadline
     (child-spec :deadline or opts :deadline) as :work/deadline — the
@@ -627,8 +598,8 @@
   `db`                 — sqlite spec, path, or SessionStore handle (must be migrated).
   `parent-session-id`  — UUID of the parent session (for validation / audit; may be nil).
   `child-session-id`   — UUID of the child session to run (must exist; the
-  session row is immutable identity and stays :created — there is NO
-  created-session lifecycle requirement, W2).
+  session row is immutable identity; the child Work owns lifecycle and there
+  is no Session lifecycle requirement (W2).
   `task`               — EDN-safe task input (e.g. {:text \"hello\"}) fed as the entry node's payload.
   `work-id`            — (5-arity) the child Work to drive. Must exist and
   belong to the child; nil resolves the child's single Work as the 4-arity does.
@@ -645,9 +616,9 @@
 
   Child intents go through the broker with the child's persisted derived leases
   from the capabilities table (P1 DB truth); DB miss means deny, no synthetic lease.
-  The child has its own event chain (per-session seq
-  1..M) independent from the parent; the parent's :subagent/spawned event
-  already links to the child (S2).
+  The child has its own event chain (per-session seq 1..M) independent from
+  the parent; the parent event records cause/task metadata, while
+  Work.parent_work_id is the topology edge (S2).
 
   W2: Work's running is execution; a future is only an internal await.
   run-subagent! drives the child Work (queued -> running -> succeeded/failed)

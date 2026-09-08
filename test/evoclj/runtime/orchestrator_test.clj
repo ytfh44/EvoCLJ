@@ -105,9 +105,7 @@
           sid (create-pinned-session db)
           intent {:intent/id (str (random-uuid)) :intent/type :intent/model-call :session/id sid :phenotype/id phenotype-id :node/id :llm :budget {:wall-ms 1000}
                   :payload {:base/messages [{:role :user :content "hi"}] :messages [{:role :user :content "hi"}] :tools [{:name "echo_tool" :tool :echo-tool}] :requested-tools [{:tool/id :echo-tool :name "echo_tool"}] :model/id "fake/model" :options {:max-tool-rounds 2}}}
-          _ (do (session/transition-session! db sid :created :resolving nil)
-                (session/transition-session! db sid :resolving :running nil)
-                (event/append-event! db {:session/id sid :generation/id generation-id :phenotype/id phenotype-id :event/type :session/started :prev/event-id (:event/id (first (event/events-for-session db sid))) :payload-ref nil :metadata {}}))
+          _ (event/append-event! db {:session/id sid :generation/id generation-id :phenotype/id phenotype-id :event/type :session/started :prev/event-id (:event/id (first (event/events-for-session db sid))) :payload-ref nil :metadata {}})
           pin2 (session/get-session db sid)
           cause-id (:event/id (last (event/events-for-session db sid)))
           orch (sut/->TraditionalOrchestrator)]

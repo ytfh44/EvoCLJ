@@ -2,28 +2,16 @@
   "Startup recovery and integrity scans (component).
 
   `scan-recovery-state` is the normative read-only scan. It NEVER
-  writes: no event is appended, no session state is rewritten, no
-  candidate is promoted. Recovery classifies crash residue so the
-  runtime can act on it; it does not pretend completion.
+  writes: no event is appended, no Session identity row is rewritten, no
+  candidate is promoted. Recovery classifies crash residue so the runtime
+  can act on it; it does not pretend completion.
 
       (scan-recovery-state store cas)
-      ;; => {:orphaned-sessions   [...]
-      ;;     :missing-artifacts   [...]
+      ;; => {:missing-artifacts   [...]
       ;;     :invalid-event-chains [...]
       ;;     :stale-candidates    [...]}
-
   Category semantics (component Steps 1-3):
 
-  * :orphaned-sessions — sessions whose persisted :state is non-terminal
-    AND whose event log contains no terminal session event
-    (:session/completed, :session/failed, :session/cancelled,
-    :session/budget-exhausted): the process died mid-flight. Each entry
-    carries :session/id, :state, and the last :event/seq recorded
-    (nil for a session with no events). The scan classifies them as
-    orphaned and does NOT pretend completion — no terminal event is
-    fabricated and the row state is untouched (Step 1). A session whose
-    log already holds a terminal event is finished regardless of its row
-    state and is never reported.
 
   * :missing-artifacts — events carrying a :payload-ref whose CAS
     artifact is absent. Rows reference payloads by content hash (Global
@@ -64,18 +52,10 @@
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.work :as work-store]
-            [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
-           (java.time.format DateTimeFormatter)
            (java.util Date UUID)))
 
-(def terminal-session-event-types
-  "Event types that close a session's lifecycle. A session whose log
-  contains one of these is finished; a session with a non-terminal row
-  state and none of these is orphaned (component Step 1)."
-  #{:session/completed :session/failed :session/cancelled
-    :session/budget-exhausted})
 
 (def prepared-candidate-states
   "Candidate states that mean materialization or evaluation was in
@@ -84,11 +64,6 @@
   recovery never promotes them."
   #{:materialized :evaluating :eligible})
 
-(def ^:private terminal-event-sql
-  "SQL IN-list literal matching the four terminal session event types as
-  stored (evoclj.store.event/type->db renders them without a leading
-  colon)."
-  "('session/completed','session/failed','session/cancelled','session/budget-exhausted')")
 
 ;; --- helpers ----------------------------------------------------------------
 
@@ -103,33 +78,8 @@
   [cas]
   (cas/->cas (cas-root cas) {:verify true}))
 
-;; --- the four normative categories ------------------------------------------
+;; --- the three normative categories ------------------------------------------
 
-(defn- orphaned-sessions
-  "Sessions whose row state is non-terminal AND whose event log holds no
-  terminal session event: {:session/id uuid, :state kw,
-  :last-event-seq int-or-nil}."
-  [store]
-  (let [rows (sqlite/query store ["SELECT id, state FROM sessions"])
-        terminal-ids (set (map :session_id
-                               (sqlite/query store
-                                             [(str "SELECT DISTINCT session_id FROM events
-                                                    WHERE event_type IN " terminal-event-sql)])))
-        last-seqs (into {}
-                        (map (juxt :session_id :last_event_seq))
-                        (sqlite/query store
-                                      ["SELECT session_id, MAX(event_seq) AS last_event_seq
-                                        FROM events GROUP BY session_id"]))]
-    (into []
-          (keep (fn [row]
-                  (let [sid (:id row)
-                        state (keyword (:state row))]
-                    (when (and (not (contains? session/terminal-states state))
-                               (not (contains? terminal-ids sid)))
-                      {:session/id (UUID/fromString sid)
-                       :state state
-                       :last-event-seq (get last-seqs sid)}))))
-          rows)))
 
 (defn- missing-artifacts
   "Events whose :payload-ref content address does not resolve in the
@@ -159,7 +109,6 @@
                   (when-not (:valid? v)
                     (assoc v :session/id sid)))))
         (sqlite/query store ["SELECT id FROM sessions"])))
-
 (defn- row->candidate
   "A candidates row as the public Candidate contract map."
   [row]
@@ -225,18 +174,17 @@
   classifies crash residue and reports corruption; it never appends,
   rewrites, or promotes anything.
 
-  Returns {:orphaned-sessions [...] :missing-artifacts [...]
-  :invalid-event-chains [...] :stale-candidates [...]}."
+  Returns {:missing-artifacts [...] :invalid-event-chains [...]
+  :stale-candidates [...]}."
   [store cas]
-  {:orphaned-sessions (orphaned-sessions store)
-   :missing-artifacts (missing-artifacts store cas)
+  {:missing-artifacts (missing-artifacts store cas)
    :invalid-event-chains (invalid-event-chains store)
    :stale-candidates (stale-candidates store)})
 
 (defn- hard-findings
   "The corruption findings strict mode fails closed on: unresolved
   payload references, invalid event chains, and a broken CURRENT
-  generation. Orphaned sessions and stale candidates are recoverable
+  generation. Stale candidates are recoverable
   crash residue and never count."
   [report]
   (concat (:missing-artifacts report)
@@ -253,11 +201,11 @@
   Runs scan-recovery-state, verifies the CURRENT generation (Database
   Invariants 6 and 7), and — in strict mode (the default, {:strict?
   false} to disable) — throws :store/integrity-failure carrying the
-  full report (the four normative categories plus :current-generation)
+  full report (the three normative categories plus :current-generation)
   when any hard finding exists: a missing payload artifact, an invalid
   event chain, or a CURRENT generation whose genome artifact is
-  absent/corrupt (or a missing/ambiguous CURRENT). Orphaned sessions
-  and stale candidates never block startup.
+  absent/corrupt (or a missing/ambiguous CURRENT). Stale candidates never
+  block startup.
 
   Returns the report augmented with :current-generation
   {:status :ok|:none|:missing|:corrupt|:missing-current|:ambiguous ...}
@@ -310,11 +258,9 @@
 (defn find-orphaned-subagents
   "Work-only subagent orphan classification: a child Work stuck
   non-terminal (:queued, :running, or :waiting per find-orphaned-works)
-  whose parent Work is already terminal. Sessions carry no runtime state
-  (W2) — the retired session-state scan (sessions.state +
-  subagent_links row states) is gone; parent/child links come from the
-  Works themselves (:work/parent-work-id), with owning sessions resolved
-  from the Work rows. Idempotent classification; never writes.
+  whose parent Work is already terminal. Session rows carry identity only;
+  parent/child links come from the Works themselves (:work/parent-work-id),
+  with owning sessions resolved from the Work rows.
 
   Returns a vector of {:parent/session-id uuid :child/session-id uuid
   :parent/work-id uuid :child/work-id uuid :parent/state kw :child/state

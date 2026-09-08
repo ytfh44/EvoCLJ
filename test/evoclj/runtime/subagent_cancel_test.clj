@@ -58,6 +58,11 @@
   (let [sess (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen})
         sid (:session/id sess)]
     (event/append-event! db {:session/id sid :generation/id gen :phenotype/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
+    (evoclj.store.work/create-work! db {:work/id (UUID/randomUUID)
+                                        :work/type :session/run
+                                        :work/state :queued
+                                        :work/session-id sid
+                                        :work/created-at (Date. 1700000000000)})
     sess))
 (defn- tool-intent [session-id phenotype-id]
   (icore/tool-call session-id phenotype-id :node/test 1 {:tool/id :fixture/echo :args {:text "hi"}} {:wall-ms 1000}))

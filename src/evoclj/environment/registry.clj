@@ -130,15 +130,13 @@
    (let [lock (Object.)
          bounds (merge (default-bounds) (:bounds opts))
          base (assoc (initial-state) :lock lock :bounds bounds)
-         ;; A6: optional durable command store wiring (outbox + recovery). When
-         ;; opts carries :store / :db / :command-store the registry retains it
-         ;; so refresh-async! can create auditable commands instead of a naked
-         ;; future. Absence preserves the pre-A6 in-memory behavior (INV-06).
-         store (or (:store opts) (:db opts) (:command-store opts) (:event-store opts) (:work-store opts))
-         with-store (if store (assoc base :store store) base)
-         ;; W1: Work unified lifecycle replaces command+future dual track.
-         ;; No :command-queue/:last-command/:last-refresh-future.
+         ;; Optional durable Work-store wiring. When opts carries :store / :db,
+         ;; the registry retains it so refresh-async! can persist auditable Work.
+         ;; Absence preserves the in-memory behavior.
+         store (or (:store opts) (:db opts) (:event-store opts) (:work-store opts))
+         ;; W1: Work is the sole durable lifecycle.
          ;; Works are durable in the `works` table; registry keeps :work-queue for in-memory audit.
+         with-store (assoc base :store store)
          with-work (assoc with-store :work-queue [] :last-work nil)]
      (atom with-work))))
 
@@ -814,7 +812,7 @@
               :per-source (per-source-results plans)})))))))
 
 (defn- resolve-refresh-owner
-    "A6 helper: find a valid owner-session-id for a refresh command when a store is present.
+    "Find a valid owner-session-id for a refresh Work when a store is present.
      Queries the DB for an existing session; falls back to nil so the caller can synth a UUID."
     [store]
     (try
@@ -827,8 +825,8 @@
 (defn refresh-async!
   "W1 — auditable refresh via the durable Work lifecycle (queued/running/succeeded/failed).
 
-   Replaces A6's future+command dual track. Work is the single durable
-   lifecycle; no :last-refresh-future is stored and no raw future is leaked.
+   Work is the single durable lifecycle; no future is stored and no raw
+   future is leaked.
 
      1. synthesize a :environment/refresh work (id, type, state :queued,
         session owner, created-at);
@@ -840,7 +838,7 @@
    The returned map is the Work contract (not a future)."
   ([registry] (refresh-async! registry nil))
   ([registry source-id]
-   (let [store (or (:store @registry) (:db @registry) (:command-store @registry) (:work-store @registry))
+   (let [store (or (:store @registry) (:db @registry) (:work-store @registry))
          owner (or (resolve-refresh-owner store) (random-uuid))
          work-id (random-uuid)
          base-work {:work/id work-id
@@ -854,7 +852,7 @@
                 base-work
                 (catch Exception _
                   base-work))
-         ;; in-memory audit trail (W1: Work only, no command dual track)
+         ;; In-memory Work audit trail.
          _ (swap! registry update :work-queue (fnil conj []) work)
          _ (swap! registry assoc :last-work work)]
      ;; drive Work lifecycle synchronously (no future)

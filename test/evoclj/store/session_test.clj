@@ -1,23 +1,12 @@
 (ns evoclj.store.session-test
-  "component tests for session pinning and lifecycle transitions.
-
-  Step 1: a session records immutable Genome/Resolution/Phenotype ids
-  at creation. Step 2: illegal state transitions fail with the typed
-  error :session/invalid-transition. Step 3: no update operation can
-  change the pinned ids — the only write path is the compare-and-set
-  state transition and it touches state alone. Step 4: the transition
-  is a compare-and-set UPDATE, so two workers racing from the same
-  state produce exactly one winner and one :session/invalid-transition.
-
-  Fresh temp databases are migrated from the classpath migrations and
-  deleted after every test."
+  "Session identity-contract tests (W2: Work owns lifecycle)."
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
-            [evoclj.store.sqlite :as sqlite]))
-
-;; --- shared fixtures -------------------------------------------------------
+            [evoclj.store.sqlite :as sqlite]
+            [evoclj.store.work :as work-store]))
 
 (def ^:private now "2025-01-01T00:00:00Z")
 (def ^:private gen "generation-1")
@@ -27,317 +16,178 @@
 
 (def ^:private db-paths (atom []))
 
-(defn- temp-db-path
-  "A throwaway SQLite file in the system temp dir."
-  []
-  (let [p (str (java.nio.file.Files/createTempFile
-                "evoclj-session-" ".db"
-                (make-array java.nio.file.attribute.FileAttribute 0)))]
+(defn- temp-db-path []
+  (let [f (java.io.File/createTempFile "evoclj-session-test-" ".db")
+        p (.getAbsolutePath f)]
+    (.delete f)
     (swap! db-paths conj p)
     p))
 
-(defn- cleanup!
-  "Delete every temp db file created during this run."
-  []
+(defn- cleanup! []
   (doseq [p @db-paths]
-    (java.nio.file.Files/deleteIfExists
-     (java.nio.file.Paths/get p (make-array String 0))))
+    (try
+      (java.nio.file.Files/deleteIfExists
+       (java.nio.file.Paths/get p (make-array String 0)))
+      (catch Exception _ nil)))
   (reset! db-paths []))
 
-(use-fixtures :each (fn [f] (f) (cleanup!)))
+(use-fixtures :each (fn [f] (try (f) (finally (cleanup!)))))
 
-(defn- fresh-db
-  "A migrated database spec backed by a fresh temp file."
-  []
+(defn- fresh-db []
   (let [db (sqlite/spec (temp-db-path))]
     (migrate/migrate! db)
     db))
 
-(defn- seed-generation!
-  "Insert the generation row sessions are pinned to (once per db)."
-  [db]
+(defn- seed-generation! [db]
+  (artifact/ensure-artifact! db genome "application/octet-stream" 0)
+  (artifact/ensure-artifact! db resolution "application/edn" 0)
+  (artifact/ensure-artifact! db phenotype "application/edn" 0)
+  (artifact/ensure-genome! db genome)
   (sqlite/with-db [conn db]
-    ;; Fleet P5/F FK (011): generations/genome_id -> genomes -> artifacts
-    (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" genome])
-    (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" resolution])
-    (jdbc/execute! conn ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at) VALUES (?, 'application/octet-stream', 0, datetime('now'))" phenotype])
-    (jdbc/execute! conn ["INSERT OR IGNORE INTO genomes (id, created_at) VALUES (?, datetime('now'))" genome])
     (jdbc/insert! conn :generations
                   {:id gen
                    :genome_id genome
                    :resolution_id resolution
                    :parent_id nil
                    :state "active"
-                   :current 0
+                   :current 1
                    :created_at now})))
 
 (defn- session-request
-  "A valid create-session! request; callers merge overrides."
-  [& [overrides]]
-  (merge {:genome/id genome
+  [& overrides]
+  (merge {:generation/id gen
+          :genome/id genome
           :resolution/id resolution
-          :phenotype/id phenotype
-          :generation/id gen}
-         overrides))
+          :phenotype/id phenotype}
+         (apply merge overrides)))
 
-(defn- tx-error
-  "The ExceptionInfo thrown by f, or nil."
-  [f]
+(defn- tx-error [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e e)))
-
-(defn- deref-unwrap
-  "Deref a future, rethrowing the cause of an ExecutionException so
-  worker failures surface with their real type."
-  [f]
-  (try @f
-       (catch java.util.concurrent.ExecutionException e
-         (throw (or (.getCause e) e)))))
-
-;; ============================================================================
-;; Step 1 — a session records immutable pinned ids at creation
-;; ============================================================================
 
 (deftest session-pins-identity-at-creation
   (let [db (fresh-db)
         _ (seed-generation! db)
-        s (session/create-session! db (session-request))
-        sid (:session/id s)]
-    (testing "the returned value is the full public Session map"
-      (is (= s (session/get-session db sid))))
-    (testing "pinned identity fields match the request"
-      (is (uuid? sid))
-      (is (= genome (:genome/id s)))
-      (is (= resolution (:resolution/id s)))
-      (is (= phenotype (:phenotype/id s)))
-      (is (= gen (:generation/id s)))
-      (is (= :created (:state s)))
-      (is (instance? java.util.Date (:created-at s))))
-    (testing "the pinned ids never change across every transition"
-      (session/transition-session! db sid :created :resolving {})
-      (session/transition-session! db sid :resolving :running {})
-      (session/transition-session! db sid :running :waiting {})
-      (let [s2 (session/get-session db sid)]
-        (is (= [genome resolution phenotype gen]
-               [(:genome/id s2) (:resolution/id s2)
-                (:phenotype/id s2) (:generation/id s2)]))
-        (is (= :waiting (:state s2)))))))
+        created-at (java.util.Date. 1700000000000)
+        s (session/create-session! db (assoc (session-request) :created-at created-at))
+        fetched (session/get-session db (:session/id s))]
+    (is (instance? java.util.UUID (:session/id s)))
+    (is (= gen (:generation/id s)))
+    (is (= [genome resolution phenotype]
+           [(:genome/id s) (:resolution/id s) (:phenotype/id s)]))
+    (is (= created-at (:created-at s)))
+    (is (not (contains? s :state)))
+    (is (= [genome resolution phenotype gen]
+           [(:genome/id fetched) (:resolution/id fetched)
+            (:phenotype/id fetched) (:generation/id fetched)]))))
 
-(deftest get-session-returns-nil-for-an-unknown-session
-  (let [db (fresh-db)]
-    (is (nil? (session/get-session db (random-uuid))))))
-
-;; ============================================================================
-;; Step 2 — illegal state transitions fail with :session/invalid-transition
-;; ============================================================================
-
-(deftest illegal-transitions-fail
+(deftest supplied-session-id-round-trips
   (let [db (fresh-db)
         _ (seed-generation! db)
-        sid (:session/id (session/create-session! db (session-request)))
-        invalid? (fn [expected new]
-                   (= :session/invalid-transition
-                      (-> (tx-error #(session/transition-session! db sid expected new {}))
-                          ex-data :error/type)))]
-    (testing "a state cannot be skipped"
-      (is (invalid? :created :running)))
-    (testing "a state cannot go backwards"
-      (is (invalid? :resolving :created)))
-    (testing "a self-transition is not an edge of the state machine"
-      (is (invalid? :running :running)))
-    (testing ":running cannot complete directly; :completed is reached via :waiting"
-      (is (invalid? :running :completed)))
-    (testing "a session cannot be created into a later state"
-      (is (invalid? :created :completed))
-      (is (invalid? :created :failed)))
-    (testing "an unknown state is not a valid source or target"
-      (is (invalid? :bogus :running))
-      (is (invalid? :running :bogus)))
-    (testing "an illegal transition leaves the stored state unchanged"
-      (is (invalid? :created :running))
-      (is (= :created (:state (session/get-session db sid)))))))
+        sid (java.util.UUID/randomUUID)
+        s (session/create-session! db (assoc (session-request) :session/id sid))]
+    (is (= sid (:session/id s)))
+    (is (= s (session/find-session db sid)))
+    (is (true? (session/session-exists? db sid)))))
 
-(deftest terminal-states-accept-nothing
+(deftest unknown-session-is-not-found
   (let [db (fresh-db)
-        _ (seed-generation! db)
-        to-terminal (fn [terminal]
-                      (let [sid (:session/id (session/create-session! db (session-request)))]
-                        (session/transition-session! db sid :created :resolving {})
-                        (session/transition-session! db sid :resolving :running {})
-                        (is (= terminal (:state (session/transition-session!
-                                                 db sid :running terminal {:reason terminal}))))
-                        sid))]
-    (doseq [t [:failed :cancelled :budget-exhausted]]
-      (testing (str "terminal state " t " accepts no further transitions")
-        (let [sid (to-terminal t)]
-          (is (= :session/invalid-transition
-                 (-> (tx-error #(session/transition-session! db sid t :running {}))
-                     ex-data :error/type))))))
-    (testing "a completed session accepts no further transitions"
-      (let [sid (:session/id (session/create-session! db (session-request)))]
-        (session/transition-session! db sid :created :resolving {})
-        (session/transition-session! db sid :resolving :running {})
-        (session/transition-session! db sid :running :waiting {})
-        (is (= :completed (:state (session/transition-session!
-                                   db sid :waiting :completed {:score 1.0}))))
-        (is (= :session/invalid-transition
-               (-> (tx-error #(session/transition-session! db sid :completed :waiting {}))
-                   ex-data :error/type)))))))
-
-(deftest transition-on-an-unknown-session-is-rejected
-  (let [db (fresh-db)
-        _ (seed-generation! db)]
+        sid (java.util.UUID/randomUUID)]
+    (is (nil? (session/get-session db sid)))
+    (is (nil? (session/find-session db sid)))
+    (is (nil? (session/try-cancel-session! db sid)))
     (is (= :store/session-not-found
-           (-> (tx-error #(session/transition-session! db (random-uuid) :created :resolving {}))
+           (-> (tx-error #(session/get-session! db sid))
                ex-data :error/type)))))
 
-;; ============================================================================
-;; Step 3 — no update operation can change the pinned ids
-;; ============================================================================
-
-(deftest no-update-api-can-change-pinned-ids
-  (let [db (fresh-db)
-        _ (seed-generation! db)
-        sid (:session/id (session/create-session! db (session-request)))
-        publics (set (map name (keys (ns-publics 'evoclj.store.session))))]
-    (testing "the documented public API is present"
-      (is (every? publics ["create-session!" "transition-session!" "get-session"])))
-    (testing "no update/delete-style API exists to rewrite identity"
-      (is (empty? (filter #(re-matches #".*(?:update!|delete!|insert!|remove!|drop!).*" %)
-                          publics))))
-    (testing "transitions never disturb the pinned ids"
-      (session/transition-session! db sid :created :resolving {})
-      (session/transition-session! db sid :resolving :running {})
-      (let [s (session/get-session db sid)]
-        (is (= [genome resolution phenotype]
-               [(:genome/id s) (:resolution/id s) (:phenotype/id s)]))))))
-
-;; ============================================================================
-;; Step 4 — compare-and-set: concurrent workers, exactly one wins
-;; ============================================================================
-
-(deftest concurrent-cas-exactly-one-winner
-  (let [db (fresh-db)
-        _ (seed-generation! db)
-        sid (:session/id (session/create-session! db (session-request)))
-        gate (java.util.concurrent.CountDownLatch. 1)
-        worker (fn []
-                 (.await gate)
-                 (try
-                   (session/transition-session! db sid :created :resolving
-                                                {:worker (str (Thread/currentThread))})
-                   :won
-                   (catch clojure.lang.ExceptionInfo e
-                     (if (= :session/invalid-transition (:error/type (ex-data e)))
-                       :lost
-                       (throw e)))))
-        t1 (future (worker))
-        t2 (future (worker))]
-    (.countDown gate)
-    (let [outcomes (sort [(deref-unwrap t1) (deref-unwrap t2)])]
-      (testing "exactly one worker wins; the loser sees an invalid transition"
-        (is (= [:lost :won] outcomes)))
-      (testing "the session ends in exactly the target state"
-        (is (= :resolving (:state (session/get-session db sid))))))))
-
-;; ============================================================================
-;; The full state machine (normative diagram)
-;; ============================================================================
-
-(deftest full-state-machine-walk
-  (let [db (fresh-db)
-        _ (seed-generation! db)
-        sid (:session/id (session/create-session! db (session-request)))]
-    (testing ":created → :resolving → :running ↔ :waiting → :completed"
-      (is (= :resolving (:state (session/transition-session! db sid :created :resolving {}))))
-      (is (= :running (:state (session/transition-session! db sid :resolving :running {}))))
-      (is (= :waiting (:state (session/transition-session! db sid :running :waiting {}))))
-      (is (= :running (:state (session/transition-session! db sid :waiting :running {}))))
-      (is (= :waiting (:state (session/transition-session! db sid :running :waiting {}))))
-      (is (= :completed (:state (session/transition-session!
-                                 db sid :waiting :completed {:score 1.0})))))))
-
-;; ============================================================================
-;; Input validation at the module boundary
-;; ============================================================================
-
 (deftest create-request-is-validated
-  (let [db (fresh-db)
-        _ (seed-generation! db)
-        invalid? (fn [req]
-                   (= :store/session-invalid
-                      (-> (tx-error #(session/create-session! db req))
-                          ex-data :error/type)))]
-    (testing "unknown keys are rejected (closed trust boundary)"
-      (is (invalid? (assoc (session-request) :bogus 1))))
-    (testing "a malformed genome id is rejected"
-      (is (invalid? (assoc (session-request) :genome/id "not-a-hash"))))
-    (testing "a malformed resolution id is rejected"
-      (is (invalid? (assoc (session-request) :resolution/id "not-a-hash"))))
-    (testing "a malformed phenotype id is rejected"
-      (is (invalid? (assoc (session-request) :phenotype/id "not-a-hash"))))
-    (testing "a missing generation id is rejected"
-      (is (invalid? (dissoc (session-request) :generation/id))))
-    (testing "a malformed routing map is rejected"
-      (is (invalid? (session-request {:routing {:bucket "not-an-int"}}))))
-    (testing "an unknown generation fails loudly"
-      (is (= :store/generation-not-found
-             (-> (tx-error #(session/create-session! db (session-request {:generation/id "no-such-generation"})))
-                 ex-data :error/type))))))
+  (let [db (fresh-db)]
+    (is (= :store/session-invalid
+           (-> (tx-error #(session/create-session! db {}))
+               ex-data :error/type)))
+    (is (= :store/session-invalid
+           (-> (tx-error #(session/create-session! db (assoc (session-request) :unexpected true)))
+               ex-data :error/type)))
+    (is (= :store/generation-not-found
+           (-> (tx-error #(session/create-session! db (assoc (session-request)
+                                                            :generation/id "missing-generation")))
+               ex-data :error/type)))))
 
-(deftest transition-data-must-be-edn-safe
+(deftest routing-is-persisted-with-the-session-pin
   (let [db (fresh-db)
         _ (seed-generation! db)
-        sid (:session/id (session/create-session! db (session-request)))]
-    (testing "a function in the data payload is rejected"
-      (is (= :store/session-invalid
-             (-> (tx-error #(session/transition-session! db sid :created :resolving {:bad (fn [] 1)}))
-                 ex-data :error/type))))
-    (testing "nil and plain maps are accepted"
-      (is (= :resolving (:state (session/transition-session! db sid :created :resolving nil)))))))
+        s (session/create-session! db (assoc (session-request)
+                                             :routing {:deployment-version "v1" :bucket 7}))
+        fetched (session/get-session db (:session/id s))]
+    (is (= {:deployment-version "v1" :bucket 7}
+           (:routing fetched)))))
 
-(deftest transition-data-with-lazy-seq-is-rejected-unrealized
+(deftest cancellation-delegates-to-root-work
   (let [db (fresh-db)
         _ (seed-generation! db)
-        sid (:session/id (session/create-session! db (session-request)))
-        touched (atom false)
-        poison (map (fn [x] (reset! touched true) x) (range 5))]
-    (testing "a lazy seq in transition data is rejected with the typed error"
-      (is (= :store/session-invalid
-             (-> (tx-error #(session/transition-session! db sid :created :resolving {:items poison}))
-                 ex-data :error/type))))
-    (testing "validation never realized the seq"
-      (is (false? (realized? poison)))
-      (is (false? @touched)))
-    (testing "the rejected transition wrote nothing: the session is still :created"
-      (is (= :created (:state (session/get-session db sid)))))
-    (testing "a large valid nested map still transitions"
-      (let [data {:reason :scale-check
-                  :attempt 7
-                  :scores [1 2 {:bonus #{3}}]
-                  :trail '(noted {:by ["ops"]})
-                  :rows (vec (map (fn [n] {:index n}) (range 100)))}]
-        (is (= :resolving (:state (session/transition-session! db sid :created :resolving data))))))))
+        s (session/create-session! db (session-request))
+        sid (:session/id s)
+        work-id (java.util.UUID/randomUUID)
+        _ (work-store/create-work! db {:work/id work-id
+                                       :work/type :session/run
+                                       :work/state :running
+                                       :work/session-id sid})
+        cancelled (session/try-cancel-session! db sid)]
+    (is (= sid (:session/id cancelled)))
+    (is (= :cancelled (:work/state (work-store/fetch-work db work-id))))
+    (is (not (contains? (session/get-session db sid) :state)))))
 
-(deftest routing-is-persisted-with-the-allocation-version
-  ;; component (additive migration 003-routing.sql): the :routing map
-  ;; {:deployment-version ... :bucket ...} that decided the session's
-  ;; generation is written at insert and read back by get-session, so
-  ;; routing can be audited later. (component validated but did not
-  ;; persist :routing — the schema had no columns and migrations were
-  ;; out of scope; 003-routing.sql closed that gap.)
+(deftest work-lifecycle-does-not-change-session-identity
   (let [db (fresh-db)
         _ (seed-generation! db)
-        s (session/create-session! db (session-request
-                                       {:routing {:deployment-version "v1" :bucket 7}}))
-        sid (:session/id s)]
-    (testing "the routing decision round-trips through the store"
-      (is (= {:deployment-version "v1" :bucket 7} (:routing s)))
-      (is (= (:routing s) (:routing (session/get-session db sid)))))
-    (testing "the routing decision survives every state transition"
-      (session/transition-session! db sid :created :resolving {})
-      (session/transition-session! db sid :resolving :running {})
-      (is (= {:deployment-version "v1" :bucket 7}
-             (:routing (session/get-session db sid)))))
-    (testing "sessions created without routing keep a nil :routing"
-      (let [s2 (session/create-session! db (session-request))]
-        (is (nil? (:routing s2)))))))
+        s (session/create-session! db (session-request))
+        sid (:session/id s)
+        work-id (java.util.UUID/randomUUID)
+        _ (work-store/create-work! db {:work/id work-id
+                                       :work/type :session/run
+                                       :work/state :queued
+                                       :work/session-id sid})
+        _ (work-store/dispatch-work! db work-id)
+        _ (work-store/succeed-work! db work-id nil)
+        fetched (session/get-session db sid)]
+    (is (= :succeeded (:work/state (work-store/fetch-work db work-id))))
+    (is (= [genome resolution phenotype gen]
+           [(:genome/id fetched) (:resolution/id fetched)
+            (:phenotype/id fetched) (:generation/id fetched)]))
+    (is (not (contains? fetched :state)))))
+
+(deftest session-descendants-follow-work-parentage
+  (testing "list-descendants follows works.parent_work_id transitively"
+    (let [db (fresh-db)
+          _ (seed-generation! db)
+          root-session (session/create-session! db (session-request))
+          root-id (:session/id root-session)
+          root-work-id (java.util.UUID/randomUUID)
+          _ (work-store/create-work! db {:work/id root-work-id
+                                         :work/type :session/run
+                                         :work/state :succeeded
+                                         :work/session-id root-id})
+          child-session (session/create-session! db (session-request))
+          child-id (:session/id child-session)
+          child-work-id (java.util.UUID/randomUUID)
+          _ (work-store/create-work! db {:work/id child-work-id
+                                         :work/type :subagent/run
+                                         :work/state :queued
+                                         :work/session-id child-id
+                                         :work/parent-work-id root-work-id})
+          grandchild-session (session/create-session! db (session-request))
+          grandchild-id (:session/id grandchild-session)
+          grandchild-work-id (java.util.UUID/randomUUID)
+          _ (work-store/create-work! db {:work/id grandchild-work-id
+                                         :work/type :subagent/run
+                                         :work/state :queued
+                                         :work/session-id grandchild-id
+                                         :work/parent-work-id child-work-id})
+          descendants (set (session/list-descendants db root-id))]
+      (is (= #{child-id grandchild-id} descendants)))))
+
+(deftest session-api-has-no-state-transition-entrypoint
+  (let [db (fresh-db)
+        _ (seed-generation! db)
+        s (session/create-session! db (session-request))]
+    (is (nil? (ns-resolve 'evoclj.store.session 'transition-session!)))
+    (is (not (contains? (session/get-session db (:session/id s)) :state)))))

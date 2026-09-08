@@ -73,6 +73,11 @@
                              :prev/event-id nil
                              :payload-ref nil
                              :metadata {}})
+    (evoclj.store.work/create-work! db {:work/id (UUID/randomUUID)
+                                        :work/type :session/run
+                                        :work/state :queued
+                                        :work/session-id sid
+                                        :work/created-at (Date. 1700000000000)})
     sess))
 
 ;; ===========================================================================
@@ -90,7 +95,7 @@
           child-sess (:child/session res)]
       (is (uuid? child-id) "child id is uuid")
       (is (some? child-sess) "child session map returned")
-      (is (= :created (:state child-sess)) "session row stays :created (immutable identity, never a lifecycle)")
+        (is (not (contains? child-sess :state)) "session row has no lifecycle state")
       (is (= genome (:genome/id child-sess)) "same genome as parent")
       (is (= resolution (:resolution/id child-sess)) "same resolution as parent")
       (is (= phenotype (:phenotype/id child-sess)) "same phenotype as parent")

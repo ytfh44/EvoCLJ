@@ -2,8 +2,8 @@
 
 **Scope:** `evoclj.runtime.scheduler/run-session!`, the executor map it
 consumes, and the store components it writes through
-(`evoclj.store.event/append-event!`,
-`evoclj.store.session/transition-session!`, `evoclj.store.cas`).
+(`evoclj.store.event/append-event!`, `evoclj.store.work`,
+`evoclj.store.cas`).
 This document describes what is **serialized** and what is
 **concurrent** in the v0 single-session scheduler, and what the component stress test (`test/evoclj/runtime/scheduler_stress_test.clj`)
 proves about it. The doc is the contract: it matches the code, and
@@ -37,7 +37,7 @@ concurrency (or its absence) is decided by the host that calls it.
 | Concern | Mechanism |
 | Event persistence | `append-event!` runs each append in one `BEGIN IMMEDIATE` transaction: seq allocation (`max(seq)+1`), prev validation (strict immediate predecessor), `prev-hash` linkage, v2 hash computation, row insert — atomic, never interleaved |
 | Node execution | FIFO; one node completes before the next is stepped |
-| Session state | compare-and-set `transition-session!` hops: `:created → :resolving → :running → :waiting → :completed` (or `:failed` / `:budget-exhausted`) |
+| Work state | Work CAS transitions (`queued` → `running` → terminal); Session identity is not mutable lifecycle state |
 | SCI runtime use | one session at a time — a SCI runtime is not thread-safe: one live session per runtime (the stress test builds exactly this shape) |
 | Intent effect transaction | per intent: `:intent/proposed` → broker dispatch (one call) → `:intent/authorized` + `:provider/call-started` + `:provider/call-completed`, or `:intent/denied` / `:intent/failed` — persisted before the session continues |
 | Loop state | per-session `:loop-state` map, built fresh by every `run-session!` call |
@@ -107,9 +107,10 @@ fingerprints (determinism).
   SCI runtime.
 - One store (sqlite + CAS) may serve any number of concurrent
   sessions; the store serializes writers at the transaction level.
-- `run-session!` only starts sessions in `:created`; a session that
-  is already running or terminal is rejected with
-  `:scheduler/session-invalid`.
+- `run-session!` creates or resumes the session root Work; Work state
+  determines whether execution can proceed.
+- A terminal root Work is rejected with `:scheduler/session-invalid`; Session
+  identity itself is not used as a lifecycle state.
 - Recovery of a session interrupted mid-run is the store recovery
   layer's job (component), not the scheduler's.
 ## 7. Async durable work — the `works` lifecycle (W1/W2)
@@ -172,51 +173,31 @@ Both paths persist `:mcp/continue` / `:environment/refresh` Works best-effort (a
 
 ## 8. Subagents — Work-supervised child executions
 
-**Components:** `evoclj.runtime.subagent` (spawn / run / cancel / result + tool surface), `evoclj.store.work` (7-state lifecycle + `parent_work_id` graph), `evoclj.store.session` (immutable identity rows + `subagent_links` session mirror), `evoclj.store.recovery` (Work-only orphan reporting), `evoclj.capability.mint` (`derive-lease!` attenuation), `evoclj.intent.schema` / `evoclj.intent.dispatch` (typed intents). Wolfram [W-16..W-19] (subagent SM), [W-08..W-11] (attenuation / downward-closed), [W-25..W-27] (event chain).
+**Components:** `evoclj.runtime.subagent` (spawn / run / cancel / result + tool surface), `evoclj.store.work` (7-state lifecycle + `parent_work_id` graph), `evoclj.store.session` (immutable identity rows), `evoclj.store.recovery` (Work-only orphan reporting), `evoclj.capability.mint` (`derive-lease!` attenuation), `evoclj.intent.schema` / `evoclj.intent.dispatch` (typed intents). Wolfram [W-16..W-19] (subagent SM), [W-08..W-11] (attenuation / downward-closed), [W-25..W-27] (event chain).
 
 > **Lifecycle note (W1/W2):** `Work` (`works` table, 7-state SM
 > `queued|running|waiting|succeeded|failed|cancelled|timed-out`) is the sole
-> durable lifecycle for subagents (INV-12). A session row is immutable
-> identity — it is inserted once as `:created` and never transitions for a
-> subagent; completion, failure, and cancellation truth all live on the
-> child Work row, driven by compare-and-set. The `transition-session!`
-> hops in section 2 describe the scheduler's session mirror, not the
-> subagent lifecycle.
+> durable lifecycle for scheduler and subagent execution (INV-12). A Session
+> row is immutable identity; completion, failure, cancellation, and timeout
+> truth all live on its Work row, driven by compare-and-set. The scheduler
+> never writes a Session lifecycle state.
 
-A subagent is not a thread. It is an independent **session** — own `session/id`, own phenotype (SCI runtime), own single-session FIFO scheduler — that runs through the same broker and store as its parent and is supervised via the Work graph and the lease lattice. Parent and child share no mutable state except the `subagent_links` edge, the parent->child Work edge, and the derived lease chain.
+A subagent is not a thread. It is an independent **session** — own `session/id`, own phenotype (SCI runtime), own single-session FIFO scheduler — that runs through the same broker and store as its parent and is supervised via the Work graph and the lease lattice. Parent and child share no mutable state except the parent->child Work edge and the derived lease chain.
 
 * **Same genome/resolution, new session + new child Principal.** Spawn derives a child execution (Phenotype instance) from the parent's genome/resolution, so the Principal is `{:principal/type :session :session/id child-id}` (I2 single field) — siblings on the same genome are different Principals (exact tagged-value equality, [W-01]).
 * **Derived leases via `capability/mint.clj` `derive-lease!`.** The child's capability set is an **attenuation** of the parent's: `actions child subset actions parent`, `maxCalls child <= maxCalls parent`, `issued child >= issued parent`, `expires child <= expires parent`, with `:cap/attenuated-from` chain retained for audit. An expanded action set or longer window is rejected (`[W-08..W-11]` narrow derivation + downward-closed: the parent's authority is a superset of every reachable child's). The mutation path never mints a fresh lease for a child — it always derives.
 * **Independent scheduler lane.** The child's intents all pass the broker with the child's Principal and derived leases; provider execution is per-session. Each session's event chain is positionally `1..M` (`[W-25]`) with strict immediate-prev only (`[W-26]`) and sha256 hash chain verified per session (`[W-27]`).
 * **One spawn mints exactly one child Work.** `spawn-subagent!` returns `{:child/session-id, :child/work-id, ...}`: the session id is the identity handle, the Work id (`:subagent/run`, starting `:queued`) is the durable execution handle the run, status, cancel, and replay paths resolve. There is no created-session lifecycle requirement — `run-subagent!` drives whatever live child Work the handle names.
 
-### 8.2 Spawn graph — `parent_work_id` (durable) + `subagent_links` (session mirror)
+### 8.2 Spawn graph — `works.parent_work_id` (sole durable edge)
 
-Parent links are not on the `sessions` row — they live in a dedicated table so one parent can have many children and ancestry is queryable without parsing metadata:
+`works.parent_work_id` is the sole durable parent/child edge. Every child Work points at the exact parent Work that caused the spawn; the owning session ids are read from those Work rows. Session identity rows do not carry topology or lifecycle state.
 
-```sql
-CREATE TABLE IF NOT EXISTS subagent_links (
-  child_session_id  TEXT PRIMARY KEY,                            -- one parent per child
-  parent_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  created_at        TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS subagent_links_parent_idx ON subagent_links(parent_session_id);
-```
+Navigation (`get-parent-work-id`, `child-work-ids`, `work-depth`, `work-fanout`, `work-descendants`) lives in `store/work.clj`. Cancellation, recovery, traversal, and result delivery query this Work graph only; there is no session-link fallback or second topology source.
 
-`ensure-subagent-link-table!` is idempotent — ad-hoc in-memory DBs opened by tests get the table without running the full migration chain.
+The historical `020-subagent-links.sql` migration remains in the classpath for upgrading existing databases, but the runtime neither reads nor writes that legacy table.
 
-Queries (`runtime/subagent.clj` and `store/session.clj` share the shape):
-
-| Helper | Meaning |
-| --- | --- |
-| `get-parent-session-id(child)` | single hop upward |
-| `child-session-ids(parent)` | direct children ordered by `created_at` |
-| `subagent-depth(session)` | walks `get-parent-session-id` upward to count depth (root = 0) |
-| `list-descendants(root)` | **BFS closure** over `child-session-ids`, not including root; iteratively expands a queue; each newly discovered node's children are queued — returns full transitive descendant set in BFS order; cycle-free by `PRIMARY KEY` + parent-exists-before-child insertion order |
-
-The durable spawn graph is `works.parent_work_id`: every child Work points at the exact parent Work the spawn was attributed to (`:parent/work-id` on the Intent path, the parent's latest Work on the `:agent/spawn` tool path). Navigation (`get-parent-work-id`, `child-work-ids`, `work-depth`, `work-fanout`, `work-descendants`) lives in `store/work.clj`. `subagent_links` is the session-level mirror kept for compat; cancel targets are the union of the link BFS and the Work BFS, so neither graph can strand a descendant.
-
-`cancel-subagent-tree!` computes its revocation set over both graphs and `cancel-subagent!` on a mid-tree node revokes its whole subtree via the same closure.
+`cancel-subagent-tree!` computes its revocation set over the Work BFS closure, and `cancel-subagent!` on a mid-tree node revokes its whole Work subtree via the same closure.
 
 ### 8.3 Spawn — `:intent/subagent-spawn` via `spawn-subagent!`
 
@@ -227,7 +208,7 @@ intent/subagent-spawn
        * checks depth <= max-subagent-depth (5) and spawns-per-parent <= 10 before insertion
        * derives child execution (Phenotype instance) from parent genome/resolution; child Principal is {:principal/type :session :session/id child-id} (I2)
        * derives child leases as narrowings via capability/mint.clj derive-lease!
-       * inserts child session row (immutable identity, :created) + subagent_links row + records leases in leases-by-session
+       * inserts child session row (immutable identity, :created) + records leases in leases-by-session
        * appends :subagent/spawned event to the parent chain with prev -> parent's latest event id (GC-20 causal link)
        * creates exactly ONE child Work (:subagent/run, :queued) carrying the spawn-time task digest as :work/payload-ref and the spawn deadline as :work/deadline — the durable handle the run, status, cancel, and replay paths resolve
 ```
@@ -250,7 +231,10 @@ run-subagent! (child-id, task [, work-id])
   -> child intents all pass broker with child leases + child Principal
 ```
 
-* There is no created-session requirement: the session row stays `:created` (immutable identity) while the child Work carries the lifecycle. Awaiting uses the Work handle (`await-child!` polls the Work to a terminal; `run-subagent-async!` keeps the future as an await handle only — Work stays the truth).
+* A child Session pins identity only; its child Work carries the lifecycle.
+  Awaiting uses the Work handle (`await-child!` polls the Work to a terminal;
+  `run-subagent-async!` keeps the future as an await handle only — Work stays
+  the truth).
 * No shared SCI binding, no shared lease atom, no shared event cursor. Each session's `seq` is `1..M` locally; parent and child chains interleave only via the `:subagent/spawned` prev link and `:causal-links` edges.
 * Progress events are fanned out through `mcp/manager` so the host can observe `waiting` vs `running` accurately.
 * Hash chain: each session's `verify-event-chain` is independent; tampering changes the header digest and is detected per session.
@@ -261,8 +245,8 @@ run-subagent! (child-id, task [, work-id])
 Typed intent `intent/subagent-cancel` (`{:target/session-id uuid, :target/work-id uuid (cross-checked against the owning session), :reason #{:user-request :parent-cancel :timeout ...}}`) and the `:agent/cancel` model tool (descendant-scoped, session- or Work-addressable) both drive one path:
 
 * **Lease revocation (fail-closed).** `cancel-subagent!` / `cancel-subagent-tree!` revoke every lease recorded for each target in the global `subagent-lease-registry` (in-memory, `capability/mint.clj` `revoke-lease!`, `create-lease-registry`) and in the persistent `capabilities` table (`store/capability-store` `revoke-capability!` when present), plus `leases-by-session` tombstones. The registry is partition-safe — revoked leases are tombstoned even if unseen. The next broker call on that child with the revoked lease yields `:capability/denied`.
-* **Work CAS (the lifecycle truth).** `cancel-subtree-tx!` moves every target Work `queued|running|waiting -> cancelled` with `WHERE state IN (...)` compare-and-set in ONE `BEGIN IMMEDIATE` transaction together with the revoke and the cancel events — DB-first, memory tombstones after commit. No session row is transitioned (rows stay `:created`); the per-target `:session/cancelled` event and the `:subagent/cancelled` edge on each immediate parent chain are annotations sequenced inside the same tx. Cancel is idempotent — an already `:cancelled` Work is a no-op (returns `already-cancelled?`), and other terminal Work states (`succeeded`, `failed`, `timed-out`) are left as-is.
-* **Transitive cascade.** `cancel-subagent-tree!` with root `R` computes the BFS closure over the link graph AND the Work graph and revokes + cancels every descendant in one call; `cancel-subagent!` on a mid-tree node likewise cancels its subtree, so a child cannot outlive its parent's revocation. The scheduler's terminal step also cancels non-terminal children (`cancel-non-terminal-children!`), joining structured concurrency with `await-child!`.
+* **Work CAS (the lifecycle truth).** `cancel-subtree-tx!` moves every target Work `queued|running|waiting -> cancelled` with `WHERE state IN (...)` compare-and-set in ONE `BEGIN IMMEDIATE` transaction together with the revoke and cancel events. The Session row is never a lifecycle target; `:session/cancelled` and `:subagent/cancelled` are event annotations. Cancel is idempotent — already `:cancelled` Work is a no-op, and other terminal Work states (`succeeded`, `failed`, `timed-out`) are left as-is.
+* **Transitive cascade.** `cancel-subagent-tree!` with root `R` computes the BFS closure over the Work graph and revokes + cancels every descendant in one call; `cancel-subagent!` on a mid-tree node likewise cancels its Work subtree, so a child cannot outlive its parent Work. The scheduler's terminal step also cancels non-terminal children (`cancel-non-terminal-children!`), joining structured concurrency with `await-child!`.
 
 ### 8.6 Result delivery — `:subagent/result` with CAS ref
 
@@ -302,9 +286,9 @@ Checked in `check-depth-and-budget!` before insertion. Depth is per-chain (`dept
 
 The model-facing facade is the canonical `tool.specs` triple (S6, `activate_skill`-style) — the Malli schemas, the C-Tool maps, and the wire entries are defined once in `tool.specs`; `runtime/subagent.clj` aliases them (no duplicate maps) and consumes `subagent-tool-catalog` in `build-child-executor` (registers the three providers, S14-resolves the catalog):
 
-* `:agent/spawn` — `agent-spawn-provider` (broker-executable), args `{:task, :capabilities}` validated against the canonical input schema, output `{:child/session-id, :child/work-id, :child/capabilities}`; `:effect :write` (persists session row + event + link + child Work), so the tool-call path demands `:metadata {:idempotency/key ...}`.
+* `:agent/spawn` — `agent-spawn-provider` (broker-executable), args `{:task, :capabilities}` validated against the canonical input schema, output `{:child/session-id, :child/work-id, :child/capabilities}`; `:effect :write` (persists session identity + event + child Work), so the tool-call path demands `:metadata {:idempotency/key ...}`.
 * `:agent/status` — `agent-status-provider`, args `{:session-id}` or first-class `{:work-id}`, output `{:session/id, :work/id, :state, :children [...], :depth, ...}` where `:state` is the child Work state; descendant-scoped (`:capability/scope-denied` otherwise).
 * `:agent/cancel` — `agent-cancel-provider`, args `{:session-id}` or `{:work-id}` plus `:reason`; cancels the subtree via `cancel-subagent!`; descendant-scoped like status.
 
-All three descriptors declare `:tool/audience #{:model}`. The broker path is `tool -> :agent/spawn -> agent-spawn-provider -> spawn-subagent!` (same Grant-meet lease derivation, link insertion, and single-Work minting as the intent path).
+All three descriptors declare `:tool/audience #{:model}`. The broker path is `tool -> :agent/spawn -> agent-spawn-provider -> spawn-subagent!` (same Grant-meet lease derivation and single-Work minting as the intent path).
 

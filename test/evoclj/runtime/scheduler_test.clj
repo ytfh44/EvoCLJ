@@ -7,9 +7,9 @@
   nodes from :entry, stepping each node's handler, dispatching every
   emitted intent through evoclj.intent.dispatch! (the broker), feeding
   the provider results back into the session's accumulated outputs,
-  and persisting EVERY transition through
-  evoclj.store.event/append-event! and
-  evoclj.store.session/transition-session!.
+  and persisting EVERY event through evoclj.store.event/append-event!.
+  Session identity is immutable; Work transitions are driven by
+  evoclj.store.work CAS operations.
 
   The four normative scenarios, in the task's numbered order:
 
@@ -330,8 +330,8 @@
       (is (= 2 (count (:provider/call-completed by-type)))))
     (testing "the session ended :completed and the output artifact holds the accumulated outputs"
       (is (= :succeeded (session-work-state executor sid)))
-      (is (= :created (:state (session/get-session (:sqlite (:stores executor)) sid)))
-          "session identity default :created — Work owns the lifecycle")
+      (is (not (contains? (session/get-session (:sqlite (:stores executor)) sid) :state))
+          "Session carries identity only; Work owns the lifecycle")
       (is (= [{:action {:intent/type :intent/tool-call
                         :payload {:tool/id :fixture/echo :args {:text "abc"}}}}
               {:text "abc"}
@@ -513,4 +513,5 @@
       (is (= :requested-not-granted (:reason (ex-data e)))))
     (testing "the failed preflight mints no Work (the session never left its identity state)"
       (is (nil? (session-work-state executor sid)))
-      (is (= :created (:state (session/get-session (:sqlite (:stores executor)) sid)))))))
+      (is (not (contains? (session/get-session (:sqlite (:stores executor)) sid) :state))
+          "Session carries identity only; Work owns the lifecycle"))))

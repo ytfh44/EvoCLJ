@@ -1,7 +1,5 @@
 (ns evoclj.cli.recovery-test
-  "Feature O3: the `evoclj recovery` command surfaces the store's
-  recovery scan report (orphaned sessions, missing artifacts,
-  invalid chains, stale candidates)."
+  "Feature O3: the `evoclj recovery` command surfaces the store recovery scan report (orphaned Works, missing artifacts, invalid chains, stale candidates)."
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing]]
             [evoclj.cli.recovery :as rec]
@@ -24,8 +22,11 @@
                                          "evoclj-rec-cas-"
                                          (make-array FileAttribute 0)))
                             :verify false}}}))
+
 (defn- seed-orphan! [db]
-  (let [genome "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  (let [sid "00000000-0000-0000-0000-0000000000a1"
+        work-id "00000000-0000-0000-0000-0000000000b1"
+        genome "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         resolution "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         phenotype "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]
     (artifact/ensure-artifact! db genome "application/octet-stream" 0)
@@ -40,28 +41,31 @@
                      :parent_id nil :state "active" :current 1
                      :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :sessions
-                    {:id "00000000-0000-0000-0000-0000000000a1" :generation_id "g1"
+                    {:id sid :generation_id "g1"
                      :genome_id genome
                      :resolution_id resolution
                      :phenotype_id phenotype
-                     :state "running"
-                     :created_at "2025-01-01T00:00:00Z"}))))
+                     :created_at "2025-01-01T00:00:00Z"})
+      (jdbc/insert! conn :works
+                    {:id work-id :type "session/run" :state "running"
+                     :session_id sid
+                     :created_at "2025-01-01T00:00:00Z"
+                     :updated_at "2025-01-01T00:00:00Z"}))))
 
 (deftest recovery-scan-empty-store
   (testing "an empty migrated store scans clean"
     (let [report (report-for (temp-db))]
-      (is (empty? (:orphaned-sessions report)))
+      (is (empty? (:orphaned-works report)))
       (is (empty? (:missing-artifacts report)))
       (is (empty? (:invalid-event-chains report)))
       (is (empty? (:stale-candidates report))))))
 
-(deftest recovery-scan-reports-orphaned-session
-  (testing "a session left in :running without a terminal event is
-            reported as orphaned"
+(deftest recovery-scan-reports-orphaned-work
+  (testing "a Work left in :running without a terminal state is reported as orphaned"
     (let [db (temp-db)
           _ (seed-orphan! db)
           report (report-for db)]
-      (is (= 1 (count (:orphaned-sessions report))))
+      (is (= 1 (count (:orphaned-works report))))
       (is (= (java.util.UUID/fromString "00000000-0000-0000-0000-0000000000a1")
-             (get-in report [:orphaned-sessions 0 :session/id])))
-      (is (= :running (get-in report [:orphaned-sessions 0 :state]))))))
+             (get-in report [:orphaned-works 0 :work/session-id])))
+      (is (= :running (get-in report [:orphaned-works 0 :work/state]))))))

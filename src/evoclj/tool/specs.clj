@@ -360,9 +360,8 @@
   "Canonical C-Tool / provider descriptor for :agent/spawn.
 
   INPUT is the tool's model-facing args: {:task string :capabilities [string]}.
-  :required-action is :invoke (capability-gated via broker). :effect is
   :write — spawn persists a child session row, a :subagent/spawned event,
-  a subagent_links edge, and exactly one queued :subagent/run child Work,
+  and exactly one queued :subagent/run child Work,
   so the tool-call path demands :metadata {:idempotency/key ...}.
   W2: the returned :child/work-id is the durable execution identity the
   run, status, cancel, and replay paths resolve; the session row stays

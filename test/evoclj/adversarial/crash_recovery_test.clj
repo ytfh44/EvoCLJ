@@ -64,12 +64,13 @@
             [evoclj.genome.load :as load]
             [evoclj.genome.path :as gpath]
             [evoclj.intent.dispatch :as dispatch]
+            [evoclj.store.event :as event]
             [evoclj.provider.fixture :as fixture]
             [evoclj.provider.registry :as registry]
             [evoclj.promotion.current :as current]
             [evoclj.promotion.promote :as promote]
+            [evoclj.store.work :as work-store]
             [evoclj.store.cas :as cas]
-            [evoclj.store.event :as event]
             [evoclj.store.existence :as existence]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.recovery :as recovery]
@@ -207,6 +208,10 @@
                           :prev/event-id nil
                           :payload-ref nil
                           :metadata {}})
+    (work-store/create-work! db {:work/id (UUID/randomUUID)
+                                  :work/type :session/run
+                                  :work/state :queued
+                                  :work/session-id sid})
     sid))
 
 (defn- tx-error
@@ -313,56 +318,51 @@
       (is (= id (:artifact/id (cas/put-bytes! cas (txt body) {})))))))
 
 ;; ============================================================================
-;; 3. Session state transition — crash BEFORE the transition event
+;; 3. Work lifecycle — crash BEFORE the transition event
 ;; ============================================================================
-
-(deftest session-crash-after-state-transition-before-event
-  (testing "injection: :resolving → :running persisted, no :session/started
-            event — the row state IS the recoverable state; recovery never
+(deftest work-crash-after-dispatch-before-event
+  (testing "injection: Work dispatched to :running, no :session/started
+            event — Work :running IS the recoverable state; recovery never
             rewinds it and never fabricates completion"
     (let [db (fresh-db)
           root (temp-cas-root)
           genome-id (put-genome! root "seed genome body")
           _ (seed-generation! db genome-id)
           sid (operator-session! db genome-id)
-          _ (session/transition-session! db sid :created :resolving {})
-          _ (session/transition-session! db sid :resolving :running {})
+          works (evoclj.store.work/list-works db sid)
+          root-work (first works)
+          _ (evoclj.store.work/dispatch-work! db (:work/id root-work))
           ;; crash: the :session/started event was never appended
-          report (recovery/scan-recovery-state db root)]
-      (is (= [sid] (mapv :session/id (:orphaned-sessions report))))
-      (is (= :running (:state (first (:orphaned-sessions report)))))
-      (is (= 1 (:last-event-seq (first (:orphaned-sessions report))))
+          report (recovery/scan-recovery-state db root)
+          orphan-works (recovery/find-orphaned-works db)]
+      (is (= [(:work/id root-work)] (mapv :work/id orphan-works)))
+      (let [orphan-work (first orphan-works)]
+        (is (= :running (:work/state orphan-work))
+             "orphaned root Work should remain :running"))
+      (is (= 1 (count (event/events-by-type db sid :session/created)))
           "only the :session/created root event exists")
       (is (empty? (event/events-by-type db sid :session/started))
           "no fabricated started event")
-      (is (= :running (:state (session/get-session db sid)))
-          "the scan never rewinds the persisted transition")
-      (testing "the persisted state is authoritative: a stale re-transition
-                from :created loses the compare-and-set"
-        (is (= :session/invalid-transition
-               (:error/type (ex-data (tx-error #(session/transition-session!
-                                                 db sid :created :resolving {})))))))
-      (testing "an orphaned mid-flight session is recoverable residue, not
+      (testing "an orphaned mid-flight Work is recoverable residue, not
                 corruption"
         (is (true? (:ok? (recovery/startup-integrity-scan db root)))))))
-  (testing "injection: the TERMINAL :waiting → :completed transition
-            persisted, no :session/completed event — the durable row state
-            closes the session; recovery neither reports it orphaned nor
-            fabricates the missing event"
+  (testing "injection: Work :succeeded terminal, no :session/completed event
+            — Work terminal state closes the session; recovery neither
+            reports it orphaned nor fabricates the missing event"
     (let [db (fresh-db)
           root (temp-cas-root)
           genome-id (put-genome! root "seed genome body")
           _ (seed-generation! db genome-id)
           sid (operator-session! db genome-id)
-          _ (session/transition-session! db sid :created :resolving {})
-          _ (session/transition-session! db sid :resolving :running {})
-          _ (session/transition-session! db sid :running :waiting {})
-          _ (session/transition-session! db sid :waiting :completed {})
+          works (evoclj.store.work/list-works db sid)
+          root-work (first works)
+          _ (evoclj.store.work/dispatch-work! db (:work/id root-work))
+          _ (evoclj.store.work/succeed-work! db (:work/id root-work) (str "sha256:" (apply str (repeat 64 "r"))))
           ;; crash: the :session/completed event was never appended
-          report (recovery/scan-recovery-state db root)]
-      (is (empty? (:orphaned-sessions report))
-          "a terminal row state is finished regardless of the log")
-      (is (= :completed (:state (session/get-session db sid))))
+          report (recovery/scan-recovery-state db root)
+          orphan-works (recovery/find-orphaned-works db)]
+      (is (empty? orphan-works)
+          "a terminal Work state finishes the session regardless of the log")
       (is (empty? (event/events-by-type db sid :session/completed))
           "recovery never fabricates the missing terminal event")
       (is (true? (:ok? (recovery/startup-integrity-scan db root)))))))

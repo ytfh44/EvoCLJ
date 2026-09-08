@@ -11,8 +11,6 @@
   Work-based. No ::last-refresh-future is stored and no raw future is leaked.
 
   run-session! executes ONE session against the phenotype topology the
-
-  run-session! executes ONE session against the phenotype topology the
   executor carries, in strict FIFO (v0 has no concurrency):
 
     (run-session! executor session-id task-input)
@@ -83,8 +81,8 @@
 
   BUDGET (Step 2): the topology's :limits {:max-steps N} bounds node
   visits. When the visit count reaches N the run halts BEFORE the
-  (N+1)-th node is stepped, transitions the session to
-  :budget-exhausted, and persists :session/budget-exhausted carrying
+  (N+1)-th node is stepped, drives the session's Work to :timed-out,
+  and persists :session/budget-exhausted carrying
   the limit, the steps consumed, and the accumulated outputs as a CAS
   artifact (:output-ref — failures are evidence, not discarded
   traces).
@@ -108,11 +106,11 @@
 
   FAILURE (Step 4): an unhandled node failure — a handler :failed
   transition, or ANY exception thrown while resolving, stepping, or
-  processing the node's intents — fails the session: the serializable
-  error payload is stored as a CAS artifact, :node/failed is appended
-  (its :payload-ref is the artifact), the session transitions to
-  :failed, and :session/failed is appended carrying the artifact ref
-  in its metadata (:error/artifact-ref). Scheduler-level run failures
+  processing the node's intents — records failure on the session's Work:
+  the serializable error payload is stored as a CAS artifact, :node/failed
+  is appended (its :payload-ref is the artifact), that Work is driven to
+  :failed, and :session/failed is appended carrying the artifact ref in its
+  metadata (:error/artifact-ref). Scheduler-level run failures
   (a :continue transition with no successor, a :next pointing at an
   undeclared node) fail the session the same way with a :scheduler/*
   error data map. Errors in the STORE or the BROKER CONTEXT
@@ -124,16 +122,16 @@
   :phenotype-missing, :phenotype-id-invalid, :compiled-missing,
   :topology-missing, :entry-missing, :nodes-missing, :stores-invalid,
   :sqlite-missing, :cas-missing, :dispatch-invalid),
-  :scheduler/session-invalid (:reason :not-found, :not-created,
+  :scheduler/session-invalid (:reason :not-found, :already-terminal,
   :missing-root-event), :scheduler/pin-mismatch (:reason :genome,
   :resolution, :phenotype), and :scheduler/task-input-invalid
   (:reason :not-edn-safe — nothing non-EDN crosses this boundary).
 
-   BINDINGS (WO-B1): before a session leaves :created the scheduler
+   BINDINGS (WO-B1): before the session's Work enters execution the scheduler
    restores its durable bindings' runtime state through
    evoclj.store.binding/restore! (mount/context registries may be
    carried on the executor's :stores; verification is fail-closed — an
-   unverifiable pinned binding refuses the run with typed
+   unverifiable pinned binding refuses Work dispatch with typed
    :store/binding-invalid). During model-call rounds the durable
    bindings query degrades with a COUNTED typed event
    (:scheduler/bindings-degraded, sanitized error data) instead of the
@@ -375,13 +373,13 @@
       [])))
 
 (defn- restore-session-runtime!
-  "WO-B1 production wiring: before a session leaves :created, republish
+  "WO-B1 production wiring: before Work dispatch, republish
   its durable bindings' runtime state into the executor's registries.
 
   Failure discipline (same vocabulary as fetch-bindings):
     - an INV-02 VERDICT (:store/binding-invalid — the pinned bundle can
       no longer be verified to exist) is fail-closed and ABORTS the run
-      with that typed error; the session stays :created;
+      with that typed error; Work remains queued and never executes;
     - any other Throwable (e.g. the bindings table itself unreadable)
       is recorded as a typed degradation event and the run continues
       without restored runtime state — degraded and counted, never
@@ -521,7 +519,7 @@
      :error/artifact-ref nil
      :episode/id nil}))
 (defn- validate-effect-lattice!
-  "Enforce PLT5 before a session leaves :created. Static Effects come
+  "Enforce PLT5 before Work dispatch. Static Effects come
   from the compiled topology; Requested comes from the compiled genome
   manifest; Granted comes from the kernel-owned broker lease snapshot.
   Direct scheduler fixtures without a manifest retain the topology's
@@ -644,9 +642,9 @@
                            :first-event (:event/type root)})))
 
       ;; WO-B1 production wiring: restore the session's durable bindings
-      ;; into the executor's runtime registries BEFORE the session leaves
-      ;; :created (see restore-session-runtime! for the failure
-      ;; discipline — verdicts abort typed, infrastructure degrades).
+      ;; into the executor's runtime registries BEFORE Work dispatch.
+      ;; See restore-session-runtime! for the failure discipline:
+      ;; verdicts abort typed, infrastructure failures degrade.
       ;; The restore (or a pre-run activate!) may have appended to the log
       ;; (degraded marker / :binding/activated): :session/started chains to
       ;; the CURRENT head below — never the stale root.
@@ -731,7 +729,7 @@
                               ;; node whose iteration count reached
                               ;; :max-iterations is a budget outcome,
                               ;; routed to the same :budget-exhausted
-                              ;; session state as the step budget
+                              ;; Work :timed-out state as the step budget
                               (budget-exhaust! executor pin
                                                 (:event/id started-event)
                                                 outputs

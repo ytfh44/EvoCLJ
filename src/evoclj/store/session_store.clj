@@ -20,15 +20,11 @@
   KEYs at rest (011). Raw payload_ref strings are not proofs and are
   rejected where a proof is required (existence/ensure-proof).
 
-  S2 Canonical states (Fleet S2): state vocabulary, transitions, and DB
-  mapping are defined in evoclj.store.session-states (definition >
-  validation); this store validates against it and delegates mapping.
-  No duplicate literal sets here."
+  Session is immutable pin — no state machine. Lifecycle is Work."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
-            [evoclj.store.session-states :as sstates]
             [evoclj.store.existence :as existence]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
@@ -70,14 +66,11 @@
                                        {:timestamp ts})))]
     (.format timestamp-fmt inst)))
 
-(defn- set-busy-timeout!
+(defn set-busy-timeout!
   [db ms]
   (let [^java.sql.Connection conn (:connection db)]
     (with-open [stmt (.createStatement conn)]
       (.execute stmt (str "PRAGMA busy_timeout = " ms)))))
-
-(def ^:private db-state->state sstates/db-state->kw)
-(def ^:private state->db-state sstates/kw->db-state)
 
 (defn- row->session
   "Convert a sessions DB row into the public Session contract map."
@@ -87,7 +80,6 @@
    :genome/id (:genome_id row)
    :resolution/id (:resolution_id row)
    :phenotype/id (:phenotype_id row)
-   :state (keyword (:state row))
    :created-at (Date/from (Instant/parse (:created_at row)))
    :routing (when (some? (:routing_deployment_version row))
               {:deployment-version (:routing_deployment_version row)
@@ -95,7 +87,8 @@
 
 (defn- proof->digest
   [x]
-  (existence/digest-of (existence/ensure-proof x)))
+  (when x
+    (existence/digest-of (existence/ensure-proof x))))
 
 ;; ---------------------------------------------------------------------------
 ;; Narrow operations — the ONLY jdbc on sessions
@@ -113,29 +106,31 @@
                       "insert-session! requires a SessionStore"
                       {:reason :not-a-session-store})))
   (let [db (.-db ^SessionStore store)
-        sid (UUID/randomUUID)
-        ts (canonical-timestamp (:created-at request))
-        routing (:routing request)
-        ;; P5/F: if proofs supplied, unwrap and validate; otherwise use raw
-        genome-id (if-let [p (:genome/existence-proof request)] (proof->digest p) (:genome/id request))
-        resolution-id (if-let [p (:resolution/existence-proof request)] (proof->digest p) (:resolution/id request))
-        phenotype-id (if-let [p (:phenotype/existence-proof request)] (proof->digest p) (:phenotype/id request))]
+        sid (or (:session/id request) (UUID/randomUUID))
+        genome-proof (:genome/existence-proof request)
+        resolution-proof (:resolution/existence-proof request)
+        phenotype-proof (:phenotype/existence-proof request)
+        genome-digest (proof->digest genome-proof)
+        resolution-digest (proof->digest resolution-proof)
+        phenotype-digest (proof->digest phenotype-proof)
+        ts (canonical-timestamp (:created-at request))]
     (sqlite/with-db [conn db]
-      (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" (:generation/id request)]))
+      (set-busy-timeout! conn 10000)
+      (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?"
+                                         (:generation/id request)]))
         (throw (err/error :store/generation-not-found
                           "cannot pin a session to an unknown generation"
                           {:generation/id (:generation/id request)})))
       (jdbc/insert! conn :sessions
                     {:id (str sid)
                      :generation_id (:generation/id request)
-                     :genome_id genome-id
-                     :resolution_id resolution-id
-                     :phenotype_id phenotype-id
-                     :state (name :created)
-                     :routing_deployment_version (:deployment-version routing)
-                     :routing_bucket (:bucket routing)
+                     :genome_id (or genome-digest (:genome/id request))
+                     :resolution_id (or resolution-digest (:resolution/id request))
+                     :phenotype_id (or phenotype-digest (:phenotype/id request))
+                     :routing_deployment_version (:deployment-version (:routing request))
+                     :routing_bucket (:bucket (:routing request))
                      :created_at ts}))
-    sid))
+    (str sid)))
 
 (defn find-session
   "Find session by id via SessionStore, or nil."
@@ -144,45 +139,7 @@
     (throw (err/error :store/session-invalid
                       "find-session requires a SessionStore"
                       {:reason :not-a-session-store})))
-  (some-> (first (sqlite/query (.-db ^SessionStore store) ["SELECT * FROM sessions WHERE id = ?" (str (types/session-id session-id))]))
+  (some-> (first (sqlite/query (.-db ^SessionStore store)
+                               ["SELECT * FROM sessions WHERE id = ?"
+                                (str (types/session-id session-id))]))
           row->session))
-
-(defn transition-session!
-  "CAS state transition via SessionStore. Returns updated session."
-  [^SessionStore store session-id expected-state new-state]
-  (when-not (instance? SessionStore store)
-    (throw (err/error :store/session-invalid
-                      "transition-session! requires a SessionStore"
-                      {:reason :not-a-session-store})))
-  (when-not (sstates/session-state? new-state)
-    (throw (err/error :session/invalid-transition
-                      "target state not in closed session vocabulary"
-                      {:expected-state expected-state :new-state new-state})))
-  (when-not (sstates/valid-transition? expected-state new-state)
-    (throw (err/error :session/invalid-transition
-                      "not an edge of the session state machine"
-                      {:session/id (types/session-id session-id)
-                       :expected-state expected-state
-                       :new-state new-state})))
-  (let [sid (types/session-id session-id)
-        key (str sid)
-        ts (canonical-timestamp nil)
-        db (.-db ^SessionStore store)]
-    (sqlite/with-db [conn db]
-      (set-busy-timeout! conn 10000)
-      (let [cnt (first (jdbc/execute! conn
-                                        ["UPDATE sessions SET state = ?, updated_at = ? WHERE id = ? AND state = ?"
-                                         (name new-state) ts key (name expected-state)]))]
-        (when-not (= 1 cnt)
-          (let [row (first (jdbc/query conn ["SELECT state FROM sessions WHERE id = ?" key]))]
-            (if row
-              (throw (err/error :session/invalid-transition
-                                "session is not in the expected state"
-                                {:session/id sid
-                                 :expected-state expected-state
-                                 :new-state new-state
-                                 :actual-state (keyword (:state row))}))
-              (throw (err/error :store/session-not-found
-                                "no session with this id"
-                                {:session/id sid})))))))
-    (find-session store sid)))

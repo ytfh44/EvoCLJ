@@ -28,7 +28,7 @@
 
 (def latest-version
   "The schema version this codebase knows how to migrate to. Must equal
-  the count of migration files; bumped to 20 for subagent_links DDL promotion."
+  the count of migration files; this is schema version 20."
   20)
 (def ^:private version-key "schema_version")
 (def ^:private applied-key "applied_migrations")

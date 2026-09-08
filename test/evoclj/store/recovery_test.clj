@@ -32,7 +32,8 @@
             [evoclj.store.migrate :as migrate]
             [evoclj.store.recovery :as recovery]
             [evoclj.store.session :as session]
-            [evoclj.store.sqlite :as sqlite])
+            [evoclj.store.sqlite :as sqlite]
+            [evoclj.store.work :as work-store])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file Files Path)))
 
@@ -230,27 +231,30 @@
 ;; ============================================================================
 ;; Step 1 — a session left :running with no terminal event is orphaned
 ;; ============================================================================
-
 (deftest running-session-without-terminal-event-is-orphaned
   (let [db (fresh-db)
         root (temp-root)
         genome-id (put-genome! root)
         _ (seed-generation! db genome-id)
         sid (:session/id (session/create-session! db (session-request genome-id)))
+        work-id (random-uuid)
+        _ (work-store/create-work! db {:work/id work-id
+                                       :work/type :session/run
+                                       :work/state :running
+                                       :work/session-id sid})
         created (event/append-event! db (base-event sid {:event/type :session/created}))
-        _ (session/transition-session! db sid :created :resolving {})
-        _ (session/transition-session! db sid :resolving :running {})
         _ (event/append-event! db (base-event sid {:event/type :session/started
-                                                   :prev/event-id (:event/id created)}))
-        report (recovery/scan-recovery-state db root)]
-    (testing "the crash-interrupted session is classified as orphaned, not completed"
-      (is (= [sid] (mapv :session/id (:orphaned-sessions report))))
-      (is (= :running (:state (first (:orphaned-sessions report)))))
-      (is (= 2 (:last-event-seq (first (:orphaned-sessions report))))))
+                                                    :prev/event-id (:event/id created)}))
+        report (recovery/scan-recovery-state db root)
+        orphan-works (recovery/find-orphaned-works db)]
+    (testing "the crash-interrupted Work is classified as orphaned, not completed"
+      (is (= [work-id] (mapv :work/id orphan-works)))
+      (is (= [sid] (mapv :work/session-id orphan-works)))
+      (is (= :running (:work/state (first orphan-works)))))
     (testing "recovery never pretends completion: no terminal event is fabricated"
       (is (empty? (event/events-by-type db sid :session/completed))))
-    (testing "and the persisted row state is untouched by the scan"
-      (is (= :running (:state (session/get-session db sid)))))
+    (testing "Session carries identity only; Work owns the lifecycle"
+      (is (not (contains? (session/get-session db sid) :state))))
     (testing "the orphan is not corruption: an otherwise healthy store scans clean"
       (is (empty? (:missing-artifacts report)))
       (is (empty? (:invalid-event-chains report)))
@@ -263,16 +267,15 @@
         genome-id (put-genome! root)
         _ (seed-generation! db genome-id)
         done (:session/id (session/create-session! db (session-request genome-id)))
-        created (event/append-event! db (base-event done {:event/type :session/created}))
-        started (event/append-event! db (base-event done {:event/type :session/started
-                                                          :prev/event-id (:event/id created)}))
-        _ (session/transition-session! db done :created :resolving {})
-        _ (session/transition-session! db done :resolving :running {})
-        _ (session/transition-session! db done :running :waiting {})
-        _ (session/transition-session! db done :waiting :completed {})
-        _ (event/append-event! db (base-event done {:event/type :session/completed
-                                                    :prev/event-id (:event/id started)}))]
-    (is (= [] (:orphaned-sessions (recovery/scan-recovery-state db root))))))
+        work-id (random-uuid)
+        _ (work-store/create-work! db {:work/id work-id
+                                       :work/type :session/run
+                                       :work/state :succeeded
+                                       :work/session-id done})
+        report (recovery/scan-recovery-state db root)]
+    (is (= :succeeded (:work/state (work-store/fetch-work db work-id))))
+    (is (empty? (recovery/find-orphaned-works db)))
+    (is (empty? (:invalid-event-chains report)))))
 
 ;; ============================================================================
 ;; Step 2 — an event referencing an absent CAS payload fails loudly
@@ -423,7 +426,7 @@
         r (recovery/startup-integrity-scan db root)]
     (is (true? (:ok? r)))
     (is (= :none (:status (:current-generation r))))
-    (is (empty? (:orphaned-sessions r)))
+    (is (empty? (recovery/find-orphaned-works db)))
     (is (empty? (:missing-artifacts r)))
     (is (empty? (:invalid-event-chains r)))
     (is (empty? (:stale-candidates r)))))
@@ -482,9 +485,6 @@
         (is (= :missing-current (:status (:current-generation (ex-data e)))))))))
 
 ;; ============================================================================
-;; Milestone 5 exit test — reopen the DB/CAS and reconstruct without memory
-;; ============================================================================
-
 (deftest milestone5-reopen-reconstructs-session-without-memory
   (let [db-file (temp-db-path)
         cas-dir (temp-root)
@@ -493,13 +493,14 @@
         genome-id (put-genome! cas-dir)
         _ (seed-generation! db genome-id)
         sid (:session/id (session/create-session! db (session-request genome-id)))
-        ;; session created -> running
+        work-id (random-uuid)
+        _ (work-store/create-work! db {:work/id work-id
+                                       :work/type :session/run
+                                       :work/state :running
+                                       :work/session-id sid})
         created (event/append-event! db (base-event sid {:event/type :session/created}))
-        _ (session/transition-session! db sid :created :resolving {})
-        _ (session/transition-session! db sid :resolving :running {})
         started (event/append-event! db (base-event sid {:event/type :session/started
                                                          :prev/event-id (:event/id created)}))
-        ;; intent -> provider call -> result
         request-id (:artifact/id (put! cas-dir "normalized request body"))
         proposed (event/append-event! db (base-event sid {:event/type :intent/proposed
                                                           :payload-ref request-id
@@ -516,15 +517,12 @@
                                                                 :prev/event-id (:event/id call-started)}))
         intent-completed (event/append-event! db (base-event sid {:event/type :intent/completed
                                                                   :prev/event-id (:event/id call-completed)}))
-        ;; session waits then completes
         waiting (event/append-event! db (base-event sid {:event/type :session/waiting
                                                          :prev/event-id (:event/id intent-completed)}))
-        _ (session/transition-session! db sid :running :waiting {})
         _ (event/append-event! db (base-event sid {:event/type :session/completed
                                                    :prev/event-id (:event/id waiting)}))
-        _ (session/transition-session! db sid :waiting :completed {})]
-    ;; "terminate the process": drop every connection and any in-memory
-    ;; state; reopen the SAME db file and CAS root from disk only.
+        _ (work-store/succeed-work! db work-id nil)]
+    ;; Drop every connection and any in-memory state; reopen the same files.
     (let [db2 (sqlite/spec db-file)
           cas2 (cas/->cas cas-dir {:verify true})]
       (testing "the event chain verifies from the reopened database"
@@ -532,17 +530,19 @@
       (testing "the pinned session identity is reconstructed without memory"
         (let [s (session/get-session db2 sid)]
           (is (some? s))
-          (is (= :completed (:state s)))
+          (is (not (contains? s :state)))
           (is (= [genome-id resolution phenotype gen]
                  [(:genome/id s) (:resolution/id s)
                   (:phenotype/id s) (:generation/id s)]))))
+      (testing "the terminal Work is reconstructed from the reopened database"
+        (is (= :succeeded (:work/state (work-store/fetch-work db2 work-id))))
+        (is (empty? (recovery/find-orphaned-works db2))))
       (testing "the referenced payload artifacts are intact in the reopened CAS"
         (is (= (vec (txt "normalized request body")) (vec (cas/get-bytes cas2 request-id))))
         (is (= (vec (txt "normalized result body")) (vec (cas/get-bytes cas2 result-id)))))
       (testing "a recovery scan on the reopened store finds nothing to recover"
         (let [r (recovery/startup-integrity-scan db2 cas2)]
           (is (true? (:ok? r)))
-          (is (empty? (:orphaned-sessions r)))
           (is (empty? (:missing-artifacts r)))
           (is (empty? (:invalid-event-chains r)))
           (is (empty? (:stale-candidates r))))))))

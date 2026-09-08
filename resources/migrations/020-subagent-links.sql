@@ -1,17 +1,11 @@
--- 020-subagent-links.sql — promote subagent_links DDL to migration
--- Design decisions (clean):
---   * subagent_links is the session-level child->parent helper used by
---     evoclj.store.session/list-descendants and the cancel cascade that
---     unions subagent_links with the Work-graph (works.parent_work_id).
---     The Work graph is the durable spawn truth (W2); subagent_links is
---     the compat mirror kept for fast BFS over sessions.
---   * Columns: child_session_id PRIMARY KEY, parent_session_id FK to
---     sessions(id) ON DELETE CASCADE, created_at ISO-8601.
---   * Migration makes the CREATE TABLE previously inlined in
---     evoclj.runtime.subagent/ensure-subagent-link-table! non-runtime;
---     that helper is deleted. Read paths (get-parent-session-id,
---     child-session-ids, cancel cascade) now hit a table that the
---     migration runner creates once at bootstrap.
+-- 020-subagent-links.sql — historical topology DDL retained for upgrades
+-- Design decisions (clean cutover):
+--   * Existing databases keep this table so migration history remains valid.
+--   * Runtime topology is stored only in works.parent_work_id; runtime code never
+--     reads or writes subagent_links.
+--   * Columns are preserved unchanged for upgrade compatibility.
+--   * This migration replaces the former inline CREATE TABLE helper; it is
+--     intentionally schema-only and has no active read path.
 --   * Idempotency: CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS.
 --   * Single transaction via the runner.
 

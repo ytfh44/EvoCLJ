@@ -555,8 +555,8 @@
       (is (= :requested-not-granted (:reason error)))
       (is (= 0 @executions)
           "the denied :net/fetch request never reached the provider")
-      (is (= :created (:state (session/get-session db sid)))
-          "the static gate rejects before the session leaves :created")
+      (is (not (contains? (session/get-session db sid) :state))
+          "the static gate rejects before Work dispatch")
       (is (= [:session/created] (mapv :event/type events)))
       (is (:valid? (event/verify-event-chain db sid)))))
   (testing "filesystem scope broader than the host grant -> :intent/denied

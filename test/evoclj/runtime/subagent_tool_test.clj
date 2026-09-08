@@ -93,6 +93,11 @@
                              :prev/event-id nil
                              :payload-ref nil
                              :metadata {}})
+    (work-store/create-work! db {:work/id (UUID/randomUUID)
+                                 :work/type :session/run
+                                 :work/state :queued
+                                 :work/session-id sid
+                                 :work/created-at (Date. 1700000000000)})
     sess))
 
 ;; ===========================================================================
@@ -188,7 +193,7 @@
       (let [child (session/get-session db child-id)]
         (is (some? child) "child session exists")
         (is (= parent-id (subagent/get-parent-session-id db child-id)) "parent link stored")
-        (is (= :created (:state child)) "session row stays :created (immutable identity, never a lifecycle)"))
+        (is (not (contains? child :state)) "session row has no lifecycle state"))
       ;; W2: the lifecycle truth is the child Work CAS — exactly one queued
       ;; :subagent/run Work, and the returned handle names it.
       (let [child-works (work-store/list-works db child-id)]

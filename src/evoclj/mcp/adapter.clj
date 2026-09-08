@@ -68,9 +68,9 @@
   (continue [this task] "MRTR/Tasks continuation — auditable via a persisted :mcp/continue Work"))
 
 (defn- adapter-store
-  "A6 helper: resolve a durable command store from adapter opts, if wired."
+  "A6 helper: resolve a durable Work store from adapter opts, if wired."
   [opts]
-  (or (:store opts) (:db opts) (:command-store opts)))
+  (or (:store opts) (:db opts)))
 
 (defn- resolve-mcp-owner
   [store]

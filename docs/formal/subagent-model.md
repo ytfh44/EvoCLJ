@@ -2,7 +2,7 @@
 
 > **Source:** `local://evoclj-reconstruction-dag-2.md` V1 §subagent refinement (Work replaces Session×Command, E1 causal-links, H1 hydration) and `local://evoclj-implementation-dag.md` §1.4 (SubAgentSession SM, [W-16..W-19] retired), §2 rows S1–S6, §3–§4 (DAG topology + waves). Context: `local://wave1-context.md` (GC-20 causality, broker closed registry).
 > **Status:** V1 refinement — **subagent is a child Work** (not a child Session row alone). Events use **E1 causal refinement**: `prev/event-id` linear same-session predecessor + `causal-links #{ {:from :type} }` cross-session graph. Hydration (H1) guarantees `hydrate(pin) → ExecutionHandle`. Documents the Work-based subagent that W1/W2 + E1 + H1 realized.
-> **Scope:** Work child lifecycle, spawn/cancel/result flows via `store/work` + `runtime/subagent`, the `subagent_links` helper and new `works.parent_work_id` link, cascade revocation via DB-truth lease registry (P1), and H1 hydration pin.
+> **Scope:** Work child lifecycle, spawn/cancel/result flows via `store/work` + `runtime/subagent`, the `works.parent_work_id` topology, cascade revocation via DB-truth lease registry (P1), and H1 hydration pin.
 > **Sibling:** `perm-model.md` (Principal/Grant/Lease), `async-model.md` (Work 7-state SM + H1).
 
 ---
@@ -37,7 +37,7 @@ The old [W-16..W-19] session SM is **retired** and replaced by the Work SM check
 
 ### 1.4 Work table encoding for subagents
 
-`store/work.clj` maps Work onto the `works` table (`state TEXT` with CHECK covering 7 states). `works.parent_work_id TEXT REFERENCES works(id) ON DELETE SET NULL` links a child Work to its parent Work (the subagent relation). The legacy `subagent_links(child_session_id, parent_session_id)` table is **retained as helper** for session-graph queries but new subagents use `parent_work_id`; both are kept in sync by `runtime/subagent.clj` for migration. Valid state set enforced in code (Malli enum) and DB CHECK; illegal states rejected on write. State column updated only via CAS helpers (`dispatch-work!`, `wait-work!`, `succeed-work!`, `fail-work!`, `cancel-work!`, `timeout-work!`) — no ad-hoc UPDATE bypasses the edge table. Tests in `runtime/subagent_*_test` and `store/work` drive each edge via Work.
+`store/work.clj` maps Work onto the `works` table (`state TEXT` with CHECK covering 7 states). `works.parent_work_id TEXT REFERENCES works(id) ON DELETE SET NULL` links a child Work to its parent Work. The historical `020-subagent-links.sql` migration remains only for upgrades; runtime code never reads or writes that legacy table. Valid state set enforced in code (Malli enum) and DB CHECK; illegal states rejected on write. State column updated only via CAS helpers (`dispatch-work!`, `wait-work!`, `succeed-work!`, `fail-work!`, `cancel-work!`, `timeout-work!`) — no ad-hoc UPDATE bypasses the edge table. Tests in `runtime/subagent_*_test` and `store/work` drive each edge via Work.
 
 ---
 
@@ -52,7 +52,7 @@ intent/subagent-spawn
        * checks depth ≤ max-subagent-depth (5) and spawns-per-parent ≤ 10 via parent_work_id count
        * derives child Principal from parent Principal (I2 single-field, not dual-anchor)
        * derives child leases as narrowings of parent leases (perm-model §2, Grant attenuates)
-       * inserts child Work row (state queued) + subagent_links row (compat) + parent_work_id link
+       * inserts child Work row (state queued) with its parent_work_id link
        * appends :subagent/spawned event with prev → parent's latest event and causal-links #{} (GC-20 linear)
        * records child leases durably via capability_store (P1 DB truth) + in-mem cache
   → child Work is dispatchable (queued → running on scheduler)
@@ -92,14 +92,14 @@ run-subagent! (child-work-id, task)
 intent/subagent-cancel  { :session/id target, :work/id target-work, :reason ∈ {:user-request :parent-cancel :timeout} }
   → dispatch.clj → subagent/cancel-subagent! or cancel-subagent-tree!
        * resolves target set: single child Work or whole BFS descendant tree
-         via works.parent_work_id + subagent_links (both, for compat)
+         via works.parent_work_id
        * for each target: CAS cancel-work! (queued|running|waiting → cancelled)
        * revoke-leases! for each target's leases (perm-model §3, P1 DB truth: UPDATE WHERE revoked=0 then cache tombstone)
        * appends :session/cancelled or :subagent/cancelled event with prev → target's latest and causal-links → parent
        * next intent on that child → :capability/denied (broker sees revoked Principal's lease)
 ```
 
-Key property: **cancellation is transitive**. `cancel-subagent-tree!` with root Work `R` computes `list-descendants(R)` as BFS closure over `works.parent_work_id` (and `subagent_links`) and CAS-cancels every descendant + revokes leases idempotently via P1 DB truth. A child cannot outlive its parent's revocation — its next broker call is denied.
+Key property: **cancellation is transitive**. `cancel-subagent-tree!` with root Work `R` computes `list-descendants(R)` as a BFS closure over `works.parent_work_id` and CAS-cancels every descendant + revokes leases idempotently via P1 DB truth. A child cannot outlive its parent Work revocation — its next broker call is denied.
 
 The test `subagent_cancel_test.clj` proves: parent revoked ⇒ child and grandchild leases all revoked (DB rows `revoked=1`) ⇒ their next intents are `:capability/denied`. Hydration of a cancelled Work returns a handle whose leases fail closed.
 
@@ -125,38 +125,30 @@ The `tool.specs` canonical pair `:agent/spawn` / `:agent/status` (S6) is the mod
 
 ---
 
-## 3. The `subagent_links` graph (retained) + `works.parent_work_id` (canonical)
+## 3. The `works.parent_work_id` graph (sole durable topology)
 
-Parent links live in two places for migration: the dedicated helper table `subagent_links` and the canonical self-FK `works.parent_work_id`. New code writes both; read paths prefer `parent_work_id` but fall back to the helper.
+`works.parent_work_id` is the sole durable parent/child edge. Every child Work points at exactly one parent Work, and the owning session ids are read from those Work rows. Session identity rows do not carry topology or lifecycle state.
 
 ### 3.1 DDL
 
 ```sql
--- helper retained (store/session.clj + recovery.clj + migration backfill)
-CREATE TABLE IF NOT EXISTS subagent_links (
-  child_session_id  TEXT PRIMARY KEY,
-  parent_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  created_at        TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS subagent_links_parent_idx ON subagent_links(parent_session_id);
-
--- canonical (018-work.sql)
+-- canonical Work topology (018-work.sql)
 -- works.parent_work_id TEXT REFERENCES works(id) ON DELETE SET NULL
 CREATE INDEX IF NOT EXISTS works_parent_idx ON works(parent_work_id) WHERE parent_work_id IS NOT NULL;
 ```
 
-* `child_session_id` PRIMARY KEY — a child has exactly one parent (session graph).
-* `works.parent_work_id` is the Work graph — a child Work has exactly one parent Work.
-* `ON DELETE CASCADE` / `SET NULL` — deleting a session/work cascades helper links but never fabricates delivery.
-* `store/session.clj` helper `ensure-subagent-link-table!` is idempotent, so in-mem DB tests get the table without full migration chain.
+* `works.parent_work_id` gives each child Work exactly one parent Work.
+* `ON DELETE SET NULL` preserves historical child rows without fabricating delivery.
+* The historical `020-subagent-links.sql` migration remains only for upgrading existing databases; runtime code does not read or write that legacy table.
 
-### 3.2 Queries over the graph
+### 3.2 Queries over the Work graph
 
-* `get-parent-session-id(child)` — single hop upward via `subagent_links`.
 * `get-parent-work-id(child-work)` — single hop upward via `works.parent_work_id`.
-* `child-session-ids(parent)` / `child-work-ids(parent-work)` — single level downward, ordered by `created_at`.
-* `subagent-depth(session)` — walks upward via `get-parent-session-id` to count depth (0 for root).
-* `list-descendants(root)` — **BFS closure** over `child-work-ids` (canonical) union `child-session-ids` (compat), not including `root` itself. Cycle-free by construction (child inserted only after parent exists, `parent_work_id` FK + `child_session_id` PK forbid second parent). This is the function that `cancel-subagent-tree!` uses to compute the revocation set.
+* `child-work-ids(parent-work)` — direct children ordered by `created_at`.
+* `work-depth(child-work)` — walks parent Work ids to count depth (0 for a root).
+* `work-descendants(root-work)` — **BFS closure** over `child-work-ids`, excluding the root; cycle protection is provided by the Work graph traversal and the self-FK.
+
+Cancellation, recovery, status, and result delivery use this graph only. There is no session-link fallback or second durable topology source.
 
 ---
 
@@ -245,7 +237,7 @@ Condensed from `local://evoclj-reconstruction-dag-2.md` V1 §3–§4 (same Wolfr
 | Wave | Subagent work |
 |------|---------------|
 | W2 | **E1** — `prev/causal-links` split, migrations 017 |
-| W4 | **S2** — `spawn-subagent!` via Work child + Principal + H1 hydrate + P1 DB leases + `subagent_links` compat; **H1** — `hydrate(pin)` factory |
+| W4 | **S2** — `spawn-subagent!` via Work child + Principal + H1 hydrate + P1 DB leases + `works.parent_work_id`; **H1** — `hydrate(pin)` factory |
 | W5 | **S3** — child SCI via ExecutionHandle; **S4** — `cancel-subagent!` + BFS cascade via works.parent_work_id + P1 revoke; **S5** — `deliver-result!` with E1 causal-links + orphan recovery via Work |
 | W6 | **S6** — `:agent/spawn|:agent/status` broker surface via Work; **V1** doc refinement |
 | W7 | V2 doc closure |
@@ -257,6 +249,6 @@ Condensed from `local://evoclj-reconstruction-dag-2.md` V1 §3–§4 (same Wolfr
 ## 9. References
 
 * Design source: `local://evoclj-reconstruction-dag-2.md` V1 (E1/H1/W1/W2/P1), `local://evoclj-implementation-dag.md` §1.4, §2 rows S1–S6, §3 edges, §4 waves/critical path.
-* Implementation: `src/evoclj/intent/schema.clj` (S1 intent types with parent Work), `src/evoclj/runtime/subagent.clj` (spawn/run/cancel/result via Work), `src/evoclj/runtime/hydrate.clj` (H1 pin → ExecutionHandle), `src/evoclj/store/work.clj` (Work table), `src/evoclj/store/event.clj` + `event_schema.clj` (E1 prev/causal-links), `src/evoclj/store/session.clj` (immutable pin + `subagent_links` compat), `src/evoclj/store/recovery.clj` (orphans via Work).
+* Implementation: `src/evoclj/intent/schema.clj` (S1 intent types with parent Work), `src/evoclj/runtime/subagent.clj` (spawn/run/cancel/result via Work), `src/evoclj/runtime/hydrate.clj` (H1 pin → ExecutionHandle), `src/evoclj/store/work.clj` (Work table and topology), `src/evoclj/store/event.clj` + `event_schema.clj` (E1 prev/causal-links), `src/evoclj/store/session.clj` (immutable pin), `src/evoclj/store/recovery.clj` (orphans via Work).
 * Tests: `test/evoclj/intent/subagent_intent_test.clj`, `test/evoclj/runtime/subagent_spawn_test.clj`, `test/evoclj/runtime/subagent_run_test.clj`, `test/evoclj/runtime/subagent_cancel_test.clj`, `test/evoclj/runtime/subagent_result_test.clj`, `test/evoclj/runtime/subagent_tool_test.clj`, `test/evoclj/runtime/hydrate_test.clj`, `test/evoclj/store/event_test.clj` (E1), `test/evoclj/store/work_property_test.clj` (W2 100 rounds).
 * Wolfram & hash discipline shared with `perm-model.md` and `async-model.md`; this file contains no hash-shaped bare tokens and passes `scripts/verify-doc-hashes.clj` exit 0 without exemptions. The `sha256:` literals shown are stripped by rule E2.

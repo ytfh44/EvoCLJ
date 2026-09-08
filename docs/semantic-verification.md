@@ -11,7 +11,7 @@ is enumerated exhaustively where the domain is finite.
 for f in scripts/verify-semantics/verify*_*.clj; do clojure -M "$f"; done
 ```
 
-**Result:** 7/7 suites, 143 assertions, 0 failures (2026-08-14).
+**Result:** 7/7 suites, 132 assertions, 0 failures (2026-08-14).
 
 ---
 
@@ -111,15 +111,15 @@ that stays valid EDN (`:max-steps 64` → `65`) → different ID; shuffled entry
 order → identical tree-digest; and `genome/id` equals the tree-digest of its
 own entries exactly (the ID is the canonical tree digest).
 
-## 7. Session state machine closure/legality — `verify7_session_states.clj`
+## 7. Work state machine closure/legality — `verify7_work_states.clj`
 
-**Model.** Directed graph over the 8 states; edges exactly as declared in
-`session/transitions`; terminal states absorbing.
+**Model.** Directed graph over the seven Work states defined by
+`evoclj.runtime.work/work-transitions`; terminal states are sinks and the graph
+is acyclic.
 
-**Real code.** Exhaustive 8×8 enumeration through the real
-`transition-session!`: every declared edge accepted, every other pair
-(including terminal-source pairs, self-loops, and the reverse edges)
-rejected with `:session/invalid-transition` — 66 checks.
+**Real code.** The verifier calls the production Work predicates for closure,
+acyclicity, terminal sinks, and reachability, then checks every ordered state
+pair against the production transition table.
 
 ---
 

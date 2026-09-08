@@ -1,6 +1,6 @@
 (ns evoclj.runtime.subagent-result-test
   "S5 result delivery — deliver-result! appends :subagent/result to parent,
-  validation on non-completed child, and orphan recovery via subagent_links."
+  validation on non-completed child, and Work-only orphan recovery."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.java.jdbc :as jdbc]
             [evoclj.capability.mint :as mint]
@@ -72,6 +72,11 @@
                              :prev/event-id nil
                              :payload-ref nil
                              :metadata {}})
+    (evoclj.store.work/create-work! db {:work/id (UUID/randomUUID)
+                                        :work/type :session/run
+                                        :work/state :queued
+                                        :work/session-id sid
+                                        :work/created-at (Date. 1700000000000)})
     sess))
 
 ;; ---------------------------------------------------------------------------

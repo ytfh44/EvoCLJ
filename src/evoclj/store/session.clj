@@ -1,50 +1,29 @@
 (ns evoclj.store.session
-  "Session pinning and lifecycle transitions (component).
+  "Session pinning - immutable context with no runtime state machine (W2).
 
   A session is created pinned to one Genome, one Resolution, one
   Phenotype, and one Generation for its whole lifetime (Global
   Constraint 2, Database Invariant 2). The pinned identity columns are
-  written once at insert and never touched again: the ONLY write path
-  after creation is transition-session!, a compare-and-set UPDATE that
-  matches the stored state and changes state (plus the transition
-  timestamp) alone.
-
-  State machine (normative, docs component):
-
-      :created -> :resolving -> :running <-> :waiting -> :completed
-                               |------------> :failed
-                               |------------> :cancelled
-                               `------------> :budget-exhausted
-
-  Terminal states (:completed :failed :cancelled :budget-exhausted)
-  accept no further transitions. transition-session! rejects a
-  statically illegal edge (:session/invalid-transition) before touching
-  the database, and the SQL `WHERE state = expected-state` backstop
-  means a concurrent worker that lost the compare-and-set also sees
-  :session/invalid-transition — two workers can never both transition
-  from the same state silently (component Step 4).
+  written once at insert and never touched again - Session carries NO
+  runtime state machine. The durable lifecycle is Work
+  (queued/running/waiting/succeeded/failed/cancelled/timed-out) in
+  evoclj.store.work / evoclj.runtime/work.
 
   Public Session contract (docs 'Detailed Public Data Contracts'):
   :session/id, :generation/id, :genome/id, :resolution/id,
-  :phenotype/id, :state, :created-at, :routing. Pinned identity fields
+  :phenotype/id, :created-at, :routing. Pinned identity fields
   are immutable after insert.
 
   Fleet R horizontal (narrow handle): this namespace is the business
   layer; persistence is via evoclj.store.session-store/SessionStore
   (opaque deftype). Raw maps are rejected (definition > validation).
-  Fleet S2: state vocabulary and transitions are defined in
-  evoclj.store.session-states (single canonical source).
+  Fleet S2: Session is immutable pin; lifecycle is Work.
   Fleet P5/F: genome/phenotype/resolution existence is enforced via
   VerifiedDigest and FK at rest (011).
-
-  W1 (Work unified lifecycle): Session is now immutable context (pin:
+  W1 (Work unified lifecycle): Session is immutable context (pin:
   Genome/Resolution/CodeImage/Deployment/Generation). The durable
   lifecycle is Work (queued/running/waiting/succeeded/failed/cancelled/timed-out)
-  in evoclj.store.work / evoclj.runtime.work. This namespace's
-  transition-session! remains for backward compat (component tests still
-  drive Session), but new code should drive Work; scheduler mirrors
-  Session transitions to Work for the 48->7 collapse."
-;; E1: Event prev vs causal-links — session creation uses :prev/event-id nil + :causal-links #{}, no :cause.
+  in evoclj.store.work / evoclj.runtime/work."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [malli.core :as m]
@@ -52,29 +31,11 @@
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
             [evoclj.sci.boundary :as boundary]
-            [evoclj.store.session-states :as sstates]
             [evoclj.store.session-store :as ss]
             [evoclj.store.existence :as existence]
+            [evoclj.store.work :as work-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.util Date UUID)))
-
-;; --- state machine (canonical — delegates to session-states) ---------------
-
-(def states
-  "Every state in the component state machine (alias for session-states/session-states)."
-  sstates/session-states)
-
-(def transitions
-  "State machine edges (alias for session-states/session-transitions)."
-  sstates/session-transitions)
-
-(def terminal-states
-  "States that accept no further transitions (alias)."
-  sstates/terminal-states)
-
-(defn- valid-transition?
-  [expected-state new-state]
-  (sstates/valid-transition? expected-state new-state))
 
 ;; --- boundary validation ----------------------------------------------------
 
@@ -91,6 +52,7 @@
   generations; :routing and :created-at are optional. Unknown keys are
   rejected: trust boundaries use closed maps."
   [:map {:closed true}
+   [:session/id {:optional true} uuid?]
    [:genome/id [:fn types/genome-id?]]
    [:resolution/id [:fn types/resolution-id?]]
    [:phenotype/id [:fn types/artifact-id?]]
@@ -103,14 +65,13 @@
 
 (def SessionSchema
   "The public Session contract map returned by create-session! and
-  get-session."
+  get-session. Immutable pin - no state machine."
   [:map {:closed true}
    [:session/id uuid?]
    [:generation/id string?]
    [:genome/id [:fn types/genome-id?]]
    [:resolution/id [:fn types/resolution-id?]]
    [:phenotype/id [:fn types/artifact-id?]]
-   [:state sstates/session-state-enum]
    [:created-at [:fn inst?]]
    [:routing [:maybe routing-schema]]])
 
@@ -162,56 +123,68 @@
 
 (declare get-session)
 
+(defn- canonical-timestamp
+  [instant]
+  (let [ts (or instant (java.time.Instant/now))]
+    (.format java.time.format.DateTimeFormatter/ISO_INSTANT ts)))
 (defn create-session!
-  "Create a session row pinned to the request's Genome, Resolution,
-  Phenotype, and Generation ids (Global Constraint 2) and return the
-  persisted Session contract map. The pinned identity fields are
-  immutable after insert — no API can change them later.
-
-  `store` is a SessionStore handle (evoclj.store.session-store/make-session-store).
-  Raw maps are rejected (Fleet R). For backward compat a raw sqlite spec
-  (string path) is auto-wrapped, but new code must pass a handle.
-
-  Typed errors: :store/session-invalid, :store/session-invalid :not-a-session-store,
-  :store/generation-not-found. Optional :genome/existence-proof etc. may
-  carry VerifiedDigest proofs (Fleet P5/F)."
+  "Create a new session with pinned Genome/Resolution/Phenotype/Generation.
+  Returns the public Session contract map (immutable pin, no state machine)."
   [store request]
   (validate-create-request request)
-  (let [ss-store (normalize-store store)
-        sid (ss/insert-session! ss-store request)]
-    (get-session ss-store sid)))
-
-(defn transition-session!
-  "Compare-and-set state transition (component Step 4)."
-  [store session-id expected-state new-state data]
-  (when-not (and (keyword? expected-state) (keyword? new-state))
-    (throw (err/error :store/session-invalid
-                      "transition states must be keywords"
-                      {:expected-state expected-state :new-state new-state})))
-  (when-not (edn-safe-map? data)
-    (throw (err/error :store/session-invalid
-                      "transition data must be nil or an EDN-safe map"
-                      {:data data})))
-  (when-not (valid-transition? expected-state new-state)
-    (throw (err/error :session/invalid-transition
-                      "not an edge of the session state machine"
-                      {:session/id (types/session-id session-id)
-                       :expected-state expected-state
-                       :new-state new-state})))
-  (let [ss-store (normalize-store store)]
-    (ss/transition-session! ss-store session-id expected-state new-state)))
+  (let [store (normalize-store store)
+        sid (or (:session/id request) (UUID/randomUUID))]
+    (ss/insert-session! store (assoc request :session/id sid))
+    (get-session store sid)))
 
 (defn get-session
   "The session as the public Session contract map, or nil when no
-  session has `session-id`. Read-only."
+  session with this id exists."
   [store session-id]
-  (let [ss-store (normalize-store store)]
-    (some-> (ss/find-session ss-store session-id)
-            validate-session)))
+  (let [store (normalize-store store)
+        sid (try (types/session-id session-id) (catch Exception _ session-id))]
+    (ss/find-session store sid)))
 
-;; ---------------------------------------------------------------------------
-;; Session helpers for subagent child execution (S3)
-;; ---------------------------------------------------------------------------
+(defn try-cancel-session!
+  "Cancel a session by marking its root Work as cancelled via Work store.
+  Session is immutable pin - cancellation is driven by Work lifecycle.
+  Returns the session map if found, nil otherwise."
+  [store session-id]
+  (let [sid (try (types/session-id session-id) (catch Exception _ session-id))
+        sess (get-session store sid)
+        db-spec (if (instance? evoclj.store.session_store.SessionStore store)
+                  (.-db ^evoclj.store.session_store.SessionStore store)
+                  store)]
+    (when sess
+      (let [works (try (evoclj.store.work/list-works db-spec sid) (catch Exception _ []))]
+        (when (seq works)
+          (let [root-work (first works)]
+            (evoclj.store.work/cancel-work! db-spec (:work/id root-work))))))
+    sess))
+
+(defn find-session
+  "Find session by id via sqlite spec, or nil."
+  [db session-id]
+  (get-session db session-id))
+
+(defn list-descendants
+  "Return all descendant session ids (UUIDs) transitively spawned from
+  `root-id` via Work graph (works.parent_work_id)."
+  [db root-id]
+  (let [root-id (types/session-id root-id)
+        spec (if (instance? evoclj.store.session_store.SessionStore db)
+               (.-db ^evoclj.store.session_store.SessionStore db)
+               db)
+        works (try (work-store/list-works spec root-id) (catch Exception _ []))
+        descendant-work-ids (try
+                              (mapcat #(work-store/work-descendants spec (:work/id %)) works)
+                              (catch Exception _ []))]
+    (->> descendant-work-ids
+         (map #(try (work-store/fetch-work spec %) (catch Exception _ nil)))
+         (keep :work/session-id)
+         (remove #(= root-id %))
+         distinct
+         vec)))
 
 (defn get-session!
   "Fetch session or throw :store/session-not-found when missing.
@@ -230,9 +203,9 @@
   (boolean (get-session store session-id)))
 
 (defn child-session?
-  "True when `session-id` is a child subagent session (has a parent link).
-  Requires the subagent link table; returns false when the table is absent
-  or the link is not found. Lazy-requires subagent to avoid circular deps."
+  "True when `session-id` is a child subagent session (has a parent Work).
+  Parentage is resolved only from Work.parent_work_id; no event or helper-table
+  fallback is consulted. Lazy-requires subagent to avoid circular deps."
   [store session-id]
   (try
     (let [subagent-ns (try (requiring-resolve 'evoclj.runtime.subagent/get-parent-session-id)
@@ -241,78 +214,3 @@
         (boolean (@subagent-ns store session-id))
         false))
     (catch Exception _ false)))
-
-;; ---------------------------------------------------------------------------
-;; Subagent graph helpers (S4)
-;; ---------------------------------------------------------------------------
-;; subagent_links is owned by 020-subagent-links — no runtime DDL.
-
-(defn list-descendants
-  [db root-id]
-  (let [root-uuid (try (types/session-id root-id) (catch Exception _ root-id))
-        spec (if (instance? evoclj.store.session_store.SessionStore db)
-               (.-db ^evoclj.store.session_store.SessionStore db)
-               db)]
-    (loop [queue [root-uuid] visited #{} result []]
-      (if (empty? queue)
-        result
-        (let [cur (first queue)
-              rest-q (vec (rest queue))]
-          (if (contains? visited cur)
-            (recur rest-q visited result)
-            (let [visited2 (conj visited cur)
-                  cur-str (str cur)
-                  work-kids (try
-                              (mapv #(types/session-id (:child_session_id %))
-                                    (sqlite/query spec
-                                      ["SELECT w1.session_id AS child_session_id
-                                        FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
-                                        WHERE w2.session_id = ?
-                                        ORDER BY w1.created_at" cur-str]))
-                              (catch Exception _ []))
-                  event-kids (try
-                               (let [rows (sqlite/query spec
-                                            ["SELECT payload FROM events
-                                              WHERE session_id = ? AND event_type = 'subagent/spawned'
-                                              ORDER BY id" cur-str])]
-                                 (into []
-                                       (keep (fn [r]
-                                               (when-let [m (some-> (:payload r) edn/read-string)]
-                                                 (some-> (:child/session-id m) types/session-id))))
-                                       rows))
-                               (catch Exception _ []))
-                  link-kids (try
-                              (mapv #(types/session-id (:child_session_id %))
-                                    (sqlite/query spec
-                                      ["SELECT child_session_id FROM subagent_links WHERE parent_session_id = ? ORDER BY created_at" cur-str]))
-                              (catch Exception _ []))
-                  children (into [] (distinct (concat work-kids event-kids link-kids)))
-                  new-result (into result children)
-                  new-queue (into rest-q children)]
-              (recur new-queue visited2 new-result))))))))
-
-(defn try-cancel-session!
-  [db session-id]
-  (let [sid (try (evoclj.genome.types/session-id session-id) (catch Exception _ session-id))
-        sess (get-session db sid)]
-    (when sess
-      (let [cur (:state sess)]
-        (cond
-          (= cur :cancelled) sess
-          (contains? terminal-states cur) sess
-          :else
-          (let [spec (if (instance? evoclj.store.session_store.SessionStore db)
-                       (.-db ^evoclj.store.session_store.SessionStore db)
-                       db)
-                ts (.format java.time.format.DateTimeFormatter/ISO_INSTANT (java.time.Instant/now))
-                updated (try
-                           (evoclj.store.sqlite/with-db [conn spec]
-                             (let [cnt (first (clojure.java.jdbc/execute! conn ["UPDATE sessions SET state = 'cancelled', updated_at = ? WHERE id = ? AND state NOT IN ('completed','failed','cancelled','budget-exhausted')" ts (str sid)]))]
-                               (= 1 cnt)))
-                           (catch Exception _ false))]
-            (if updated
-              (get-session db sid)
-              (if (valid-transition? cur :cancelled)
-                (try (transition-session! db sid cur :cancelled nil) (catch Exception _ (get-session db sid)))
-                (get-session db sid)))))))))
-  

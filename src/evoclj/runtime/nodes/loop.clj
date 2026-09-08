@@ -45,10 +45,10 @@
   the handler returns a :failed transition carrying the typed error
   data {:error/type :loop/max-iterations-exceeded :max-iterations n
   :iterations n}. The scheduler recognizes this error type and routes
-  it to the :budget-exhausted session state (:session/budget-exhausted
+  it to the Work :timed-out state (`:session/budget-exhausted`
   event recording the {:max-iterations n} limit), so an unbounded
-  predicate is a budget outcome — failures are evidence, never
-  discarded traces — not a session failure.
+  predicate is a budget outcome — failures are evidence, never discarded
+  traces — not a Session lifecycle failure.
 
   PAYLOAD FORWARDING: the scheduler feeds each next node the most
   recently accumulated session output (peek of :outputs), so on the
@@ -95,7 +95,7 @@
   "The typed budget outcome for an iteration count that reached the
   :max-iterations cap: a :failed transition carrying serializable
   error data. evoclj.runtime.scheduler routes this error type to the
-  :budget-exhausted session state (the typed budget outcome chosen for
+  :timed-out Work state (the typed budget outcome chosen for
   component and documented there)."
   [iterations max-iterations]
   (node/validate-transition!

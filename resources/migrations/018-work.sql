@@ -4,7 +4,7 @@
 --   * Table `works` replaces `commands` + part of `subagent_sessions` (subagent = child Work + Principal + causal-links).
 --   * Columns: id TEXT PK uuid, type TEXT NOT NULL, state TEXT CHECK 7, session_id TEXT FK, parent_work_id TEXT self-FK, payload_ref TEXT, deadline TEXT, continuation_edn TEXT, created_at/updated_at TEXT NOT NULL.
 --   * State strings in DB: 'queued','running','waiting','succeeded','failed','cancelled','timed_out' (DB stores snake_case timed_out, code maps both hyphen forms).
---   * Migration: create works IF NOT EXISTS, then backfill from commands when commands exists (command queued->work queued etc, timed_out->timed-out). subagent_links rows are NOT auto-migrated — they remain as helper but future subagents use parent_work_id.
+--   * Migration: create works IF NOT EXISTS, then backfill from commands when commands exists (command queued->work queued etc, timed_out->timed-out). Historical subagent_links rows are not migrated; runtime ignores the legacy table.
 --   * Idempotency: CREATE TABLE IF NOT EXISTS, INSERT OR IGNORE for backfill, indexes IF NOT EXISTS.
 --   * Single transaction via runner.
 

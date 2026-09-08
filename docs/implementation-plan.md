@@ -858,35 +858,31 @@ cas/sha256/ab/abcdef.../meta.edn
 
 ---
 
-## component — Persist session pinning and lifecycle transitions
+## component — Persist immutable Session pinning
 
 **Files:**
 
 - Create: `src/evoclj/store/session.clj`
 - Create: `test/evoclj/store/session_test.clj`
 
-**State machine:**
-
-```text
-:created → :resolving → :running ↔ :waiting → :completed
-                         ├──────────────→ :failed
-                         ├──────────────→ :cancelled
-                         └──────────────→ :budget-exhausted
-```
-
-**Interfaces:**
+**Contract:**
 
 ```clojure
-(create-session! store {:genome/id ... :resolution/id ... :phenotype/id ...})
-(transition-session! store session-id expected-state new-state data)
+(create-session! store {:genome/id ... :resolution/id ... :phenotype/id ... :generation/id ...})
 (get-session store session-id)
+(try-cancel-session! store session-id)
 ```
 
-- [ ] **Step 1: Test a session records immutable Genome/Resolution/Phenotype IDs at creation.**
-- [ ] **Step 2: Test illegal state transition fails with `:session/invalid-transition`.**
-- [ ] **Step 3: Test no update operation can change pinned IDs.**
-- [ ] **Step 4: Implement compare-and-set state transition in SQL so concurrent workers cannot both transition from the same state silently.**
-- [ ] **Step 5: Run and commit.**
+The Session row is immutable execution identity: it pins the Genome, Resolution, Phenotype, and Generation IDs at creation. It has no lifecycle state machine and no state-transition API. Work owns the durable execution lifecycle through `works.parent_work_id` and the seven Work states.
+
+- [x] **Step 1: Test immutable identity pinning at Session creation.**
+- [x] **Step 2: Test unknown generations are rejected before a Session pin is written.**
+- [x] **Step 3: Test no update operation can change pinned IDs.**
+- [x] **Step 4: Delegate cancellation to the Session root Work; Work CAS owns lifecycle transitions.**
+- [x] **Step 5: Test descendant navigation through the Work graph only.**
+- [x] **Step 6: Run and commit.**
+
+**Acceptance:** The store reconstructs immutable Session identity while Work rows provide the only durable execution state and parent/child topology.
 
 ---
 
@@ -900,13 +896,13 @@ cas/sha256/ab/abcdef.../meta.edn
 **Interfaces:**
 
 ```clojure
+(find-orphaned-works store)
+;; => [{:work/id ... :work/session-id ... :work/state ...}]
 (scan-recovery-state store cas)
-;; => {:orphaned-sessions [...]
-;;     :missing-artifacts [...]
+;; => {:missing-artifacts [...]
 ;;     :invalid-event-chains [...]
 ;;     :stale-candidates [...]}
 ```
-
 - [ ] **Step 1: Simulate process death after session entered `:running` but before a terminal event. Recovery must classify it, not pretend completion.**
 - [ ] **Step 2: Simulate missing CAS payload referenced by an event. Integrity scan must fail loudly.**
 - [ ] **Step 3: Simulate a prepared but uncommitted candidate; recovery may mark it stale but must not promote it.**

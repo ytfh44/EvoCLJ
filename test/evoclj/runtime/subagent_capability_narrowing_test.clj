@@ -70,6 +70,11 @@
                              :prev/event-id nil
                              :payload-ref nil
                              :metadata {}})
+    (evoclj.store.work/create-work! db {:work/id (UUID/randomUUID)
+                                        :work/type :session/run
+                                        :work/state :queued
+                                        :work/session-id sid
+                                        :work/created-at (Date. 1700000000000)})
     sess))
 
 (defn- child-tool-ids [caps]

@@ -55,7 +55,7 @@
     catalog) so it works after source deletion or a restart.
   - WO-B1: restore! verifies EVERY durable binding (phase 1) before
     republishing ANY of them (phase 2); the scheduler's run-session!
-    calls it before a session leaves :created (production restart
+    calls it before the session's Work is dispatched (production restart
     wiring).
   - WO-B4: when the caller supplies a filesystem lease (`:fs-lease`,
     plus an optional `:fs-lease-registry` atom for revocation/recording
