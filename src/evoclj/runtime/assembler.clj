@@ -47,6 +47,18 @@
     (conj (vec tools) tool-specs/code-execution-wire-tool)
     tools))
 
+(defn provider-model-request
+  "Project a PreparedModelCall into the closed provider-facing model request.
+
+  Context, provenance, catalog bindings, tool maps, and effective context
+  remain assembler-owned. Only these four fields cross the provider input
+  boundary: model identity, ordered messages, declared tools, and options."
+  [base-call prepared]
+  {:model/id (:model/id base-call)
+   :messages (vec (or (:messages prepared) []))
+   :tools (vec (or (:tools prepared) []))
+   :options (or (:options base-call) {})})
+
 (defn base->prepared
   "Assemble PreparedModelCall.
 
@@ -137,6 +149,9 @@
                                :tool-catalog tool-catalog
                                :bindings manifest}
       :base base-call
+      :model/request (provider-model-request base-call
+                                             {:messages messages
+                                              :tools (or requested-tools [])})
       :effective effective})))
 
 (defn pin-catalog

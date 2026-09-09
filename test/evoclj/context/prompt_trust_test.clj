@@ -213,3 +213,22 @@
           "model message is last")
       (is (= (count messages) (count trusts))
           "provenance attributes exactly the emitted messages"))))
+
+(deftest provider-model-request-is-contained
+  (testing "provider projection excludes assembler context and provenance state"
+    (let [base {:model/id "provider/model"
+                :options {:temperature 0.2}}
+          prepared {:messages [{:role "system" :content "K"}]
+                    :tools [{:name "echo"}]
+                    :tool-map {"echo" {:tool/id :fixture/echo}}
+                    :prompt/provenance {:prompt/segments []}
+                    :context/manifest {:context/manifest-version 1}
+                    :effective {:effective/segments []}}
+          request (assembler/provider-model-request base prepared)]
+      (is (= {:model/id "provider/model"
+              :messages [{:role "system" :content "K"}]
+              :tools [{:name "echo"}]
+              :options {:temperature 0.2}}
+             request))
+      (is (= #{:model/id :messages :tools :options}
+             (set (keys request)))))))
