@@ -4,7 +4,8 @@
             [evoclj.control :as control]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
-            [evoclj.store.sqlite :as sqlite]))
+            [evoclj.store.sqlite :as sqlite]
+            [evoclj.store.work :as work-store]))
 
 (def ^:private generation "generation-1")
 (def ^:private genome "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -27,22 +28,23 @@
 (defn- seed-session!
   [db sid]
   (sqlite/with-db [conn db]
-    (doseq [[hash media-type size]
-            [[genome "application/octet-stream" 64]
-             [resolution "application/edn" 64]
-             [phenotype "application/octet-stream" 64]]]
-      (jdbc/insert! conn :artifacts {:hash hash
-                                     :media_type media-type
-                                     :size size
-                                     :created_at created-at}))
-    (jdbc/insert! conn :genomes {:id genome :created_at created-at})
-    (jdbc/insert! conn :generations {:id generation
-                                     :genome_id genome
-                                     :resolution_id resolution
-                                     :parent_id nil
-                                     :state "active"
-                                     :current 0
-                                     :created_at created-at})
+    (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" generation]))
+      (doseq [[hash media-type size]
+              [[genome "application/octet-stream" 64]
+               [resolution "application/edn" 64]
+               [phenotype "application/octet-stream" 64]]]
+        (jdbc/insert! conn :artifacts {:hash hash
+                                       :media_type media-type
+                                       :size size
+                                       :created_at created-at}))
+      (jdbc/insert! conn :genomes {:id genome :created_at created-at})
+      (jdbc/insert! conn :generations {:id generation
+                                       :genome_id genome
+                                       :resolution_id resolution
+                                       :parent_id nil
+                                       :state "active"
+                                       :current 0
+                                       :created_at created-at}))
     (jdbc/insert! conn :sessions {:id (str sid)
                                   :generation_id generation
                                   :genome_id genome
@@ -51,6 +53,19 @@
                                   :state "created"
                                   :created_at created-at}))
   sid)
+
+(defn- make-work!
+  [db sid & [parent-work-id]]
+  (let [id (random-uuid)]
+    (work-store/create-work!
+     db
+     (cond-> {:work/id id
+              :work/type :subagent/run
+              :work/state :queued
+              :work/session-id sid
+              :work/created-at (java.util.Date. 0)}
+       parent-work-id (assoc :work/parent-work-id parent-work-id)))
+    id))
 
 (defn- root-event!
   [db sid]
@@ -64,19 +79,21 @@
                            :metadata {}}))
 
 (defn- request
-  [sid]
-  {:control/id (random-uuid)
-   :control/type :interrupt
-   :control/idempotency-key "interrupt-1"
-   :control/scope {:session/id sid}
-   :control/payload {:reason "operator-request"}
-   :control/requested-at (java.util.Date. 0)})
+  [issuer target & [work-id]]
+  (cond-> {:control/id (random-uuid)
+           :control/issuer issuer
+           :control/type :interrupt
+           :control/idempotency-key (str "interrupt-" (random-uuid))
+           :control/scope {:session/id target}
+           :control/payload {:reason "operator-request"}
+           :control/requested-at (java.util.Date. 0)}
+    work-id (assoc-in [:control/scope :work/id] work-id)))
 
 (defn- append-control!
-  [db sid root req]
+  [db target root req]
   (control/append-control-event!
    db
-   {:session/id sid
+   {:session/id target
     :generation/id generation
     :phenotype/id phenotype
     :prev/event-id (:event/id root)
@@ -97,7 +114,7 @@
         sid (seed-session! db (random-uuid))]
     (try
       (let [root (root-event! db sid)
-            req (request sid)
+            req (request sid sid)
             persisted (append-control! db sid root req)]
         (is (= :control/requested (:event/type persisted)))
         (is (= (assoc req :control/status :requested)
@@ -111,7 +128,7 @@
         sid (seed-session! db (random-uuid))]
     (try
       (let [root (root-event! db sid)
-            req (request sid)
+            req (request sid sid)
             first-event (append-control! db sid root req)
             replay (append-control! db sid root req)]
         (is (= (:event/id first-event) (:event/id replay)))
@@ -125,7 +142,7 @@
         sid (seed-session! db (random-uuid))]
     (try
       (let [root (root-event! db sid)
-            req (request sid)
+            req (request sid sid)
             results (->> (repeatedly 8 #(future (append-control! db sid root req)))
                          (mapv deref))]
         (is (= 1 (count (set (map :event/id results)))))
@@ -138,7 +155,7 @@
         sid (seed-session! db (random-uuid))]
     (try
       (let [root (root-event! db sid)
-            req (request sid)]
+            req (request sid sid)]
         (append-control! db sid root req)
         (is (= :control/idempotency-conflict
                (thrown-error-type
@@ -151,6 +168,37 @@
       (finally
         (cleanup! path)))))
 
+(deftest ancestor-controls-descendant-but-child-cannot-control-parent-or-sibling
+  (let [[db path] (fresh-db)
+        parent (seed-session! db (random-uuid))
+        child (seed-session! db (random-uuid))
+        sibling (seed-session! db (random-uuid))]
+    (try
+      (let [parent-work (make-work! db parent)
+            child-work (make-work! db child parent-work)
+            _sibling-work (make-work! db sibling parent-work)
+            parent-root (root-event! db parent)
+            child-root (root-event! db child)]
+        (is (= :control/requested
+               (:event/type
+                (append-control! db child child-root
+                                 (request parent child child-work)))))
+        (is (= :control/scope-denied
+               (thrown-error-type
+                #(append-control! db parent parent-root
+                                  (request child parent parent-work)))))
+        (is (= :control/scope-denied
+               (thrown-error-type
+                #(append-control! db child child-root
+                                  (request sibling child child-work)))))
+        (is (= :control/work-scope-mismatch
+               (thrown-error-type
+                #(append-control! db child child-root
+                                  (request parent child parent-work)))))
+        (is (some? (work-store/fetch-work db child-work))))
+      (finally
+        (cleanup! path)))))
+
 (deftest control-request-validation-fails-closed
   (let [[db path] (fresh-db)
         sid (seed-session! db (random-uuid))]
@@ -159,11 +207,14 @@
         (is (= :control/request-invalid
                (thrown-error-type
                 #(append-control! db sid root
-                                  (assoc (request sid) :control/type :pause)))))
-        (is (= :control/scope-mismatch
+                                  (assoc (request sid sid) :control/type :pause)))))
+        (is (= :control/issuer-not-found
                (thrown-error-type
                 #(append-control! db sid root
-                                  (assoc (request sid)
-                                         :control/scope {:session/id (random-uuid)}))))))
+                                  (request (random-uuid) sid)))))
+        (is (= :control/work-not-found
+               (thrown-error-type
+                #(append-control! db sid root
+                                  (request sid sid (random-uuid)))))))
       (finally
         (cleanup! path)))))

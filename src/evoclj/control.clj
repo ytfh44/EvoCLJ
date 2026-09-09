@@ -20,12 +20,13 @@
 (def ControlScopeSchema
   [:map {:closed true}
    [:session/id [:fn types/session-id?]]
-   [:work/id {:optional true} pos-int?]])
+   [:work/id {:optional true} uuid?]])
 
 (def ControlRequestSchema
   "A command-shaped control request before the log records it."
   [:map {:closed true}
    [:control/id uuid?]
+   [:control/issuer [:fn types/session-id?]]
    [:control/type ControlTypeSchema]
    [:control/idempotency-key [:and string? [:fn not-empty]]]
    [:control/scope ControlScopeSchema]
@@ -36,6 +37,7 @@
   "The durable control fact carried in an Event metadata map."
   [:map {:closed true}
    [:control/id uuid?]
+   [:control/issuer [:fn types/session-id?]]
    [:control/type ControlTypeSchema]
    [:control/idempotency-key [:and string? [:fn not-empty]]]
    [:control/scope ControlScopeSchema]
@@ -116,13 +118,94 @@
                          :control/idempotency-key (:control/idempotency-key request)
                          :existing-event/id (:event/id match)})))))
 
+(defn- session-exists-on-connection?
+  [conn session-id]
+  (seq (sqlite/query-raw! conn
+                          "SELECT id FROM sessions WHERE id = ?"
+                          [(str (types/session-id session-id))])))
+
+(defn- work-session-on-connection
+  [conn work-id]
+  (:session_id
+   (first (sqlite/query-raw! conn
+                             "SELECT session_id FROM works WHERE id = ?"
+                             [(str work-id)]))))
+
+(defn- issuer-controls-target-work?
+  [conn issuer-session-id target-work-id]
+  (seq
+   (sqlite/query-raw!
+    conn
+    "WITH RECURSIVE lineage(session_id, work_id) AS (
+       SELECT session_id, id FROM works WHERE id = ?
+       UNION ALL
+       SELECT parent.session_id, parent.id
+       FROM works child
+       JOIN lineage current ON child.id = current.work_id
+       JOIN works parent ON parent.id = child.parent_work_id
+     )
+     SELECT 1 FROM lineage WHERE session_id = ? LIMIT 1"
+    [(str target-work-id) (str (types/session-id issuer-session-id))])))
+
+(defn- issuer-controls-target-session?
+  [conn issuer-session-id target-session-id]
+  (seq
+   (sqlite/query-raw!
+    conn
+    "WITH RECURSIVE lineage(session_id, work_id) AS (
+       SELECT session_id, id FROM works WHERE session_id = ?
+       UNION ALL
+       SELECT parent.session_id, parent.id
+       FROM works child
+       JOIN lineage current ON child.id = current.work_id
+       JOIN works parent ON parent.id = child.parent_work_id
+     )
+     SELECT 1 FROM lineage WHERE session_id = ? LIMIT 1"
+    [(str (types/session-id target-session-id))
+     (str (types/session-id issuer-session-id))])))
+
+(defn- validate-scope-on-connection!
+  [conn context request]
+  (let [target-session-id (types/session-id (:session/id context))
+        issuer-session-id (types/session-id (:control/issuer request))
+        target-work-id (get-in request [:control/scope :work/id])
+        work-session (when target-work-id
+                       (work-session-on-connection conn target-work-id))]
+    (when-not (session-exists-on-connection? conn issuer-session-id)
+      (throw (err/error :control/issuer-not-found
+                        "control issuer session does not exist"
+                        {:control/issuer issuer-session-id})))
+    (when (and target-work-id (nil? work-session))
+      (throw (err/error :control/work-not-found
+                        "control scope names a nonexistent work"
+                        {:work/id target-work-id})))
+    (when (and target-work-id
+               (not= work-session (str target-session-id)))
+      (throw (err/error :control/work-scope-mismatch
+                        "control work must belong to the target session"
+                        {:work/id target-work-id
+                         :work/session-id work-session
+                         :control/session-id target-session-id})))
+    (when-not (or (= issuer-session-id target-session-id)
+                  (if target-work-id
+                    (issuer-controls-target-work? conn issuer-session-id target-work-id)
+                    (issuer-controls-target-session? conn issuer-session-id target-session-id)))
+      (throw (err/error :control/scope-denied
+                        "control issuer is neither the target nor an ancestor session"
+                        {:control/issuer issuer-session-id
+                         :control/session-id target-session-id
+                         :work/id target-work-id}))))
+  true)
+
 (defn append-control-event!
   "Append a :control/requested fact to the existing Event log.
 
   `request` is recorded with status :requested. The event log remains
   the only persistence path, including sequence and hash-chain facts.
   Retries with the same control identity and identical request replay the
-  original event; a reused identity with different content is rejected."
+  original event; a reused identity with different content is rejected.
+  A control may target its own session or a descendant work/session; a
+  child cannot control its parent or a sibling."
   [store context request]
   (validate-control-request request)
   (validate! AppendControlRequestSchema
@@ -141,6 +224,7 @@
                              :causal-links (or (:causal-links context) #{}))
         _ (event-schema/validate-append-request event-request)
         result (sqlite/with-write-tx [conn store]
+                 (validate-scope-on-connection! conn context request)
                  (if-let [existing (replay-or-conflict!
                                     (controls-on-connection conn (:session/id context))
                                     request)]
