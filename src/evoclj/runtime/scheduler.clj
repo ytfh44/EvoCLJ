@@ -456,10 +456,6 @@
                          (orchestrator/->TraditionalOrchestrator))]
     (orchestrator/orchestrate orchestrator executor pin cause intent outputs)))
 
-(defn- try-work-transition!
-  [db work-id f & args]
-  (when work-id
-    (apply f db work-id args)))
 
 (defn- work-terminated?
   [db work-id]
@@ -566,12 +562,6 @@
                            :work/id work-id
                            :cause (err/error-data t)}))
         (throw t)))))
-(defn- session-work-id
-  "The session's sole execution Work id (W2: one mandatory Work per run,
-  resolved from the store — Work is the durable execution identity). nil
-  when the session has not yet minted a Work."
-  [db session-id]
-  (some-> (last (work-store/list-works db session-id)) :work/id))
 
 (defn- terminal-work-for
   "The session's first terminal Work (:succeeded/:failed/:cancelled/:timed-out),
@@ -590,54 +580,141 @@
   (or (:event/id (last (event/events-for-session db session-id)))
       fallback-id))
 
-(defn- fail-session!
-  "Fail the run: store the serializable error payload as a CAS artifact,
-  append :node/failed (chained to `cause`, :payload-ref = the artifact),
-  drive the session's Work to :failed (the SOLE durable lifecycle — the
-  Work terminal state IS the failure truth), and append :session/failed
-  carrying the artifact ref in its metadata (:error/artifact-ref). Returns
-  the run result map (its :status is derived from the Work :failed terminal
-  state, never a Session transition)."
-  [executor pin cause node-id step error-data outputs]
-  (let [db (:sqlite (:stores executor))
-        error-ref (put-payload! executor error-data)
-        node-failed (append-event! executor pin cause :node/failed error-ref
-                                   {:node/id node-id
-                                    :step step
-                                    :error/type (:error/type error-data)})]
-    (try-work-transition! db (session-work-id db (:session/id pin))
-                          work-store/fail-work! nil)
-    (append-event! executor pin (:event/id node-failed) :session/failed error-ref
-                   {:status :failed
-                    :error/artifact-ref error-ref
-                    :error/type (:error/type error-data)})
-    {:status :failed
-     :session/id (:session/id pin)
-     :output-ref (outputs-ref executor outputs)
-     :error/artifact-ref error-ref
-     :episode/id nil}))
+(def ^:private terminal-session-event-types
+  #{:session/completed :session/failed :session/budget-exhausted :session/cancelled})
 
-(defn- budget-exhaust!
-  "Halt the run when the topology's :max-steps budget is consumed
-  (component Step 2): drive the session's Work to :timed-out (the SOLE
-  durable lifecycle — a consumed step/loop budget is a Work timeout, not a
-  Session transition) and append :session/budget-exhausted carrying the
-  limit, the steps consumed, and the accumulated outputs as a CAS artifact.
-  Returns the run result map (its :status is derived from the Work
-  :timed-out terminal state)."
-  [executor pin cause outputs limits steps]
+(def ^:private terminal-event-for-work-state
+  {:cancelled :session/cancelled
+   :timed-out :session/budget-exhausted})
+
+(def ^:private terminal-status-for-work-state
+  {:cancelled :cancelled
+   :timed-out :budget-exhausted})
+
+(defn- terminal-session-outcome!
+  "Fence a run after Work has reached :cancelled or :timed-out. The
+  terminal Work wins over any stale in-memory step result. Reuse an
+  already persisted terminal event (cancellation may have been written
+  by the parent-cascade transaction); otherwise append exactly the event
+  allowed by the Work state."
+  [executor pin work-id outputs]
+  (let [db (:sqlite (:stores executor))
+        work-row (work-store/fetch-work db work-id)
+        state (:work/state work-row)
+        event-type (get terminal-event-for-work-state state)
+        status (get terminal-status-for-work-state state)]
+    (when-not event-type
+      (throw (err/error :scheduler/work-terminal-invalid
+                        "terminal outcome fence requires cancellation or timeout"
+                        {:work/id work-id
+                         :work/state state})))
+    (let [events (event/events-for-session db (:session/id pin))
+          conflicting (some #(when (and (contains? terminal-session-event-types (:event/type %))
+                                       (not= event-type (:event/type %)))
+                              %) events)]
+      (when conflicting
+        (throw (err/error :scheduler/terminal-event-conflict
+                          "session log contains a terminal event inconsistent with Work"
+                          {:work/id work-id
+                           :work/state state
+                           :event/id (:event/id conflicting)
+                           :event/type (:event/type conflicting)})))
+      (let [out-ref (outputs-ref executor outputs)
+            terminal (or (some #(when (= event-type (:event/type %)) %) (reverse events))
+                         (append-event! executor pin
+                                        (:event/id (last events))
+                                        event-type
+                                        out-ref
+                                        {:status status
+                                         :work/id work-id
+                                         :output/ref out-ref}))]
+        {:status status
+         :session/id (:session/id pin)
+         :output-ref out-ref
+         :error/artifact-ref nil
+         :episode/id nil
+         :terminal/event-id (:event/id terminal)}))))
+
+(defn- fail-session!
+  "Fail the run unless the Work has already been cancelled or timed out.
+  Work CAS is the terminal fence: a late failure cannot append a
+  contradictory :session/failed event."
+  [executor pin work-id cause node-id step error-data outputs]
+  (let [db (:sqlite (:stores executor))]
+    (if (work-terminated? db work-id)
+      (terminal-session-outcome! executor pin work-id outputs)
+      (let [error-ref (put-payload! executor error-data)
+            node-failed (append-event! executor pin cause :node/failed error-ref
+                                       {:node/id node-id
+                                        :step step
+                                        :error/type (:error/type error-data)})
+            failed? (try
+                      (work-store/fail-work! db work-id error-ref)
+                      true
+                      (catch clojure.lang.ExceptionInfo t
+                        (if (work-terminated? db work-id)
+                          false
+                          (throw t))))]
+        (if-not failed?
+          (terminal-session-outcome! executor pin work-id outputs)
+          (do
+            (append-event! executor pin (:event/id node-failed) :session/failed error-ref
+                           {:status :failed
+                            :error/artifact-ref error-ref
+                            :error/type (:error/type error-data)})
+            {:status :failed
+             :session/id (:session/id pin)
+             :output-ref (outputs-ref executor outputs)
+             :error/artifact-ref error-ref
+             :episode/id nil}))))))
+
+(defn- complete-session!
+  "Commit a successful Work only while it is still running. A concurrent
+  cancellation wins the CAS and is returned through the terminal fence;
+  no :session/completed event is appended for a cancelled Work."
+  [executor pin work-id completed outputs]
   (let [db (:sqlite (:stores executor))
         out-ref (outputs-ref executor outputs)]
-    (try-work-transition! db (session-work-id db (:session/id pin))
-                          work-store/timeout-work!)
-    (append-event! executor pin cause :session/budget-exhausted out-ref
-                   {:status :budget-exhausted
-                    :limits limits :steps steps :output/ref out-ref})
-    {:status :budget-exhausted
-     :session/id (:session/id pin)
-     :output-ref out-ref
-     :error/artifact-ref nil
-     :episode/id nil}))
+    (try
+      (work-store/wait-work! db work-id)
+      (work-store/succeed-work! db work-id out-ref)
+      (append-event! executor pin (:event/id completed)
+                     :session/completed out-ref
+                     {:status :completed
+                      :output/ref out-ref})
+      {:status :completed
+       :session/id (:session/id pin)
+       :output-ref out-ref
+       :error/artifact-ref nil
+       :episode/id nil}
+      (catch clojure.lang.ExceptionInfo t
+        (if (work-terminated? db work-id)
+          (terminal-session-outcome! executor pin work-id outputs)
+          (throw t))))))
+
+(defn- budget-exhaust!
+  "Halt the run when the topology's :max-steps budget is consumed.
+  The timeout CAS is the terminal fence: a concurrent cancellation wins
+  and is returned as :cancelled rather than being overwritten."
+  [executor pin work-id cause outputs limits steps]
+  (let [db (:sqlite (:stores executor))
+        out-ref (outputs-ref executor outputs)]
+    (if (work-terminated? db work-id)
+      (terminal-session-outcome! executor pin work-id outputs)
+      (try
+        (work-store/timeout-work! db work-id)
+        (append-event! executor pin cause :session/budget-exhausted out-ref
+                       {:status :budget-exhausted
+                        :limits limits :steps steps :output/ref out-ref})
+        {:status :budget-exhausted
+         :session/id (:session/id pin)
+         :output-ref out-ref
+         :error/artifact-ref nil
+         :episode/id nil}
+        (catch clojure.lang.ExceptionInfo t
+          (if (work-terminated? db work-id)
+            (terminal-session-outcome! executor pin work-id outputs)
+            (throw t)))))))
 (defn- validate-effect-lattice!
   "Enforce PLT5 before Work dispatch. Static Effects come
   from the compiled topology; Requested comes from the compiled genome
@@ -797,18 +874,14 @@
                        loop-state {}]
                   (cond
                     (work-terminated? db work-id)
-                    (fail-session! executor pin (:event/id last-event)
-                                   node-id (inc steps)
-                                   {:error/type :work/cancelled
-                                    :error/message "work was cancelled or timed-out (CAS)"
-                                    :work/id work-id} outputs)
+                    (terminal-session-outcome! executor pin work-id outputs)
                     (and max-steps (>= steps max-steps))
-                    (budget-exhaust! executor pin (:event/id last-event)
+                    (budget-exhaust! executor pin work-id (:event/id last-event)
                                      outputs limits steps)
                     :else
                     (let [node (get (:nodes topology) node-id)]
                   (if-not node
-                    (fail-session! executor pin (:event/id last-event)
+                    (fail-session! executor pin work-id (:event/id last-event)
                                    node-id (inc steps)
                                    {:error/type :scheduler/node-not-found
                                     :error/message "topology :next references an undeclared node"
@@ -834,7 +907,7 @@
                                                  runtime-state node input-event))}
                                     (catch Throwable t
                                       {:failed-outcome
-                                       (fail-session! executor pin (:event/id started-event)
+                                       (fail-session! executor pin work-id (:event/id started-event)
                                                       node-id (inc steps)
                                                       (err/error-data t) outputs)}))]
                       (if-let [failed-outcome (:failed-outcome stepped)]
@@ -849,13 +922,13 @@
                               ;; :max-iterations is a budget outcome,
                               ;; routed to the same :budget-exhausted
                               ;; Work :timed-out state as the step budget
-                              (budget-exhaust! executor pin
+                              (budget-exhaust! executor pin work-id
                                                 (:event/id started-event)
                                                 outputs
                                                 {:max-iterations
                                                  (:max-iterations node)}
                                                 (inc steps))
-                              (fail-session! executor pin (:event/id started-event)
+                              (fail-session! executor pin work-id (:event/id started-event)
                                              node-id (inc steps)
                                              (:error transition) outputs))
 
@@ -867,20 +940,9 @@
                                              {:node/id node-id
                                               :step (inc steps)
                                               :transition/status :complete})]
-                              ;; W2 Work mirror: running -> waiting -> succeeded
-                              ;; (acyclic). Work's :succeeded IS the run's
-                              ;; completion truth — no Session transition.
-                              (try-work-transition! db work-id work-store/wait-work!)
-                              (try-work-transition! db work-id work-store/succeed-work! out-ref)
-                              (append-event! executor pin (:event/id completed)
-                                             :session/completed out-ref
-                                             {:status :completed
-                                              :output/ref out-ref})
-                              {:status :completed
-                               :session/id (:session/id pin)
-                               :output-ref out-ref
-                               :error/artifact-ref nil
-                               :episode/id nil})
+                              (complete-session! executor pin work-id completed
+                                                  (:outputs transition))
+                              )
 
                             :continue
                             (let [completed (append-event!
@@ -903,7 +965,7 @@
                                             (:intents transition))
                                     (catch Throwable t
                                       {:failed-outcome
-                                       (fail-session! executor pin (session-tip-id db (:session/id pin) (:event/id completed))
+                                       (fail-session! executor pin work-id (session-tip-id db (:session/id pin) (:event/id completed))
                                                       node-id (inc steps)
                                                       (err/error-data t) outputs)}))]
                               (if-let [failed-outcome (:failed-outcome dispatch-result)]
@@ -928,7 +990,7 @@
                                             :payload (peek outputs)}
                                            outputs (inc steps) last-event
                                            loop-state)
-                                    (fail-session! executor pin (:event/id last-event)
+                                    (fail-session! executor pin work-id (:event/id last-event)
                                                    node-id (inc steps)
                                                    {:error/type :scheduler/dangling-run
                                                     :error/message "a :continue transition carries no successor"

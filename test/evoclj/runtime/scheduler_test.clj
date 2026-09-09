@@ -598,3 +598,67 @@
     (is (= :succeeded (:work/state (work-store/fetch-work db work-id))))
     (is (= 1 (count (filter #(= :session/started (:event/type %)) events))))
     (is (= 1 (count (filter #(= :session/completed (:event/type %)) events))))))
+
+(deftest cancellation-and-timeout-win-over-late-outcomes
+  (testing "cancellation wins when completion loses the Work CAS"
+    (let [{:keys [executor]} (build-executor
+                              {:graph/id :graph/cancel-completion
+                               :entry :node/emit
+                               :nodes {:node/emit {:node/type :emit}}
+                               :limits {:max-steps 8}})
+          db (:sqlite (:stores executor))
+          sid (create-pinned-session executor)
+          wait-work* work-store/wait-work!
+          result (with-redefs [work-store/wait-work!
+                               (fn [db work-id]
+                                 (work-store/cancel-work! db work-id)
+                                 (wait-work* db work-id))]
+                   (scheduler/run-session! executor sid {}))
+          events (event/events-for-session db sid)]
+      (is (= :cancelled (:status result)))
+      (is (= :cancelled (session-work-state executor sid)))
+      (is (= [:session/created :session/started
+              :node/started :node/completed :session/cancelled]
+             (mapv :event/type events)))
+      (is (empty? (filter #{:session/completed :session/failed
+                           :session/budget-exhausted}
+                          (map :event/type events))))))
+  (testing "cancellation wins when timeout loses the Work CAS"
+    (let [{:keys [executor]} (build-executor
+                              (assoc (tool-only-topology)
+                                     :limits {:max-steps 1}))
+          db (:sqlite (:stores executor))
+          sid (create-pinned-session executor)
+          timeout-work* work-store/timeout-work!
+          result (with-redefs [work-store/timeout-work!
+                               (fn [db work-id]
+                                 (work-store/cancel-work! db work-id)
+                                 (timeout-work* db work-id))]
+                   (scheduler/run-session! executor sid {:text "abc"}))
+          events (event/events-for-session db sid)]
+      (is (= :cancelled (:status result)))
+      (is (= :cancelled (session-work-state executor sid)))
+      (is (= [:session/created :session/started
+              :node/started :node/completed
+              :intent/proposed :intent/authorized
+              :provider/call-started :provider/call-completed
+              :session/cancelled]
+             (mapv :event/type events)))
+      (is (not-any? #{:session/budget-exhausted} (map :event/type events)))))
+  (testing "cancellation wins when a late node failure loses the Work CAS"
+    (let [{:keys [executor]} (build-executor (boom-topology))
+          db (:sqlite (:stores executor))
+          sid (create-pinned-session executor)
+          fail-work* work-store/fail-work!
+          result (with-redefs [work-store/fail-work!
+                               (fn [db work-id reason]
+                                 (work-store/cancel-work! db work-id)
+                                 (fail-work* db work-id reason))]
+                   (scheduler/run-session! executor sid {}))
+          events (event/events-for-session db sid)]
+      (is (= :cancelled (:status result)))
+      (is (= :cancelled (session-work-state executor sid)))
+      (is (= [:session/created :session/started
+              :node/started :node/failed :session/cancelled]
+             (mapv :event/type events)))
+      (is (not-any? #{:session/failed} (map :event/type events))))))
