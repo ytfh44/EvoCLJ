@@ -67,21 +67,20 @@
 (defn- ambiguous-provider-event
   "Find a durable recovery marker for this provider intent."
   [executor pin intent]
-  (some (fn [entry]
-          (let [metadata (or (:metadata entry) {})
-                intent-match? (and (:intent/id metadata)
-                                   (:intent/id intent)
-                                   (= (:intent/id metadata) (:intent/id intent)))
-                key-match? (and (:idempotency/key metadata)
-                                (get-in intent [:metadata :idempotency/key])
-                                (= (:idempotency/key metadata)
-                                   (get-in intent [:metadata :idempotency/key])))]
-            (when (and (= :provider/call-ambiguous (:event/type entry))
-                       (or intent-match? key-match?))
-              entry)))
-        (event/events-for-session
-         (:sqlite (:stores executor))
-         (:session/id pin))))
+  (when-let [db (:sqlite (:stores executor))]
+    (some (fn [entry]
+            (let [metadata (or (:metadata entry) {})
+                  intent-match? (and (:intent/id metadata)
+                                     (:intent/id intent)
+                                     (= (:intent/id metadata) (:intent/id intent)))
+                  key-match? (and (:idempotency/key metadata)
+                                  (get-in intent [:metadata :idempotency/key])
+                                  (= (:idempotency/key metadata)
+                                     (get-in intent [:metadata :idempotency/key])))]
+              (when (and (= :provider/call-ambiguous (:event/type entry))
+                         (or intent-match? key-match?))
+                entry)))
+         (event/events-for-session db (:session/id pin)))))
 
 (defn- reject-ambiguous-provider-call!
   "A recovery marker is a hard redelivery fence: a late or restarted
