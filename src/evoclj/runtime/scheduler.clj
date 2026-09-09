@@ -459,13 +459,17 @@
 (defn- try-work-transition!
   [db work-id f & args]
   (when work-id
-    (try (apply f db work-id args) (catch Exception _ nil))))
+    (apply f db work-id args)))
 
 (defn- work-terminated?
   [db work-id]
   (when work-id
-    (try (contains? #{:cancelled :timed-out} (:work/state (work-store/fetch-work db work-id)))
-         (catch Exception _ false))))
+    (let [work (work-store/fetch-work db work-id)]
+      (when-not work
+        (throw (err/error :scheduler/work-not-found
+                          "execution Work disappeared during a run"
+                          {:work/id work-id})))
+      (contains? #{:cancelled :timed-out} (:work/state work)))))
 
 (defn- create-session-work!
   "Create the session's sole execution Work (:session/run, queued). Mandatory:
@@ -486,6 +490,82 @@
 
 ;; --- terminal session outcomes ----------------------------------------------
 
+(def ^:private executable-work-types #{:session/run :subagent/run})
+(def ^:private active-work-states #{:queued :running :waiting})
+
+(defn- active-works-for
+  [db session-id]
+  (filter #(contains? active-work-states (:work/state %))
+          (work-store/list-works db session-id)))
+
+(defn- validate-provided-work!
+  "Validate a caller-supplied execution Work before any event is appended.
+  The Work row is the owner: its session, type, and queued state must all
+  agree with this run. A session may have only one active execution Work."
+  [db session-id work-id]
+  (when-not (uuid? work-id)
+    (throw (err/error :scheduler/work-invalid
+                      "provided work id must be a UUID"
+                      {:work/id work-id
+                       :session/id session-id
+                       :reason :invalid-id})))
+  (let [w (work-store/fetch-work db work-id)]
+    (when-not w
+      (throw (err/error :scheduler/work-not-found
+                        "provided execution Work does not exist"
+                        {:work/id work-id
+                         :session/id session-id})))
+    (when-not (= session-id (:work/session-id w))
+      (throw (err/error :scheduler/work-scope-mismatch
+                        "provided Work belongs to another session"
+                        {:work/id work-id
+                         :session/id session-id
+                         :work/session-id (:work/session-id w)})))
+    (when-not (contains? executable-work-types (:work/type w))
+      (throw (err/error :scheduler/work-invalid
+                        "provided Work is not executable by the session scheduler"
+                        {:work/id work-id
+                         :work/type (:work/type w)
+                         :reason :unsupported-type})))
+    (when-not (= :queued (:work/state w))
+      (throw (err/error :scheduler/work-invalid
+                        "provided Work is not queued for a first dispatch"
+                        {:work/id work-id
+                         :work/state (:work/state w)
+                         :reason :already-claimed-or-terminal})))
+    (let [active (vec (active-works-for db session-id))]
+      (when (some #(not= work-id (:work/id %)) active)
+        (throw (err/error :scheduler/work-conflict
+                          "session already has another active execution Work"
+                          {:session/id session-id
+                           :work/id work-id
+                           :active/work-ids (mapv :work/id active)}))))
+    w))
+
+(defn- validate-new-work-slot!
+  [db session-id]
+  (let [active (vec (active-works-for db session-id))]
+    (when (seq active)
+      (throw (err/error :scheduler/work-conflict
+                        "session already has an active execution Work"
+                        {:session/id session-id
+                         :active/work-ids (mapv :work/id active)})))))
+
+(defn- claim-work!
+  "Atomically win the queued -> running execution claim. A losing
+  dispatcher fails closed with a typed scheduler error; it never starts
+  a second session execution or appends session events."
+  [db session-id work-id]
+  (try
+    (work-store/dispatch-work! db work-id)
+    (catch clojure.lang.ExceptionInfo t
+      (if (= :work/invalid-transition (:error/type (ex-data t)))
+        (throw (err/error :scheduler/work-claim-lost
+                          "another dispatcher claimed the execution Work"
+                          {:session/id session-id
+                           :work/id work-id
+                           :cause (err/error-data t)}))
+        (throw t)))))
 (defn- session-work-id
   "The session's sole execution Work id (W2: one mandatory Work per run,
   resolved from the store — Work is the durable execution identity). nil
@@ -689,18 +769,17 @@
       ;; (degraded marker / :binding/activated): :session/started chains to
       ;; the CURRENT head below — never the stale root.
       (restore-session-runtime! executor pin root)
-      (let [work-id (if work-id
-                      (do (when-not (work-store/fetch-work db work-id)
-                            (throw (err/error :scheduler/work-not-found
-                                              "provided work-id does not exist"
-                                              {:work/id work-id})))
-                          work-id)
-                      ;; creation path mints the row WITH the task ref so the
-                      ;; queued Work is replayable; the provided path (a
-                      ;; :subagent/run Work from spawn) already carries its
-                      ;; spawn-time digest bind and is left untouched.
-                      (create-session-work! db (:session/id pin) (payload-ref executor task-input)))
-            _work-running (try-work-transition! db work-id work-store/dispatch-work!)]
+(let [work-id (if work-id
+                (do
+                  (validate-provided-work! db (:session/id pin) work-id)
+                  work-id)
+                (do
+                  (validate-new-work-slot! db (:session/id pin))
+                  ;; creation path mints the row WITH the task ref so the
+                  ;; queued Work is replayable.
+                  (create-session-work! db (:session/id pin)
+                                        (payload-ref executor task-input))))
+      _work-running (claim-work! db (:session/id pin) work-id)]
         (let [started (append-event! executor pin (:event/id (last (event/events-for-session db (:session/id pin)))) :session/started
                                      (put-payload! executor task-input)
                                      {:entry entry :work/id work-id})

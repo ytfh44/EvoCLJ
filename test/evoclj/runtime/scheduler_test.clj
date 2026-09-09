@@ -515,3 +515,86 @@
       (is (nil? (session-work-state executor sid)))
       (is (not (contains? (session/get-session (:sqlite (:stores executor)) sid) :state))
           "Session carries identity only; Work owns the lifecycle"))))
+(deftest provided-work-id-requires-session-type-owner-and-queued-state
+  (let [{:keys [executor]} (build-executor (tool-only-topology))
+        db (:sqlite (:stores executor))
+        sid (create-pinned-session executor)
+        queued-id (java.util.UUID/randomUUID)
+        wrong-session-id (:session/id
+                           (session/create-session!
+                            db {:genome/id genome-id
+                                :resolution/id resolution-id
+                                :phenotype/id phenotype-id
+                                :generation/id generation-id}))
+        wrong-type-id (java.util.UUID/randomUUID)
+        running-id (java.util.UUID/randomUUID)
+        created (fn [id session-id type state]
+                  (work-store/create-work!
+                   db {:work/id id
+                       :work/type type
+                       :work/state state
+                       :work/session-id session-id
+                       :work/payload-ref nil}))
+        _ (created queued-id sid :session/run :queued)
+        _ (created wrong-session-id wrong-session-id :session/run :queued)
+        _ (created wrong-type-id sid :unsupported/run :queued)
+        _ (created running-id sid :session/run :queued)
+        _ (work-store/dispatch-work! db running-id)
+        error-of (fn [f]
+                   (try (f)
+                        nil
+                        (catch clojure.lang.ExceptionInfo e
+                          (ex-data e))))]
+    (testing "malformed and missing ids fail before session start"
+      (is (= :scheduler/work-invalid
+             (:error/type (error-of #(scheduler/run-session! executor sid {} "not-a-uuid")))))
+      (is (= :scheduler/work-not-found
+             (:error/type (error-of #(scheduler/run-session! executor sid {}
+                                      (java.util.UUID/randomUUID)))))))
+    (testing "session ownership and executable type are checked before dispatch"
+      (is (= :scheduler/work-scope-mismatch
+             (:error/type (error-of #(scheduler/run-session! executor sid {}
+                                      wrong-session-id)))))
+      (is (= :scheduler/work-invalid
+             (:error/type (error-of #(scheduler/run-session! executor sid {}
+                                      wrong-type-id)))))
+      (is (= :queued (:work/state (work-store/fetch-work db queued-id)))
+          "a valid queued Work must remain unclaimed after rejected alternatives")
+      (is (= :scheduler/work-invalid
+             (:error/type (error-of #(scheduler/run-session! executor sid {}
+                                      running-id)))))
+    (is (empty? (filter #(= :session/started (:event/type %))
+                        (event/events-for-session db sid)))))))
+
+(deftest concurrent-supplied-work-claim-has-one-dispatch-winner
+  (let [{:keys [executor]} (build-executor
+                            {:graph/id :graph/claim-race
+                             :entry :node/emit
+                             :nodes {:node/emit {:node/type :emit}}
+                             :limits {:max-steps 8}})
+        db (:sqlite (:stores executor))
+        sid (create-pinned-session executor)
+        work-id (java.util.UUID/randomUUID)
+        _ (work-store/create-work!
+           db {:work/id work-id
+               :work/type :session/run
+               :work/state :queued
+               :work/session-id sid
+               :work/payload-ref nil})
+        futures (doall
+                 (repeatedly 2
+                   #(future
+                      (try
+                        {:status (:status (scheduler/run-session! executor sid {}
+                                                            work-id))}
+                        (catch clojure.lang.ExceptionInfo e
+                          {:error/type (:error/type (ex-data e))})))))
+        results (mapv deref futures)
+        events (event/events-for-session db sid)]
+    (is (= 1 (count (filter #(= :completed (:status %)) results)))
+        (str "exactly one caller completes: " results))
+    (is (= 1 (count (filter #(= :scheduler/work-claim-lost (:error/type %)) results)))
+        (str "exactly one caller loses the Work claim: " results))
+    (is (= :succeeded (:work/state (work-store/fetch-work db work-id))))
+    (is (= 1 (count (filter #(= :session/started (:event/type %)) events))))
+    (is (= 1 (count (filter #(= :session/completed (:event/type %)) events))))))
