@@ -200,6 +200,15 @@
        :options (or (get-in intent [:payload :options]) {})
        :model/id (get-in intent [:payload :model/id])})))
 
+(defn- project-model-intent
+  "Keep assembler-owned context out of the provider-facing intent payload."
+  [intent base-call prepared]
+  (assoc intent :payload
+         (if prepared
+           (or (:model/request prepared)
+               (assembler/provider-model-request base-call prepared))
+           (select-keys (:payload intent) [:model/id :messages :tools :options]))))
+
 (defn- tool-call-intent
   "A validated :intent/tool-call for one model-requested tool call."
   [intent cause tool-call tool-id]
@@ -413,13 +422,7 @@
                                                 :ptc ptc})
                            (catch Throwable _ nil))
                 tool-map (if prepared (:tool-map prepared) (tool-map-of current-intent))
-                effective-intent (if prepared
-                                   (-> current-intent
-                                       (assoc-in [:payload :messages] (:messages prepared))
-                                       (assoc-in [:payload :tools] (:tools prepared))
-                                       (assoc-in [:payload :base/messages] (:base/messages current-base-call))
-                                       (assoc-in [:payload :requested-tools] (:requested-tools current-base-call)))
-                                   current-intent)
+                effective-intent (project-model-intent current-intent current-base-call prepared)
                 step (dispatch-intent! executor pin cause-id effective-intent outputs)
                 value (peek (:outputs step))
                 tool-calls (when (= :intent/model-call (:intent/type current-intent))
@@ -519,13 +522,7 @@
                                                     :ptc ptc})
                                (catch Throwable _ nil))
                     tool-map (if prepared (:tool-map prepared) (tool-map-of current-intent))
-                    effective-intent (if prepared
-                                       (-> current-intent
-                                           (assoc-in [:payload :messages] (:messages prepared))
-                                           (assoc-in [:payload :tools] (:tools prepared))
-                                           (assoc-in [:payload :base/messages] (:base/messages current-base-call))
-                                           (assoc-in [:payload :requested-tools] (:requested-tools current-base-call)))
-                                       current-intent)
+                    effective-intent (project-model-intent current-intent current-base-call prepared)
                     step (dispatch-intent! executor pin cause-id effective-intent outputs)
                     value (peek (:outputs step))
                     tool-calls (when (= :intent/model-call (:intent/type current-intent))

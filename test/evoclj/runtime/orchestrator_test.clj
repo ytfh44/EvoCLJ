@@ -172,3 +172,96 @@
       (is (= 1 (count (filter #(= :provider/call-ambiguous (:event/type %)) events))))
       (is (= 0 (count (filter #(= :provider/call-completed (:event/type %)) events))))
       (is (:valid? (event/verify-event-chain db sid))))))
+
+(deftest model-dispatch-excludes-assembler-owned-state
+  (testing "only the contained provider request crosses the model dispatch boundary"
+    (let [db (fresh-db)
+          cas-root (fresh-cas)
+          sid (create-pinned-session db)
+          pin (session/get-session db sid)
+          cause-id (:event/id (last (event/events-for-session db sid)))
+          seen (atom [])
+          intent {:intent/id "projection-intent"
+                  :intent/type :intent/model-call
+                  :session/id sid
+                  :phenotype/id phenotype-id
+                  :node/id :llm
+                  :budget {:wall-ms 1000}
+                  :payload {:model/id "fake/model"
+                            :base/messages [{:role :user :content "internal"}]
+                            :messages [{:role :user :content "internal"}]
+                            :requested-tools [{:tool/id :echo-tool :name "echo_tool"}]
+                            :tools [{:name "echo_tool"}]
+                            :options {:max-tool-rounds 0}}}
+          prepared {:messages [{:role :system :content "assembled"}]
+                    :tools [{:name "echo_tool"}]
+                    :tool-map {"echo_tool" {:tool :echo-tool}}
+                    :prompt/provenance {:prompt/segments []}
+                    :context/manifest {:context/manifest-version 1}
+                    :environment/provenance {:catalog {}}
+                    :base {:base/messages [{:role :user :content "internal"}]}
+                    :effective {:effective/segments []}}
+          executor {:stores {:sqlite db :cas cas-root}
+                    :dispatch {:leases [] :catalog {}}}]
+      (with-redefs [assembler/assemble (fn [& _] prepared)
+                    dispatch/dispatch! (fn [_ dispatched]
+                                         (swap! seen conj (:payload dispatched))
+                                         {:result/status :ok
+                                          :value {:model/output {:text "ok"}
+                                                  :tool-calls []}
+                                          :authorization {:decision :allow
+                                                          :lease-id "l1"}})]
+        (sut/orchestrate (sut/->TraditionalOrchestrator)
+                         executor pin cause-id intent []))
+      (is (= [{:model/id "fake/model"
+               :messages [{:role :system :content "assembled"}]
+               :tools [{:name "echo_tool"}]
+               :options {:max-tool-rounds 0}}]
+             @seen)))))
+
+(deftest codemode-model-dispatch-excludes-assembler-owned-state
+  (testing "CodeMode also sends only the contained provider request"
+    (let [db (fresh-db)
+          cas-root (fresh-cas)
+          sid (create-pinned-session db)
+          pin (session/get-session db sid)
+          cause-id (:event/id (last (event/events-for-session db sid)))
+          seen (atom [])
+          intent {:intent/id "codemode-projection-intent"
+                  :intent/type :intent/model-call
+                  :session/id sid
+                  :phenotype/id phenotype-id
+                  :node/id :llm
+                  :budget {:wall-ms 1000}
+                  :payload {:model/id "fake/model"
+                            :base/messages [{:role :user :content "internal"}]
+                            :messages [{:role :user :content "internal"}]
+                            :requested-tools [{:tool/id :echo-tool :name "echo_tool"}]
+                            :tools [{:name "echo_tool"}]
+                            :options {:max-tool-rounds 0}}}
+          prepared {:messages [{:role :system :content "assembled"}]
+                    :tools [{:name "echo_tool"}]
+                    :tool-map {"echo_tool" {:tool :echo-tool}}
+                    :prompt/provenance {:prompt/segments []}
+                    :context/manifest {:context/manifest-version 1}
+                    :environment/provenance {:catalog {}}
+                    :base {:base/messages [{:role :user :content "internal"}]}
+                    :effective {:effective/segments []}}
+          executor {:stores {:sqlite db :cas cas-root}
+                    :dispatch {:leases [] :catalog {}}
+                    :ptc {:enabled? true}}]
+      (with-redefs [assembler/assemble (fn [& _] prepared)
+                    dispatch/dispatch! (fn [_ dispatched]
+                                         (swap! seen conj (:payload dispatched))
+                                         {:result/status :ok
+                                          :value {:model/output {:text "ok"}
+                                                  :tool-calls []}
+                                          :authorization {:decision :allow
+                                                          :lease-id "l1"}})]
+        (sut/orchestrate (sut/->CodeModeOrchestrator {:stub true})
+                         executor pin cause-id intent []))
+      (is (= [{:model/id "fake/model"
+               :messages [{:role :system :content "assembled"}]
+               :tools [{:name "echo_tool"}]
+               :options {:max-tool-rounds 0}}]
+             @seen)))))
