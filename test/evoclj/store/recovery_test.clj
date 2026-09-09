@@ -583,3 +583,85 @@
           (is (empty? (:missing-artifacts r)))
           (is (empty? (:invalid-event-chains r)))
           (is (empty? (:stale-candidates r))))))))
+
+(deftest provider-start-without-result-is-ambiguous
+  (let [db (fresh-db)
+        root (temp-root)
+        genome-id (put-genome! root)
+        _ (seed-generation! db genome-id)
+        sid (:session/id (session/create-session! db (session-request genome-id)))
+        intent-id (str (random-uuid))
+        created (event/append-event! db (base-event sid {:event/type :session/created}))
+        authorized (event/append-event!
+                    db
+                    (base-event sid {:event/type :intent/authorized
+                                     :prev/event-id (:event/id created)
+                                     :metadata {:intent/id intent-id
+                                                :authorization {:decision :allow}}}))
+        _ (event/append-event!
+           db
+           (base-event sid {:event/type :provider/call-started
+                            :prev/event-id (:event/id authorized)
+                            :metadata {:intent/id intent-id
+                                       :tool/id :fixture/charge
+                                       :idempotency/key "charge-1"}}))
+        before-count (count (event/events-for-session db sid))
+        report (recovery/scan-recovery-state db root)]
+    (testing "a provider start without a result is manual-review evidence"
+      (let [effect (first (:ambiguous-effects report))]
+        (is (= 1 (count (:ambiguous-effects report))))
+        (is (= sid (:session/id effect)))
+        (is (= intent-id (:intent/id effect)))
+        (is (= :ambiguous (:outcome effect)))
+        (is (true? (:manual-review effect)))))
+    (testing "the normative scan is read-only"
+      (is (= before-count (count (event/events-for-session db sid)))))
+    (testing "ambiguous effects do not fail a healthy startup scan"
+      (is (true? (:ok? (recovery/startup-integrity-scan db root)))))))
+
+(deftest recovery-marks-ambiguous-provider-effect-idempotently
+  (let [db (fresh-db)
+        root (temp-root)
+        genome-id (put-genome! root)
+        _ (seed-generation! db genome-id)
+        sid (:session/id (session/create-session! db (session-request genome-id)))
+        work-id (random-uuid)
+        intent-id (str (random-uuid))
+        _ (work-store/create-work! db {:work/id work-id
+                                       :work/type :session/run
+                                       :work/state :running
+                                       :work/session-id sid})
+        created (event/append-event! db (base-event sid {:event/type :session/created}))
+        authorized (event/append-event!
+                    db
+                    (base-event sid {:event/type :intent/authorized
+                                     :prev/event-id (:event/id created)
+                                     :metadata {:intent/id intent-id
+                                                :authorization {:decision :allow}}}))
+        _ (event/append-event!
+           db
+           (base-event sid {:event/type :provider/call-started
+                            :prev/event-id (:event/id authorized)
+                            :metadata {:intent/id intent-id
+                                       :tool/id :fixture/charge
+                                       :idempotency/key "charge-2"}}))
+        first-recovery (recovery/recover-works! db)
+        second-recovery (recovery/recover-works! db)
+        events (event/events-for-session db sid)
+        ambiguous (filter #(= :provider/call-ambiguous (:event/type %)) events)
+        completed (filter #(= :provider/call-completed (:event/type %)) events)]
+    (testing "recovery fails the orphaned Work without claiming provider success"
+      (is (= :failed (:work/state (work-store/fetch-work db work-id))))
+      (is (= [work-id] (mapv :work/id (:recovered-running first-recovery)))))
+    (testing "the missing provider result is recorded once with its identity"
+      (is (= 1 (count ambiguous)))
+      (is (= intent-id (get-in (first ambiguous) [:metadata :intent/id])))
+      (is (= "charge-2" (get-in (first ambiguous) [:metadata :idempotency/key])))
+      (is (true? (get-in (first ambiguous) [:metadata :manual-review])))
+      (is (= 0 (count completed))))
+    (testing "a second recovery run neither retries nor duplicates the marker"
+      (is (empty? (:ambiguous-effects second-recovery)))
+      (is (empty? (:marked-ambiguous-effects second-recovery)))
+      (is (= 1 (count (filter #(= :provider/call-ambiguous (:event/type %))
+                              (event/events-for-session db sid)))))
+      (is (:valid? (event/verify-event-chain db sid))))))

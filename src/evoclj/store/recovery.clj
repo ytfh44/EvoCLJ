@@ -56,6 +56,7 @@
             [evoclj.store.event :as event]
             [evoclj.store.invariant :as invariant-store]
             [evoclj.store.work :as work-store]
+            [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
            (java.util Date UUID)))
@@ -343,6 +344,8 @@
      :partial-activations partial
      :quarantined quarantined
      :terminal-evidence-missing terminal}))
+
+(declare ambiguous-provider-effects)
 (defn scan-recovery-state
   "The normative recovery scan (component interface). Read-only: it
   classifies crash residue and reports corruption; it never appends,
@@ -358,7 +361,8 @@
      :invalid-event-chains (invalid-event-chains store)
      :stale-candidates (stale-candidates store)
      :invariant-state inv
-     :generated-invariants inv}))
+     :generated-invariants inv
+     :ambiguous-effects (ambiguous-provider-effects store)}))
 
 (defn- hard-findings
   "The corruption findings strict mode fails closed on: unresolved
@@ -415,14 +419,132 @@
   [db]
   (work-store/find-orphaned-works db))
 
+(defn- same-provider-call?
+  [started other]
+  (let [sm (:metadata started)
+        om (:metadata other)
+        intent-match? (and (:intent/id sm) (:intent/id om)
+                           (= (str (:intent/id sm)) (str (:intent/id om))))
+        key-match? (and (:idempotency/key sm) (:idempotency/key om)
+                        (= (str (:idempotency/key sm))
+                           (str (:idempotency/key om))))]
+    (and (> (:event/seq other) (:event/seq started))
+         (or intent-match? key-match?))))
+
+(defn ambiguous-provider-effects
+  "Report provider effects whose started event has no matching result.
+  The provider may already have acted, so these effects are ambiguous and
+  require manual review; recovery MUST NOT redeliver them blindly."
+  [store]
+  (reduce
+   (fn [acc row]
+     (let [sid (persisted-session-id (:id row))]
+       (if-not (instance? UUID sid)
+         acc
+         (let [events (event/events-for-session store sid)
+               started (filter #(= :provider/call-started (:event/type %)) events)
+               results (filter #(contains? #{:provider/call-completed
+                                             :provider/call-ambiguous}
+                                             (:event/type %)) events)]
+           (into acc
+                 (keep (fn [start]
+                         (when-not (some #(same-provider-call? start %) results)
+                           (let [metadata (:metadata start)]
+                             {:session/id sid
+                              :event/id (:event/id start)
+                              :event/seq (:event/seq start)
+                              :event/type :provider/call-started
+                              :intent/id (:intent/id metadata)
+                              :tool/id (:tool/id metadata)
+                              :idempotency/key (:idempotency/key metadata)
+                              :outcome :ambiguous
+                              :manual-review true})))
+                       started))))))
+   []
+   (sqlite/query store ["SELECT id FROM sessions"])))
+
+(defn record-ambiguous-provider-effects!
+  "Durably classify provider effects as ambiguous in the append-only event
+  log. The marker is keyed by the started event id and is idempotent under
+  concurrent recovery. A marker never authorizes provider re-execution."
+  [db effects]
+  (let [effects (vec effects)]
+    (if (empty? effects)
+      []
+      (let [pins (into {}
+                       (map (fn [effect]
+                              [(str (:session/id effect))
+                               (session/get-session db (:session/id effect))]))
+                       effects)]
+        (sqlite/with-write-tx [conn db]
+          (mapv (fn [effect]
+                  (let [sid (:session/id effect)
+                        pin (get pins (str sid))]
+                    (when-not (and (instance? UUID sid) pin)
+                      (throw (err/error
+                              :recovery/ambiguous-effect-unrecordable
+                              "cannot record an ambiguous provider effect without a UUID session pin"
+                              {:session/id sid
+                               :event/id (:event/id effect)})))
+                    (let [marker-rows
+                          (sqlite/query-raw!
+                           conn
+                           "SELECT id, payload FROM events WHERE session_id = ? AND event_type = ? ORDER BY event_seq ASC"
+                           [(str sid) "provider/call-ambiguous"])
+                          existing
+                          (some (fn [row]
+                                  (let [metadata (try (edn/read-string (:payload row))
+                                                      (catch Exception _ {}))]
+                                    (when (or (= (str (:provider/call-started-event/id metadata))
+                                                 (str (:event/id effect)))
+                                              (and (:intent/id metadata)
+                                                   (:intent/id effect)
+                                                   (= (str (:intent/id metadata))
+                                                      (str (:intent/id effect))))
+                                              (and (:idempotency/key metadata)
+                                                   (:idempotency/key effect)
+                                                   (= (str (:idempotency/key metadata))
+                                                      (str (:idempotency/key effect)))))
+                                      (assoc metadata :event/id (:id row)))))
+                                marker-rows)]
+                      (or existing
+                          (let [tip (first (sqlite/query-raw!
+                                            conn
+                                            "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1"
+                                            [(str sid)]))]
+                            (event/append-event-on-conn!
+                             conn
+                             {:session/id sid
+                              :generation/id (:generation/id pin)
+                              :phenotype/id (:phenotype/id pin)
+                              :event/type :provider/call-ambiguous
+                              :prev/event-id (:id tip)
+                              :causal-links #{}
+                              :payload-ref nil
+                              :metadata {:provider/call-started-event/id (:event/id effect)
+                                         :intent/id (:intent/id effect)
+                                         :tool/id (:tool/id effect)
+                                         :idempotency/key (:idempotency/key effect)
+                                         :outcome :ambiguous
+                                         :manual-review true
+                                         :recovery/reason :provider-result-missing}}))))))
+                effects))))))
+
 (defn recover-works!
   "W2: Idempotent Work recovery (report, not fabricate :succeeded).
   :queued orphans stay :queued for redelivery; :running/:waiting orphans
   are marked :failed via CAS (fail-work! with :recovery/orphaned).
-  Re-running on already-terminal rows is a no-op.
-  Returns {:orphaned-works [...] :recovered-queued [...] :recovered-running [...]}."
+  Provider calls whose result event was never persisted are first classified
+  :ambiguous and marked with :provider/call-ambiguous, preventing blind
+  retry of an effect that may already have happened. Re-running on already
+  terminal rows and already-marked provider effects is a no-op."
   [db]
-  (work-store/recover-works! db))
+  (let [ambiguous (ambiguous-provider-effects db)
+        marked (record-ambiguous-provider-effects! db ambiguous)
+        report (work-store/recover-works! db)]
+    (assoc report
+           :ambiguous-effects ambiguous
+           :marked-ambiguous-effects marked)))
 
 (def terminal-work-states
   "Work states that close a Work's lifecycle. A Work in any other state

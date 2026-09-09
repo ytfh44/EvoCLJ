@@ -124,3 +124,51 @@
           (is (map? step))
           (is (contains? step :outputs))
           (is (contains? step :last-event)))))))
+
+(deftest late-provider-result-cannot-complete-ambiguous-call
+  (testing "a recovery marker fences a provider result before completion is appended"
+    (let [db (fresh-db)
+          cas-root (fresh-cas)
+          sid (create-pinned-session db)
+          pin (session/get-session db sid)
+          cause-id (:event/id (last (event/events-for-session db sid)))
+          intent {:intent/id "late-intent"
+                  :intent/type :intent/tool-call
+                  :session/id sid
+                  :phenotype/id phenotype-id
+                  :node/id :tool
+                  :metadata {:idempotency/key "late-key"}
+                  :payload {:tool/id :fixture/echo
+                            :arguments {}}}
+          executor {:stores {:sqlite db :cas cas-root}
+                    :dispatch {:leases [] :catalog {}}}
+          error (with-redefs [dispatch/dispatch!
+                              (fn [_ _]
+                                (let [tip (last (event/events-for-session db sid))]
+                                  (event/append-event!
+                                   db
+                                   {:session/id sid
+                                    :generation/id generation-id
+                                    :phenotype/id phenotype-id
+                                    :event/type :provider/call-ambiguous
+                                    :prev/event-id (:event/id tip)
+                                    :payload-ref nil
+                                    :metadata {:intent/id "late-intent"
+                                               :idempotency/key "late-key"
+                                               :outcome :ambiguous
+                                               :manual-review true}}))
+                                {:result/status :ok
+                                 :value {:ok true}
+                                 :authorization {:decision :allow
+                                                 :lease-id "l1"}})]
+                  (try
+                    (#'sut/dispatch-intent! executor pin cause-id intent [])
+                    nil
+                    (catch clojure.lang.ExceptionInfo e e)))
+          events (event/events-for-session db sid)]
+      (is error)
+      (is (= :provider/late-effect (:error/type (ex-data error))))
+      (is (= :after-dispatch (:phase (ex-data error))))
+      (is (= 1 (count (filter #(= :provider/call-ambiguous (:event/type %)) events))))
+      (is (= 0 (count (filter #(= :provider/call-completed (:event/type %)) events))))
+      (is (:valid? (event/verify-event-chain db sid))))))

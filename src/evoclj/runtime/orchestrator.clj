@@ -64,6 +64,38 @@
     :payload-ref payload-ref
     :metadata metadata}))
 
+(defn- ambiguous-provider-event
+  "Find a durable recovery marker for this provider intent."
+  [executor pin intent]
+  (some (fn [entry]
+          (let [metadata (or (:metadata entry) {})
+                intent-match? (and (:intent/id metadata)
+                                   (:intent/id intent)
+                                   (= (:intent/id metadata) (:intent/id intent)))
+                key-match? (and (:idempotency/key metadata)
+                                (get-in intent [:metadata :idempotency/key])
+                                (= (:idempotency/key metadata)
+                                   (get-in intent [:metadata :idempotency/key])))]
+            (when (and (= :provider/call-ambiguous (:event/type entry))
+                       (or intent-match? key-match?))
+              entry)))
+        (event/events-for-session
+         (:sqlite (:stores executor))
+         (:session/id pin))))
+
+(defn- reject-ambiguous-provider-call!
+  "A recovery marker is a hard redelivery fence: a late or restarted
+  provider result cannot be persisted as a completed effect."
+  [executor pin intent phase]
+  (when-let [marker (ambiguous-provider-event executor pin intent)]
+    (throw (err/error
+            :provider/late-effect
+            "provider result is fenced by an ambiguous recovery marker"
+            {:phase phase
+             :session/id (:session/id pin)
+             :intent/id (:intent/id intent)
+             :idempotency/key (get-in intent [:metadata :idempotency/key])
+             :provider/call-ambiguous-event/id (:event/id marker)}))))
 (defn- dispatch-intent!
   "Persist one validated intent through the broker and feed the result back.
   Mirrors scheduler/dispatch-intent! exactly — single implementation in this namespace."
@@ -74,8 +106,12 @@
                                         :intent/type (:intent/type intent)
                                         :node/id (:node/id intent)}
                                        (replay-event-metadata raw-evidence-ref)))
+        _before-fence (reject-ambiguous-provider-call!
+                       executor pin intent :before-dispatch)
         result (dispatch/dispatch! (:dispatch executor) intent)
         evidence-ref (replay-evidence-ref! executor intent result)
+        _after-fence (reject-ambiguous-provider-call!
+                      executor pin intent :after-dispatch)
         evidence-metadata (replay-event-metadata evidence-ref)]
     (if (= :ok (:result/status result))
       (let [authorization (:authorization result)
