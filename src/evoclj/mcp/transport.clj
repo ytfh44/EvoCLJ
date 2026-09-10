@@ -9,38 +9,59 @@
    Phase 3 (transport coverage): stdio accepts :cwd and :env; SSE/HTTP
    transports accept :headers; TLS configuration is supported via
    :tls-context."
-  (:import [io.modelcontextprotocol.client.transport
-            StdioClientTransport
-            HttpClientSseClientTransport
-            HttpClientStreamableHttpTransport
-            ServerParameters$Builder
-            ServerParameters]
-           [io.modelcontextprotocol.json.jackson3
-            JacksonMcpJsonMapperSupplier]
-           [io.modelcontextprotocol.json
-            McpJsonMapperSupplier]
-           [java.nio.file Files Paths]
-           [java.util Map]
-           [javax.net.ssl SSLContext]))
+  (:import
+   [io.modelcontextprotocol.client.transport
+    StdioClientTransport
+    HttpClientSseClientTransport
+    HttpClientStreamableHttpTransport
+    ServerParameters$Builder
+    ServerParameters]
+   [io.modelcontextprotocol.client.transport.customizer
+    McpSyncHttpClientRequestCustomizer]
+   [io.modelcontextprotocol.json.jackson3
+    JacksonMcpJsonMapperSupplier]
+   [io.modelcontextprotocol.json
+    McpJsonMapperSupplier]
+   [java.nio.file Files Paths]
+   [java.util Map HashMap]
+   [java.util.function Consumer]
+   [java.net.http HttpRequest$Builder HttpClient$Builder]
+   [javax.net.ssl SSLContext]))
 
+(defn- config-diag
+  "Return a non-secret diagnostic summary of a transport config.
+   Never embeds secret values (:env values, :headers values, tokens).
+   Used in error payloads instead of (pr-str config) to avoid leaking
+   secrets into exception boundaries."
+  [config]
+  {:transport/type (:type config)
+   :connection/id (:connection/id config)
+   :command-present? (boolean (:command config))
+   :args-count (count (or (:args config) []))
+   :env-keys (sort (keys (or (:env config) {})))
+   :header-names (sort (keys (or (:headers config) {})))})
 ;; --- stdio -------------------------------------------------------------------
 
 (defn- build-server-parameters
   "Build a ServerParameters from a plain Clojure map {:command <string>
-   :args [<strings>] :cwd <string?> :env {<string> <string>}}. The
-   Builder Java API is ServerParameters.builder(command).args(varargs)
-   .directory(file) .environment(map) .build(); we call each setter
-   when the corresponding key is present."
-  [{:keys [command args cwd env]}]
+   :args [<strings>] :cwd <string?> :env {<string> <string>}}.
+   SDK 2.0.0 API: ServerParameters$Builder has env(Map) and addEnvVar,
+   but NO environment(Map) and NO directory(Path). If :cwd is present
+   we fail closed with a typed error (honest fail-closed vs. silent drop)."
+  [{:keys [command args cwd env] :as config}]
   (let [b (ServerParameters/builder ^String command)]
     (when (seq args)
       (.args ^ServerParameters$Builder b (into-array String args)))
-    (when (and cwd (string? cwd))
-      (let [path (Paths/get cwd (make-array String 0))]
-        (when (Files/exists path (make-array java.nio.file.LinkOption 0))
-          (.directory ^ServerParameters$Builder b path))))
+    ;; SDK 2.0.0: ServerParameters$Builder has NO .directory method.
+    ;; Fail closed with honest typed error instead of silent misconfig.
+    (when cwd
+      (throw (ex-info "MCP stdio :cwd is unsupported on MCP Java SDK 2.0.0 (no ServerParameters directory setter)"
+                      {:error/type :mcp/transport-invalid
+                       :transport/type :stdio
+                       :config-diag (config-diag config)})))
     (when (and env (map? env))
-      (.environment ^ServerParameters$Builder b (into-array [env])))
+      (.env ^ServerParameters$Builder b
+            ^java.util.Map (java.util.HashMap. ^java.util.Map env)))
     (.build ^ServerParameters$Builder b)))
 
 (defn stdio-transport
@@ -58,37 +79,47 @@
     (throw (ex-info "MCP stdio transport requires :command as a string"
                     {:error/type :mcp/transport-invalid
                      :transport/type :stdio
-                     :config (pr-str config)})))
-  (let [params (build-server-parameters
-                {:command command
-                 :args (or args [])
-                 :cwd (:cwd config)
-                 :env (:env config)})
+                     :config-diag (config-diag config)})))
+  (let [params (build-server-parameters config)
         ^McpJsonMapperSupplier supplier (JacksonMcpJsonMapperSupplier.)
         mapper (.get ^McpJsonMapperSupplier supplier)]
     (StdioClientTransport. ^ServerParameters params ^McpJsonMapper mapper)))
 
-;; --- SSE ---------------------------------------------------------------------
+(defn- header-customizer
+  "SDK 2.0.0 request customizer that stamps `headers` onto every outgoing
+   HTTP request. Named (not inline) so it is directly testable against a
+   real HttpRequest$Builder without a network round-trip."
+  [headers]
+  (reify io.modelcontextprotocol.client.transport.customizer.McpSyncHttpClientRequestCustomizer
+    (customize [_ rb _method _uri _body _ctx]
+      (doseq [[k v] headers]
+        (.setHeader ^java.net.http.HttpRequest$Builder rb
+                    ^String k ^String v)))))
 
 (defn- apply-http-options
   "Apply optional :headers and :tls-context to an HTTP client transport
-   builder. Returns the builder. :headers is a map of string -> string;
-   :tls-context is either a javax.net.ssl.SSLContext or a map with
-   :trust-managers."
+   builder (SSE or Streamable HTTP). SDK 2.0.0 API: no .headers(Map) or
+   .tlsContext(SSLContext) — use httpRequestCustomizer for headers and
+   customizeClient for TLS. Returns the builder."
   [builder headers tls-context]
-  (let [builder (cond
+  (let [builder (cond-> builder
                   (and (map? headers) (seq headers))
-                  (.headers builder ^java.util.Map (doto (java.util.HashMap.)
-                                                     (.putAll ^java.util.Map (java.util.HashMap. headers))))
-                  :else builder)]
+                  (.httpRequestCustomizer (header-customizer headers)))]
     (cond
       (instance? javax.net.ssl.SSLContext tls-context)
-      (.tlsContext builder ^javax.net.ssl.SSLContext tls-context)
+      (.customizeClient builder
+                        (reify java.util.function.Consumer
+                          (accept [_ cb]
+                            (.sslContext ^java.net.http.HttpClient$Builder cb tls-context))))
       (and (map? tls-context) (seq (:trust-managers tls-context)))
-      (let [tm-array (.toArray ^java.util.Collection (:trust-managers tls-context))
+      (let [tm-array (into-array javax.net.ssl.TrustManager
+                                 (:trust-managers tls-context))
             ctx (javax.net.ssl.SSLContext/getInstance "TLS")]
         (.init ctx nil tm-array (java.security.SecureRandom.))
-        (.tlsContext builder ctx))
+        (.customizeClient builder
+                          (reify java.util.function.Consumer
+                            (accept [_ cb]
+                              (.sslContext ^java.net.http.HttpClient$Builder cb ctx)))))
       :else builder)))
 
 (defn sse-transport
@@ -160,4 +191,4 @@
     (throw (ex-info (str "unknown MCP transport type: " type)
                     {:error/type :mcp/transport-invalid
                      :transport/type type
-                     :config (pr-str config)}))))
+                     :config-diag (config-diag config)}))))

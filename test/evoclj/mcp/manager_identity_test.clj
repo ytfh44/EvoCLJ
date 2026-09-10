@@ -22,31 +22,16 @@
    The eight mandatory WO-M2 paths live in tests named p1..p8; the two
    WO-named adversarial counterexample directions are the guard-* tests.
 
-   DEVIATION NOTE (dispatcher-approved, extends DEVIATION RECORD 2 of
-   evoclj.mcp.support.fake-server): path 7's original wording drives a
-   marker through the stdio :env channel. At HEAD BOTH secret channels
-   of production evoclj.mcp.transport are frozen by SDK 2.0.0 API drift,
-   verified against mcp-core-2.0.0.jar with javap on this host:
-
-     - :env  — ServerParameters$Builder has NO `environment` method (only
-       env(Map)/addEnvVar); build-server-parameters calls `.environment`,
-       so any config carrying a map :env fails at transport construction.
-     - :headers — NEITHER HttpClientStreamableHttpTransport$Builder NOR
-       HttpClientSseClientTransport$Builder has a `.headers(Map)` method;
-       apply-http-options calls `.headers`, so any HTTP/SSE config
-       carrying :headers fails at transport construction.
-
-   The pre-fix code accidentally masked both defects because
-   normalize-transport replaced :env/:headers with the string
-   \"[REDACTED]\", which failed the (map? env) guard and skipped the
-   builder call entirely. Both freezes are PRE-EXISTING production
-   defects owned outside M-scope (M7 per the fake-server record); M2
-   therefore proves the un-redacted execution input at the production
-   error boundary (p7): stdio-transport embeds the pr-str of the config
-   open! actually delivered into its typed :mcp/transport-invalid error,
-   so ONE real exception payload exhibits both derivations side by side
-   — display point redacted, execution input carrying plaintext secrets.
-   p7 also pins the two freeze failure modes as executable documentation."
+  DEVIATION NOTE (dispatcher-approved, extends DEVIATION RECORD 2 of
+  evoclj.mcp.support.fake-server): the #35 and #36 fixes resolved both
+  issues documented here:
+  - :env  now flows via ServerParameters$Builder.env(Map) — no longer frozen.
+  - :headers now flows via HttpRequest customizer — no longer frozen.
+  - the secret-leak via pr-str(config) is sealed by #35: transport
+    exceptions now carry :config-diag (keys only) instead of (pr-str config).
+  Consequently, p7 no longer proves a leak; it now asserts the NO-LEAK
+  invariant at the production error boundary. The frozen-channel
+  documentation sub-test has been removed since both channels are now live."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [evoclj.mcp.manager :as manager]
@@ -344,18 +329,18 @@
 (deftest p7-real-config-traverses-production-open-chain
   (testing "WO-M2 #7: the REAL config traverses bridge provider ->
             get-or-open! -> open! -> transport-for. Observed at the
-            production ERROR BOUNDARY: stdio-transport embeds the pr-str
-            of the config open! ACTUALLY delivered in its typed
-            :mcp/transport-invalid error when :command is missing — so
-            one exception payload shows BOTH derivations at once: the
-            display point redacted, the execution input real."
+            production ERROR BOUNDARY: stdio-transport throws typed
+            :mcp/transport-invalid carrying :config-diag (keys only,
+            no secret values). The provider wraps this in its error
+            payload; we assert the NO-LEAK invariant and display
+            redaction is preserved."
     (let [header-secret "Bearer M2-EXEC-CANARY-a1b2c3"
           env-secret "sk-m2-env-canary-d4e5f6"
           cfg {:type :stdio
                ;; :command deliberately absent -> production
                ;; stdio-transport throws :mcp/transport-invalid carrying
-               ;; :config = pr-str of what open! received; nothing is
-               ;; spawned and no server is needed.
+               ;; :config-diag = non-secret diagnostic summary of what
+               ;; open! received; nothing is spawned and no server is needed.
                :args ["--require-token" "M2-MARKER"]
                :env {"M2_TOKEN" env-secret}
                :headers {"Authorization" header-secret}
@@ -373,52 +358,26 @@
               "display point keeps whole-value redaction")
           (is (= "[REDACTED]" (get-in ed [:mcp/transport-config :env]))
               "display point keeps whole-value redaction")
-          ;; execution-input derivation: REAL values reached transport
-          ;; construction inside the sanitized cause chain
+          ;; NO-LEAK invariant: NO secret VALUE appears anywhere in the
+          ;; error payload, not even in the cause chain. (Non-secret args
+          ;; legitimately remain in the redacted display config.)
           (let [s (pr-str ed)]
-            (is (.contains ^String s header-secret)
-                "REAL Authorization value rode through open!")
-            (is (.contains ^String s env-secret)
-                "REAL env value rode through open!")
-            (is (.contains ^String s "--require-token")
-                "non-secret args ride verbatim too")
+            (is (not (.contains ^String s header-secret))
+                "Authorization secret MUST NOT appear in error payload")
+            (is (not (.contains ^String s env-secret))
+                "env secret MUST NOT appear in error payload")
             (is (.contains ^String s "[REDACTED]")
-                "same payload still carries the redacted display form")))
-        (finally
-          (manager/shutdown! mgr)))))
-  (testing "executable documentation of the two frozen channels
-            (pre-existing defects OUTSIDE M scope — owned by M7):
-            each fails at transport construction with its signature
-            reflection error, proving these paths were never functional
-            at HEAD even though pre-fix redaction masked them"
-    (let [mgr (manager/create-manager)
-          http-cfg {:type :http :url (refused-url) :endpoint "/mcp"
-                    :headers {"Authorization" "Bearer whatever"}
-                    :connection/id :m2/frozen-hdr}
-          p (make-provider mgr http-cfg :m2/frozen-hdr)]
-      (try
-        (let [t (try (proto/execute-request! p (echo-request p))
-                     nil
-                     (catch Throwable e e))]
-          (is (some? t) "the frozen :headers channel failed")
-          (is (re-find #"No matching method headers"
-                       (pr-str (ex-data t)))
-              "SDK 2.0.0 builders expose no .headers(Map)"))
-        (finally
-          (manager/shutdown! mgr))))
-    (let [mgr (manager/create-manager)
-          stdio-cfg* {:type :stdio :command "node" :args []
-                      :env {"M2_ENV_FREEZE" "proof"}
-                      :connection/id :m2/frozen-env}
-          p (make-provider mgr stdio-cfg* :m2/frozen-env)]
-      (try
-        (let [t (try (proto/execute-request! p (echo-request p))
-                     nil
-                     (catch Throwable e e))]
-          (is (some? t) "the frozen :env channel failed")
-          (is (re-find #"No matching method environment"
-                       (pr-str (ex-data t)))
-              "SDK 2.0.0 Builder exposes no .environment(Map)"))
+                "same payload still carries the redacted display form"))
+          ;; :config-diag carries only non-secret structure, inside the cause
+          (let [diag (get-in ed [:cause :error/data :config-diag])]
+            (is (some? diag) ":config-diag present in the error payload")
+            (is (= :stdio (:transport/type diag)) "transport type recorded")
+            (is (false? (:command-present? diag)) "command absent")
+            (is (pos? (:args-count diag)) "args count recorded")
+            (is (seq (:env-keys diag)) "env keys recorded")
+            (is (seq (:header-names diag)) "header names recorded")
+            (is (not (.contains ^String (pr-str diag) env-secret))
+                "the diagnostic summary itself carries no secret values")))
         (finally
           (manager/shutdown! mgr))))))
 

@@ -48,21 +48,21 @@
   M7 fixes env passthrough upstream, :env can be re-added here with no
   test changes.
 
-  DEVIATION RECORD 3 (SDK auto-pagination, discovered by wire capture):
+  DEVIATION RECORD 3 (SDK auto-pagination — RESOLVED by #34):
   against SDK 2.0.0 a SINGLE `McpSyncClient.listTools(...)` call follows
-  `nextCursor` internally and only returns when the server emits a page
-  WITHOUT nextCursor, aggregating every page into one result (verified:
-  many-pages 13 tools / page size 5 -> one production call returns all
-  13 tools with :next-cursor nil). Consequences honored by this harness
-  and its tests:
-  - `infinite-cursor` mode must NEVER be driven by ANY production
-    listing function (`list-tools` included — a single call is already
-    unbounded); tests exercise it via bounded raw stdio JSON-RPC frames
-    only — exactly WO-T1's \"client-side bounded controlled call or no
-    production function\" allowance.
-  - `many-pages` assertions live at two levels: aggregate semantics
-    through the production client (one call collects all pages) and
-    page-shaped wire behavior through raw bounded probes."
+  `nextCursor` internally (Mono.expand in McpAsyncClient.listTools()).
+  The #34 fix changed list-tools to always use the single-page overload
+  (.listTools client cursor), so the unbounded auto-follow cursor chain
+  in the SDK is no longer reachable from EvoCLJ production code.
+  Consequences:
+  - `infinite-cursor` mode MAY now be driven by production list-all-tools,
+    which is bounded by max-pages / deadline / size and fails closed with
+    typed :mcp/pagination-exceeded (reason :page-count-exceeded). The
+    production regression test lives in fake_server_test.clj
+    (infinite-cursor-production-bounded-by-pagination-cap).
+  - `many-pages` assertions now live at two levels: SINGLE-PAGE semantics
+    through list-tools (first page only), and aggregate semantics through
+    list-all-tools (full pagination across pages)."
   (:require [clojure.java.io :as io])
   (:import [java.util HashMap]
            [java.util.concurrent TimeUnit]))

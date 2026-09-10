@@ -1,13 +1,13 @@
 (ns evoclj.mcp.client-pagination-cap-test
   "WO-M6 — list-all-tools pagination hard cap, typed :mcp/pagination-exceeded.
 
-  Context (WO-T1 finding): the MCP Java SDK 2.0.0 auto-follows nextCursor
-  *inside a single* listTools call, so one client/list-tools invocation can
-  already return every server page aggregated into one vector. The production
-  risk is therefore unbounded blocking/aggregation at the SDK-internal layer;
-  the guard MUST live at the EvoCLJ layer — inside list-all-tools — and raise a
-  typed :mcp/pagination-exceeded. This is fail-closed (INV-04), enforced
-  before the unbounded result is returned, and is NOT delegated to the SDK.
+  Context (WO-T1 finding + #34 fix): the MCP Java SDK 2.0.0 auto-follows
+  nextCursor inside a single .listTools() call WITH NO CURSOR. The fix
+  (#34) made list-tools use the single-page overload (.listTools client
+  cursor), so pagination is now driven entirely by EvoCLJ. The production
+  risk of an unbounded cursor chain is now bounded by THREE independent
+  ceilings in list-all-tools: max-tools, max-pages, deadline-ms, and
+  max-bytes — all fail-closed at the EvoCLJ layer.
 
   Production-path discipline (INV-09): every behavioral test drives a REAL
   fake-mcp-server subprocess (FAKE_MODE=many-pages) through the production
@@ -17,14 +17,15 @@
   is exercised by rebinding *default-max-tools* (the same dynamic var a
   configuration layer would set).
 
-  Required six path classes:
+  Required seven path classes:
     A. happy path — under cap returns the full aggregated set
-    B. new branch — over cap raises :mcp/pagination-exceeded
+    B. new branch — over cap raises :mcp/pagination-exceeded (tool count)
     C. new branch — exactly-at-boundary cap returns the full set (inclusive)
     D. >=2 fault cases — cap = 0 (invalid/zero ceiling) and cap below count
     E. concurrency — cap checked per independent client under the same server
     F. regression — the previously-unbounded aggregation is now bounded
-    G. doc/behavior consistency — the typed signal serializes & round-trips"
+    G. new regression — page-count / deadline / size bounds enforceable
+    H. doc/behavior consistency — the typed signal serializes & round-trips"
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.kernel.error :as err]
             [evoclj.mcp.client :as mcp]
@@ -33,8 +34,10 @@
            [java.util.concurrent.atomic AtomicInteger]))
 
 ;; Tool population used by the behavioral tests: many-pages with a large
-;; tool count and small page size => the SDK aggregates many real wire pages
-;; into one production result; the cap is on the AGGREGATE tool count.
+;; tool count and small page size => list-tools now returns ONE page (page-size
+;; tools) and list-all-tools aggregates across pages. The caps apply at the
+;; list-all-tools layer: max-tools caps the aggregate, max-pages bounds the
+;; number of SDK calls, deadline-ms caps wall time.
 (def ^:const tool-count 50)
 (def ^:const page-size 5)
 
