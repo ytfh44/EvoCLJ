@@ -25,7 +25,7 @@
             [evoclj.mcp.canonical :as canonical]
             [evoclj.mcp.transport :as transport])
   (:import [io.modelcontextprotocol.client McpClient McpSyncClient]
-           [io.modelcontextprotocol.spec McpClientTransport McpError]
+           [io.modelcontextprotocol.spec McpClientTransport McpError McpSchema]
             [io.modelcontextprotocol.spec McpSchema$JSONRPCResponse$JSONRPCError]
            [io.modelcontextprotocol.spec McpSchema$CallToolRequest
             McpSchema$CallToolResult
@@ -308,9 +308,17 @@
   ([^McpSyncClient client cursor]
    (try
      (let [now (now-iso)
-           ^McpSchema$ListToolsResult result (if cursor
-                                               (.listTools client ^String cursor)
-                                               (.listTools client))
+           ;; ONE PAGE ONLY: always the String-cursor overload. The no-arg
+           ;; .listTools() on MCP Java SDK 2.0.0 auto-follows nextCursor
+           ;; internally (Mono.expand in McpAsyncClient.listTools()), so a
+           ;; hostile or misconfigured server that keeps minting fresh
+           ;; cursors would pin discovery inside a single call, beyond the
+           ;; reach of every EvoCLJ-layer bound. The String overload issues
+           ;; exactly ONE tools/list request, which puts pagination control
+           ;; back in EvoCLJ where :max-tools / :max-pages / the deadline are
+           ;; enforceable.
+           ^McpSchema$ListToolsResult result
+           (.listTools client ^String (or cursor McpSchema/FIRST_PAGE))
            tools (.tools result)
            next-cursor (.nextCursor result)]
        {:tools (mapv (fn [^McpSchema$Tool t]
@@ -348,65 +356,128 @@
                          {:cause (err/sanitize ex)}))))))
 
 (def ^:dynamic ^:private *default-max-tools*
-  "Hard ceiling on the number of tools `list-all-tools` will aggregate across
-   all pages before failing closed with `:mcp/pagination-exceeded`.
+  "Hard ceiling on the aggregated tool count `list-all-tools` will collect
+   before failing closed with `:mcp/pagination-exceeded`.
 
-   The MCP Java SDK 2.0.0 auto-follows `nextCursor` *inside a single*
-   `listTools` call (WO-T1: one production call already walks every server
-   page and returns the whole aggregate). A hostile or misconfigured server
-   advertising a huge tool set would therefore blow the caller's memory the
-   moment that one call returns, and — at the raw layer — a never-terminating
-   cursor would block the SDK-internal loop indefinitely. This EvoCLJ-layer
-   bound is the fail-closed guard (WO-M6; fail-closed per INV-04): it is
-   enforced in `list-all-tools`, NOT delegated to the SDK. Callers may pass a
-   tighter `:max-tools` via opts; configuration layers may rebind this var."
-   10000)
+   Since #34 fix, `list-tools` now uses the single-page SDK overload
+   (.listTools client cursor), so pagination is driven entirely by EvoCLJ.
+   This var limits the TOTAL number of tool descriptors returned across all
+   pages. Callers may pass a tighter `:max-tools` via opts; configuration
+   layers may rebind this var."
+  10000)
+
+(def ^:dynamic ^:private *default-max-pages*
+  "Hard ceiling on the number of page requests `list-all-tools` will issue
+   before failing closed with `:mcp/pagination-exceeded` (reason
+   :page-count-exceeded). This bounds the SDK-level request count and
+   prevents an infinite cursor chain from starving the caller."
+  512)
+
+(def ^:dynamic ^:private *default-discovery-deadline-ms*
+  "Wall-clock deadline (ms) for the entire `list-all-tools` aggregation
+   loop. When exceeded, throws `:mcp/pagination-exceeded` with reason
+   `:deadline-exceeded`. This backstops the per-request timeout that the
+   SDK already enforces (default 20s), protecting against a server that
+   dribbles pages slowly forever."
+  60000)
+
+(def ^:dynamic ^:private *default-max-bytes*
+  "Approximate cumulative serialized-size ceiling (bytes) for the
+   retained tool descriptors. Measured by summing `count (pr-str page-tools)`
+   for each page. When exceeded, throws `:mcp/pagination-exceeded` with
+   reason `:size-exceeded`. This limits heap pressure from a server that
+   returns many small pages with huge descriptors."
+  16777216)
 
 (defn list-all-tools
   "Return a single vector of all plain Clojure tool-descriptor maps by
-   following :next-cursor pagination until exhausted.
+   following :next-cursor pagination until exhausted. Pagination is now
+   driven entirely by EvoCLJ (issue #34) — each page is fetched via the
+   single-page SDK overload, so the unbounded auto-follow cursor chain in
+   the SDK is never reachable.
 
    `opts` may carry:
-     :max-tools <pos-int>  hard ceiling on the aggregated tool count; when
-       the running total would exceed it, throws `:mcp/pagination-exceeded`
-       (fail-closed). Defaults to `*default-max-tools*`.
+     :max-tools         <pos-int>  aggregated tool count cap (default *default-max-tools*)
+     :max-pages         <pos-int>  page request cap       (default *default-max-pages*)
+     :deadline-ms       <pos-int>  wall-clock deadline ms (default *default-discovery-deadline-ms*)
+     :max-bytes         <pos-int>  approx. serialized size cap in bytes (default *default-max-bytes*)
+
+   All bounds are enforced by THIS loop; nothing is delegated to the SDK.
+   Each bound fails closed with a typed `:mcp/pagination-exceeded` error
+   carrying a discriminating `:error/reason`.
 
    Throws `:mcp/list-tools-failed` on transport failure and
-   `:mcp/pagination-exceeded` when the aggregated tool count exceeds the
-   configured cap (or the cap itself is not a positive integer)."
+   `:mcp/pagination-exceeded` when any bound is exceeded (or an invalid
+   bound value is supplied)."
   ([^McpSyncClient client]
    (list-all-tools client {}))
-  ([^McpSyncClient client {:keys [max-tools] :or {max-tools *default-max-tools*}}]
-   ;; fail-closed on an unusable cap (e.g. cap = 0 / negative / nil): a
-   ;; non-positive ceiling would let the next page push the aggregate past
-   ;; any finite bound, so reject it up front rather than silently accept.
-   (when-not (pos-int? max-tools)
-     (throw (err/error :mcp/pagination-exceeded
-                       "list-all-tools max-tools must be a positive integer"
-                       {:max-tools (pr-str max-tools)
-                        :error/reason :invalid-max-tools})))
-   (loop [acc []
-          cursor nil
-          pages 0]
-     (let [result (list-tools client cursor)
-           tools (:tools result)
-           next (into acc tools)
-           pages (inc pages)]
-       (cond
-         ;; fail-closed: aggregated count exceeds the configured cap
-         (> (count next) max-tools)
-         (throw (err/error :mcp/pagination-exceeded
-                           "list-all-tools exceeded the pagination tool-count cap"
-                           {:max-tools max-tools
-                            :observed (count next)
-                            :pages pages
-                            :error/reason :tool-count-exceeded}))
-         ;; normal termination: no more pages
-         (not (:has-more? result))
-         next
-         ;; keep aggregating the next page
-         :else
-         (recur next (:next-cursor result) pages))))))
+  ([^McpSyncClient client
+    {:keys [max-tools max-pages deadline-ms max-bytes]
+     :or {max-tools *default-max-tools*
+          max-pages *default-max-pages*
+          deadline-ms *default-discovery-deadline-ms*
+          max-bytes *default-max-bytes*}}]
+   ;; fail-closed validation for ALL four bounds
+   (doseq [[bound name reason] [[max-tools "max-tools" :invalid-max-tools]
+                                [max-pages "max-pages" :invalid-max-pages]
+                                [deadline-ms "deadline-ms" :invalid-deadline-ms]
+                                [max-bytes "max-bytes" :invalid-max-bytes]]]
+     (when-not (pos-int? bound)
+       (throw (err/error :mcp/pagination-exceeded
+                         (str "list-all-tools " name " must be a positive integer")
+                         {name (pr-str bound)
+                          :error/reason reason}))))
+   (let [start-ms (System/currentTimeMillis)]
+     (loop [acc []
+            cursor nil
+            pages 0
+            bytes 0]
+       ;; wall-clock deadline: evaluated BEFORE issuing the next page request,
+       ;; so a server that dribbles pages forever can never push us past it.
+       (let [elapsed-ms (- (System/currentTimeMillis) start-ms)]
+         (when (> elapsed-ms deadline-ms)
+           (throw (err/error :mcp/pagination-exceeded
+                             "list-all-tools exceeded the discovery wall-clock deadline"
+                             {:deadline-ms deadline-ms
+                              :elapsed-ms elapsed-ms
+                              :pages pages
+                              :observed (count acc)
+                              :error/reason :deadline-exceeded}))))
+       (let [result (list-tools client cursor)
+             tools (:tools result)
+             page-bytes (count (pr-str tools))
+             next (into acc tools)
+             pages' (inc pages)
+             bytes' (+ bytes page-bytes)]
+         (cond
+           ;; page request cap
+           (> pages' max-pages)
+           (throw (err/error :mcp/pagination-exceeded
+                             "list-all-tools exceeded the maximum page request count"
+                             {:max-pages max-pages
+                              :observed pages'
+                              :error/reason :page-count-exceeded}))
+           ;; approximate serialized size cap
+           (> bytes' max-bytes)
+           (throw (err/error :mcp/pagination-exceeded
+                             "list-all-tools exceeded the approximate serialized size budget"
+                             {:max-bytes max-bytes
+                              :observed bytes'
+                              :error/reason :size-exceeded}))
+           ;; aggregated tool count cap
+           (> (count next) max-tools)
+           (throw (err/error :mcp/pagination-exceeded
+                             "list-all-tools exceeded the pagination tool-count cap"
+                             {:max-tools max-tools
+                              :observed (count next)
+                              :pages pages'
+                              :error/reason :tool-count-exceeded}))
+           ;; normal termination: no more pages
+           (not (:has-more? result))
+           next
+           ;; keep aggregating the next page
+           :else
+           (recur next (:next-cursor result) pages' bytes')))))))
 
 ;; --- tool invocation ---------------------------------------------------------
 

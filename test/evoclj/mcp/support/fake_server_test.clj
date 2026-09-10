@@ -328,24 +328,23 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest many-pages-paginates-and-terminates
-  (testing "FAKE_MODE=many-pages: production client aggregates all FAKE_TOOL_COUNT tools in one terminating listing"
+  (testing "FAKE_MODE=many-pages: list-tools returns ONE page; list-all-tools aggregates all"
     (fake/with-fake-server [srv {:mode :many-pages :tool-count 13 :page-size 5}]
       (let [managed (mcp/open! (:config srv))]
         (try
-          ;; one SDK listTools call walks all ceil(13/5)=3 pages internally
-          ;; and returns them aggregated with no dangling cursor
+          ;; list-tools now returns a SINGLE page via the page-at-a-time overload
           (let [res (mcp/list-tools (:client managed))
                 names (mapv :mcp/name (:tools res))]
-            (is (= 13 (count (:tools res)))
-                "single production call collects all 3 pages worth of tools")
-            (is (= 13 (count (distinct names))) "no duplicates across pages")
-            (is (nil? (:next-cursor res)) "terminal page: cursor exhausted")
-            (is (false? (:has-more? res)))
+            (is (= 5 (count (:tools res))) "list-tools returns exactly one page of tools")
+            (is (= 5 (count (distinct names))) "no duplicates in first page")
+            (is (some? (:next-cursor res)) "first page carries a nextCursor")
+            (is (true? (:has-more? res)) "has-more? true on first page")
             (is (every? #(re-find #"^fake-tool-\d+$" %) names))
-            ;; list-all-tools over an already-aggregated single page: same set
+            ;; list-all-tools still aggregates all pages
             (let [all (mcp/list-all-tools (:client managed))]
-              (is (= 13 (count all)))
-              (is (= (sort names) (sort (mapv :mcp/name all))))))
+              (is (= 13 (count all)) "list-all-tools aggregates all pages")
+              (is (= (sort names) (sort (mapv :mcp/name (take 5 all))))
+                  "first page names match list-tools first page")))
           (finally
             (mcp/close! managed))))))
 
@@ -419,6 +418,33 @@
               "ok mode: single terminal page — no infinite-cursor premise"))
         (finally
           (is (true? (kill-raw! raw))))))))
+
+;; ---------------------------------------------------------------------------
+;; infinite-cursor knob — PRODUCTION regression test (#34)
+;;
+;; The #34 fix made list-all-tools bounded by max-pages / deadline / size.
+;; This test drives the infinite-cursor server through the PRODUCTION
+;; list-all-tools and asserts it terminates with a typed pagination error.
+;; ---------------------------------------------------------------------------
+
+(deftest infinite-cursor-production-bounded-by-pagination-cap
+  (testing "infinite-cursor: production list-all-tools terminates with :page-count-exceeded"
+    (fake/with-fake-server [srv {:mode :infinite-cursor :tool-count 6 :page-size 3}]
+      (let [managed (mcp/open! (:config srv))]
+        (try
+          ;; pass a tiny page cap so we terminate fast
+          (let [t (capture-throw
+                    #(mcp/list-all-tools (:client managed) {:max-pages 3}))
+                d (ex-data t)]
+            (is (= :mcp/pagination-exceeded (:error/type d))
+                "typed pagination failure")
+            (is (= :page-count-exceeded (:error/reason d))
+                "the page-count bound (not the tool-count bound) fired")
+            (is (= 3 (:max-pages d)) "reported cap matches the request")
+            (is (= 4 (:observed d))
+                "4th page request tripped the 3-page cap"))
+          (finally
+            (mcp/close! managed)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; crash-after-init knob — typed failure + transport-timeout evidence +

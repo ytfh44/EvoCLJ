@@ -23,8 +23,10 @@
             [evoclj.kernel.error :as err]
             [evoclj.store.cas :as cas]
             [clojure.java.io :as io])
-  (:import (java.nio.file Files LinkOption Path Paths)
+  (:import (java.nio.file Files LinkOption Path Paths StandardOpenOption)
            (java.nio.file.attribute BasicFileAttributes)
+           (java.nio.channels Channels)
+           (java.io ByteArrayOutputStream)
            (java.nio.charset StandardCharsets)))
 
 (def workspace-access
@@ -119,8 +121,66 @@
   (backend-delete [this rel-path] "Delete file or empty dir"))
 
 ;; ---------------------------------------------------------------------------
-;; HostDirectoryBackend
+;; HostDirectoryBackend — and its TOCTOU hardening for host reads (#37)
+;;
+;; Authorize and act are necessarily two syscall phases on the JVM (no
+;; openat2 / O_NOFOLLOW handle semantics). Two independent measures narrow
+;; the window and make a detected swap fail closed:
+;;   1. the read opens the file with LinkOption/NOFOLLOW_LINKS, so a leaf
+;;      replaced by a symbolic link after the pre-check cannot be followed;
+;;   2. the file identity (file-key / size / last-modified) is captured
+;;      before the open and re-verified after the read; a mismatch raises a
+;;      typed :filesystem/toctou-identity-mismatch instead of serving
+;;      content from a substituted object.
+;; A concurrent writer racing in the remaining microsecond window can still
+;; be undetected on platforms without a stable file-key; that residue is
+;; documented, not silently accepted (issue #37).
 ;; ---------------------------------------------------------------------------
+
+(def ^:private nofollow-links
+  (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+
+(defn- read-attrs-nofollow
+  [^Path p]
+  (Files/readAttributes p BasicFileAttributes ^"[Ljava.nio.file.LinkOption;" nofollow-links))
+
+(defn- file-identity
+  "Platform-graded identity of an already-read attribute set. :file-key is
+  the strong signal where the platform exposes it; :size + :last-modified
+  catch a same-path replacement on weak platforms."
+  [^BasicFileAttributes attrs]
+  {:file-key (.fileKey attrs)
+   :size (.size attrs)
+   :last-modified (.toMillis (.lastModifiedTime attrs))})
+
+(defn verify-unchanged!
+  "Fail closed when `path`'s identity no longer matches `expected` (the
+  identity captured before the read). Public so the guard itself is
+  directly testable without a racy concurrent-writer harness."
+  [^Path path expected rel-path]
+  (let [now (try (file-identity (read-attrs-nofollow path))
+                 (catch Exception e
+                   (throw (err/error :filesystem/toctou-identity-mismatch
+                                     "target is not re-verifiable after read"
+                                     {:path rel-path :cause (.getMessage e)}))))]
+    (when-not (= expected now)
+      (throw (err/error :filesystem/toctou-identity-mismatch
+                        "file identity changed between pre-check and read"
+                        {:path rel-path :before expected :after now})))
+    true))
+
+(defn- read-nofollow-bytes
+  "Read all bytes of `p` through a channel opened with NOFOLLOW_LINKS: a
+  symlink swapped in for the leaf after the pre-check fails the open rather
+  than being followed."
+  ^bytes [^Path p]
+  (with-open [ch (Files/newByteChannel
+                  p (into-array java.nio.file.OpenOption
+                                [StandardOpenOption/READ LinkOption/NOFOLLOW_LINKS]))
+              in (Channels/newInputStream ch)
+              out (ByteArrayOutputStream.)]
+    (io/copy in out)
+    (.toByteArray out)))
 
 (defrecord HostDirectoryBackend [root]
   Backend
@@ -134,7 +194,11 @@
         (throw (err/error :filesystem/is-directory "path is a directory" {:path rel-path})))
       (when (Files/isSymbolicLink target)
         (throw (err/error :filesystem/symlink-rejected "symlink not allowed" {:path rel-path})))
-      (Files/readAllBytes target)))
+      ;; identity BEFORE the open, then NOFOLLOW open, then re-verify after.
+      (let [before (file-identity (read-attrs-nofollow target))
+            ba (read-nofollow-bytes target)]
+        (verify-unchanged! target before rel-path)
+        ba)))
   (backend-stat [_ rel-path]
     (let [p (canonicalize-mount-path rel-path)
           target (host-resolve root p)]
