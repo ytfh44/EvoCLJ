@@ -69,9 +69,11 @@
   BEGIN fails) — the gap this fleet closes. The :promotion/promoted and
   :promotion/stale events are NOW appended INSIDE the same BEGIN IMMEDIATE
   transaction that moves CURRENT (outbox pattern). A dedicated helper
-  insert-event-in-tx! allocates the per-session seq, verifies cause, computes
-  the hash chain (sha256 over canonical header via evoclj.genome.hash), and
-  INSERTs the event row on the SAME raw Connection before COMMIT. An outbox
+  insert-event-in-tx! delegates to
+  evoclj.store.event/append-event-on-conn! (INV-05, the single event write
+  path) so the promotion event is committed under the canonical v2 header —
+  generation, phenotype, the stored metadata bytes and causal-links inside
+  the tamper-evidence (GC-20) — on the SAME raw Connection before COMMIT. An outbox
   row (promotion_outbox) FK-links the promotion and event (dispatched=0) in
   the same commit. Either both promotion+CURRENT and event+outbox commit, or
   a throw (including :failpoint) rolls back every write — no dagling promotion
@@ -161,7 +163,6 @@
             [evoclj.promotion.current :as current]
             [evoclj.promotion.state :as state]
             [evoclj.promotion.activation :as activation]
-            [evoclj.sci.boundary :as boundary]
             [evoclj.security.sci-recheck :as recheck]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -331,35 +332,17 @@
     (str ns "/" (name t))
     (name t)))
 
-(defn- canonical-header
-  "Deterministic canonical header an event hash is computed over."
-  [h]
-  (str (:session/id h) "\n"
-       (:event/seq h) "\n"
-       (type->db (:event/type h)) "\n"
-       (or (:prev/event-id h) "") "\n"
-       (or (:payload-ref h) "") "\n"
-       (or (:prev-hash h) "") "\n"
-       (:created-at h)))
-
-(defn- event-hash
-  "sha256:<64 hex> over the canonical header."
-  [h]
-  (hash/text-digest (canonical-header h)))
-
-(defn- edn-safe-metadata?
-  "True when m is a map of plain EDN-safe data (Global Constraint 22).
-  Recursive pre-materialization check via evoclj.sci.boundary/edn-safe?:
-  lazy seqs, records, functions and other non-data are rejected WITHOUT
-  being realized or serialized."
-  [m]
-  (and (map? m) (boundary/edn-safe? m)))
-
 (defn- insert-event-in-tx!
   "Append one :promotion/* event INSIDE the caller's open promotion
-  transaction (same Connection). Allocates per-session seq as
-  MAX(event_seq)+1, validates cause, links prev-hash, computes hash,
-  and INSERTs the row. Returns {:event/id <int> :event/seq <int>}.
+  transaction (same Connection), delegating to the store's single event
+  write path (evoclj.store.event/append-event-on-conn!) so the event is
+  committed under the canonical v2 header — session, seq, type, prev id,
+  payload-ref, prev-hash, created-at, generation id, phenotype id, the
+  exact stored metadata EDN bytes, and causal-links (INV-05; closes the
+  GC-20 gap where the promotion's generation/phenotype/payload columns
+  sat outside the commitment). The strict predecessor is the session's
+  latest event. Returns
+  {:event/id <int> :event/seq <int> :event/hash sha256:<64 hex>}.
   Throws typed errors on violation — the promotion transaction rolls
   back."
   [conn session-key event-type metadata ts]
@@ -370,41 +353,29 @@
             (throw (err/error :store/session-not-found
                               "cannot anchor the promotion event to an unknown operator session"
                               {:session/id session-id})))
-        generation-id (:generation_id sess)
-        phenotype-id (:phenotype_id sess)
-        ;; newest event is the cause (the :session/created root or prior promotion event)
-        newest (first (raw-query conn "SELECT id, event_seq, event_hash FROM events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1" [session-key]))
+        ;; newest event is the immediate predecessor (:session/created root or prior promotion event)
+        newest (first (raw-query conn "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1" [session-key]))
         cause-id (:id newest)
-        new-seq (if newest (inc (:event_seq newest)) 1)
-        prev-hash (:event_hash newest)
         _ (when (nil? cause-id)
             (throw (err/error :promotion/event-anchor-missing
                               "the operator session must carry its :session/created root event first"
                               {:session/id session-id})))
-        header {:session/id session-key
-                :event/seq new-seq
-                :event/type event-type
-                :prev/event-id (str cause-id)
-                :payload-ref nil
-                :prev-hash prev-hash
-                :created-at ts}
-        ev-hash (event-hash header)
-        _ (when-not (edn-safe-metadata? metadata)
-            (throw (err/error :store/event-invalid
-                              "metadata must be EDN-safe Clojure data"
-                              {:event/type event-type})))]
-    (raw-insert! conn
-                 "INSERT INTO events
-                       (session_id, event_seq, generation_id, phenotype_id,
-                        event_type, cause_event_id, payload_ref, payload,
-                        prev_hash, event_hash, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                 [session-key new-seq generation-id phenotype-id
-                  (type->db event-type) cause-id nil (pr-str metadata)
-                  prev-hash ev-hash ts])
-    ;; retrieve the inserted row's autoincrement id
-    (let [row (first (raw-query conn "SELECT id, event_seq FROM events WHERE session_id = ? AND event_seq = ?" [session-key new-seq]))]
-      {:event/id (:id row) :event/seq (:event_seq row) :event/hash ev-hash})))
+        ev (event/append-event-on-conn!
+            conn
+            {:session/id session-key
+             :generation/id (:generation_id sess)
+             :phenotype/id (:phenotype_id sess)
+             :event/type event-type
+             :prev/event-id cause-id
+             :payload-ref nil
+             :causal-links #{}
+             :metadata metadata
+             :created-at ts})]
+    ;; :event-hash is read back from the persisted row by append-event-on-conn!
+    ;; (row->event) — the single source of truth, never re-derived here.
+    {:event/id (:event/id ev)
+     :event/seq (:event/seq ev)
+     :event/hash (:event-hash ev)}))
 
 (defn- insert-outbox-in-tx!
   "Insert the promotion_outbox row linking promotion and event in the

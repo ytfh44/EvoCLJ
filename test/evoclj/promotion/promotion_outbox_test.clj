@@ -256,3 +256,81 @@
       (is (thrown? Exception
                    (sqlite/exec! db ["INSERT INTO promotion_outbox (id, promotion_id, session_id, event_id, event_type, event_seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
                                       (str (random-uuid)) promo-id (str (:event/session-id fx)) 99999 "promotion/promoted" 999 "2025-01-01T00:00:00Z"]))))))
+
+;; ============================================================================
+;; GC-20 — a promotion event's hash commits its generation and payload
+;; ============================================================================
+;;
+;; Before this refactor, promotion events were written by a private hasher
+;; over a 7-line legacy header: generation_id, phenotype_id and the stored
+;; payload bytes sat OUTSIDE the commitment. insert-event-in-tx! now
+;; delegates to evoclj.store.event/append-event-on-conn! (canonical v2
+;; header, INV-05), so the stored row re-verifies from its own fields and
+;; rewriting those fields breaks verification. The events table rejects
+;; UPDATE by design, so these tests copy the session's real rows into a
+;; fresh database with one field altered (the event-test tamper technique)
+;; and assert :event/hash-mismatch.
+
+(defn- insert-event-row!
+  "Raw-insert one events row (DB column map) into db, preserving both
+  predecessor columns as stored."
+  [db row]
+  (sqlite/exec! db
+                ["INSERT INTO events
+                    (session_id, event_seq, generation_id, phenotype_id,
+                     event_type, cause_event_id, prev_event_id, payload_ref, payload,
+                     prev_hash, event_hash, created_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                 (:session_id row) (:event_seq row) (:generation_id row)
+                 (:phenotype_id row) (:event_type row) (:cause_event_id row)
+                 (:prev_event_id row) (:payload_ref row) (:payload row)
+                 (:prev_hash row) (:event_hash row) (:created_at row)]))
+
+(defn- event-copy-db
+  "A fresh migrated DB carrying the fixture's generation/session rows
+  (same ids, so copied event FKs and chain re-verification hold) plus a
+  decoy generation as a valid tamper target."
+  [session-id]
+  (let [db (fresh-db)]
+    (sqlite/with-db [conn db]
+      (try (jdbc/insert! conn :artifacts {:hash parent-genome :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
+      (try (jdbc/insert! conn :artifacts {:hash parent-resolution :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
+      (try (jdbc/insert! conn :artifacts {:hash phenotype :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
+      (try (jdbc/insert! conn :genomes {:id parent-genome :created_at now}) (catch Exception _ nil))
+      (jdbc/insert! conn :generations {:id seed-gen :genome_id parent-genome :resolution_id parent-resolution :parent_id nil :state "active" :current 1 :created_at now})
+      (jdbc/insert! conn :generations {:id "generation-decoy" :genome_id parent-genome :resolution_id parent-resolution :parent_id nil :state "active" :current 0 :created_at now})
+      (jdbc/insert! conn :sessions {:id (str session-id) :generation_id seed-gen :genome_id parent-genome :resolution_id parent-resolution :phenotype_id phenotype :state "created" :created_at now}))
+    db))
+
+(deftest promotion-event-hash-commits-generation-and-payload
+  (let [fx (promotion-fixture)
+        db (:db fx)
+        sid (:event/session-id fx)
+        _ (promote/promote! (promotion-system fx) (promote-request fx))
+        rows (sqlite/query db ["SELECT * FROM events WHERE session_id = ? ORDER BY event_seq" (str sid)])
+        promo-row (first (filter #(= "promotion/promoted" (:event_type %)) rows))]
+    (testing "the :promotion/promoted row exists and its chain verifies under v2"
+      (is (some? promo-row))
+      (is (:valid? (event/verify-event-chain db sid))))
+    (testing "rewriting the stored generation on the :promotion/promoted row breaks the hash"
+      (let [copy (event-copy-db sid)
+            tampered (mapv #(if (= (:event_seq %) (:event_seq promo-row))
+                              (assoc % :generation_id "generation-decoy")
+                              %)
+                           rows)]
+        (doseq [r tampered] (insert-event-row! copy r))
+        (let [v (event/verify-event-chain copy sid)]
+          (is (false? (:valid? v)))
+          (is (= :event/hash-mismatch (:reason v)))
+          (is (= (:event_seq promo-row) (:event/seq v))))))
+    (testing "rewriting the stored payload bytes on the :promotion/promoted row breaks the hash"
+      (let [copy (event-copy-db sid)
+            tampered (mapv #(if (= (:event_seq %) (:event_seq promo-row))
+                              (assoc % :payload (pr-str {:from "tampered"}))
+                              %)
+                           rows)]
+        (doseq [r tampered] (insert-event-row! copy r))
+        (let [v (event/verify-event-chain copy sid)]
+          (is (false? (:valid? v)))
+          (is (= :event/hash-mismatch (:reason v)))
+          (is (= (:event_seq promo-row) (:event/seq v))))))))
