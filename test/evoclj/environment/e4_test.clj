@@ -33,7 +33,7 @@
    All tests drive the REAL production components (evoclj.environment.registry,
    evoclj.environment.bundle, evoclj.environment.snapshot). The FakeSource
    records used here are real evoclj.environment.source/LiveSource
-   implementations whose class names satisfy register-source!'s allowlist;
+   implementations that pass register-source!'s LiveSource protocol boundary;
    they are NOT fn-injection hooks into production code."
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
