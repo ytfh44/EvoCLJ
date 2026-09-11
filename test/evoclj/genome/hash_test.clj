@@ -166,6 +166,23 @@
                  {:path "skills/route.edn" :digest (hash/text-digest "{:priority 3}\n")}]]
     (is (apply = (repeatedly 100 #(hash/tree-digest entries))))))
 
+(deftest canonical-edn-deterministic-gc6
+  (testing "map key order is irrelevant at every depth (nested maps, vectors, sets)"
+    (let [a {:b 2 :a {:y [1 2 {:m 1 :n 2}] :x "hi"} :z 3}
+          b {:z 3 :b 2 :a {:x "hi" :y [1 2 {:n 2 :m 1}]}}]
+      (is (= (hash/canonical a) (hash/canonical b)))))
+  (testing "set element order is irrelevant"
+    (is (= (hash/canonical #{1 2 3}) (hash/canonical #{3 2 1}))))
+  (testing "digest of logically-equal values with different key order is equal"
+    (is (= (hash/digest {:b 2 :a [1 {:x 9 :y 8}]})
+           (hash/digest {:a [1 {:y 8 :x 9}] :b 2}))))
+  (testing "genuinely different values digest differently"
+    (is (not= (hash/digest {:b 2 :a [1 2]})
+              (hash/digest {:b 2 :a [1 3]}))))
+  (testing "vector order is significant (canonicalization is NOT over-normalizing)"
+    (is (not= (hash/canonical [1 2]) (hash/canonical [2 1])))
+    (is (not= (hash/digest [1 2]) (hash/digest [2 1])))))
+
 (deftest canonical-text-bytes-match-text-digest
   (testing "canonical bytes hash (raw) to the same digest as the normalized text"
     (doseq [s ["a\nb" "a\r\nb" "a\rb" "x\r\ny" "plain"]]

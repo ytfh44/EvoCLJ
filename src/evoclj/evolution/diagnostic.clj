@@ -14,22 +14,6 @@
 
 (def ^:private media-type "application/edn")
 
-(defn- canonical
-  "Deterministic EDN form used for the bundle content address."
-  [x]
-  (cond
-    (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map (fn [[k v]] [k (canonical v)])) x)
-    (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map canonical) x)
-    (vector? x) (mapv canonical x)
-    (seq? x) (mapv canonical x)
-    :else x))
-
-(defn- digest
-  [data]
-  (hash/text-digest (pr-str (canonical data))))
-
 (defn- utf8-bytes
   [s]
   (.getBytes ^String s StandardCharsets/UTF_8))
@@ -53,7 +37,7 @@
   (let [body (merge details
                     {:evidence/id (:evidence/id evidence-pack)
                      :diagnosis/id (:diagnosis/id diagnosis-result)})
-        bundle (assoc body :diagnostic/id (digest body))]
+        bundle (assoc body :diagnostic/id (hash/digest body))]
     (schema/validate-bundle bundle)
     bundle))
 
@@ -76,14 +60,14 @@
   (validate-store! store)
   (schema/validate-bundle bundle)
   (let [body (dissoc bundle :diagnostic/id)
-        id (digest body)]
+        id (hash/digest body)]
     (when-not (= id (:diagnostic/id bundle))
       (throw (err/error :diagnostic/id-mismatch
                         "diagnostic id must be the content hash of the bundle body"
                         {:diagnostic/id (:diagnostic/id bundle)
                          :expected id})))
     (let [put-result (cas/put-bytes! (:cas store)
-                                     (utf8-bytes (pr-str (canonical body)))
+                                     (utf8-bytes (pr-str (hash/canonical body)))
                                      {:media-type media-type})]
       (artifact/ensure-artifact! (:sqlite store)
                                  id

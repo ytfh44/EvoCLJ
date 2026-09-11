@@ -285,21 +285,7 @@
      :events events}))
 
 ;; --- content addressing ------------------------------------------------------
-
-(defn- canonical
-  "Deterministic EDN form for hashing: maps sorted by their pr-str key
-  form, sets by their pr-str element form, collections realized
-  eagerly. Any EDN-safe value yields a stable pr-str, so the content
-  hash is a pure function of logical content (Global Constraint 6)."
-  [x]
-  (cond
-    (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map (fn [[k v]] [k (canonical v)])) x)
-    (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map canonical) x)
-    (vector? x) (mapv canonical x)
-    (seq? x) (mapv canonical x)
-    :else x))
+;; The canonical EDN form lives in evoclj.genome.hash/canonical (single source).
 
 (defn- pack-digest
   "The evidence id: a content hash over the canonical pack data using
@@ -308,7 +294,7 @@
   the CAS under exactly these bytes, so :evidence/id IS the content
   address of the pack artifact."
   [data]
-  (hash/text-digest (pr-str (canonical data))))
+  (hash/text-digest (pr-str (hash/canonical data))))
 
 ;; --- the freeze --------------------------------------------------------------
 
@@ -351,7 +337,7 @@
                               _ (es/validate-excerpt excerpt)
                               put-result
                               (cas/put-bytes! (:cas store)
-                                              (utf8-bytes (pr-str (canonical excerpt)))
+                                              (utf8-bytes (pr-str (hash/canonical excerpt)))
                                               {:media-type excerpt-media-type})]
                           (cond-> {:episode/id (:episode/id episode)
                            :session/id (:session/id episode)
@@ -382,7 +368,7 @@
         id (pack-digest data)
         ;; freeze: the canonical pack data IS stored under its own
         ;; content hash, so :evidence/id is a resolvable ArtifactId
-        _ (cas/put-bytes! (:cas store) (utf8-bytes (pr-str (canonical data)))
+        _ (cas/put-bytes! (:cas store) (utf8-bytes (pr-str (hash/canonical data)))
                           {:media-type excerpt-media-type})
         pack (assoc data :evidence/id id)]
     (es/validate-pack pack)

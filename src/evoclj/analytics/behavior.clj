@@ -401,21 +401,7 @@
     profile))
 
 ;; --- fingerprint ------------------------------------------------------------
-
-(defn- canonical
-  "Deterministic EDN form for hashing: maps and sets sorted by their
-  pr-str key/element form, nested values collapsed recursively so equal
-  logical content always pr-strs identically (the same convention the
-  repo uses in evoclj.eval.replay)."
-  [x]
-  (cond
-    (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map (fn [[k v]] [k (canonical v)])) x)
-    (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map canonical) x)
-    (vector? x) (mapv canonical x)
-    (seq? x) (mapv canonical x)
-    :else x))
+;; The canonical EDN form is evoclj.genome.hash/canonical (single source).
 
 (defn fingerprint
   "A deterministic \"sha256:<64 hex>\" content address for a
@@ -423,7 +409,7 @@
   hashed via evoclj.genome.hash/text-digest. Equal logical profiles
   hash alike; any change to the profile changes the hash."
   [profile]
-  (hash/text-digest (pr-str (canonical profile))))
+  (hash/text-digest (pr-str (hash/canonical profile))))
 
 ;; --- summaries --------------------------------------------------------------
 

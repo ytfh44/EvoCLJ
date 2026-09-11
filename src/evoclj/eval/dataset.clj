@@ -142,19 +142,7 @@
                        :case-count 0})))
   cases)
 
-(defn- canonical
-  "Deterministic EDN form for hashing: maps sorted by their pr-str key
-  form, sets by their pr-str element form, collections realized
-  eagerly (the same convention as evoclj.evolution.evidence)."
-  [x]
-  (cond
-    (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map (fn [[k v]] [k (canonical v)])) x)
-    (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map canonical) x)
-    (vector? x) (mapv canonical x)
-    (seq? x) (mapv canonical x)
-    :else x))
+;; Content addressing uses evoclj.genome.hash/canonical (single source).
 
 (defn- case-ref
   "The artifact ref for one case: the deterministic content address of
@@ -163,7 +151,7 @@
   metadata, not content, so the ref is a pure function of the body."
   [case]
   {:case/id (:case/id case)
-   :artifact-ref (hash/text-digest (pr-str (canonical (dissoc case :case/id))))})
+   :artifact-ref (hash/text-digest (pr-str (hash/canonical (dissoc case :case/id))))})
 
 (defn case-refs
   "Content-addressed artifact refs for a vector of case maps — no
