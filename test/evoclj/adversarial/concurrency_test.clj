@@ -1058,14 +1058,23 @@
           "the component schema issues no journal-mode pragma — the
           default applies, and 'delete' (not WAL) is therefore the
           operating mode of every store")))
-  (testing "busy_timeout: promotion/rollback/event transactions set it
-            explicitly before BEGIN IMMEDIATE, so contended writers wait
-            for SQLite's write lock instead of failing SQLITE_BUSY"
+  (testing "busy_timeout: promotion/rollback set it explicitly, the
+            shared write helper (store/sqlite.clj) sets it before BEGIN
+            IMMEDIATE, and the event append routes through that shared
+            helper -- so contended writers wait for SQLite's write lock
+            instead of failing SQLITE_BUSY"
     (doseq [path ["src/evoclj/promotion/promote.clj"
                   "src/evoclj/promotion/rollback.clj"
-                  "src/evoclj/store/event.clj"]]
+                  "src/evoclj/store/sqlite.clj"]]
       (is (str/includes? (slurp path) "PRAGMA busy_timeout = 10000")
           (str path " sets busy_timeout = 10000 before BEGIN IMMEDIATE")))
+    (testing "the event append delegates to the shared writer"
+      (is (str/includes? (slurp "src/evoclj/store/event.clj")
+                         "sqlite/with-write-tx")
+          "src/evoclj/store/event.clj must append through
+          sqlite/with-write-tx -- the shared writer that sets busy_timeout
+          before BEGIN IMMEDIATE; a private event.clj transaction would
+          reintroduce the SQLITE_BUSY race this test guards against"))
     (testing "the evaluation finalization transaction relies on the
               sqlite-jdbc driver default (documented finding, not a
               defect: its write window is one INSERT + one UPDATE)"
