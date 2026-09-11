@@ -515,17 +515,26 @@
 ;; ---------------------------------------------------------------------------
 
 (defn refresh-skills!
-  "Explicit refresh: snapshot all discovered skill dirs -> parse from snapshot -> publish bundles.
-  Returns {:status :published/:noop :results [...] }.
+  "Explicit, PURE refresh of a skill source: run the source's `snapshot!`
+  (capture all discovered skill dirs to CAS -> parse/validate FROM SNAPSHOT)
+  and return the resulting snapshot.
+  Returns {:status :captured, :snapshot <snapshot>, :results (:skill/results snapshot)}.
 
-  This is the normative refresh flow:
-  filesystem event -> mark dirty -> snapshot whole skill dir to CAS -> parse FROM SNAPSHOT -> validate -> derive SurfaceBundle -> atomic publish.
-  Must not parse live then snapshot."
+  This function does NOT publish. `SkillSource/snapshot!` is PURE — it performs
+  no registry mutation and no publication (its implementation comment in this
+  namespace documents the PURE capture contract) — so it must not parse live
+  then snapshot, and the returned :status is :captured, not :published.
+
+  All publication belongs to the registry's
+  `evoclj.environment.registry/refresh!` single transaction
+  (Source -> Revision -> Projector -> Bundle). Callers that need bundles
+  published must register the source and run refresh!; this helper only exposes
+  the source's capture + parse path."
   [source]
   (when-not (satisfies? src/LiveSource source)
     (throw (err/error :skill/invalid-source "source must satisfy LiveSource" {:source source})))
   (let [snap (src/snapshot! source)]
-    {:status :published :snapshot snap :results (:skill/results snap)}))
+    {:status :captured :snapshot snap :results (:skill/results snap)}))
 
 (defn catalog-snapshot
   "Return catalog projection map logical-id -> offer for current registry state."
