@@ -54,16 +54,6 @@
 ;; db helpers
 ;; ---------------------------------------------------------------------------
 
-(defn- db-spec
-  "Coerce the caller's db handle to a sqlite spec."
-  [db]
-  (cond
-    (string? db) db
-    (and (map? db) (contains? db :sqlite)) (:sqlite db)
-    (and (map? db) (contains? db :subprotocol)) db
-    (and (map? db) (contains? db :subname)) db
-    :else (try (.-db ^Object db) (catch Exception _ db))))
-
 (defn- cas-of
   "Extract the CAS handle from the db argument if it is a stores map
   {:sqlite spec :cas cas}. Returns nil when db is a bare sqlite spec
@@ -76,7 +66,7 @@
   "Raw sessions row (map with string keys) for id, or nil."
   [db sid-str]
   (try
-    (first (sqlite/query (db-spec db)
+    (first (sqlite/query (sqlite/db-spec db)
                          ["SELECT * FROM sessions WHERE id = ?" sid-str]))
     (catch Exception _ nil)))
 
@@ -137,7 +127,7 @@
   CodeImage table is empty) — only a present row that disagrees fails."
   [db pin]
   (let [pin-code (:code/id pin)
-        spec (db-spec db)]
+        spec (sqlite/db-spec db)]
     ;; execution check — the normative id authentication
     (when-let [eid (:execution/id pin)]
       (when (and eid pin-code)
@@ -232,7 +222,7 @@
   [db sid]
   (try
     (let [cap-store (requiring-resolve 'evoclj.store.capability-store/list-active-capabilities)
-          rows (@cap-store (db-spec db) {:principal-type "session" :principal-id (str sid)})]
+          rows (@cap-store (sqlite/db-spec db) {:principal-type "session" :principal-id (str sid)})]
       (when (seq rows)
         (mapv (fn [row]
                 (or (:lease row)
@@ -280,7 +270,7 @@
   A mismatch throws :hydrate/pin-mismatch (typed)."
   [cas-store db pin]
   (when-let [gid (:genome/id pin)]
-    (when-let [{:keys [catalog loaded]} (store-genome/loaded-genome cas-store (db-spec db) gid)]
+    (when-let [{:keys [catalog loaded]} (store-genome/loaded-genome cas-store (sqlite/db-spec db) gid)]
       (let [compiled (compiler/compile-genome loaded catalog)
             ;; Assert identity matches the pin — this is the H1 pin validation
             cid (:code/id pin)
@@ -338,7 +328,7 @@
       (throw (err/error :hydrate/invalid-pin "pin missing :session/id" {:pin pin})))
     ;; verify existence of session row
     (let [sid (:session/id norm)
-          sess (try (session/get-session (db-spec db) sid) (catch Exception _ nil))
+          sess (try (session/get-session (sqlite/db-spec db) sid) (catch Exception _ nil))
           pin' (if sess
                  (merge norm
                         {:genome/id (or (:genome/id norm) (:genome/id sess))

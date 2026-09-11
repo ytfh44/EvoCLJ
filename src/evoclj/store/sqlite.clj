@@ -26,6 +26,39 @@
      :subname db}
     db))
 
+(defn db-spec
+  "Coerce any caller's db handle into a java.jdbc db spec (or path string).
+
+  Accepted shapes, in the order tested — the ORDER IS LOAD-BEARING:
+
+    1. a string                                  -> itself (a SQLite path)
+    2. {:sqlite <spec> ...}                      -> the nested :sqlite spec
+    3. {:subprotocol ...} / {:subname ...}       -> itself (already a jdbc spec)
+    4. {:db <spec> ...}                          -> the nested :db spec
+    5. anything else                             -> its `.-db` field when it has
+                                                    one, else the input unchanged
+
+  Shape 2 is the executor :stores map and MUST be tested before every other
+  map branch: testing a generic map branch first would hand the whole stores
+  map to java.jdbc unsplit, and `spec` passes maps through unchanged, so the
+  call would fail instead of opening the nested SQLite store.
+
+  Unlike `spec`, nested handle shapes ARE unwrapped here. This namespace
+  cannot name SessionStore in an `instance?` check — evoclj.store.session-store
+  requires this namespace, so referencing it back would introduce a require
+  cycle — so the reflective `.-db` fallback (shape 5) is the single branch
+  covering every field-bearing handle, SessionStore included."
+  [db]
+  (cond
+    (string? db) db
+    (and (map? db) (contains? db :sqlite)) (:sqlite db)
+    (and (map? db) (contains? db :subprotocol)) db
+    (and (map? db) (contains? db :subname)) db
+    (and (map? db) (contains? db :db)) (:db db)
+    :else (try
+            (.-db ^Object db)
+            (catch Exception _ db))))
+
 (defn enable-foreign-keys!
   "Enable SQLite foreign-key enforcement on `db` (a path string, a
   java.jdbc spec, or the spec-with-connection map bound by `with-db`).

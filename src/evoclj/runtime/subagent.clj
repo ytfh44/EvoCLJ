@@ -68,17 +68,6 @@
 ;; Helpers
 ;; ---------------------------------------------------------------------------
 
-(defn- db-spec
-  [db]
-  (cond
-    (string? db) db
-    (and (map? db) (contains? db :sqlite)) (:sqlite db)
-    (and (map? db) (contains? db :subprotocol)) db
-    (and (map? db) (contains? db :subname)) db
-    :else (try
-            (.-db ^Object db)
-            (catch Exception _ db))))
-
 (declare auto-deliver-child-terminal!)
 
 
@@ -86,7 +75,7 @@
   "Return the parent session id (UUID) for `child-session-id`, or nil.
   Uses Work graph (works.parent_work_id) — the single durable spawn truth."
   [db child-session-id]
-  (let [spec (db-spec db)
+  (let [spec (sqlite/db-spec db)
         cid (types/session-id child-session-id)
         sid (str cid)]
     (when-let [row (first (sqlite/query spec
@@ -101,7 +90,7 @@
 (defn child-session-ids
   "All child session ids spawned from `parent-session-id` via Work graph."
   [db parent-session-id]
-  (let [spec (db-spec db)
+  (let [spec (sqlite/db-spec db)
         pid (str (types/session-id parent-session-id))
         rows (try
                (sqlite/query spec
@@ -345,8 +334,8 @@
   back to the parent's latest Work (nil for a root session with none)."
   [db parent-id work-id]
   (if (nil? work-id)
-    (some-> (last (work-store/list-works (db-spec db) parent-id)) :work/id)
-    (let [w (work-store/fetch-work (db-spec db) work-id)]
+    (some-> (last (work-store/list-works (sqlite/db-spec db) parent-id)) :work/id)
+    (let [w (work-store/fetch-work (sqlite/db-spec db) work-id)]
       (when-not w
         (throw (err/error :store/work-not-found
                           (str "parent work not found: " work-id)
@@ -464,7 +453,7 @@
                                   :metadata {:child/session-id child-id
                                              :child/spec child-spec
                                              :task/digest (:task-bind plan)}})
-          spec (db-spec db)]
+          spec (sqlite/db-spec db)]
       ;; W2: durable child Work (queued) — the SOLE execution identity for
       ;; this child. parent-work-id is the explicit :parent/work-id when
       ;; supplied, else the parent's latest Work (nil only for the root
@@ -539,7 +528,7 @@
   audit never throws, so ad-hoc runs of a different task than the spawn
   spec stay executable while the divergence is observable."
   [db child-work-id executed-task]
-  (let [w (work-store/fetch-work (db-spec db) child-work-id)
+  (let [w (work-store/fetch-work (sqlite/db-spec db) child-work-id)
         spawn-digest (:work/payload-ref w)
         executed-digest (task-digest executed-task)]
     {:spawn/digest spawn-digest
@@ -557,7 +546,7 @@
   run should read."
   [db child-id work-id]
   (if (some? work-id)
-    (let [w (work-store/fetch-work (db-spec db) work-id)]
+    (let [w (work-store/fetch-work (sqlite/db-spec db) work-id)]
       (when-not w
         (throw (err/error :store/work-not-found "child work not found" {:work/id work-id})))
       (when (not= child-id (:work/session-id w))
@@ -581,14 +570,14 @@
   :waiting) and throw :subagent/deadline-exceeded. Nil deadline is a no-op."
   [db child-work-id]
   (when child-work-id
-    (let [w (work-store/fetch-work (db-spec db) child-work-id)
+    (let [w (work-store/fetch-work (sqlite/db-spec db) child-work-id)
           deadline (:work/deadline w)]
       (when (and deadline (work-store/deadline-passed? deadline (java.util.Date.)))
         (let [state (:work/state w)]
           (try
             (cond
-              (= :queued state) (work-store/fail-work! (db-spec db) child-work-id {:error/type :subagent/deadline-exceeded})
-              (contains? #{:running :waiting} state) (work-store/timeout-work! (db-spec db) child-work-id)
+              (= :queued state) (work-store/fail-work! (sqlite/db-spec db) child-work-id {:error/type :subagent/deadline-exceeded})
+              (contains? #{:running :waiting} state) (work-store/timeout-work! (sqlite/db-spec db) child-work-id)
               :else nil)
             (catch Exception _ nil)))
         (throw (err/error :subagent/deadline-exceeded "child Work deadline has passed"
@@ -713,7 +702,7 @@
     (loop []
       (let [w (some-> (last (try (work-store/list-works db child-id)
                                  (catch Exception _ nil)))
-                      (#(try (work-store/fetch-work (db-spec db) (:work/id %))
+                      (#(try (work-store/fetch-work (sqlite/db-spec db) (:work/id %))
                              (catch Exception _ %))))]
         (cond
           (and w (contains? #{:succeeded :failed :cancelled :timed-out} (:work/state w))) w
@@ -733,7 +722,7 @@
   Work is missing, :subagent/task-not-found when no spawn event names this
   child session."
   [db work-id]
-  (let [spec (db-spec db)
+  (let [spec (sqlite/db-spec db)
         w (work-store/fetch-work spec work-id)]
     (when-not w
       (throw (err/error :store/work-not-found "no work with this id" {:work/id work-id})))
@@ -770,8 +759,8 @@
   ([db run-fn]
   (let [run-fn (or run-fn (fn [db parent-id child-id task work-id]
                             (run-subagent! db parent-id child-id task work-id)))]
-    (try (work-store/sweep-expired-deadlines! (db-spec db)) (catch Exception _ nil))
-    (let [queued (try (work-store/fetch-works-by-state (db-spec db) :queued)
+    (try (work-store/sweep-expired-deadlines! (sqlite/db-spec db)) (catch Exception _ nil))
+    (let [queued (try (work-store/fetch-works-by-state (sqlite/db-spec db) :queued)
                       (catch Exception _ []))]
     (into []
            (comp (filter #(= :subagent/run (:work/type %)))
@@ -864,7 +853,7 @@
   Returns the appended event."
   [db parent child-work-id terminal-event-id expected-state metadata]
   (let [parent-id (:session/id parent)
-        spec (db-spec db)]
+        spec (sqlite/db-spec db)]
     (sqlite/with-write-tx [conn spec]
       (let [row (first (sqlite/query-raw! conn "SELECT state FROM works WHERE id = ?" [(str child-work-id)]))
             state (:state row)]
@@ -919,7 +908,7 @@
     (throw (ex-info (str "invalid cas-ref: " cas-ref)
                     {:error/type :store/cas-invalid
                      :cas-ref cas-ref})))
-  (let [spec (db-spec db)
+  (let [spec (sqlite/db-spec db)
         child-work (work-store/fetch-work spec child-work-id)]
     (when-not child-work
       (throw (err/error :store/work-not-found "child work not found" {:work/id child-work-id})))
@@ -990,7 +979,7 @@
   ([db parent-session-id parent-work-id child-work-id terminal-event-id opts]
    (when (nil? db)
      (throw (ex-info "deliver-failure-for-works! requires a db/store handle" {:error/type :store/session-invalid})))
-   (let [spec (db-spec db)
+   (let [spec (sqlite/db-spec db)
          child-work (work-store/fetch-work spec child-work-id)]
      (when-not child-work
        (throw (err/error :store/work-not-found "child work not found" {:work/id child-work-id})))
@@ -1077,7 +1066,7 @@
                       {:error/type :subagent/not-found
                        :session/id child-id})))
     (let [child-work-id (resolve-child-work-id! db child-id nil)
-          child-work (when child-work-id (work-store/fetch-work (db-spec db) child-work-id))]
+          child-work (when child-work-id (work-store/fetch-work (sqlite/db-spec db) child-work-id))]
       (when-not (and child-work (= :succeeded (:work/state child-work)))
         (throw (ex-info (str "child not completed: " child-id " work=" (:work/state child-work))
                         {:error/type :subagent/not-completed
@@ -1117,7 +1106,7 @@
                       {:error/type :subagent/not-found
                        :session/id child-id})))
     (let [child-work-id (resolve-child-work-id! db child-id nil)
-          child-work (when child-work-id (work-store/fetch-work (db-spec db) child-work-id))]
+          child-work (when child-work-id (work-store/fetch-work (sqlite/db-spec db) child-work-id))]
       (when-not (and child-work (= :failed (:work/state child-work)))
         (throw (ex-info (str "child not failed: " child-id " work=" (:work/state child-work))
                         {:error/type :subagent/not-failed
@@ -1149,7 +1138,7 @@
   [:work/state _] [:error/type _]} for the run result's :delivery."
   [db parent-id child-id child-work-id]
   (try
-    (let [child-work (work-store/fetch-work (db-spec db) child-work-id)]
+    (let [child-work (work-store/fetch-work (sqlite/db-spec db) child-work-id)]
       (cond
         (nil? child-work)
         {:delivered false :reason :work-not-found :work/id child-work-id}
@@ -1323,7 +1312,7 @@
   (let [work-str (:work-id args)]
     (if (some? work-str)
       (let [wid (try (UUID/fromString (str work-str)) (catch Exception _ work-str))
-            w (try (work-store/fetch-work (db-spec db) wid) (catch Exception _ nil))]
+            w (try (work-store/fetch-work (sqlite/db-spec db) wid) (catch Exception _ nil))]
         (when-not w
           (throw (err/error :store/work-not-found "status Work handle names no row"
                             {:work/id work-str})))
@@ -1378,7 +1367,7 @@
                                    :target/session-id sid})))
               (cond-> {:found true
                        :session/id (:session/id sess)
-                       :state (some-> (last (work-store/list-works (db-spec db) (:session/id sess))) :work/state)
+                       :state (some-> (last (work-store/list-works (sqlite/db-spec db) (:session/id sess))) :work/state)
                        :phenotype/id (:phenotype/id sess)
                        :depth (try (subagent-depth db sid) (catch Exception _ nil))
                        :children (try (child-session-ids db sid) (catch Exception _ []))}
@@ -1394,7 +1383,7 @@
   (let [work-str (:work-id args)]
     (if (some? work-str)
       (let [wid (try (UUID/fromString (str work-str)) (catch Exception _ work-str))
-            w (try (work-store/fetch-work (db-spec db) wid) (catch Exception _ nil))]
+            w (try (work-store/fetch-work (sqlite/db-spec db) wid) (catch Exception _ nil))]
         (when-not w
           (throw (err/error :store/work-not-found "cancel Work handle names no row"
                             {:work/id work-str})))
