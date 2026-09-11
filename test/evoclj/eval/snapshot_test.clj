@@ -1,5 +1,6 @@
 (ns evoclj.eval.snapshot-test
   (:require [clojure.test :refer [deftest is testing]]
+            [evoclj.compiler.core :as compiler-core]
             [evoclj.eval.snapshot :as snap]
             [evoclj.environment.fake :as fake]
             [evoclj.environment.registry :as reg]
@@ -104,12 +105,12 @@
     (let [abi {:kernel 1 :genome 1 :intent 1 :tool 1}
           gid "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           rid "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          program (snap/code-id abi gid rid)
+          program (compiler-core/code-id abi gid rid)
           descriptor {:kernel/abi abi
                       :kernel/build :kernel/build-unresolved
                       :interpreter/build "sci-0.15.58"
                       :adapter/builds {:planner "1"}}
-          same-program (snap/code-id abi gid rid)
+          same-program (compiler-core/code-id abi gid rid)
           runtime-a (snap/runtime-image-id program descriptor)
           runtime-b (snap/runtime-image-id
                      same-program
@@ -122,5 +123,5 @@
     (let [abi {:kernel 1 :genome 1 :intent 1 :tool 1}
           gid "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           rid "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
-      (is (= (snap/code-id abi gid rid) (snap/phenotype-id abi gid rid)))
-      (is (= (snap/code-id abi gid rid) (snap/code-image-id abi gid rid))))))
+      (is (= (compiler-core/code-id abi gid rid)
+             (snap/phenotype-id abi gid rid))))))

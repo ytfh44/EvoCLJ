@@ -82,14 +82,21 @@
       (is (types/execution-id? (:execution/id ph-a2))))
     (testing "eval snapshot exposes matching code-id and deployment-id helpers"
       (is (= code-id
-             (snapshot/code-id (:abi compiled) (:code/genome-id compiled) (:code/resolution-id compiled))))
+             (compiler-core/code-id (:abi compiled) (:code/genome-id compiled) (:code/resolution-id compiled))))
       (is (= (:deployment/id ph-a)
              (compiler-core/deployment-id code-id
                                          (:bindings deps-a)
                                          (get-in deps-a [:capabilities :leases])))))
     (testing "compile output verifiable: code/id is H(abi, genome, resolution)"
-      (let [expected (snapshot/code-id (:abi compiled) (:code/genome-id compiled) (:code/resolution-id compiled))]
-        (is (= expected (:code/id compiled)) "code/id verifiable via snapshot helper")))))
+      (let [expected (compiler-core/code-id (:abi compiled) (:code/genome-id compiled) (:code/resolution-id compiled))]
+        (is (= expected (:code/id compiled)) "code/id verifiable via snapshot helper")))
+    (testing "code-id is deterministic across insertion order at every depth (GC-6)"
+      (is (= (compiler-core/code-id
+              {:kernel 1 :genome 1 :intent 1 :tool 1 :nested {:a 2 :b 1}}
+              (:code/genome-id compiled) (:code/resolution-id compiled))
+             (compiler-core/code-id
+              {:nested {:b 1 :a 2} :tool 1 :intent 1 :genome 1 :kernel 1}
+              (:code/genome-id compiled) (:code/resolution-id compiled)))))))
 
 (deftest program-image-stable-across-kernel-implementation-change-while-runtime-image-differs
   (let [compiled (compiler-core/compile-genome (seed-loaded-genome) (fixture-catalog))

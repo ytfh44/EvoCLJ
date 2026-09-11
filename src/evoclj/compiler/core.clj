@@ -176,7 +176,7 @@
   [v]
   (pr-str (canonical-edn-value v)))
 
-(defn- code-id
+(defn code-id
   "The canonical ProgramImageId (historical name CodeImageId):
   sha256:<64 hex> over the canonical serialization of kernel-abi ||
   genome-id || resolution-id. Identifies the ABI-compatible program
