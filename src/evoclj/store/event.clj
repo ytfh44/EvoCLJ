@@ -79,7 +79,6 @@
             [evoclj.store.event-schema :as es]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
-           (java.time.format DateTimeFormatter)
            (java.util Date UUID)))
 
 (def root-event-types
@@ -103,19 +102,15 @@
 (defn- root-event? [type]
   (contains? root-event-types type))
 
-(def ^:private timestamp-fmt DateTimeFormatter/ISO_INSTANT)
-
-(defn- canonical-timestamp
+(defn- invalid-timestamp
+  "Build the typed failure for a :created-at that is not a Date,
+  Instant, or ISO-8601 string. The shared coercion + ISO formatting
+  lives in evoclj.store.sqlite/canonical-timestamp; only the error type
+  stays namespace-local."
   [ts]
-  (let [inst (cond
-               (nil? ts) (Instant/now)
-               (instance? Instant ts) ts
-               (instance? Date ts) (.toInstant ^Date ts)
-               (string? ts) (Instant/parse ts)
-               :else (throw (err/error :store/event-invalid
-                                       "created-at must be an inst, Instant, or ISO-8601 string"
-                                       {:created-at ts})))]
-    (.format timestamp-fmt inst)))
+  (err/error :store/event-invalid
+             "created-at must be an inst, Instant, or ISO-8601 string"
+             {:created-at ts}))
 
 (defn- type->db
   [t]
@@ -358,7 +353,7 @@
                                   WHERE session_id = ? AND event_seq = ?"
                                  [session-key (dec new-seq)])
                       first :event_hash)
-        ts (canonical-timestamp (:created-at event))
+        ts (sqlite/canonical-timestamp (:created-at event) invalid-timestamp)
         metadata (or (:metadata event) {})
         _ (when-not (edn-safe-metadata? metadata)
             (throw (err/error :store/event-invalid

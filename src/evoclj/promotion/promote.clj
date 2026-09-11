@@ -168,9 +168,7 @@
             [evoclj.store.event :as event]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
-            (java.time Instant)
-           (java.time.format DateTimeFormatter)
-           (java.util Date UUID)))
+           (java.util UUID)))
 
 ;; --- boundary validation ------------------------------------------------------
 
@@ -296,22 +294,15 @@
 
 ;; --- timestamps and ids -------------------------------------------------------
 
-(def ^:private timestamp-fmt DateTimeFormatter/ISO_INSTANT)
-
-(defn- canonical-timestamp
-  "Canonical ISO-8601 UTC string for a timestamp value (a
-  java.util.Date, java.time.Instant, or ISO-8601 string); nil means
-  now."
+(defn- invalid-timestamp
+  "Build the typed failure for a timestamp that is not a Date, Instant,
+  or ISO-8601 string. The shared coercion + ISO formatting lives in
+  evoclj.store.sqlite/canonical-timestamp; only the error type stays
+  namespace-local."
   [ts]
-  (let [inst (cond
-               (nil? ts) (Instant/now)
-               (instance? Instant ts) ts
-               (instance? Date ts) (.toInstant ^Date ts)
-               (string? ts) (Instant/parse ts)
-               :else (throw (err/error :promotion/invalid
-                                       "timestamp must be an inst, Instant, or ISO-8601 string"
-                                       {:timestamp ts})))]
-    (.format timestamp-fmt inst)))
+  (err/error :promotion/invalid
+             "timestamp must be an inst, Instant, or ISO-8601 string"
+             {:timestamp ts}))
 
 (defn- new-generation-id
   "The stable id of the promoted generation, derived deterministically
@@ -780,7 +771,7 @@
         candidate-id (:candidate-id request)
         evaluation-id (:evaluation-id request)
         expected-parent (:expected-parent-generation request)
-        ts (canonical-timestamp nil)]
+        ts (sqlite/canonical-timestamp nil invalid-timestamp)]
     ;; THE PROMOTION TRANSACTION (the normative order; the outcome map
     ;; is returned, or a throw rolls back every write INCLUDING the event/outbox).
     (with-promotion-tx [conn db]
