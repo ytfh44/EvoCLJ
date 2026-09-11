@@ -66,7 +66,6 @@
             [evoclj.eval.replay :as replay]
             [evoclj.evolution.core :as evolution]
             [evoclj.genome.load :as load]
-            [evoclj.genome.path :as gpath]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.metrics.core :as f2]
             [evoclj.provider.fixture :as fixture]
@@ -165,17 +164,6 @@
                                      (make-array FileAttribute 0))
             (Files/copy p target (make-array java.nio.file.CopyOption 0))))))))
 
-(defn- genome-index-bytes
-  "The canonical CAS body of a loaded Genome — the exact serialization
-  of evoclj.genome.hash/tree-digest (path + NUL + digest + LF per
-  entry, sorted bytewise) whose SHA-256 is the genome's content
-  address."
-  [loaded]
-  (apply str
-         (map (fn [[p {:keys [digest]}]]
-                (str p "\u0000" digest "\n"))
-              (sort-by (fn [[p _]] p) gpath/bytewise-compare (:files loaded)))))
-
 (defn- program-sources [loaded compiled]
   (into {}
         (map (fn [[program-id descriptor]]
@@ -214,7 +202,7 @@
         resolution-id (:code/resolution-id compiled)
         cas-root (str state-dir "/cas")
         cas-store (cas/->cas cas-root)
-        genome-body (.getBytes (genome-index-bytes loaded)
+        genome-body (.getBytes (load/index-body loaded)
                                StandardCharsets/UTF_8)
         stored (:artifact/id (cas/put-bytes! cas-store genome-body {}))]
     (when-not (= stored genome-id)
@@ -543,27 +531,6 @@
      :evaluation/id (:evaluation/id evaluation)
      :eligibility (:eligibility evaluation)}))
 
-(defn- compiled-resolution-id
-  "The compiled ResolutionId of a candidate Genome bundle (compilation
-  is the host's job — promote! never compiles)."
-  [bundle-root]
-  (:code/resolution-id
-   (compiler/compile-genome (cli-session/load-genome-for-execution bundle-root)
-                            cli-session/provider-catalog)))
-
-(defn- store-candidate-genome-body!
-  "Host bookkeeping the promotion phase requires: persist the
-  candidate Genome's canonical body into the CAS under its content
-  address so promote!'s integrity re-hash (Database Invariant 7)
-  passes."
-  [opts system genome-id]
-  (cas/put-bytes! (cli-session/cas-of system)
-                  (.getBytes (genome-index-bytes
-                              (cli-session/load-genome-for-execution
-                               (cli-session/resolve-bundle-root opts genome-id)))
-                             StandardCharsets/UTF_8)
-                  {}))
-
 (defn- promote-one
   "PROMOTE one eligible candidate through promotion.promote/promote!
   (the atomic CURRENT compare-and-set — Global Constraint 15)."
@@ -574,9 +541,10 @@
         op-session (cli-session/operator-session! opts system parent-gen-id)
         candidate-root (cli-session/candidate-bundle-root
                         opts (:candidate/genome-id c))
-        _ (store-candidate-genome-body! opts system (:candidate/genome-id c))
+        _ (cli-session/store-candidate-genome-body! opts system
+                                                   (:candidate/genome-id c))
         promotion-system {:store store
-                          :resolution/id (compiled-resolution-id candidate-root)
+                          :resolution/id (cli-session/compiled-resolution-id candidate-root)
                           :candidate/root candidate-root
                           :event/session-id op-session}
         result (promote/promote! promotion-system

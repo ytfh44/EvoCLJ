@@ -339,6 +339,14 @@
                  [path (file-value path ba)])))
         walked))
 
+(defn- files->entries
+  "The canonical hash entries ({:path p :digest d}) of a loaded :files
+  map — the input shape evoclj.genome.hash/tree-digest and
+  /index-body consume. The :files keys are already canonical relative
+  paths, so no further normalization happens here."
+  [files]
+  (mapv (fn [[p {:keys [digest]}]] {:path p :digest digest}) files))
+
 ;; --- public entry point -----------------------------------------------------
 
 (defn load-genome
@@ -381,11 +389,20 @@
          walked-paths (into #{} (map :path) walked)
          _ (check-declared-modules! root manifest walked-paths)
          files (build-files walked (declared-parse-paths manifest))
-         id (hash/tree-digest (mapv (fn [[p {:keys [digest]}]]
-                                      {:path p :digest digest})
-                                    files))]
+         id (hash/tree-digest (files->entries files))]
      (verify-trust-anchors! anchors id)
      {:genome/id id
       :genome/root root
       :manifest manifest
       :files files})))
+
+ (defn index-body
+   "The canonical Genome index body of a loaded Genome: the exact bytes
+   whose SHA-256 is :genome/id (evoclj.genome.hash/index-body). This is
+   the body a host stores under the Genome's content address in the CAS
+   — the body promote!'s integrity re-hash reads back (Database
+   Invariant 7). Delegates to the hash namespace's single index
+   construction so the persisted body and the content address can never
+   diverge."
+   [loaded]
+   (hash/index-body (files->entries (:files loaded))))

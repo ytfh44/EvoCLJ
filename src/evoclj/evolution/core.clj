@@ -131,7 +131,6 @@
             [evoclj.evolution.mutation :as mutation]
             [evoclj.genome.load :as load]
             [evoclj.genome.patch :as patch]
-            [evoclj.genome.path :as genome-path]
             [evoclj.kernel.error :as err]
             [evoclj.store.cas :as cas]
             [evoclj.store.existence :as existence]
@@ -435,15 +434,6 @@
   (.resolve (Path/of (str (:candidates-dir system)) (make-array String 0))
             (str/replace genome-id ":" "-")))
 
-(defn- genome-index-body
-  "The canonical Genome CAS body: path + NUL + digest + LF for every
-  file, ordered by the same bytewise path comparator as tree-digest."
-  [loaded]
-  (apply str
-         (map (fn [[path {:keys [digest]}]]
-                (str path "\u0000" digest "\n"))
-              (sort-by first genome-path/bytewise-compare (:files loaded)))))
-
 (defn- register-artifact!
   "Register an already content-addressed artifact in the SQLite catalog
   so the durable FK can prove the same existence as the CAS."
@@ -460,7 +450,7 @@
   digest in SQLite, and return a VerifiedDigest proof."
   [system loaded]
   (let [cas-store (:cas (:store system))
-        body (.getBytes (genome-index-body loaded) StandardCharsets/UTF_8)
+        body (.getBytes (load/index-body loaded) StandardCharsets/UTF_8)
         stored (:artifact/id (cas/put-bytes! cas-store body {}))
         expected (:genome/id loaded)]
     (when-not (= stored expected)

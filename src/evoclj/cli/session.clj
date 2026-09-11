@@ -54,7 +54,6 @@
             [evoclj.kernel.system :as kernel]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.genome.load :as load]
-            [evoclj.genome.path :as genome-path]
             [evoclj.provider.mcp-bridge :as mcp-bridge]
             [evoclj.provider.protocol :as proto]
             [evoclj.provider.registry :as registry]
@@ -512,13 +511,29 @@
 ;; compiled identity + operator sessions
 ;; ============================================================================
 
-(defn- genome-index-body
-  "Return the canonical Genome index bytes for one loaded bundle."
-  [loaded]
-  (apply str
-         (map (fn [[path {:keys [digest]}]]
-                (str path "\u0000" digest "\n"))
-              (sort-by first genome-path/bytewise-compare (:files loaded)))))
+(defn compiled-resolution-id
+  "The compiled ResolutionId of a candidate Genome bundle (compilation
+  is the host's job — promote! never compiles). THE definition: the
+  CLI's promote, cycle, and loop paths all delegate here."
+  [bundle-root]
+  (:code/resolution-id
+   (compiler/compile-genome (load-genome-for-execution bundle-root)
+                            provider-catalog)))
+
+(defn store-candidate-genome-body!
+  "Host bookkeeping the promotion phase requires: persist the candidate
+  Genome's canonical body (evoclj.genome.load/index-body) into the CAS
+  under its content address so promote!'s integrity re-hash (Database
+  Invariant 7) passes. Standalone `promote` assumes an operator already
+  provisioned this; cycle, as the self-contained orchestrator, ensures
+  it before promoting."
+  [opts system genome-id]
+  (cas/put-bytes! (cas-of system)
+                  (.getBytes (load/index-body
+                              (load-genome-for-execution
+                               (resolve-bundle-root opts genome-id)))
+                             StandardCharsets/UTF_8)
+                  {}))
 
 (defn ensure-identity-artifacts!
   "Register compiled identity rows only after the Genome's canonical
@@ -532,7 +547,7 @@
    (let [db (db-of system)
          genome-id (:genome/id identity)]
      (if loaded
-       (let [body (.getBytes (genome-index-body loaded)
+       (let [body (.getBytes (load/index-body loaded)
                              StandardCharsets/UTF_8)
              stored (:artifact/id (cas/put-bytes! (cas-of system) body {}))]
          (when-not (= stored genome-id)

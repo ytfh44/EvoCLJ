@@ -74,7 +74,6 @@
             [evoclj.compiler.core :as compiler]
             [evoclj.compiler.resolution :as resolution]
             [evoclj.genome.load :as load]
-            [evoclj.genome.path :as genome-path]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
             [evoclj.provider.registry :as registry]
@@ -224,14 +223,6 @@
      :constraints {:max-calls 10000}
      :issued-at now
      :expires-at expires}))
-(defn- genome-index-body
-  "Return the canonical Genome index body whose digest is the loaded
-  Genome's :genome/id."
-  [loaded]
-  (apply str
-         (map (fn [[path {:keys [digest]}]]
-                (str path "\u0000" digest "\n"))
-              (sort-by first genome-path/bytewise-compare (:files loaded)))))
 
 (defn- program-identity
   "The ProgramImage triple off a compile-genome result, tolerant of the
@@ -291,7 +282,7 @@
   (let [db (:sqlite stores)
         cas-store (:cas stores)
         genome-id (:genome/id (program-identity compiled))
-        genome-body (.getBytes (genome-index-body loaded) StandardCharsets/UTF_8)
+        genome-body (.getBytes (load/index-body loaded) StandardCharsets/UTF_8)
         stored (:artifact/id (cas/put-bytes! cas-store genome-body {}))
         _ (when-not (= stored genome-id)
             (throw (err/error :eval/paired-genome-mismatch
