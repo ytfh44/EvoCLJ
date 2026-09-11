@@ -1,6 +1,6 @@
 (ns evoclj.context.provenance-test
   (:require [clojure.test :refer [deftest is testing]]
-            [evoclj.context.provenance :as prov]))
+            [evoclj.context.compression.provenance :as prov]))
 
 ;; ----------------------------------------------------------------------
 ;; make-source validation

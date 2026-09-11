@@ -1,6 +1,6 @@
 (ns evoclj.context.registry-test
   (:require [clojure.test :as t]
-            [evoclj.context.registry :as registry]))
+            [evoclj.context.compression.registry :as registry]))
 
 ;; ---------------------------------------------------------------------------
 ;; Test archiver
