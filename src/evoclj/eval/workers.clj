@@ -39,11 +39,9 @@
   :bad-concurrency :bad-timeout :runner-not-a-fn]."
 
   (:require [evoclj.eval.runner :as runner]
-            [evoclj.eval.worker-transport :as wt]
             [evoclj.kernel.error :as err])
   (:import (java.util.concurrent Callable CancellationException Executors
-                                  Future TimeUnit TimeoutException)
-           [evoclj.eval.worker_transport LocalWorkerTransport]))
+                                  Future TimeUnit TimeoutException)))
 
 ;; --- the task contract -------------------------------------------------------
 
@@ -114,13 +112,6 @@
   (when-not (fn? task-runner)
     (bad! :runner-not-a-fn))
   task-runner)
-
-(defn validate-tasks
-  "Public wrapper around validate-tasks!. Returns the validated tasks
-  vectorized with :task/index set to each task's original position.
-  Throws :eval/workers-invalid on malformed input."
-  [tasks]
-  (validate-tasks! tasks))
 
 ;; --- per-task result construction ---------------------------------------------
 
@@ -361,46 +352,6 @@
                                         1000000))}})
       (finally
         (.shutdownNow pool)))))
-
-;; --- distributed transport batch ------------------------------------------------
-
-(defn run-batch-with-transport!
-  "Execute a batch of tasks against a WorkerTransport.
-
-  For LocalWorkerTransport, delegates to run-batch! using the transport's
-  task-runner (preserving bounded concurrency, per-task timeout, early
-  exit, and error isolation). For other transports, submits each task
-  individually via submit-task and collects results into the standard
-  batch result map."
-  [transport tasks opts]
-  (if (instance? LocalWorkerTransport transport)
-    (run-batch! (:task-runner transport) tasks opts)
-    (let [tasks (validate-tasks tasks)
-          total (count tasks)
-          completed (atom [])
-          failed (atom [])]
-      (doseq [task tasks]
-        (let [result (wt/submit-task transport task)]
-          (case (:status result)
-            :completed (swap! completed conj {:task/index (:task/index task)
-                                               :task/id (:task/id task)
-                                               :task/result (:task/result result)})
-            :failed (swap! failed conj {:task/index (:task/index task)
-                                         :task/id (:task/id task)
-                                         :error/type (:error/type result)
-                                         :error/message (:error/message result)
-                                         :error/data (or (:error/data result) {})})
-            (swap! completed conj {:task/index (:task/index task)
-                                   :task/id (:task/id task)
-                                   :task/result result}))))
-      {:batch/completed (sort-by :task/index @completed)
-       :batch/failed (sort-by :task/index @failed)
-       :batch/cancelled []
-       :batch/stats {:total total
-                      :ok (count @completed)
-                      :failed (count @failed)
-                      :cancelled 0
-                      :wall-ms 0}})))
 
 ;; --- side-task-runner adapter ----------------------------------------------------
 
