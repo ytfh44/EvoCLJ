@@ -537,6 +537,15 @@
                               (catch Exception t
                                 {:candidate/id cid :error (error-data t)}))))
                         pending)
+            ;; NOTE: evaluate-candidate! always returns a VALIDATED
+            ;; Evaluation whose schema requires BOTH :summary and
+            ;; :eligibility, with :eligible? a strict boolean; a failed eval
+            ;; carries neither. So this filter and make-generation-runner's
+            ;; (:summary, then truthy :eligible?) select the SAME passing
+            ;; set on every input. They are nonetheless NOT swappable:
+            ;; this entry projects to :candidate/id/:evaluation/id/
+            ;; :eligibility only, so :summary-based filtering here would
+            ;; drop every passing candidate.
             passing (filterv #(and (contains? % :eligibility)
                                    (true? (get-in % [:eligibility :eligible?])))
                              evals)
