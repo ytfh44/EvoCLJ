@@ -1,6 +1,6 @@
 (ns evoclj.store.invariant-test
   (:require [clojure.edn :as edn]
-            [clojure.test :refer [deftest is use-fixtures]]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.eval.static :as static]
             [evoclj.evolution.invariant :as evolution]
             [evoclj.store.artifact :as artifact]
@@ -34,7 +34,12 @@
   {:proposal/id "p1" :proposer "owner" :scope :runtime :risk :low :version 1
    :registry/revision (static/registry-revision) :predicate (base-predicate)
    :evidence/refs [e] :replay/refs [r] :adversarial/refs [a]})
-(defn- setup-approved []
+(defn- error-type
+  "The :error/type carried by the ExceptionInfo thrown by thunk, or nil."
+  [thunk]
+  (try (thunk) nil
+       (catch clojure.lang.ExceptionInfo e (:error/type (ex-data e)))))
+(defn- approved-store-and-refs []
   (let [s (fresh-store)
         e (proof! s {:evidence :input})
         d (proof! s {:details :g3})
@@ -51,7 +56,8 @@
     (invariant-store/append-run! s (:proposal/id p) {:run/id "r" :kind :replay :result/ref r})
     (invariant-store/append-run! s (:proposal/id p) {:run/id "a" :kind :adversarial :result/ref a})
     (invariant-store/approve! s "p1" "reviewer" {:replay/ref r :adversarial/ref a})
-    s))
+    {:store s :replay r :adversarial a}))
+(defn- setup-approved [] (:store (approved-store-and-refs)))
 
 (deftest raw-and-forged-references-cannot-persist
   (let [s (fresh-store)]
@@ -88,6 +94,34 @@
     (is (thrown? clojure.lang.ExceptionInfo (invariant-store/approve! s "p1" "reviewer" {})))
     (is (invariant-store/reject! s "p1" "reviewer" "no"))
     (is (= 1 (count-rows s "invariant_decisions")))))
+(deftest repeated-identical-decisions-return-the-existing-row
+  (testing "a repeated identical approval is idempotent and returns the stored row"
+    (let [{:keys [store replay adversarial]} (approved-store-and-refs)
+          row (first (sqlite/query (:sqlite store) ["SELECT * FROM invariant_decisions WHERE proposal_id = 'p1'"]))
+          again (invariant-store/approve! store "p1" "reviewer" {:replay/ref replay :adversarial/ref adversarial})]
+      (is (= 1 (count-rows store "invariant_decisions")))
+      (is (= (:id row) (:id again)))
+      (is (= (:decision_digest row) (:decision_digest again)))))
+  (testing "a repeated identical rejection is idempotent and returns the existing decision"
+    (let [s (fresh-store) e (proof! s {}) r (proof! s {}) a (proof! s {})]
+      (invariant-store/propose! s (proposal e r a))
+      (invariant-store/reject! s "p1" "reviewer" "no")
+      (let [row (first (sqlite/query (:sqlite s) ["SELECT * FROM invariant_decisions WHERE proposal_id = 'p1'"]))
+            again (invariant-store/reject! s "p1" "reviewer" "no")]
+        (is (= 1 (count-rows s "invariant_decisions")))
+        (is (= (:id row) (:decision/id again)))
+        (is (= (:decision_digest row) (:decision/digest again)))))))
+(deftest a-different-decision-on-a-decided-proposal-fails-closed
+  (testing "a second approval with different inputs is a typed conflict"
+    (let [{:keys [store replay adversarial]} (approved-store-and-refs)]
+      (is (= :invariant/decision-conflict
+             (error-type #(invariant-store/approve! store "p1" "reviewer2" {:replay/ref replay :adversarial/ref adversarial}))))
+      (is (= 1 (count-rows store "invariant_decisions")))))
+  (testing "rejecting an already-approved proposal is a typed conflict"
+    (let [store (setup-approved)]
+      (is (= :invariant/decision-conflict
+             (error-type #(invariant-store/reject! store "p1" "reviewer" "changed my mind"))))
+      (is (= 1 (count-rows store "invariant_decisions"))))))
 (deftest publication-requires-opaque-durable-proof
   (let [d {:invariant/id "x" :version 1 :predicate {:predicate/type :kernel-rule :rule/id :x} :registry/revision (static/registry-revision) :activation/committed? true}]
     (is (thrown? clojure.lang.ExceptionInfo (static/publish-active-invariant! d)))))
