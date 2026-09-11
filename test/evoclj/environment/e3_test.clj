@@ -31,9 +31,9 @@
 
    All tests drive the REAL production components (evoclj.environment.bundle,
    evoclj.environment.registry/refresh!) — the custom LiveSource records
-   below carry \"FakeSource\" in their class names solely to satisfy the
-   registry's register-source! class allowlist; they are NOT fn-injection
-   hooks into production code."
+   below satisfy register-source!'s LiveSource protocol boundary and are
+   driven through the real production path; they are NOT fn-injection hooks
+   into production code."
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.environment.fake :as fake]
             [evoclj.environment.surface :as surf]
@@ -83,7 +83,7 @@
        (catch clojure.lang.ExceptionInfo e (ex-data e))))
 
 ;; Real LiveSource whose projector binds a FIXED surface id (for ownership
-;; duels) — class name satisfies register-source!'s allowlist.
+;; duels) — it passes register-source!'s LiveSource protocol boundary.
 (defrecord FakeSourceFixedSurface [source-id state surface-id]
   src/LiveSource
   (snapshot! [this]

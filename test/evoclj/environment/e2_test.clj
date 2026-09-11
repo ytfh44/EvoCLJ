@@ -25,9 +25,9 @@
 
   The custom sources below are real evoclj.environment.source/LiveSource
   implementations driven through the production evoclj.environment.registry/
-  refresh! path. Their class names contain \"FakeSource\" so they pass the
-  registry's source-class allowlist (evoclj.environment.registry/
-  register-source!); they are NOT fn-injection hooks into production code."
+  refresh! path (register-source! admits them by satisfying the LiveSource
+  protocol, not by class name); they are NOT fn-injection hooks into
+  production code."
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.environment.fake :as fake]
             [evoclj.environment.surface :as surf]

@@ -44,8 +44,8 @@
   registry)
 
 ;; A real LiveSource that emits a NEW surface-id per revision, so an old
-;; surface becomes orphaned (proving gc! reclaims surfaces too). Class name
-;; satisfies register-source!'s allowlist.
+;; surface becomes orphaned (proving gc! reclaims surfaces too). It passes
+;; register-source!'s LiveSource protocol boundary.
 (defrecord FakeSourceNewSurface [source-id state]
   src/LiveSource
   (snapshot! [this]
