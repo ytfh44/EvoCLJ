@@ -7,8 +7,7 @@
   so a live registry refresh does not create a treatment-effect
   difference between sides. The environment identity belongs to the
   experiment condition and never participates in phenotype hashing."
-  (:require [evoclj.compiler.core :as compiler-core]
-            [evoclj.environment.revision :as rev]
+  (:require [evoclj.environment.revision :as rev]
             [evoclj.environment.source :as src]
             [evoclj.genome.hash :as hash]))
 
@@ -107,25 +106,20 @@
   []
   (java.util.UUID/randomUUID))
 
-;; Legacy alias for backwards compat — RETAINED (decision): still called by
-;; test/evoclj/eval/snapshot_test.clj and test/evoclj/acceptance/unified_test.clj,
-;; so removal is unsafe. Delegates to the compiler's single-source code-id; it
-;; names the ProgramImage, nothing more.
-(defn phenotype-id
-  "Deprecated alias for evoclj.compiler.core/code-id — the ProgramImage:
-  H(kernel ABI, Genome, Resolution). Program identity ONLY, never execution
-  semantics; I1 prefers code-id/code-image-id."
-  [abi genome-id resolution-id]
-  (compiler-core/code-id abi genome-id resolution-id))
-
 ;; --- RuntimeImage + ExecutionEnvironment mirror --------------------------------
-;; Mirrors evoclj.compiler.core/runtime-image-id and
-;; evoclj.compiler.resolution/execution-environment so eval-side helpers stay
-;; usable without pulling the compiler into every eval namespace. The
-;; runtime-image-id formula MUST stay byte-identical to the compiler's: both
-;; canonicalize the descriptor with sorted maps and hash
-;; (canonical-descriptor || program-image-id). A mirror-consistency test
-;; pins the equality.
+;; These eval-side mirrors exist because eval call sites need them, and their
+;; formulas MUST stay byte-identical to the compiler's — a difference would
+;; silently split eval-side identity from compiler-side identity. Each mirrors
+;; one compiler function: runtime-image-id mirrors
+;; evoclj.compiler.core/runtime-image-id and return-fingerprint mirrors
+;; evoclj.compiler.resolution/return-fingerprint. Both canonicalize before
+;; hashing (the descriptor with sorted maps; the program-image-id and the
+;; returned bytes appended verbatim).
+;;
+;; A mirror-consistency test pins the runtime-image-id equality
+;; (test/evoclj/compiler/deployment_identity_test.clj,
+;; snapshot-runtime-image-mirror-matches-compiler-formula); no equivalent test
+;; pins return-fingerprint against the compiler's formula.
 
 (defn runtime-image-id
   "Mirror of evoclj.compiler.core/runtime-image-id: the RuntimeImageId over
