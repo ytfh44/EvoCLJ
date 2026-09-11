@@ -1,12 +1,12 @@
 (ns evoclj.context.loop-test
   (:require [clojure.test :as t]
             [clojure.string :as str]
-            [evoclj.context.loop :as loop]
+            [evoclj.context.compression.loop :as loop]
             [evoclj.context.compression.envelope :as envelope]
             [evoclj.context.compression.compacter :as compacter]
             [evoclj.context.compression.apply :as apply]
             [evoclj.context.compression.idempotency :as idempotency]
-            [evoclj.context.registry :as registry]))
+            [evoclj.context.compression.registry :as registry]))
 
 ;; ---------------------------------------------------------------------------
 ;; Fixtures

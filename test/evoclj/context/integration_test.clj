@@ -4,12 +4,12 @@
             [evoclj.context.compression.compacter :as compacter]
             [evoclj.context.compression.apply :as apply]
             [evoclj.context.compression.envelope :as envelope]
-            [evoclj.context.loop :as loop]
+            [evoclj.context.compression.loop :as loop]
             [evoclj.context.compression.eval :as eval]
             [evoclj.context.compression.archivers :as archivers]
-            [evoclj.context.registry :as registry]
-            [evoclj.context.token-estimator :as token-estimator]
-            [evoclj.context.trigger :as trigger]))
+            [evoclj.context.compression.registry :as registry]
+            [evoclj.context.compression.token-estimator :as token-estimator]
+            [evoclj.context.compression.trigger :as trigger]))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers

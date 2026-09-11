@@ -3,7 +3,7 @@
             [clojure.string :as str]
             [evoclj.context.compression.compacter :as compacter]
             [evoclj.context.compression.envelope :as envelope]
-            [evoclj.context.registry :as registry]
+            [evoclj.context.compression.registry :as registry]
             [evoclj.context.compression.footer :as footer]
             [evoclj.context.compression.crosscheck :as crosscheck]
             [evoclj.context.compression.eval :as eval]))
