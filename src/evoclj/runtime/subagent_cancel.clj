@@ -179,8 +179,7 @@
       ;;    on the immediate parent chain, sequenced inside the same tx
       (doseq [tid targets]
         (let [sess (get sessions tid)
-              last-id (:id (last (sqlite/query-raw! conn "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq"
-                                                    [(str tid)])))
+              last-id (event/latest-event-id-on-conn conn tid)
               edge-reason (if (= tid direct-id) reason :parent-cancel)
               edge-parent (if (= tid direct-id) parent-id (get link-parent tid))]
           (when (and sess last-id)
@@ -194,8 +193,7 @@
               (event/append-event-on-conn! conn req)))
           (when (and edge-parent (get sessions edge-parent))
             (let [psess (get sessions edge-parent)
-                  plast-id (:id (last (sqlite/query-raw! conn "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq"
-                                                         [(str edge-parent)])))]
+                  plast-id (event/latest-event-id-on-conn conn edge-parent)]
               (when (and psess plast-id)
                 (let [req {:session/id edge-parent
                            :generation/id (:generation/id psess)

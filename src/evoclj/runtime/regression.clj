@@ -266,9 +266,7 @@
   (let [sess (first (sqlite/query store
                                   ["SELECT generation_id, phenotype_id, resolution_id FROM sessions WHERE id = ?"
                                    session-key]))
-        newest (first (sqlite/query store
-                                    ["SELECT MAX(id) AS id FROM events WHERE session_id = ?"
-                                     session-key]))]
+        tip (event/latest-event-id store session-key)]
     (when-not sess
       (throw (err/error :store/session-not-found
                         "cannot anchor the regression audit event to an unknown session"
@@ -276,7 +274,7 @@
     {:generation/id (:generation_id sess)
      :phenotype/id (:phenotype_id sess)
      :resolution/id (:resolution_id sess)
-     :prev/event-id (:id newest)}))
+     :prev/event-id tip}))
 
 (defn- alert-handler
   "The :monitor/alert-regression handler: append ONE audit event

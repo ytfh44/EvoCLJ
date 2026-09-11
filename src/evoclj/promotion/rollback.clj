@@ -288,10 +288,8 @@
       (throw (err/error :store/session-not-found
                         "cannot anchor the rollback event to an unknown operator session"
                         {:session/id session-id})))
-    (let [newest (first (raw-query conn
-                                   "SELECT MAX(id) AS id FROM events WHERE session_id = ?"
-                                   [key]))]
-      (when (nil? (:id newest))
+    (let [tip (event/latest-event-id-on-conn conn key)]
+      (when (nil? tip)
         (throw (err/error :promotion/event-anchor-missing
                           "the operator session must carry its :session/created root event first"
                           {:session/id session-id})))
@@ -344,9 +342,7 @@
   (let [sess (first (sqlite/query db
                                   ["SELECT generation_id, phenotype_id FROM sessions WHERE id = ?"
                                    session-key]))
-        newest (first (sqlite/query db
-                                    ["SELECT MAX(id) AS id FROM events WHERE session_id = ?"
-                                     session-key]))]
+        tip (event/latest-event-id db session-key)]
     (when-not sess
       (throw (err/error :store/session-not-found
                         "cannot anchor the rollback event to an unknown operator session"
@@ -356,7 +352,7 @@
                           :generation/id (:generation_id sess)
                           :phenotype/id (:phenotype_id sess)
                           :event/type :promotion/rollback
-                          :prev/event-id (:id newest)
+                          :prev/event-id tip
                           :payload-ref nil
                           :metadata {:from (:from result)
                                      :to (:to result)

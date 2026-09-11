@@ -335,6 +335,31 @@
       (is (= [1] (mapv :event/seq (event/events-by-type db sid :session/created))))
       (is (= [] (event/events-by-type db sid :node/started))))))
 
+(deftest latest-event-id-is-the-session-tip
+  (let [db (fresh-db)
+        sid (seed-session! db)
+        other (seed-session! db)]
+    (testing "a session with no events has no tip"
+      (is (nil? (event/latest-event-id db sid)))
+      (sqlite/with-db [spec db]
+        (is (nil? (event/latest-event-id-on-conn (:connection spec) sid)))))
+    (testing "the tip is the LAST event appended, not the first"
+      (let [root (event/append-event! db (base-event sid {:event/type :session/created}))
+            _ (is (= (:event/id root) (event/latest-event-id db sid)))
+            e2 (event/append-event! db (base-event sid {:prev/event-id (:event/id root)}))
+            _ (is (= (:event/id e2) (event/latest-event-id db sid)))
+            e3 (event/append-event! db (base-event sid {:prev/event-id (:event/id e2)}))]
+        (is (= (:event/id e3) (event/latest-event-id db sid)))
+        (is (= 3 (:event/seq (event/get-event-by-id db (event/latest-event-id db sid)))))))
+    (testing "another session's tip does not leak into this session's"
+      (let [other-root (event/append-event! db (base-event other {:event/type :session/created}))]
+        (is (= 3 (:event/seq (event/get-event-by-id db (event/latest-event-id db sid)))))
+        (is (= (:event/id other-root) (event/latest-event-id db other)))))
+    (testing "the conn arity reports the same tip as the spec arity"
+      (sqlite/with-db [spec db]
+        (is (= (event/latest-event-id db sid)
+               (event/latest-event-id-on-conn (:connection spec) sid)))))))
+
 ;; ============================================================================
 ;; Step 5 — hash-chain tamper evidence
 ;; ============================================================================
