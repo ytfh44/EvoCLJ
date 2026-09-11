@@ -142,17 +142,6 @@
 (def environment-registry-key :environment/registry)
 (def skill-source-key :skill/source)
 
-(def host-component-keys
-  "The normative Integrant-owned host component set (component plus
-   post-v0 extension 1: the models.dev catalog and the model registry,
-   plus the WO-M5 MCP manager pool and the WO-E6 dynamic environment
-   host: the EnvironmentRegistry component and the SkillSource switch).
-   Genome graph nodes are NOT in this set."
-  [store-sqlite-key store-cas-key provider-registry-key
-   capability-broker-key runtime-executor-key evolution-system-key
-   eval-system-key promotion-system-key modelsdev-catalog-key
-   model-registry-key environment-registry-key skill-source-key])
-
 ;; --- path resolution ---------------------------------------------------------
 
 (defn- resolve-config-path

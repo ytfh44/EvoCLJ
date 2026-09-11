@@ -1138,8 +1138,3 @@
                                            :error/rollback-failure (err/error-data (::rollback-failure unwound))}))))
                     (recur (rest pending) (conj undos undo))))))]
         (publish-all bundles [])))))
-
-(defn restore-active-bindings!
-  "Alias for restore!."
-  [db session-id opts]
-  (restore! db session-id opts))

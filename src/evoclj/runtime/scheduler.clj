@@ -861,10 +861,9 @@
                                      (put-payload! executor task-input)
                                      {:entry entry :work/id work-id})
             outcome
-            ;; W2: Work's running is execution; future is only internal await.
-            ;; Synchronous walk, but an internal future is awaited to prove no bare Future shadows Work.
-            (do @(future :work-await-internal)
-                (loop [node-id entry
+            ;; W2: Work's running is execution; synchronous walk with no
+            ;; bare Future shadowing Work.
+            (loop [node-id entry
                        input-event {:event/id (:event/id started)
                                     :event/type :session/started
                                     :payload task-input}
@@ -995,7 +994,7 @@
                                                    {:error/type :scheduler/dangling-run
                                                     :error/message "a :continue transition carries no successor"
                                                     :node/id node-id}
-                                                   outputs))))))))))))))]
+                                                   outputs)))))))))))))]
           ;; Structured concurrency: the session's Work just reached terminal
           ;; (completed/failed/timed-out — every outcome above is terminal),
           ;; so live children must not outlive it. Best-effort cascade-cancel

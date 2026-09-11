@@ -47,9 +47,6 @@
                         ["SELECT * FROM capability_budgets WHERE id = ?"
                          (str budget-id)]))))
 
-(defn snapshot [db budget-id]
-  (get-budget db budget-id))
-
 (defn budget-for-lease [db lease-id]
   "Return the active allocation attached to a capability lease."
   (row->budget

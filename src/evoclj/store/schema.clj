@@ -131,24 +131,3 @@
                            "resolved schema is not a valid Malli schema"
                            {:reason :invalid-schema
                             :value (err/sanitize s)})))))
-
-;; --- Capabilities store re-export (P7) ---------------------------------------
-;; Additive persistence layer for CapabilityLease (migration 013).
-;; Helpers are owned by evoclj.store.capability-store; re-exported here so the
-;; central schema file remains a single discovery point without duplicating.
-
-(def insert-capability!
-  "Re-export of evoclj.store.capability-store/insert-capability!."
-  cap-store/insert-capability!)
-
-(def fetch-capability
-  "Re-export of evoclj.store.capability-store/fetch-capability."
-  cap-store/fetch-capability)
-
-(def revoke-capability!
-  "Re-export of evoclj.store.capability-store/revoke-capability!."
-  cap-store/revoke-capability!)
-
-(def list-capabilities
-  "Re-export of evoclj.store.capability-store/list-capabilities."
-  cap-store/list-capabilities)
