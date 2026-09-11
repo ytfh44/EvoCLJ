@@ -10,7 +10,7 @@
 
   The registry is a deftype holding an immutable key/validate pair and a
   single atom (described as {:descriptors map, :sealed? bool}) behind a
-  private secret (mirrors S4/S5 sealed handles and evoclj.broker.registry).
+  private secret (mirrors S4/S5 sealed handles).
   Mutation is reachable only through add!/remove!, which consult the sealed
   flag; seal-registry! is a one-way fold. Tests that need a custom descriptor
   build a SEPARATE (unsealed) registry via build-registry, rather than

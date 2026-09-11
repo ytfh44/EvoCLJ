@@ -1,14 +1,10 @@
 (ns evoclj.capability.capability-handle-test
-  "Fleet S5/S6: sealed handles and closed registry — arbitrary fn never accepted.
+  "Fleet S5: sealed handles — arbitrary fn never accepted.
 
-  Tests the S5 sealed CapabilityHandle / ActivationHandle and S6 closed
-  ResourceKindRegistry. This is the required test proving arbitrary fn is
-  not accepted as capability (DAG S5/S6)."
+  Tests the S5 sealed CapabilityHandle / ActivationHandle. This is the
+  required test proving arbitrary fn is not accepted as capability (DAG S5)."
   (:require [clojure.test :refer [deftest is testing]]
-            [evoclj.broker.registry :as reg]
             [evoclj.capability.core :as cap]
-            [evoclj.capability.broker :as broker]
-            [evoclj.intent.core :as intent]
             [evoclj.promotion.activation :as activation]))
 
 ;; --- S5: CapabilityHandle is sealed — arbitrary fn never accepted ------------
@@ -59,57 +55,3 @@
   (testing "make-activation-handle validates generation-id"
     (is (thrown? clojure.lang.ExceptionInfo (activation/make-activation-handle nil)))
     (is (thrown? clojure.lang.ExceptionInfo (activation/make-activation-handle 42)))))
-
-;; --- S6: Broker registry closed — explicit allowlist, not arbitrary keyword --
-
-(deftest broker-registry-is-closed
-  (testing "default registry is sealed and contains only allowlisted kinds"
-    (let [r (reg/default-registry)]
-      (is (reg/registry? r))
-      (is (= #{:tool :model :memory :filesystem :filesystem/path} reg/allowed-resource-kinds))
-      (doseq [k reg/allowed-resource-kinds]
-        (is (reg/registry-contains? r k)))))
-  (testing "make-registry rejects arbitrary keyword not in allowlist"
-    (is (thrown? clojure.lang.ExceptionInfo (reg/make-registry {:arbitrary/keyword [{:source :request :action-from :request}]})))
-    (try
-      (reg/make-registry {:evil/kind [{:source :request :action-from :request}]})
-      (catch clojure.lang.ExceptionInfo e
-        (is (= :registry/invalid-kind (:error/type (ex-data e)))))))
-  (testing "broker authorize rejects non-sealed registry (arbitrary map)"
-    (let [session-id #uuid "11111111-1111-4111-8111-111111111111"
-          phenotype "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-          intent (intent/tool-call session-id phenotype :node/tool 42 {:tool/id :fixture/echo :args {:text "hi"}} {:wall-ms 1000})
-          normalized {:tool/id :fixture/echo :resource {:kind :tool :id :fixture/echo}}]
-      (is (thrown? clojure.lang.ExceptionInfo
-                   (broker/authorize {:intent intent
-                                      :normalized-request normalized
-                                      :leases []
-                                      :now (java.util.Date.)
-                                      :registry {:arbitrary/keyword [{:source :request :action-from :request}]}})))
-      (try
-        (broker/authorize {:intent intent :normalized-request normalized :leases [] :now (java.util.Date.) :registry {:bad/kind [{:source :request :action-from :request}]}})
-        (catch clojure.lang.ExceptionInfo e
-          (is (= :registry/invalid-kind (:error/type (ex-data e))))))))
-  (testing "C1: kind recognition comes from the Descriptor registry, not the :registry override"
-    (let [session-id #uuid "11111111-1111-4111-8111-111111111111"
-          phenotype "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-          intent (intent/tool-call session-id phenotype :node/tool 42 {:tool/id :fixture/echo :args {:text "hi"}} {:wall-ms 1000})
-          r (reg/make-registry {:tool [{:source :request :action-from :request}]})]
-      (is (reg/registry? r))
-      ;; :filesystem is a registered built-in descriptor, so it is a KNOWN kind —
-      ;; with no granting lease the broker returns :capability/missing, not unknown.
-      (let [fs-norm {:tool/id :fixture/echo :resource {:kind :filesystem :path "/tmp/x"}}]
-        (is (= :capability/missing
-               (:reason (broker/authorize {:intent intent :normalized-request fs-norm :leases [] :now (java.util.Date.) :registry r})))))
-      ;; a kind that is NOT registered in the Descriptor registry is unknown, fail-closed.
-      (let [unknown-norm {:tool/id :fixture/echo :resource {:kind :no/such-kind :id :x}}]
-        (is (= :capability/unknown-resource-kind
-               (:reason (broker/authorize {:intent intent :normalized-request unknown-norm :leases [] :now (java.util.Date.) :registry r}))))))))
-
-;; --- S5/S6 integration: definition > validation -------------------------------
-
-(deftest registry-definition-is-single-source
-  (testing "allowed-resource-kinds is the single definition; registry validates against it"
-    (is (= reg/allowed-resource-kinds #{:tool :model :memory :filesystem :filesystem/path}))
-    (is (contains? reg/allowed-resource-kinds :tool))
-    (is (not (contains? reg/allowed-resource-kinds :arbitrary/keyword)))))

@@ -45,14 +45,6 @@
                         are enforced on their OWN dimensions by the
                         policy. nil means no usage consumed.
   - :now                the decision instant, an #inst value.
-  - :registry           (optional) a sealed ResourceKindRegistry from
-                        evoclj.broker.registry overriding the built-in
-                        default. The registry is CLOSED — only
-                        allowlisted kinds (definition > validation)
-                        are accepted; an arbitrary keyword map is
-                        rejected with :registry/invalid-kind and an
-                        unregistered kind is denied with
-                        :capability/unknown-resource-kind.
 
   Fail-closed: no lease in :leases grants the request -> deny with
   :capability/missing; an UNREGISTERED resource kind -> deny with
@@ -74,7 +66,6 @@
   intent), because garbage never authorizes and never hides a caller
   bug."
   (:require [clojure.set :as set]
-            [evoclj.broker.registry :as reg]
             [evoclj.capability.policy :as policy]
             [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.semantic :as semantic]
@@ -107,18 +98,12 @@
 
 ;; --- resource-kind registry -------------------------------------------------
 ;;
-;; S6 — closed registry (definition > validation). The broker's
-;; former open map is now a sealed ResourceKindRegistry from
-;; evoclj.broker.registry. The closed allowlist
-;; reg/allowed-resource-kinds is the single definition; validation
-;; checks membership. New kinds are added by extending the allowlist
-;; definition, never by passing an arbitrary keyword map.
-
-(def ^:private default-resource-kind-registry
-  "The sealed built-in resource-kind registry (fail-closed default).
-  Delegates to evoclj.broker.registry/default-registry — the closed
-  allowlist is the single source."
-  (reg/default-registry))
+;; The single source of resource-kind definitions is the descriptor
+;; registry in evoclj.capability.resource-kind (`builtin-descriptors`,
+;; installed at load time). The broker consults it per request via
+;; rk/authorization-targets-for and rk/allowed-actions-by-kind; a kind
+;; with no targets is unregistered and denied fail-closed below. There is
+;; no separate broker allowlist.
 
 (defn- resolve-target-resource
   "The canonical resource a target authorizes against."
@@ -163,26 +148,23 @@
   resource carries none. Pure: no I/O, no state change, no provider
   invocation - the effectful dispatcher arrives in component
 
-  Optional inputs: :registry overrides the built-in sealed registry
-  (must be a ResourceKindRegistry from evoclj.broker.registry; an
-  arbitrary map is rejected with :registry/invalid-kind).
-  :lease-registry (P5) is an optional atomLeaseRegistry (as created by
-  capability/mint create-lease-registry, same shape as mount/filesystem)
-  that records revocation; when supplied a revoked lease yields
-  :capability/revoked fail-closed for ANY kind (tool/model/memory/filesystem).
+  Optional inputs: :lease-registry (P5) is an optional atomLeaseRegistry
+  (as created by capability/mint create-lease-registry, same shape as
+  mount/filesystem) that records revocation; when supplied a revoked
+  lease yields :capability/revoked fail-closed for ANY kind
+  (tool/model/memory/filesystem).
   Also accepted as :leases-registry / :revocation-registry for compat.
 
   See the namespace docstring for the input contract and the stable
   deny reason codes; an unregistered resource kind is denied with
   :capability/unknown-resource-kind (fail closed)."
-  [{:keys [intent normalized-request leases usage now registry lease-registry leases-registry revocation-registry]}]
+  [{:keys [intent normalized-request leases usage now lease-registry leases-registry revocation-registry]}]
   (intent-schema/validate-intent intent)
   (when-not (and (map? normalized-request)
                  (map? (:resource normalized-request)))
     (throw (err/error :capability/schema-invalid
                       "normalized request must carry a :resource map"
                       {:value (err/sanitize normalized-request)})))
-      (reg/assert-registry! registry)
     (let [lease-reg (or lease-registry leases-registry revocation-registry)
           revoked? (fn [lease] (when lease-reg (boolean (get-in @lease-reg [(:cap/id lease) :revoked?]))))
           principal (policy/intent-principal intent)
