@@ -718,6 +718,43 @@
                          :error/original (some-> original-throwable err/error-data)})))
     nil))
 
+(defn- run-staged!
+  "Run ONE WO-B1 staged two-phase transaction — the single implementation
+  behind activate!/reload!/deactivate!.
+
+  `txn` carries compensate!'s collaborators and this transaction's
+  identity (:db :session-id :logical-id :mount-registry :context-store),
+  the durable-compensation pair (:inserted-row-id / :old-row), and the
+  runtime deltas it applies (:added-mount-ids / :removed-mount-ids). The
+  engine captures the runtime pre-state (capture-runtime-prestate) BEFORE
+  running `stage-fn`, so a failed transaction restores exactly what it
+  touched.
+
+  `stage-fn` performs the staged steps — the durable row write already
+  happened in the caller — and is handed a zero-arg `commit!` it MUST call
+  once, past the point where the transaction is final (WO-B1 published ->
+  durable ordering: the event is appended before commit!). Its value is
+  the caller's return value. A Throwable before commit! runs the SINGLE
+  compensation engine (compensate!) and is rethrown unchanged; nothing
+  compensates after commit!. compensate! may itself throw
+  :store/binding-rollback-failed."
+  [{:keys [db session-id logical-id mount-registry context-store
+           inserted-row-id old-row added-mount-ids removed-mount-ids]}
+   stage-fn]
+  (let [runtime-opts {:mount-registry mount-registry :context-store context-store}
+        prestate (capture-runtime-prestate logical-id runtime-opts)
+        committed? (atom false)]
+    (try
+      (stage-fn #(reset! committed? true))
+      (catch Throwable t
+        (when-not @committed?
+          (compensate! {:db db :session-id session-id :logical-id logical-id
+                        :inserted-row-id inserted-row-id :old-row old-row
+                        :prestate prestate :added-mount-ids added-mount-ids
+                        :removed-mount-ids removed-mount-ids :opts runtime-opts
+                        :original-throwable t}))
+        (throw t)))))
+
 ;; ---------------------------------------------------------------------------
 ;; Public API
 ;; ---------------------------------------------------------------------------
@@ -843,39 +880,32 @@
                                         {:session/id (types/session-id session-id) :logical/id logical-id}))
                       (throw e)))))]
        ;; ---- WO-B1 staged region: everything below is compensatable ----
-       (let [runtime-opts {:mount-registry mount-registry :context-store context-store}
-             prestate (capture-runtime-prestate logical-id runtime-opts)
-             added-ids (publish-mount-ids bundle)
-             committed? (atom false)]
-         (try
-           ;; T2 seam: durable row inserted; sits outside every catch around
-           ;; the insert, so a hook throw propagates to the caller unchanged
-           (fault/trigger! opts :after-db-insert)
-           (publish-runtime! bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
-           ;; T2 seam: runtime mount/context state published
-           (fault/trigger! opts :after-publish-runtime)
-           ;; T2 seam: last point before the auditable event append
-           (fault/trigger! opts :before-event-append)
-           (append-binding-event! db session-id :binding/activated
-                                  {:logical/id logical-id :revision/id rev :bundle/id bid :binding/id id})
-           ;; ---- commit point: past here the activation is final ----
-           (reset! committed? true)
-           ;; T2 seam: event appended successfully
-           (fault/trigger! opts :after-event-append)
-           (get-binding db session-id logical-id)
-           (catch Throwable t
-             (when-not @committed?
-               (compensate! {:db db
-                             :session-id session-id
-                             :logical-id logical-id
-                             :inserted-row-id id
-                             :old-row nil
-                             :prestate prestate
-                             :added-mount-ids added-ids
-                             :removed-mount-ids #{}
-                             :opts runtime-opts
-                             :original-throwable t}))
-             (throw t))))))))
+       (let [added-ids (publish-mount-ids bundle)]
+         (run-staged! {:db db
+                       :session-id session-id
+                       :logical-id logical-id
+                       :mount-registry mount-registry
+                       :context-store context-store
+                       :inserted-row-id id
+                       :old-row nil
+                       :added-mount-ids added-ids
+                       :removed-mount-ids #{}}
+                      (fn [commit!]
+                        ;; T2 seam: durable row inserted; sits outside every catch around
+                        ;; the insert, so a hook throw propagates to the caller unchanged
+                        (fault/trigger! opts :after-db-insert)
+                        (publish-runtime! bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
+                        ;; T2 seam: runtime mount/context state published
+                        (fault/trigger! opts :after-publish-runtime)
+                        ;; T2 seam: last point before the auditable event append
+                        (fault/trigger! opts :before-event-append)
+                        (append-binding-event! db session-id :binding/activated
+                                               {:logical/id logical-id :revision/id rev :bundle/id bid :binding/id id})
+                        ;; ---- commit point: past here the activation is final ----
+                        (commit!)
+                        ;; T2 seam: event appended successfully
+                        (fault/trigger! opts :after-event-append)
+                        (get-binding db session-id logical-id))))))))
 
 (defn reload!
   "Reload an active binding to a new revision (A -> B).
@@ -935,40 +965,33 @@
            (throw (err/error :store/binding-not-found "no active binding for this session + logical_id"
                              {:session/id (types/session-id session-id) :logical/id logical-id})))
          ;; ---- WO-B1 staged region: everything below is compensatable ----
-         (let [runtime-opts {:mount-registry mount-registry :context-store context-store}
-               prestate (capture-runtime-prestate logical-id runtime-opts)
-               added-ids (publish-mount-ids new-bundle)
-               removed-ids (removed-mount-ids-for old-surfaces logical-id)
-               committed? (atom false)]
-           (try
-             ;; T2 seam: durable row updated (revision/bundle/metadata)
-             (fault/trigger! opts :after-db-insert)
-             (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
-             (publish-runtime! new-bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
-             ;; T2 seam: runtime state republished at the new revision
-             (fault/trigger! opts :after-publish-runtime)
-             ;; T2 seam: last point before the auditable event append
-             (fault/trigger! opts :before-event-append)
-             (append-binding-event! db session-id :binding/reloaded
-                                    {:logical/id logical-id :from-revision (:revision/id old-binding) :to-revision new-rev :bundle/id new-bid})
-             ;; ---- commit point: past here the reload is final ----
-             (reset! committed? true)
-             ;; T2 seam: reloaded event appended successfully
-             (fault/trigger! opts :after-event-append)
-             (get-binding db session-id logical-id)
-             (catch Throwable t
-               (when-not @committed?
-                 (compensate! {:db db
-                               :session-id session-id
-                               :logical-id logical-id
-                               :inserted-row-id nil
-                               :old-row old-row
-                               :prestate prestate
-                               :added-mount-ids added-ids
-                               :removed-mount-ids removed-ids
-                               :opts runtime-opts
-                               :original-throwable t}))
-               (throw t)))))))))
+         (let [added-ids (publish-mount-ids new-bundle)
+               removed-ids (removed-mount-ids-for old-surfaces logical-id)]
+           (run-staged! {:db db
+                         :session-id session-id
+                         :logical-id logical-id
+                         :mount-registry mount-registry
+                         :context-store context-store
+                         :inserted-row-id nil
+                         :old-row old-row
+                         :added-mount-ids added-ids
+                         :removed-mount-ids removed-ids}
+                        (fn [commit!]
+                          ;; T2 seam: durable row updated (revision/bundle/metadata)
+                          (fault/trigger! opts :after-db-insert)
+                          (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
+                          (publish-runtime! new-bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
+                          ;; T2 seam: runtime state republished at the new revision
+                          (fault/trigger! opts :after-publish-runtime)
+                          ;; T2 seam: last point before the auditable event append
+                          (fault/trigger! opts :before-event-append)
+                          (append-binding-event! db session-id :binding/reloaded
+                                                 {:logical/id logical-id :from-revision (:revision/id old-binding) :to-revision new-rev :bundle/id new-bid})
+                          ;; ---- commit point: past here the reload is final ----
+                          (commit!)
+                          ;; T2 seam: reloaded event appended successfully
+                          (fault/trigger! opts :after-event-append)
+                          (get-binding db session-id logical-id)))))))))
 
 (defn deactivate!
   "Deactivate the active binding for session-id + logical-id.
@@ -1004,33 +1027,26 @@
        (throw (err/error :store/binding-not-found "no active binding to deactivate"
                          {:session/id (types/session-id session-id) :logical/id logical-id})))
      ;; ---- WO-B1 staged region: unpublish + commit event compensatable ----
-     (let [runtime-opts {:mount-registry mount-registry :context-store context-store}
-           prestate (capture-runtime-prestate logical-id runtime-opts)
-           removed-ids (removed-mount-ids-for old-surfaces logical-id)
-           committed? (atom false)]
-       (try
-         (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
-         ;; T2 seam: runtime state removed (row already flipped to inactive)
-         (fault/trigger! opts :after-unpublish)
-         (append-binding-event! db session-id :binding/deactivated
-                                {:logical/id logical-id})
-         ;; ---- commit point ----
-         (reset! committed? true)
-         (let [row (first (sqlite/query db ["SELECT * FROM session_bindings WHERE session_id = ? AND logical_id = ? ORDER BY activated_at DESC LIMIT 1" sid lid]))]
-           (when row (row->binding row)))
-         (catch Throwable t
-           (when-not @committed?
-             (compensate! {:db db
-                           :session-id session-id
-                           :logical-id logical-id
-                           :inserted-row-id nil
-                           :old-row old-row
-                           :prestate prestate
-                           :added-mount-ids #{}
-                           :removed-mount-ids removed-ids
-                           :opts runtime-opts
-                           :original-throwable t}))
-           (throw t)))))))
+     (let [removed-ids (removed-mount-ids-for old-surfaces logical-id)]
+       (run-staged! {:db db
+                     :session-id session-id
+                     :logical-id logical-id
+                     :mount-registry mount-registry
+                     :context-store context-store
+                     :inserted-row-id nil
+                     :old-row old-row
+                     :added-mount-ids #{}
+                     :removed-mount-ids removed-ids}
+                    (fn [commit!]
+                      (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
+                      ;; T2 seam: runtime state removed (row already flipped to inactive)
+                      (fault/trigger! opts :after-unpublish)
+                      (append-binding-event! db session-id :binding/deactivated
+                                             {:logical/id logical-id})
+                      ;; ---- commit point ----
+                      (commit!)
+                      (let [row (first (sqlite/query db ["SELECT * FROM session_bindings WHERE session_id = ? AND logical_id = ? ORDER BY activated_at DESC LIMIT 1" sid lid]))]
+                        (when row (row->binding row)))))))))
 
 (defn restore!
   "Restore active bindings for session-id into runtime registries.
