@@ -9,8 +9,12 @@
   uses the connection-based cas-current! inside its BEGIN IMMEDIATE
   transaction.
 
-  The handle is opaque via deftype - it does NOT expose :db or :sqlite
-  via keyword access; (:db handle) is nil. No db-of escape is provided.
+  The handle's db is NOT exposed via keyword access - deftype implements
+  no ILookup, so (:db handle) is nil. The field itself is a public final
+  JVM field (Clojure cannot make deftype fields private) and is reachable
+  as (.-db handle). This namespace funnels its own field access through a
+  private db-of; callers outside should pass the handle to
+  current-generation/init-singleton! rather than reach into it.
 
   Fleet S1 (DAG S1): CURRENT transitions from predicate (generations.current
   INTEGER 0/1 + partial unique index) to singleton reference (kernel_state
@@ -39,6 +43,10 @@
                       {:reason :sqlite-missing})))
   (->CurrentStore db))
 
+(defn- db-of [^CurrentStore s] (.-db ^CurrentStore s))
+;; Note: db-of is private — only this namespace's narrow operations touch
+;; the field; external callers pass the handle.
+
 (defn current-generation
   "The CURRENT generation row as read via CurrentStore (read-only).
   Prefers the singleton kernel_state (JOIN) when present; falls back to
@@ -50,7 +58,7 @@
     (throw (err/error :promotion/system-invalid
                       "current-generation requires a CurrentStore"
                       {:reason :not-a-current-store})))
-  (let [db (.-db ^CurrentStore store)
+  (let [db (db-of store)
         via-singleton (try
                         (first (sqlite/query db ["SELECT g.* FROM generations g JOIN kernel_state k ON k.current_generation = g.id WHERE k.id = 1"]))
                         (catch Exception _ nil))]
@@ -97,5 +105,5 @@
     (throw (err/error :promotion/system-invalid
                       "init-singleton! requires a CurrentStore"
                       {:reason :not-a-current-store})))
-  (sqlite/with-db [conn (.-db ^CurrentStore store)]
+  (sqlite/with-db [conn (db-of store)]
     (jdbc/execute! conn ["INSERT OR IGNORE INTO kernel_state (id, current_generation, updated_at) VALUES (1, ?, datetime('now'))" generation-id])))

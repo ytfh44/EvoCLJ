@@ -47,7 +47,9 @@
   cannot name SessionStore in an `instance?` check — evoclj.store.session-store
   requires this namespace, so referencing it back would introduce a require
   cycle — so the reflective `.-db` fallback (shape 5) is the single branch
-  covering every field-bearing handle, SessionStore included."
+  covering every field-bearing handle, SessionStore included. It relies on
+  the `db` field being publicly reachable: a deftype field is a public final
+  JVM field, so this reflective read succeeds for every handle shape."
   [db]
   (cond
     (string? db) db

@@ -117,7 +117,7 @@
           (let [args (:args authorized-request)
                 session-id (:session/id args)
                 op (:memory/op args)
-                db (.-db ^evoclj.store.memory_store.MemoryStore mem-store)]
+                db (ms/db-of mem-store)]
             (when-not (uuid? session-id)
               (throw (err/error :provider/request-invalid
                                 "normalized memory request must carry a uuid :session/id"

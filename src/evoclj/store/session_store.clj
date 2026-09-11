@@ -6,8 +6,13 @@
   validation). Business namespaces (e.g. evoclj.store.session)
   must receive a SessionStore, not a raw sqlite spec or {:sqlite ...} map.
 
-  The handle is opaque via deftype — it does NOT expose :db or :sqlite
-  via keyword access; (:db handle) is nil. No db-of escape is provided.
+  The handle's db is NOT exposed via keyword access — deftype implements
+  no ILookup, so (:db handle) is nil. The field itself is a public final
+  JVM field (Clojure cannot make deftype fields private) and is reachable
+  as (.-db handle); db-of below is the sanctioned accessor for
+  evoclj.store.session, which needs the raw spec for its Work-graph
+  reads. Other callers should pass the handle to
+  insert-session!/find-session rather than reach into it.
 
   S1 Singleton (Fleet S1): sessions are pinned to a generation whose
   CURRENT pointer is the kernel_state singleton (see
@@ -46,6 +51,10 @@
                       "SessionStore requires a non-nil db"
                       {:reason :sqlite-missing})))
   (->SessionStore db))
+
+(defn db-of [^SessionStore s] (.-db ^SessionStore s))
+;; Note: db-of is for evoclj.store.session's Work-graph reads only;
+;; it is not exported as a generic escape hatch (package-private via doc).
 
 ;; ---------------------------------------------------------------------------
 ;; Shared helpers (single source — only this ns does jdbc on sessions)
@@ -94,7 +103,7 @@
     (throw (err/error :store/session-invalid
                       "insert-session! requires a SessionStore"
                       {:reason :not-a-session-store})))
-  (let [db (.-db ^SessionStore store)
+  (let [db (db-of store)
         sid (or (:session/id request) (UUID/randomUUID))
         genome-proof (:genome/existence-proof request)
         resolution-proof (:resolution/existence-proof request)
@@ -128,7 +137,7 @@
     (throw (err/error :store/session-invalid
                       "find-session requires a SessionStore"
                       {:reason :not-a-session-store})))
-  (some-> (first (sqlite/query (.-db ^SessionStore store)
+  (some-> (first (sqlite/query (db-of store)
                                ["SELECT * FROM sessions WHERE id = ?"
                                 (str (types/session-id session-id))]))
           row->session))

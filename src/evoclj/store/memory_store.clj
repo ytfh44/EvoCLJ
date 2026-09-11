@@ -6,8 +6,15 @@
   (e.g. evoclj.provider.memory) must receive a MemoryStore, not a raw
   sqlite spec.
 
-  The handle is opaque via deftype — it does NOT expose :db via keyword
-  access. FK existence (Fleet P5/F): episodic_memory.session_id
+  The handle's db is NOT exposed via keyword access — deftype implements
+  no ILookup, so (:db handle) is nil. The field itself is a public final
+  JVM field (Clojure cannot make deftype fields private) and is reachable
+  as (.-db handle); db-of below is the sanctioned accessor for
+  evoclj.provider.memory, which needs the raw spec for its
+  episodic_memory queries. Other callers should pass the handle to
+  memory-read/memory-write!/memory-delete! rather than reach into it.
+
+  FK existence (Fleet P5/F): episodic_memory.session_id
   REFERENCES sessions(id) (011), so a write for an unknown session fails
   with a foreign-key violation at rest, and the app boundary validates
   session existence before writing when a SessionStore is available.
@@ -30,6 +37,10 @@
                       {:reason :sqlite-missing})))
   (->MemoryStore db))
 
+(defn db-of [^MemoryStore s] (.-db ^MemoryStore s))
+;; Note: db-of is for evoclj.provider.memory's episodic_memory queries only;
+;; it is not exported as a generic escape hatch (package-private via doc).
+
 (defn memory-read
   "Read episodic memory content for (session-id, key) via MemoryStore, or nil."
   [^MemoryStore store session-id memory-key]
@@ -37,7 +48,7 @@
     (throw (err/error :store/memory-invalid
                       "memory-read requires a MemoryStore"
                       {:reason :not-a-memory-store})))
-  (let [db (.-db ^MemoryStore store)]
+  (let [db (db-of store)]
     (first (sqlite/query db ["SELECT content FROM episodic_memory WHERE session_id = ? AND memory_key = ?"
                           (str session-id) (name memory-key)]))))
 
@@ -48,7 +59,7 @@
     (throw (err/error :store/memory-invalid
                       "memory-write! requires a MemoryStore"
                       {:reason :not-a-memory-store})))
-  (let [db (.-db ^MemoryStore store)
+  (let [db (db-of store)
         now (str (Instant/now))]
     (sqlite/exec! db ["INSERT OR REPLACE INTO episodic_memory (session_id, memory_key, content, created_at) VALUES (?, ?, ?, ?)"
                       (str session-id) (name memory-key) (pr-str content) now])))
@@ -60,5 +71,5 @@
     (throw (err/error :store/memory-invalid
                       "memory-delete! requires a MemoryStore"
                       {:reason :not-a-memory-store})))
-  (sqlite/exec! (.-db ^MemoryStore store) ["DELETE FROM episodic_memory WHERE session_id = ? AND memory_key = ?"
+  (sqlite/exec! (db-of store) ["DELETE FROM episodic_memory WHERE session_id = ? AND memory_key = ?"
                                             (str session-id) (name memory-key)]))
