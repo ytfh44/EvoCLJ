@@ -80,9 +80,6 @@
                       {:reason :not-an-enrichment-store :value (err/sanitize store)})))
   store)
 
-(defn- db-of [store] (.-db ^evoclj.store.enrichment_store.EnrichmentStore store))
-(defn- cas-of [store] (.-cas ^evoclj.store.enrichment_store.EnrichmentStore store))
-
 ;; --- timestamps ----------------------------------------------------------------
 
 (defn- invalid-timestamp
@@ -118,8 +115,8 @@
   [store request]
   (validate-store! store)
   (validate-request! request)
-  (let [db (db-of store)
-        cas-root (cas-of store)
+  (let [db (es/db-of store)
+        cas-root (es/cas-of store)
         ts (sqlite/canonical-timestamp (:created-at request) invalid-timestamp)
         entity-kind (kw->db (:entity/kind request))
         entity-id (:entity/id request)
@@ -160,7 +157,7 @@
 (defn enrichments
   [store entity-kind entity-id kind]
   (validate-store! store)
-  (->> (sqlite/query (db-of store)
+  (->> (sqlite/query (es/db-of store)
                      ["SELECT * FROM enrichments
                        WHERE entity_kind = ? AND entity_id = ? AND kind = ?
                        ORDER BY version ASC"
@@ -170,7 +167,7 @@
 (defn latest-enrichment
   [store entity-kind entity-id kind]
   (validate-store! store)
-  (->> (sqlite/query (db-of store)
+  (->> (sqlite/query (es/db-of store)
                      ["SELECT * FROM enrichments
                        WHERE entity_kind = ? AND entity_id = ? AND kind = ?
                        ORDER BY version DESC
@@ -184,10 +181,10 @@
   [store enrichment]
   (validate-store! store)
   (let [payload-ref (:payload-ref enrichment)]
-    (when-not (cas/exists? (cas-of store) payload-ref)
+    (when-not (cas/exists? (es/cas-of store) payload-ref)
       (throw (err/error :enrichment/payload-missing
                         "the enrichment payload artifact is absent from the CAS"
                         {:payload-ref payload-ref})))
     (edn/read-string
-     (String. (cas/get-bytes (cas-of store) payload-ref)
+     (String. (cas/get-bytes (es/cas-of store) payload-ref)
               java.nio.charset.StandardCharsets/UTF_8))))

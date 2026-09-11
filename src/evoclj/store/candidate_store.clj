@@ -6,8 +6,12 @@
   validation). Business namespaces (e.g. evoclj.evolution.candidate)
   must receive a CandidateStore, not a raw {:sqlite db :cas cas} map.
 
-  The handle is opaque via deftype — it does NOT expose :db or :sqlite
-  via keyword access; (:db handle) is nil. No db-of escape is provided.
+  The handle's db is NOT exposed via keyword access — deftype implements
+  no ILookup, so (:db handle) is nil. The field itself is a public final
+  JVM field (Clojure cannot make deftype fields private) and is reachable
+  as (.-db handle). This namespace funnels its own field access through a
+  private db-of; callers outside should pass the handle to its narrow
+  operations rather than reach into it.
 
   S3 Normalization (Fleet S3, DAG S3 — definition > validation):
     Candidate duplicates Mutation fields (parent_genome_id, evidence_id,
@@ -51,6 +55,10 @@
                       "CandidateStore requires a non-nil db"
                       {:reason :sqlite-missing})))
   (->CandidateStore db))
+
+(defn- db-of [^CandidateStore s] (.-db ^CandidateStore s))
+;; Note: db-of is private — only this namespace's narrow operations touch
+;; the field; external callers pass the handle.
 
 ;; ---------------------------------------------------------------------------
 ;; Shared helpers (single source — only this ns does jdbc on candidates/mutations)
@@ -212,7 +220,7 @@
     (throw (err/error :candidate/store-invalid
                       "materialize! requires a CandidateStore"
                       {:reason :not-a-candidate-store})))
-  (let [db (.-db ^CandidateStore store)
+  (let [db (db-of store)
         mh (mutation-hash mutation)
         ts (sqlite/canonical-timestamp (:created-at candidate) invalid-timestamp)]
     (sqlite/with-db [conn db]
@@ -264,7 +272,7 @@
                        :new-state new-state})))
   (let [cid (types/session-id candidate-id)
         key (str cid)
-        db (.-db ^CandidateStore store)]
+        db (db-of store)]
     (sqlite/with-db [conn db]
       (sqlite/set-busy-timeout! conn 10000)
       (let [count (first (jdbc/execute! conn
@@ -302,7 +310,7 @@
     (throw (err/error :candidate/store-invalid
                       "find-candidate requires a CandidateStore"
                       {:reason :not-a-candidate-store})))
-  (some-> (first (sqlite/query (.-db ^CandidateStore store)
+  (some-> (first (sqlite/query (db-of store)
                                ["SELECT c.*, m.parent_genome_id AS m_parent_genome_id, m.evidence_id AS m_evidence_id, m.risk AS m_risk
                                  FROM candidates c JOIN mutations m ON c.mutation_id = m.id
                                  WHERE c.id = ?"
@@ -317,7 +325,7 @@
     (throw (err/error :candidate/store-invalid
                       "find-candidates-by-parent requires a CandidateStore"
                       {:reason :not-a-candidate-store})))
-  (->> (sqlite/query (.-db ^CandidateStore store)
+  (->> (sqlite/query (db-of store)
                      ["SELECT c.*, m.parent_genome_id AS m_parent_genome_id, m.evidence_id AS m_evidence_id, m.risk AS m_risk
                        FROM candidates c JOIN mutations m ON c.mutation_id = m.id
                        WHERE c.parent_genome_id = ?
@@ -346,7 +354,7 @@
     (throw (err/error :candidate/store-invalid "insert-parent-edges! requires a CandidateStore" {})))
   (let [cid (str (types/session-id candidate-id))
         edges (vec (sort-by :ordinal edges))
-        db (.-db ^CandidateStore store)]
+        db (db-of store)]
     (sqlite/with-db [conn db]
       (doseq [edge edges]
         (jdbc/execute! conn
@@ -370,7 +378,7 @@
   [^CandidateStore store candidate-id]
   (when-not (instance? CandidateStore store)
     (throw (err/error :candidate/store-invalid "find-parent-edges requires a CandidateStore" {})))
-  (->> (sqlite/query (.-db ^CandidateStore store)
+  (->> (sqlite/query (db-of store)
                      ["SELECT * FROM candidate_parent_edges WHERE candidate_id = ? ORDER BY ordinal"
                       (str (types/session-id candidate-id))])
        (mapv edge-row->map)))
@@ -380,7 +388,7 @@
   [^CandidateStore store parent-id]
   (when-not (instance? CandidateStore store)
     (throw (err/error :candidate/store-invalid "find-candidates-by-parent-edge requires a CandidateStore" {})))
-  (->> (sqlite/query (.-db ^CandidateStore store)
+  (->> (sqlite/query (db-of store)
                      ["SELECT c.*, m.parent_genome_id AS m_parent_genome_id,
                               m.evidence_id AS m_evidence_id, m.risk AS m_risk
                        FROM candidates c JOIN mutations m ON c.mutation_id = m.id

@@ -149,7 +149,7 @@
   (let [sid (try (types/session-id session-id) (catch Exception _ session-id))
         sess (get-session store sid)
         db-spec (if (instance? evoclj.store.session_store.SessionStore store)
-                  (.-db ^evoclj.store.session_store.SessionStore store)
+                  (ss/db-of store)
                   store)]
     (when sess
       (let [works (try (evoclj.store.work/list-works db-spec sid) (catch Exception _ []))]
@@ -169,7 +169,7 @@
   [db root-id]
   (let [root-id (types/session-id root-id)
         spec (if (instance? evoclj.store.session_store.SessionStore db)
-               (.-db ^evoclj.store.session_store.SessionStore db)
+               (ss/db-of db)
                db)
         works (try (work-store/list-works spec root-id) (catch Exception _ []))
         descendant-work-ids (try
