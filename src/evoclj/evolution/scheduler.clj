@@ -322,6 +322,35 @@
   command, but takes the subsystem maps directly instead of reconstructing
   them from CLI opts — it calls the public entry points only.
 
+  The parallel is deliberate, but the two paths are NOT mergeable: the
+  `cli.evolution/cycle!` command cannot become a thin presenter over this
+  runner without changing a contract the loop depends on. The blockers:
+    - RETURN — this contract returns {:generation/id :utility :cost} and
+      discards the proposed Candidate records, the Evaluation records, and
+      the per-candidate promote outcomes that cycle!'s report publishes
+      under :phases; widening it changes what `run-cycles!` consumes.
+    - PROMOTION GRANULARITY — :promotion-system is ONE value (or a nullary
+      fn called once per generation) reused for every passing candidate,
+      while cycle! builds a promotion-system PER candidate from that
+      candidate's bundle (:resolution/id via compiled-resolution-id,
+      :candidate/root, a fresh CAS body write, an operator session pinned
+      to its parent). promote! reads :resolution/id and :candidate/root
+      from the system, so one shared value would mis-promote the second
+      and later candidates; a per-candidate factory is a ctx change.
+    - PROPOSE — the runner always proposes; cycle! proposes only under
+      --evolve or when no :evaluation-pending candidate exists (no ctx
+      knob models that).
+    - EVALUATOR — :evaluator is one value reused for every candidate (the
+      loop host folds all candidate roots into :genome/roots), while
+      cycle! builds one evaluator per candidate.
+    - ERRORS — this runner catches Throwable and reports raw ex-data;
+      cycle! catches Exception, normalises with error-data, adds
+      :status :error, and hard-throws :cli/candidate-not-found.
+  See also the filter note in `evoclj.cli.evolution/cycle!`: the two
+  eligible-set filters agree on every validated Evaluation (:summary and
+  :eligibility are always present with a boolean :eligible?), but are not
+  textually swappable because cycle! projects its eval entries.
+
   Returned fn: (fn [] -> summary-map). It:
      1. reads the CURRENT generation id (throws `:scheduler/no-current`
         when none);
