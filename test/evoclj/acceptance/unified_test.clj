@@ -21,6 +21,7 @@
             [clojure.string :as str]
             [clojure.edn :as edn]
             [evoclj.binding.call :as binding-call]
+            [evoclj.compiler.core :as compiler-core]
             [evoclj.context.binding :as ctx-binding]
             [evoclj.context.offer :as offer]
             [evoclj.context.materializer :as mat]
@@ -433,8 +434,8 @@
       (let [abi {:kernel 1 :genome 1 :intent 1 :tool 1}
             gid "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             rid "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-            p1 (snapshot/phenotype-id abi gid rid)
-            p2 (snapshot/phenotype-id abi gid rid)]
+            p1 (compiler-core/code-id abi gid rid)
+            p2 (compiler-core/code-id abi gid rid)]
         (is (= p1 p2) "phenotype identical despite different snapshots")
         (is (not (str/includes? p1 (str (:environment/id captured)))) "environment id not hashed into phenotype")))))
 

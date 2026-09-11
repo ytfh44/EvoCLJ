@@ -1,5 +1,6 @@
 (ns evoclj.eval.snapshot-test
   (:require [clojure.test :refer [deftest is testing]]
+            [evoclj.compiler.core :as compiler-core]
             [evoclj.eval.snapshot :as snap]
             [evoclj.environment.fake :as fake]
             [evoclj.environment.registry :as reg]
@@ -77,8 +78,8 @@
                                   :mcp/github (rev/payload->id "mcp-v1")})
           s2 (snap/make-snapshot {:skills/user (rev/payload->id "skill-v2")
                                   :mcp/github (rev/payload->id "mcp-v2")})
-          p1 (snap/phenotype-id abi gid rid)
-          p2 (snap/phenotype-id abi gid rid)
+          p1 (compiler-core/code-id abi gid rid)
+          p2 (compiler-core/code-id abi gid rid)
           expected (hash/text-digest (str (pr-str (into (sorted-map) abi)) gid rid))]
       (is (= p1 p2) "different environments give same phenotype")
       (is (= p1 expected) "phenotype is abi+genome+resolution only")
@@ -89,8 +90,8 @@
           gid "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           rid1 "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           rid2 "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-          p1 (snap/phenotype-id abi gid rid1)
-          p2 (snap/phenotype-id abi gid rid2)]
+          p1 (compiler-core/code-id abi gid rid1)
+          p2 (compiler-core/code-id abi gid rid2)]
       (is (not= p1 p2) "resolution does affect phenotype"))))
 
 (deftest revision-for-lookup
@@ -104,12 +105,12 @@
     (let [abi {:kernel 1 :genome 1 :intent 1 :tool 1}
           gid "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           rid "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          program (snap/code-id abi gid rid)
+          program (compiler-core/code-id abi gid rid)
           descriptor {:kernel/abi abi
                       :kernel/build :kernel/build-unresolved
                       :interpreter/build "sci-0.15.58"
                       :adapter/builds {:planner "1"}}
-          same-program (snap/code-id abi gid rid)
+          same-program (compiler-core/code-id abi gid rid)
           runtime-a (snap/runtime-image-id program descriptor)
           runtime-b (snap/runtime-image-id
                      same-program
@@ -117,10 +118,4 @@
       (is (= program same-program) "ProgramImage stable across implementation change")
       (is (re-matches #"^sha256:[0-9a-f]{64}$" runtime-a))
       (is (not= runtime-a runtime-b) "RuntimeImageId moves with the implementation")
-      (is (= runtime-a (snap/runtime-image-id program descriptor)) "deterministic")))
-  (testing "the phenotype alias names the ProgramImage and nothing more"
-    (let [abi {:kernel 1 :genome 1 :intent 1 :tool 1}
-          gid "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-          rid "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
-      (is (= (snap/code-id abi gid rid) (snap/phenotype-id abi gid rid)))
-      (is (= (snap/code-id abi gid rid) (snap/code-image-id abi gid rid))))))
+      (is (= runtime-a (snap/runtime-image-id program descriptor)) "deterministic"))))

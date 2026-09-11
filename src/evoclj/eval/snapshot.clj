@@ -92,26 +92,6 @@
   [sources]
   (make-snapshot sources))
 
-(defn code-id
-  "ProgramImage identity derived from abi, genome-id and resolution-id
-  only. Environment snapshot and runtime leases are intentionally
-  excluded — and the result identifies the ABI-compatible program ONLY,
-  never execution semantics (same ProgramImage NEVER implies the same
-  execution; see evoclj.compiler.core/runtime-image-id)."
-  [abi genome-id resolution-id]
-  (when-not (map? abi)
-    (throw (ex-info "abi must be map" {:abi abi})))
-  (when-not (re-matches #"^sha256:[0-9a-f]{64}$" genome-id)
-    (throw (ex-info "genome-id must be sha256" {:genome-id genome-id})))
-  (when-not (re-matches #"^sha256:[0-9a-f]{64}$" resolution-id)
-    (throw (ex-info "resolution-id must be sha256" {:resolution-id resolution-id})))
-  (hash/text-digest (str (pr-str (into (sorted-map) abi)) genome-id resolution-id)))
-
-(defn code-image-id
-  "Alias for code-id — the ProgramImage: H(kernel ABI, Genome, Resolution). Program identity ONLY, never execution semantics."
-  [abi genome-id resolution-id]
-  (code-id abi genome-id resolution-id))
-
 (defn- canonical-edn-value
   [v]
   (cond
@@ -121,38 +101,25 @@
     (seq? v) (mapv canonical-edn-value v)
     :else v))
 
-(defn deployment-id
-  "Deployment identity binding the ProgramImage id, bindings, and authority:
-  DeploymentId = SHA256(program-image-id || canonical(bindings) || canonical(authority)). Binds program to deployment — not execution semantics."
-  [code-id-str bindings authority]
-  (hash/text-digest
-   (str (or code-id-str "")
-        (pr-str (canonical-edn-value (vec (sort-by pr-str (or bindings [])))))
-        (pr-str (canonical-edn-value (vec (sort-by pr-str (or authority []))))))))
-
 (defn execution-id
   "Fresh ExecutionId UUID per activation (I1)."
   []
   (java.util.UUID/randomUUID))
 
-;; Legacy alias for backwards compat — RETAINED (decision): still called by
-;; test/evoclj/eval/snapshot_test.clj and test/evoclj/acceptance/unified_test.clj,
-;; so removal is unsafe. It names the ProgramImage, nothing more.
-(defn phenotype-id
-  "Deprecated alias for code-id — the ProgramImage: H(kernel ABI, Genome,
-  Resolution). Program identity ONLY, never execution semantics; I1 prefers
-  code-id/code-image-id."
-  [abi genome-id resolution-id]
-  (code-id abi genome-id resolution-id))
-
 ;; --- RuntimeImage + ExecutionEnvironment mirror --------------------------------
-;; Mirrors evoclj.compiler.core/runtime-image-id and
-;; evoclj.compiler.resolution/execution-environment so eval-side helpers stay
-;; usable without pulling the compiler into every eval namespace. The
-;; runtime-image-id formula MUST stay byte-identical to the compiler's: both
-;; canonicalize the descriptor with sorted maps and hash
-;; (canonical-descriptor || program-image-id). A mirror-consistency test
-;; pins the equality.
+;; These eval-side mirrors exist because eval call sites need them, and their
+;; formulas MUST stay byte-identical to the compiler's — a difference would
+;; silently split eval-side identity from compiler-side identity. Each mirrors
+;; one compiler function: runtime-image-id mirrors
+;; evoclj.compiler.core/runtime-image-id and return-fingerprint mirrors
+;; evoclj.compiler.resolution/return-fingerprint. Both canonicalize before
+;; hashing (the descriptor with sorted maps; the program-image-id and the
+;; returned bytes appended verbatim).
+;;
+;; A mirror-consistency test pins the runtime-image-id equality
+;; (test/evoclj/compiler/deployment_identity_test.clj,
+;; snapshot-runtime-image-mirror-matches-compiler-formula); no equivalent test
+;; pins return-fingerprint against the compiler's formula.
 
 (defn runtime-image-id
   "Mirror of evoclj.compiler.core/runtime-image-id: the RuntimeImageId over
