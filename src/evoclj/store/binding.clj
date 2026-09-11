@@ -85,26 +85,17 @@
             [evoclj.store.sqlite :as sqlite]
             [evoclj.support.failpoint :as fault])
   (:import (java.time Instant)
-           (java.time.format DateTimeFormatter)
            (java.util Date UUID)))
 
 ;; ---------------------------------------------------------------------------
-;; Timestamp helper (copied from session.clj for consistency)
+;; Timestamp failures (shared coercion + ISO formatting: store.sqlite)
 ;; ---------------------------------------------------------------------------
 
-(def ^:private timestamp-fmt DateTimeFormatter/ISO_INSTANT)
-
-(defn- canonical-timestamp
+(defn- invalid-timestamp
   [ts]
-  (let [inst (cond
-               (nil? ts) (Instant/now)
-               (instance? Instant ts) ts
-               (instance? Date ts) (.toInstant ^Date ts)
-               (string? ts) (Instant/parse ts)
-               :else (throw (err/error :store/binding-invalid
-                                       "timestamp must be an inst, Instant, or ISO-8601 string"
-                                       {:timestamp ts})))]
-    (.format timestamp-fmt inst)))
+  (err/error :store/binding-invalid
+             "timestamp must be an inst, Instant, or ISO-8601 string"
+             {:timestamp ts}))
 
 ;; ---------------------------------------------------------------------------
 ;; Row mapping
@@ -786,7 +777,7 @@
   (let [id (str (random-uuid))
         sid (str (types/session-id session-id))
         lid (logical->text logical-id)
-        now (canonical-timestamp nil)]
+        now (sqlite/canonical-timestamp nil invalid-timestamp)]
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :session_bindings
                     {:id id
@@ -940,7 +931,7 @@
          target-logical (try (bundle->logical new-bundle) (catch Exception _ logical-id))
          sid (str (types/session-id session-id))
          lid (logical->text logical-id)
-         now (canonical-timestamp nil)]
+         now (sqlite/canonical-timestamp nil invalid-timestamp)]
      (when (and target-logical (not= target-logical logical-id))
        (throw (err/error :store/binding-invalid "new bundle logical_id must match requested logical_id"
                          {:requested logical-id :new-logical target-logical})))
@@ -1013,7 +1004,7 @@
          context-store (:context-store opts)
          sid (str (types/session-id session-id))
          lid (logical->text logical-id)
-         now (canonical-timestamp nil)
+         now (sqlite/canonical-timestamp nil invalid-timestamp)
          ;; fetch before update to know mount ids to clean; WO-B1 also
          ;; captures the FULL pre-image row for byte-comparable rollback
          old-binding (get-binding db session-id logical-id)

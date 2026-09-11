@@ -8,7 +8,10 @@
   lineage FKs defined in 001-init.sql only work when callers route their
   connections through `with-db`. The migration runner and the store tests
   do this; future store modules MUST do the same."
-  (:require [clojure.java.jdbc :as jdbc]))
+  (:require [clojure.java.jdbc :as jdbc])
+  (:import (java.time Instant)
+           (java.time.format DateTimeFormatter)
+           (java.util Date)))
 
 (defn spec
   "Coerce a database argument into a java.jdbc db spec.
@@ -31,6 +34,42 @@
   [conn]
   (jdbc/execute! conn ["PRAGMA foreign_keys = ON"])
   conn)
+
+(defn set-busy-timeout!
+  "Set SQLite's busy timeout to `ms` milliseconds on an already-open
+  java.jdbc db spec (`:connection` map, as bound by `with-db`). A
+  contended writer then WAITS for SQLite's write lock instead of
+  failing with SQLITE_BUSY."
+  [db ms]
+  (let [^java.sql.Connection conn (:connection db)]
+    (with-open [stmt (.createStatement conn)]
+      (.execute stmt (str "PRAGMA busy_timeout = " ms)))))
+
+;; --- canonical timestamps ---------------------------------------------------
+;;
+;; These strings land in `created_at`-style columns and are compared and
+;; sorted as text, so the emitted form is a load-bearing invariant: ONE
+;; formatter (DateTimeFormatter/ISO_INSTANT) for every store. The
+;; per-namespace typed errors stay with the callers via `fail`.
+
+(def ^:private timestamp-fmt DateTimeFormatter/ISO_INSTANT)
+
+(defn canonical-timestamp
+  "Canonical ISO-8601 UTC string for a timestamp value (a
+  java.util.Date, a java.time.Instant, or an ISO-8601 string); nil means
+  now.
+
+  `fail` receives the offending value and MUST return the Throwable to
+  throw, so each store keeps its own typed error (callers may match on
+  :error/type)."
+  [ts fail]
+  (let [inst (cond
+               (nil? ts) (Instant/now)
+               (instance? Instant ts) ts
+               (instance? Date ts) (.toInstant ^Date ts)
+               (string? ts) (Instant/parse ts)
+               :else (throw (fail ts)))]
+    (.format timestamp-fmt inst)))
 
 (defmacro with-db
   "Run `body` on a single open connection to `db` (a path string or

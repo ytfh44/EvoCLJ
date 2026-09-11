@@ -29,7 +29,6 @@
             [evoclj.store.enrichment-store :as es]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
-           (java.time.format DateTimeFormatter)
            (java.util Date UUID)))
 
 ;; --- public contracts ----------------------------------------------------------
@@ -86,25 +85,15 @@
 
 ;; --- timestamps ----------------------------------------------------------------
 
-(def ^:private timestamp-fmt DateTimeFormatter/ISO_INSTANT)
-
-(defn- canonical-timestamp
+(defn- invalid-timestamp
+  "Build the typed failure for a :created-at that is not a Date,
+  Instant, or ISO-8601 string. The shared coercion + ISO formatting
+  lives in evoclj.store.sqlite/canonical-timestamp; only the error type
+  stays namespace-local."
   [ts]
-  (let [inst (cond
-               (nil? ts) (Instant/now)
-               (instance? Instant ts) ts
-               (instance? Date ts) (.toInstant ^Date ts)
-               (string? ts) (Instant/parse ts)
-               :else (throw (err/error :enrichment/invalid
-                                       "created-at must be an inst, Instant, or ISO-8601 string"
-                                       {:created-at ts})))]
-    (.format timestamp-fmt inst)))
-
-(defn- set-busy-timeout!
-  [db ms]
-  (let [^java.sql.Connection conn (:connection db)]
-    (with-open [stmt (.createStatement conn)]
-      (.execute stmt (str "PRAGMA busy_timeout = " ms)))))
+  (err/error :enrichment/invalid
+             "created-at must be an inst, Instant, or ISO-8601 string"
+             {:created-at ts}))
 
 (defn- kw->db
   [k]
@@ -131,7 +120,7 @@
   (validate-request! request)
   (let [db (db-of store)
         cas-root (cas-of store)
-        ts (canonical-timestamp (:created-at request))
+        ts (sqlite/canonical-timestamp (:created-at request) invalid-timestamp)
         entity-kind (kw->db (:entity/kind request))
         entity-id (:entity/id request)
         kind (kw->db (:kind request))
@@ -145,7 +134,7 @@
                         "payload write was not persisted by the CAS"
                         {:payload-ref payload-ref})))
     (sqlite/with-db [conn db]
-      (set-busy-timeout! conn 10000)
+      (sqlite/set-busy-timeout! conn 10000)
       (let [next-version (-> (jdbc/query conn
                                          ["SELECT COALESCE(MAX(version), 0) + 1 AS version
                                            FROM enrichments

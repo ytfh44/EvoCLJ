@@ -33,7 +33,6 @@
             [evoclj.store.sqlite :as sqlite]
             [evoclj.store.existence :as existence])
   (:import (java.time Instant)
-           (java.time.format DateTimeFormatter)
            (java.util Date UUID)))
 
 ;; ---------------------------------------------------------------------------
@@ -57,25 +56,15 @@
 ;; Shared helpers (single source — only this ns does jdbc on candidates/mutations)
 ;; ---------------------------------------------------------------------------
 
-(def ^:private timestamp-fmt DateTimeFormatter/ISO_INSTANT)
-
-(defn- canonical-timestamp
+(defn- invalid-timestamp
+  "Build the typed failure for a timestamp that is not a Date, Instant,
+  or ISO-8601 string. The shared coercion + ISO formatting lives in
+  evoclj.store.sqlite/canonical-timestamp; only the error type stays
+  namespace-local."
   [ts]
-  (let [inst (cond
-               (nil? ts) (Instant/now)
-               (instance? Instant ts) ts
-               (instance? Date ts) (.toInstant ^Date ts)
-               (string? ts) (Instant/parse ts)
-               :else (throw (err/error :candidate/invalid
-                                       "timestamp must be an inst, Instant, or ISO-8601 string"
-                                       {:timestamp ts})))]
-    (.format timestamp-fmt inst)))
-
-(defn- set-busy-timeout!
-  [db ms]
-  (let [^java.sql.Connection conn (:connection db)]
-    (with-open [stmt (.createStatement conn)]
-      (.execute stmt (str "PRAGMA busy_timeout = " ms)))))
+  (err/error :candidate/invalid
+             "timestamp must be an inst, Instant, or ISO-8601 string"
+             {:timestamp ts}))
 
 ;; Single-source DB mapping — delegates to candidate-states (definition > validation)
 (def ^:private db-state->state cstates/db-state->kw)
@@ -225,9 +214,9 @@
                       {:reason :not-a-candidate-store})))
   (let [db (.-db ^CandidateStore store)
         mh (mutation-hash mutation)
-        ts (canonical-timestamp (:created-at candidate))]
+        ts (sqlite/canonical-timestamp (:created-at candidate) invalid-timestamp)]
     (sqlite/with-db [conn db]
-      (set-busy-timeout! conn 10000)
+      (sqlite/set-busy-timeout! conn 10000)
       (insert-mutation-row! conn mutation ts)
       (if-let [row (find-by-dedupe-key conn (proof->digest (:parent/genome-id mutation)) mh)]
         ;; find-by-dedupe-key now returns a JOIN-derived row; normalize via row->candidate
@@ -277,7 +266,7 @@
         key (str cid)
         db (.-db ^CandidateStore store)]
     (sqlite/with-db [conn db]
-      (set-busy-timeout! conn 10000)
+      (sqlite/set-busy-timeout! conn 10000)
       (let [count (first (jdbc/execute! conn
                                         ["UPDATE candidates
                                           SET state = ?
@@ -370,7 +359,7 @@
                         (:parent/genome-id edge) (:ordinal edge)
                         (name (or (:role edge) :parent)) (:merge-plan/digest edge)
                         (:mutation/hash edge) (pr-str (or (:provenance edge) {}))
-                        (or (:created-at edge) (canonical-timestamp nil))]))
+                        (or (:created-at edge) (sqlite/canonical-timestamp nil invalid-timestamp))]))
       (->> (jdbc/query conn
                         ["SELECT * FROM candidate_parent_edges WHERE candidate_id = ?
                           ORDER BY ordinal" cid])

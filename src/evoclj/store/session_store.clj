@@ -28,7 +28,6 @@
             [evoclj.store.existence :as existence]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
-           (java.time.format DateTimeFormatter)
            (java.util Date UUID)))
 
 ;; ---------------------------------------------------------------------------
@@ -52,25 +51,15 @@
 ;; Shared helpers (single source — only this ns does jdbc on sessions)
 ;; ---------------------------------------------------------------------------
 
-(def ^:private timestamp-fmt DateTimeFormatter/ISO_INSTANT)
-
-(defn- canonical-timestamp
+(defn- invalid-timestamp
+  "Build the typed failure for a timestamp that is not a Date, Instant,
+  or ISO-8601 string. The shared coercion + ISO formatting lives in
+  evoclj.store.sqlite/canonical-timestamp; only the error type stays
+  namespace-local."
   [ts]
-  (let [inst (cond
-               (nil? ts) (Instant/now)
-               (instance? Instant ts) ts
-               (instance? Date ts) (.toInstant ^Date ts)
-               (string? ts) (Instant/parse ts)
-               :else (throw (err/error :store/session-invalid
-                                       "timestamp must be an inst, Instant, or ISO-8601 string"
-                                       {:timestamp ts})))]
-    (.format timestamp-fmt inst)))
-
-(defn set-busy-timeout!
-  [db ms]
-  (let [^java.sql.Connection conn (:connection db)]
-    (with-open [stmt (.createStatement conn)]
-      (.execute stmt (str "PRAGMA busy_timeout = " ms)))))
+  (err/error :store/session-invalid
+             "timestamp must be an inst, Instant, or ISO-8601 string"
+             {:timestamp ts}))
 
 (defn- row->session
   "Convert a sessions DB row into the public Session contract map."
@@ -113,9 +102,9 @@
         genome-digest (proof->digest genome-proof)
         resolution-digest (proof->digest resolution-proof)
         phenotype-digest (proof->digest phenotype-proof)
-        ts (canonical-timestamp (:created-at request))]
+        ts (sqlite/canonical-timestamp (:created-at request) invalid-timestamp)]
     (sqlite/with-db [conn db]
-      (set-busy-timeout! conn 10000)
+      (sqlite/set-busy-timeout! conn 10000)
       (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?"
                                          (:generation/id request)]))
         (throw (err/error :store/generation-not-found

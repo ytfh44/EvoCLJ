@@ -65,9 +65,7 @@
             [evoclj.store.session :as session]
             [evoclj.store.work :as work-store]
             [evoclj.store.sqlite :as sqlite])
-  (:import (java.time Instant)
-           (java.time.format DateTimeFormatter)
-           (java.util Date UUID)))
+  (:import (java.util UUID)))
 
 ;; --- the Episode contract (Detailed Public Data Contracts) -----------------
 
@@ -123,22 +121,15 @@
 
 ;; --- row mapping --------------------------------------------------------------
 
-(def ^:private timestamp-fmt DateTimeFormatter/ISO_INSTANT)
-
-(defn- canonical-timestamp
-  "Canonical ISO-8601 UTC string for a timestamp value (a
-  java.util.Date, a java.time.Instant, or an ISO-8601 string);
-  nil means now."
+(defn- invalid-timestamp
+  "Build the typed failure for a timestamp that is not a Date, Instant,
+  or ISO-8601 string. The shared coercion + ISO formatting lives in
+  evoclj.store.sqlite/canonical-timestamp; only the error type stays
+  namespace-local."
   [ts]
-  (let [inst (cond
-               (nil? ts) (Instant/now)
-               (instance? Instant ts) ts
-               (instance? Date ts) (.toInstant ^Date ts)
-               (string? ts) (Instant/parse ts)
-               :else (throw (episode-error :episode/invalid
-                                           "timestamp must be an inst, Instant, or ISO-8601 string"
-                                           {:timestamp ts})))]
-    (.format timestamp-fmt inst)))
+  (episode-error :episode/invalid
+                 "timestamp must be an inst, Instant, or ISO-8601 string"
+                 {:timestamp ts}))
 
 (defn- row->episode
   "Convert an episodes DB row into the public Episode contract map."
@@ -239,7 +230,7 @@
                                   {:session/id sid :task-ref task-ref})))
           (let [eid (UUID/randomUUID)
                 outcome {:status (get work-terminal-state->outcome (:work/state tw)) :score nil}
-                ts (canonical-timestamp nil)]
+                ts (sqlite/canonical-timestamp nil invalid-timestamp)]
             (sqlite/with-db [conn db]
               (jdbc/insert! conn :episodes
                             {:id (str eid)
