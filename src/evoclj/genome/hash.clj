@@ -65,6 +65,42 @@
    [s]
    (file-digest (.getBytes (normalize-line-endings s) StandardCharsets/UTF_8)))
 
+(defn canonical
+  "The single implementation of the repo's deterministic-EDN hashing
+  convention (Global Constraint 6, INV-05).
+
+  Maps are collapsed into `sorted-map-by` order over their keys' pr-str
+  form, sets into `sorted-set-by` order over their elements' pr-str
+  form, vectors and seqs are realized eagerly element-wise, and scalars
+  are returned unchanged. Equal logical content — regardless of the
+  input collection's construction or key/element insertion order —
+  therefore always produces an identical `pr-str`, which is exactly
+  what the GC-6 content-addressing contract requires: the digest of
+  such a value is a pure function of its logical content.
+
+  This is THE convention; do not introduce a second copy. (The
+  VerifiedDigest-aware variant in evoclj.store.candidate-store
+  deliberately differs.)"
+  [x]
+  (cond
+    (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
+                   (map (fn [[k v]] [k (canonical v)])) x)
+    (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
+                   (map canonical) x)
+    (vector? x) (mapv canonical x)
+    (seq? x) (mapv canonical x)
+    :else x))
+
+(defn digest
+  "The canonical content digest \"sha256:<64 lowercase hex>\" of `x`:
+  the text-digest of the `pr-str` of `canonical`'s deterministic EDN
+  form of `x`. Equal logical content (modulo map/set/key ordering and
+  the text hash's CRLF/CR normalization) yields an identical digest;
+  any logically different value yields a different one. This is the
+  GC-6 / INV-05 cross-subsystem content-addressing convention."
+  [x]
+  (text-digest (pr-str (canonical x))))
+
 (defn- entry->index-line
   "One canonical index line: path + NUL + digest + LF (rule 6)."
   [{:keys [path digest]}]

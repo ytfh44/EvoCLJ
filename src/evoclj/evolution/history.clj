@@ -173,30 +173,7 @@
                         {:limit limit :max max-window}))))
   request)
 
-;; --- canonical hashing conventions (the repo's digest convention) ---------------
-
-(defn- canonical
-  "Deterministic EDN form for hashing — the same convention as
-  evoclj.evolution.candidate/canonical: maps sorted by their pr-str
-  key form, sets by their pr-str element form, collections realized
-  eagerly. Any EDN-safe value yields a stable pr-str, so the
-  fingerprint is a pure function of logical content (Global
-  Constraint 6)."
-  [x]
-  (cond
-    (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map (fn [[k v]] [k (canonical v)])) x)
-    (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map canonical) x)
-    (vector? x) (mapv canonical x)
-    (seq? x) (mapv canonical x)
-    :else x))
-
-(defn- digest
-  "The canonical sha256 content digest (\"sha256:<64 hex>\") of the
-  canonical pr-str of `data`."
-  [data]
-  (hash/text-digest (pr-str (canonical data))))
+;; --- canonical hashing is single-sourced in evoclj.genome.hash ----------------
 
 ;; --- Step 2: the similarity fingerprint ------------------------------------------
 
@@ -293,7 +270,7 @@
   excluded. Typed errors: :mutation/op-invalid (malformed op),
   :history/op-invalid (op outside the language)."
   [op]
-  (digest {:targets [(op-target op)]}))
+  (hash/digest {:targets [(op-target op)]}))
 
 (defn mutation-fingerprint
   "The Step 2 similarity fingerprint of a whole Mutation IR: the
@@ -315,7 +292,7 @@
     (throw (err/error :history/op-invalid
                       "a mutation must carry a non-empty :ops vector"
                       {:mutation (err/sanitize (dissoc mutation :ops))})))
-  (digest {:targets (sort-by pr-str (mapv op-target (:ops mutation)))}))
+  (hash/digest {:targets (sort-by pr-str (mapv op-target (:ops mutation)))}))
 
 ;; --- row mapping -----------------------------------------------------------------
 

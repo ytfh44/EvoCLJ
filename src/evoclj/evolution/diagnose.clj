@@ -131,33 +131,13 @@
   [s]
   (.getBytes ^String s StandardCharsets/UTF_8))
 
-(defn- canonical
-  "Deterministic EDN form for hashing — the same convention as
-  evoclj.evolution.evidence/canonical: maps sorted by their pr-str key
-  form, sets by their pr-str element form, collections realized
-  eagerly. The diagnosis id is a pure function of logical content
-  (Global Constraint 6)."
-  [x]
-  (cond
-    (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map (fn [[k v]] [k (canonical v)])) x)
-    (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map canonical) x)
-    (vector? x) (mapv canonical x)
-    (seq? x) (mapv canonical x)
-    :else x))
-
-(defn- digest
-  "Content hash (sha256:<64 hex>) of the canonical pr-str of `data`."
-  [data]
-  (hash/text-digest (pr-str (canonical data))))
-
 (defn- deterministic-uuid
   "A deterministic name-based UUID (v3) over the canonical pr-str of
   `data`: identical logical content always maps to the same id, so a
-  diagnosis is a pure function of its evidence pack."
+  diagnosis is a pure function of its evidence pack.
+  Uses evoclj.genome.hash/canonical for the deterministic EDN form."
   [data]
-  (UUID/nameUUIDFromBytes (utf8-bytes (pr-str (canonical data)))))
+  (UUID/nameUUIDFromBytes (utf8-bytes (pr-str (hash/canonical data)))))
 
 ;; --- the diagnose input context (component) ------------------------------------
 
@@ -371,7 +351,7 @@
                           rank-hypotheses)
           data {:evidence/id (:evidence/id evidence-pack)
                 :hypotheses hypotheses}
-          id (digest data)
+          id (hash/digest data)
           diagnosis (assoc data :diagnosis/id id)]
       (ds/validate-diagnosis diagnosis)
       diagnosis)))
@@ -440,13 +420,13 @@
   (validate-store! store)
   (ds/validate-diagnosis diagnosis)
   (let [body (dissoc diagnosis :diagnosis/id)
-        id (digest body)]
+        id (hash/digest body)]
     (when-not (= id (:diagnosis/id diagnosis))
       (throw (err/error :diagnosis/id-mismatch
                         "diagnosis id must be the content hash of the diagnosis body"
                         {:diagnosis/id (:diagnosis/id diagnosis)
                          :expected id})))
-    (let [ba (utf8-bytes (pr-str (canonical body)))
+    (let [ba (utf8-bytes (pr-str (hash/canonical body)))
           {:keys [size]} (cas/put-bytes! (:cas store) ba
                                          {:media-type diagnosis-media-type})]
       (sqlite/exec! (:sqlite store)

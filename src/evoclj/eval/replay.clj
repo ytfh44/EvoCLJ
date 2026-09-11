@@ -129,26 +129,12 @@
   #{:fixture :recorded-read :shadow-write :forbid-write})
 
 ;; --- canonicalization (Global Constraint 22) -------------------------------
-
-(defn- canonical
-  "Deterministic EDN form for hashing and response lookup: maps sorted
-  by their pr-str key form, sets by their pr-str element form,
-  collections realized eagerly (the same convention as
-  evoclj.eval.dataset)."
-  [x]
-  (cond
-    (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map (fn [[k v]] [k (canonical v)])) x)
-    (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map canonical) x)
-    (vector? x) (mapv canonical x)
-    (seq? x) (mapv canonical x)
-    :else x))
+;; The deterministic EDN form is evoclj.genome.hash/canonical (single source).
 
 (defn- canonical-args
   "The canonical lookup key for a tool call's args."
   [args]
-  (canonical args))
+  (genome-hash/canonical args))
 
 ;; --- Step 1: replay case construction --------------------------------------
 
@@ -292,7 +278,7 @@
       (assoc replay-case
              :case/hash
              (genome-hash/text-digest
-              (pr-str (canonical (dissoc replay-case :output/equiv?))))))))
+              (pr-str (genome-hash/canonical (dissoc replay-case :output/equiv?))))))))
 
 (defn- validate-replay-case!
   "Validate a case map handed to run-replay! (a built case, or a
@@ -786,7 +772,7 @@
          summary (aggregate outcomes)
          stable-outcomes (mapv #(update % :run dissoc :session/id) outcomes)
          report-hash (genome-hash/text-digest
-                      (pr-str (canonical {:profile/hash (:profile/hash profile)
+                      (pr-str (genome-hash/canonical {:profile/hash (:profile/hash profile)
                                           :cases stable-outcomes
                                           :aggregate summary})))]
      {:replay/requested (vec replay-case-ids)
@@ -834,7 +820,7 @@
                     (= :recorded-only policy) (assoc :model/network? false))]
       (assoc profile :profile/hash
              (genome-hash/text-digest
-              (pr-str (canonical (dissoc profile :profile/hash))))))))
+              (pr-str (genome-hash/canonical (dissoc profile :profile/hash))))))))
 
 (defn load-historical-episode!
   "Kernel-owned read-only historical Episode loader. Old or incomplete
