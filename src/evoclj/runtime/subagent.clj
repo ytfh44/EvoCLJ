@@ -1227,23 +1227,6 @@
   Work CAS plus cascade revoke)."
   tool.specs/agent-cancel-tool)
 
-;; Back-compat aliases for callers that prefer the `canonical-` prefix.
-(def canonical-agent-spawn-tool tool.specs/agent-spawn-tool)
-(def canonical-agent-status-tool tool.specs/agent-status-tool)
-(def canonical-agent-cancel-tool tool.specs/agent-cancel-tool)
-
-(def agent-spawn-tool-catalog-entry
-  "Alias of the canonical tool.specs/agent-spawn-wire-tool."
-  tool.specs/agent-spawn-wire-tool)
-
-(def agent-status-tool-catalog-entry
-  "Alias of the canonical tool.specs/agent-status-wire-tool."
-  tool.specs/agent-status-wire-tool)
-
-(def agent-cancel-tool-catalog-entry
-  "Alias of the canonical tool.specs/agent-cancel-wire-tool."
-  tool.specs/agent-cancel-wire-tool)
-
 (def subagent-tool-catalog
   "The tool catalog the scheduler's tool loop consumes for subagents:
   the three S6 wire tools, single-sourced from tool.specs (wire form

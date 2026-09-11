@@ -123,10 +123,6 @@
 
 (declare get-session)
 
-(defn- canonical-timestamp
-  [instant]
-  (let [ts (or instant (java.time.Instant/now))]
-    (.format java.time.format.DateTimeFormatter/ISO_INSTANT ts)))
 (defn create-session!
   "Create a new session with pinned Genome/Resolution/Phenotype/Generation.
   Returns the public Session contract map (immutable pin, no state machine)."

@@ -77,23 +77,6 @@
       :surface/pinned-at now
       :surface/binding binding})))
 
-(defn pin-catalog
-  "Alias for pin — kept for assembler compatibility."
-  ([catalog] (pin catalog))
-  ([catalog opts] (pin catalog opts)))
-
-(defn surface-binding
-  "Extract the pinned binding from a ToolSurface."
-  [surface]
-  (:surface/binding surface))
-
-(defn tool-surface?
-  "Predicate for ToolSurface shape."
-  [x]
-  (and (map? x)
-       (contains? x :surface/tools)
-       (contains? x :surface/binding)))
-
 (defn refresh-context
   "Recompute EffectiveContext from fresh SessionBindings and CAS.
 
