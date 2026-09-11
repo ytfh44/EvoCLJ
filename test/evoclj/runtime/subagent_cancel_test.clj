@@ -3,7 +3,6 @@
             [clojure.java.jdbc :as jdbc]
             [evoclj.capability.broker :as broker]
             [evoclj.capability.mint :as mint]
-            [evoclj.broker.registry :as reg]
             [evoclj.runtime.subagent :as subagent]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
@@ -71,9 +70,8 @@
         sid (:session/id pr)
         pid (or (:phenotype/id pr) phenotype)
         it (tool-intent sid pid)
-        normalized {:resource {:kind :tool :id :fixture/echo} :action :invoke}
-        registry (reg/default-registry)]
-    (broker/authorize {:intent it :normalized-request normalized :leases [lease] :usage {} :now in-window :registry registry :lease-registry subagent/subagent-lease-registry})))
+        normalized {:resource {:kind :tool :id :fixture/echo} :action :invoke}]
+    (broker/authorize {:intent it :normalized-request normalized :leases [lease] :usage {} :now in-window :lease-registry subagent/subagent-lease-registry})))
 (deftest cancel-single-child-revokes-leases
   (testing "cancel-subagent! revokes child's derived leases; next authorize is :capability/revoked"
     (let [db (fresh-db)
