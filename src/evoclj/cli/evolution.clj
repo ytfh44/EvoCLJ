@@ -15,17 +15,14 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [evoclj.cli.session :as session]
-            [evoclj.compiler.core :as compiler]
             [evoclj.eval.core :as eval-core]
             [evoclj.evolution.candidate :as candidate]
             [evoclj.evolution.core :as evolution]
             [evoclj.genome.load :as load]
-            [evoclj.genome.path :as gpath]
             [evoclj.kernel.error :as err]
             [evoclj.config :as config]
              [evoclj.evolution.scheduler :as scheduler]
              [evoclj.promotion.promote :as promote]
-            [evoclj.store.cas :as cas]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
            (java.time Instant)
@@ -406,40 +403,6 @@
     {:error/type (or (:error/type ed) :error/unknown)
      :message (.getMessage t)}))
 
-(defn- genome-index-body
-  "The canonical CAS body of a loaded Genome — the exact serialization
-  of evoclj.genome.hash/tree-digest (path + NUL + digest + LF per
-  entry, sorted bytewise) whose SHA-256 is the genome's content
-  address. This is the body promote!'s integrity re-hash reads back
-  (Database Invariant 7)."
-  [loaded]
-  (apply str
-         (map (fn [[p {:keys [digest]}]]
-                (str p "\u0000" digest "\n"))
-              (sort-by (fn [[p _]] p) gpath/bytewise-compare (:files loaded)))))
-
-(defn- store-candidate-genome-body!
-  "Host bookkeeping the promotion phase requires: persist the candidate
-  Genome's canonical body into the CAS under its content address so
-  promote!'s integrity re-hash (Database Invariant 7) passes. Standalone
-  `promote` assumes an operator already provisioned this; cycle, as the
-  self-contained orchestrator, ensures it before promoting."
-  [opts system genome-id]
-  (cas/put-bytes! (session/cas-of system)
-                  (.getBytes (genome-index-body
-                              (session/load-genome-for-execution
-                               (session/resolve-bundle-root opts genome-id)))
-                             StandardCharsets/UTF_8)
-                  {}))
-
-(defn- compiled-resolution-id
-  "The compiled ResolutionId of a candidate Genome bundle (compilation
-  is the host's job — promote! never compiles; mirrors cli/promotion.clj)."
-  [bundle-root]
-  (:code/resolution-id
-   (compiler/compile-genome (session/load-genome-for-execution bundle-root)
-                            session/provider-catalog)))
-
 (defn cycle!
   "evoclj cycle [--generation <id|current>] [--profile <profile-id>]
         [--max-candidates <n>] [--evolve] [--no-promote]
@@ -567,10 +530,11 @@
                                                      opts system parent-gen-id)
                                          candidate-root (session/candidate-bundle-root
                                                          opts (:candidate/genome-id c))
-                                         _ (store-candidate-genome-body! opts system
-                                                                        (:candidate/genome-id c))
+                                         _ (session/store-candidate-genome-body!
+                                            opts system
+                                            (:candidate/genome-id c))
                                          promotion-system {:store store
-                                                           :resolution/id (compiled-resolution-id
+                                                           :resolution/id (session/compiled-resolution-id
                                                                            candidate-root)
                                                            :candidate/root candidate-root
                                                            :event/session-id op-session}
@@ -660,7 +624,7 @@
             candidate-root (session/candidate-bundle-root
                             opts (:candidate/genome-id first-cand))]
         {:store store
-         :resolution/id (compiled-resolution-id candidate-root)
+         :resolution/id (session/compiled-resolution-id candidate-root)
          :candidate/root candidate-root
          :event/session-id op-session}))))
 

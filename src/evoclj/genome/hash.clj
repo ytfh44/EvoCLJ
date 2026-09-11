@@ -106,6 +106,21 @@
   [{:keys [path digest]}]
   (str path "\u0000" digest "\n"))
 
+(defn index-body
+  "The canonical Genome index body (rules 5-6): `entries` is a sequence
+  of {:path p :digest d} maps; entries are ordered by normalized path in
+  bytewise lexical order, each line is path + NUL + digest + LF, and the
+  lines are concatenated.
+
+  This is THE single construction of the bytes whose SHA-256 is a
+  Genome id (rule 7): `tree-digest` digests exactly these bytes, and
+  every host-side CAS write of a loaded Genome's canonical body
+  (Database Invariant 7) delegates here, so the persisted serialization
+  can never drift from the content address."
+  [entries]
+  (apply str (map entry->index-line
+                  (sort-by :path path/bytewise-compare entries))))
+
 (defn tree-digest
   "Return the Genome ID \"sha256:<64 lowercase hex>\" for a tree of entries.
 
@@ -133,7 +148,6 @@
             (throw (err/error :genome/tree-invalid
                               "duplicate normalized paths in tree"
                               {:paths (mapv key dupes)})))
-        sorted (sort-by :path path/bytewise-compare normalized)
-        index (apply str (map entry->index-line sorted))]
+        index (index-body normalized)]
     (types/genome-id
      (str "sha256:" (hex (sha256-bytes (.getBytes ^String index StandardCharsets/UTF_8)))))))

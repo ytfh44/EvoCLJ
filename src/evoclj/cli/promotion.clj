@@ -24,7 +24,6 @@
   (:require [clojure.string :as str]
             [evoclj.cli.evolution :as evolution]
             [evoclj.cli.session :as session]
-            [evoclj.compiler.core :as compiler]
             [evoclj.evolution.candidate :as candidate]
             [evoclj.kernel.error :as err]
             [evoclj.promotion.lineage :as lineage]
@@ -65,14 +64,6 @@
       (keyword (subs t 1))
       (keyword t))))
 
-(defn- compiled-resolution-id
-  "The compiled ResolutionId of a candidate Genome bundle (compilation
-  is the host's job — promote! never compiles)."
-  [bundle-root]
-  (:code/resolution-id
-   (compiler/compile-genome (session/load-genome-for-execution bundle-root)
-                            session/provider-catalog)))
-
 ;; --- commands ----------------------------------------------------------------
 
 (defn promote!
@@ -100,7 +91,7 @@
           candidate-root (session/candidate-bundle-root opts
                                                         (:candidate/genome-id c))
           promotion-system {:store store
-                            :resolution/id (compiled-resolution-id candidate-root)
+                            :resolution/id (session/compiled-resolution-id candidate-root)
                             :candidate/root candidate-root
                             :event/session-id op-session}
           result (promote/promote! promotion-system
