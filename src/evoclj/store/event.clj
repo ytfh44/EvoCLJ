@@ -71,7 +71,6 @@
   function is a SQLite db (a path string or a java.jdbc spec), as in
   evoclj.store.sqlite."
   (:require [clojure.edn :as edn]
-            [clojure.java.jdbc :as jdbc]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
@@ -103,54 +102,6 @@
 
 (defn- root-event? [type]
   (contains? root-event-types type))
-
-(defmacro ^:private with-append-tx
-  "Open a connection, enable FK enforcement and a busy timeout, begin
-  an IMMEDIATE write transaction, run body, commit, and roll back on
-  any failure. BEGIN IMMEDIATE takes SQLite's write lock up front, so
-  the per-session seq allocation below is serialized against
-  concurrent writers; busy_timeout makes a contended append wait
-  instead of failing with SQLITE_BUSY."
-  [[conn-binding db] & body]
-  `(with-open [~conn-binding (jdbc/get-connection (sqlite/spec ~db))]
-     (raw-exec! ~conn-binding "PRAGMA foreign_keys = ON")
-     (raw-exec! ~conn-binding "PRAGMA busy_timeout = 10000")
-     (try
-       (raw-exec! ~conn-binding "BEGIN IMMEDIATE")
-       (let [result# (do ~@body)]
-         (raw-exec! ~conn-binding "COMMIT")
-         result#)
-       (catch Throwable t#
-         (try (raw-exec! ~conn-binding "ROLLBACK")
-              (catch Throwable _# nil))
-         (throw t#)))))
-
-(defn- raw-exec!
-  [^java.sql.Connection conn sql]
-  (with-open [stmt (.createStatement conn)]
-    (.execute stmt sql)))
-
-(defn- raw-query
-  [^java.sql.Connection conn sql params]
-  (with-open [stmt (.prepareStatement conn sql)]
-    (doseq [[i v] (map-indexed vector params)]
-      (.setObject stmt (inc i) v))
-    (with-open [rs (.executeQuery stmt)]
-      (let [md (.getMetaData rs)
-            n (.getColumnCount md)
-            labels (mapv #(keyword (.getColumnLabel md (inc %))) (range n))]
-        (loop [rows []]
-          (if (.next rs)
-            (recur (conj rows (zipmap labels
-                                      (mapv #(.getObject rs (inc %)) (range n)))))
-            rows))))))
-
-(defn- raw-insert!
-  [^java.sql.Connection conn sql params]
-  (with-open [stmt (.prepareStatement conn sql)]
-    (doseq [[i v] (map-indexed vector params)]
-      (.setObject stmt (inc i) v))
-    (.executeUpdate stmt)))
 
 (def ^:private timestamp-fmt DateTimeFormatter/ISO_INSTANT)
 
@@ -236,11 +187,11 @@
   created via direct inserts (bypassing migrate!) still work."
   [^java.sql.Connection conn]
   (try
-    (raw-exec! conn "CREATE TABLE IF NOT EXISTS causal_links (from_event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE, to_event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE, link_type TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (from_event_id, to_event_id, link_type)) WITHOUT ROWID")
+    (sqlite/exec-raw! conn "CREATE TABLE IF NOT EXISTS causal_links (from_event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE, to_event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE, link_type TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (from_event_id, to_event_id, link_type)) WITHOUT ROWID")
     (catch Exception _ nil))
-  (try (raw-exec! conn "CREATE INDEX IF NOT EXISTS causal_links_from_idx ON causal_links(from_event_id)") (catch Exception _ nil))
-  (try (raw-exec! conn "CREATE INDEX IF NOT EXISTS causal_links_to_idx ON causal_links(to_event_id)") (catch Exception _ nil))
-  (try (raw-exec! conn "CREATE INDEX IF NOT EXISTS causal_links_type_idx ON causal_links(link_type)") (catch Exception _ nil))
+  (try (sqlite/exec-raw! conn "CREATE INDEX IF NOT EXISTS causal_links_from_idx ON causal_links(from_event_id)") (catch Exception _ nil))
+  (try (sqlite/exec-raw! conn "CREATE INDEX IF NOT EXISTS causal_links_to_idx ON causal_links(to_event_id)") (catch Exception _ nil))
+  (try (sqlite/exec-raw! conn "CREATE INDEX IF NOT EXISTS causal_links_type_idx ON causal_links(link_type)") (catch Exception _ nil))
   nil)
 
 (defn- fetch-causal-links
@@ -248,7 +199,7 @@
   of {:from <id> :type <keyword>}."
   [^java.sql.Connection conn event-id]
   (try
-    (let [rows (raw-query conn "SELECT from_event_id, link_type FROM causal_links WHERE to_event_id = ?" [event-id])]
+    (let [rows (sqlite/query-raw! conn "SELECT from_event_id, link_type FROM causal_links WHERE to_event_id = ?" [event-id])]
       (set (map (fn [r] {:from (:from_event_id r) :type (keyword (:link_type r))}) rows)))
     (catch Exception _ #{})))
 
@@ -328,7 +279,7 @@
         prev-id (:prev/event-id event)
         causal-links (or (:causal-links event) #{})
         root? (root-event? type)
-        sess (first (raw-query conn "SELECT generation_id FROM sessions WHERE id = ?"
+        sess (first (sqlite/query-raw! conn "SELECT generation_id FROM sessions WHERE id = ?"
                                [session-key]))
         _ (when-not sess
             (throw (err/error :store/session-not-found
@@ -340,7 +291,7 @@
                               {:event/type type
                                :event/generation-id (:generation/id event)
                                :session/generation-id (:generation_id sess)})))
-        new-seq (-> (raw-query conn
+        new-seq (-> (sqlite/query-raw! conn
                                "SELECT COALESCE(MAX(event_seq), 0) + 1 AS event_seq
                                 FROM events WHERE session_id = ?"
                                [session-key])
@@ -359,7 +310,7 @@
                               "non-root events must reference the immediate predecessor in the same session"
                               {:event/type type}))
             (not root?)
-            (let [prev-row (first (raw-query conn "SELECT event_seq, session_id FROM events WHERE id = ?"
+            (let [prev-row (first (sqlite/query-raw! conn "SELECT event_seq, session_id FROM events WHERE id = ?"
                                               [prev-id]))]
               (when-not prev-row
                 (throw (err/error :store/cause-not-found
@@ -379,7 +330,7 @@
               ;; prev-hash is always taken from the positional
               ;; predecessor, so any other prev would fork the two
               ;; predecessor concepts.
-              (let [immediate-prev (first (raw-query conn "SELECT id, event_seq FROM events WHERE session_id = ? AND event_seq = ?"
+              (let [immediate-prev (first (sqlite/query-raw! conn "SELECT id, event_seq FROM events WHERE session_id = ? AND event_seq = ?"
                                                       [session-key (dec new-seq)]))]
                 (when-not (= (:id immediate-prev) prev-id)
                   (throw (err/error :store/prev-not-immediate
@@ -392,7 +343,7 @@
               (doseq [{:keys [from type]} causal-links]
                 (when-not (contains? #{:from :type} :from)
                   (throw (err/error :store/event-invalid "causal link missing :from" {:link {:from from :type type}})))
-                (let [src (first (raw-query conn "SELECT id FROM events WHERE id = ?" [from]))]
+                (let [src (first (sqlite/query-raw! conn "SELECT id FROM events WHERE id = ?" [from]))]
                   (when-not src
                     (throw (err/error :store/causal-link-not-found
                                       "causal link from references a nonexistent event"
@@ -402,7 +353,7 @@
                                       "causal link :type must be a keyword"
                                       {:link {:from from :type type}}))))))
             :else nil)
-        prev-hash (-> (raw-query conn
+        prev-hash (-> (sqlite/query-raw! conn
                                  "SELECT event_hash FROM events
                                   WHERE session_id = ? AND event_seq = ?"
                                  [session-key (dec new-seq)])
@@ -429,7 +380,7 @@
                 :metadata-edn payload
                 :causal-links-edn (canonical-causal-links causal-links)}
         ev-hash (event-hash header)]
-    (raw-insert! conn
+    (sqlite/insert-raw! conn
                  "INSERT INTO events
                     (session_id, event_seq, generation_id, phenotype_id,
                      event_type, cause_event_id, prev_event_id, payload_ref, payload,
@@ -438,12 +389,12 @@
                  [session-key new-seq (:generation/id event) (:phenotype/id event)
                   (type->db type) prev-id prev-id (:payload-ref event) payload
                   prev-hash ev-hash ts])
-    (let [row (first (raw-query conn "SELECT * FROM events
+    (let [row (first (sqlite/query-raw! conn "SELECT * FROM events
                                      WHERE session_id = ? AND event_seq = ?"
                                 [session-key new-seq]))
           new-id (:id row)]
       (doseq [{:keys [from type]} causal-links]
-        (raw-insert! conn
+        (sqlite/insert-raw! conn
                      "INSERT OR IGNORE INTO causal_links (from_event_id, to_event_id, link_type, created_at) VALUES (?, ?, ?, ?)"
                      [from new-id (type->db type) ts]))
       (let [links (fetch-causal-links conn new-id)
@@ -483,7 +434,14 @@
      (let [event (if (nil? redaction-specs)
                    event
                    (redact/redact-event event redaction-specs))]
-      (with-append-tx [conn store]
+      ;; The append runs inside evoclj.store.sqlite/with-write-tx (one
+      ;; connection, FK enforcement + 10s busy timeout, BEGIN IMMEDIATE,
+      ;; COMMIT on success / ROLLBACK + rethrow on failure). BEGIN
+      ;; IMMEDIATE takes SQLite's write lock up front, so the per-session
+      ;; seq allocation below is serialized against concurrent writers;
+      ;; busy_timeout makes a contended append wait instead of failing
+      ;; with SQLITE_BUSY.
+      (sqlite/with-write-tx [conn store]
         (append-event-on-conn! conn event))))))
 
 ;; --- read/verify queries (no update, no delete — by design) -----------------
