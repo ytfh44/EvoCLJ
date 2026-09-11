@@ -508,17 +508,14 @@
                                       (assoc metadata :event/id (:id row)))))
                                 marker-rows)]
                       (or existing
-                          (let [tip (first (sqlite/query-raw!
-                                            conn
-                                            "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1"
-                                            [(str sid)]))]
+                          (let [tip (event/latest-event-id-on-conn conn sid)]
                             (event/append-event-on-conn!
                              conn
                              {:session/id sid
                               :generation/id (:generation/id pin)
                               :phenotype/id (:phenotype/id pin)
                               :event/type :provider/call-ambiguous
-                              :prev/event-id (:id tip)
+                              :prev/event-id tip
                               :causal-links #{}
                               :payload-ref nil
                               :metadata {:provider/call-started-event/id (:event/id effect)

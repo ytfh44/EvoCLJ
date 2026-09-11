@@ -441,6 +441,38 @@
 
 ;; --- read/verify queries (no update, no delete — by design) -----------------
 
+(def ^:private latest-event-id-sql
+  "The session event-log tip query — the ONE definition of \"latest event
+  id for a session\". ORDER BY event_seq DESC LIMIT 1 is served directly
+  by the UNIQUE (session_id, event_seq) index (Database Invariant 3), so
+  it needs no rowid/sequence correlation argument."
+  "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1")
+
+(defn latest-event-id-on-conn
+  "The id of the last event appended to `session-id`'s log (its tip), or
+  nil when the session has no events, read on an already-open raw
+  java.sql.Connection the caller holds (e.g. inside a write
+  transaction) — the read-side counterpart of append-event-on-conn!.
+
+  Relies on the append path's contiguity invariant: append-event-on-conn!
+  allocates event_seq as COALESCE(MAX(event_seq), 0) + 1 inside the SAME
+  BEGIN IMMEDIATE transaction as the INSERT, so a session's seqs are
+  contiguous and monotonic and the row with the greatest event_seq is
+  the last one appended."
+  [conn session-id]
+  (:id (first (sqlite/query-raw! conn latest-event-id-sql
+                                [(str (types/session-id session-id))]))))
+
+(defn latest-event-id
+  "The id of the last event appended to `session-id`'s log (its tip), or
+  nil when the session has no events. Spec-taking counterpart of
+  latest-event-id-on-conn (db is a path string or java.jdbc spec); both
+  share the one tip query above."
+  [store session-id]
+  (:id (first (sqlite/query store
+                            [latest-event-id-sql
+                             (str (types/session-id session-id))]))))
+
 (defn events-for-session
   "All events of `session-id` in ascending :event/seq order, as a
   vector of public Event maps (never lazy). Each event includes

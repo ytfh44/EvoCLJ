@@ -345,8 +345,7 @@
                               "cannot anchor the promotion event to an unknown operator session"
                               {:session/id session-id})))
         ;; newest event is the immediate predecessor (:session/created root or prior promotion event)
-        newest (first (raw-query conn "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1" [session-key]))
-        cause-id (:id newest)
+        cause-id (event/latest-event-id-on-conn conn session-key)
         _ (when (nil? cause-id)
             (throw (err/error :promotion/event-anchor-missing
                               "the operator session must carry its :session/created root event first"
@@ -501,10 +500,8 @@
       (throw (err/error :store/session-not-found
                         "cannot anchor the promotion event to an unknown operator session"
                         {:session/id session-id})))
-    (let [newest (first (raw-query conn
-                                   "SELECT MAX(id) AS id FROM events WHERE session_id = ?"
-                                   [key]))]
-      (when (nil? (:id newest))
+    (let [tip (event/latest-event-id-on-conn conn key)]
+      (when (nil? tip)
         (throw (err/error :promotion/event-anchor-missing
                           "the operator session must carry its :session/created root event first"
                           {:session/id session-id})))

@@ -335,16 +335,14 @@
       (throw (err/error :store/session-not-found
                         "cannot anchor the canary-stop event to an unknown operator session"
                         {:session/id session-key})))
-    (let [newest (first (sqlite/query db
-                                      ["SELECT MAX(id) AS id FROM events WHERE session_id = ?"
-                                       session-key]))]
-      (when (nil? (:id newest))
+    (let [tip (event/latest-event-id db session-key)]
+      (when (nil? tip)
         (throw (err/error :promotion/event-anchor-missing
                           "the operator session must carry its :session/created root event first"
                           {:session/id session-key})))
       {:generation/id (:generation_id sess)
        :phenotype/id (:phenotype_id sess)
-       :prev/event-id (:id newest)})))
+       :prev/event-id tip})))
 
 (def ^:private active-work-states
   #{:queued :running :waiting})

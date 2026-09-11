@@ -294,13 +294,6 @@
       (throw (err/error :store/session-not-found "no session with this id" {:session/id (types/session-id session-id)})))
     row))
 
-(defn- latest-cause
-  "Return the latest event id for session, or nil if none (caller must handle root)."
-  [db session-id]
-  (let [sid (str (types/session-id session-id))
-        row (first (sqlite/query db ["SELECT id FROM events WHERE session_id = ? ORDER BY event_seq DESC LIMIT 1" sid]))]
-    (:id row)))
-
 (def ^:private event-append-max-attempts
   "Bounded retries for the auditable event append. Each
   :store/prev-not-immediate rejection implies a peer committed to the
@@ -329,7 +322,7 @@
   (let [{:keys [generation_id phenotype_id]} (fetch-session db session-id)
         sid (types/session-id session-id)]
     (loop [attempt 1]
-      (let [cause (latest-cause db session-id)]
+      (let [cause (event/latest-event-id db session-id)]
         (when (nil? cause)
           (throw (err/error :store/binding-invalid
                             "session has no events; expected :session/created root before binding activation"

@@ -872,8 +872,7 @@
           (throw (err/error (if (= :succeeded expected-state) :subagent/not-completed :subagent/not-failed)
                             "child work left its terminal state inside the delivery transaction"
                             {:work/id child-work-id :work/state state}))))
-      (let [prev-id (:id (last (sqlite/query-raw! conn "SELECT id FROM events WHERE session_id = ? ORDER BY event_seq"
-                                                  [(str parent-id)])))]
+      (let [prev-id (event/latest-event-id-on-conn conn parent-id)]
         (when-not prev-id
           (throw (err/error :store/event-invalid "parent session has no events"
                             {:session/id parent-id})))
