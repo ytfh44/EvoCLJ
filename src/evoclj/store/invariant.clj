@@ -22,7 +22,7 @@
 (defn- now [] (str (Instant/now)))
 (defn- id [] (str (UUID/randomUUID)))
 (declare verify-durable-activation! get-proposal current-state list-runs
-         safe-edn-data? read-edn decode-artifact! verify-decision-row!
+         read-edn decode-artifact! verify-decision-row!
          verify-approved-decision! verify-disable-row! verify-event-outbox!
          verify-activation! verify-target! verify-run-row!)
 
@@ -49,18 +49,15 @@
         digest (existence/digest-of vd)]
     (cas/get-bytes (verifying-cas store) digest)
     digest))
-(defn- canonical-digest? [x]
-  (and (string? x) (re-matches #"^sha256:[0-9a-f]{64}$" x)))
-
 (defn- decode-artifact!
   [store ref context]
-  (when-not (canonical-digest? ref)
+  (when-not (invariant/digest? ref)
     (throw (err/error :invariant/artifact-invalid
                       "referenced artifact id is not canonical"
                       (assoc context :artifact/id ref))))
   (let [bytes (cas/get-bytes (verifying-cas store) ref)
         value (read-edn (String. bytes StandardCharsets/UTF_8))]
-    (when-not (and (some? value) (safe-edn-data? value 0))
+    (when-not (and (some? value) (invariant/safe-edn-value? value 0))
       (throw (err/error :invariant/artifact-invalid
                         "referenced artifact is not closed EDN"
                         (assoc context :artifact/id ref))))
@@ -94,16 +91,6 @@
 (defn- json [x] (pr-str x))
 (defn- read-edn [s]
   (try (edn/read-string s) (catch Exception _ nil)))
-(defn- safe-edn-data? [x depth]
-  (if (> depth 16)
-    false
-    (cond
-      (or (nil? x) (boolean? x) (number? x) (string? x) (keyword? x) (uuid? x)) true
-      (vector? x) (every? #(safe-edn-data? % (inc depth)) x)
-      (set? x) (every? #(safe-edn-data? % (inc depth)) x)
-      (map? x) (and (every? #(or (keyword? %) (string? %)) (keys x))
-                 (every? #(safe-edn-data? % (inc depth)) (vals x)))
-      :else false)))
 (defn- verify-proposal-row! [store r]
   (let [proposal (decode-artifact! store (:proposal_digest r) {:table :invariant_proposals :column :proposal_digest :proposal/id (:id r)})
         predicate (decode-artifact! store (:predicate_digest r) {:table :invariant_proposals :column :predicate_digest :proposal/id (:id r)})
@@ -112,7 +99,7 @@
         replay-refs (read-edn (:replay_refs r))
         adversarial-refs (read-edn (:adversarial_refs r))]
     (when-not (and (map? proposal) (map? predicate)
-                   (every? #(and (vector? %) (every? canonical-digest? %))
+                   (every? #(and (vector? %) (every? invariant/digest? %))
                            [evidence-refs replay-refs adversarial-refs]))
       (throw (err/error :invariant/proposal-invalid
                         "proposal or reference columns are malformed"
@@ -431,12 +418,12 @@
         candidate (when candidate-id
                    (first (sqlite/query (:sqlite store) ["SELECT id FROM candidates WHERE id = ?" (str candidate-id)])))]
     (when (and target
-               (not (and (string? target) (re-matches #"^sha256:[0-9a-f]{64}$" target))))
+               (not (invariant/digest? target)))
       (throw (err/error :invariant/target-invalid "target digest must be a canonical CAS artifact id" {})))
     (when target
       (let [bytes (cas/get-bytes v target)
             value (read-edn (String. bytes StandardCharsets/UTF_8))]
-        (when-not (and (some? value) (safe-edn-data? value 0))
+        (when-not (and (some? value) (invariant/safe-edn-value? value 0))
           (throw (err/error :invariant/target-invalid "target artifact is not closed EDN" {})))))
     (when (and evaluation-id (nil? evaluation))
       (throw (err/error :invariant/target-invalid "evaluation identity does not name a durable eval run" {:evaluation/id evaluation-id})))
@@ -463,7 +450,7 @@
   (let [result-id (ensure-ref! store (:result/ref raw))
         result-bytes (cas/get-bytes (verifying-cas store) result-id)
         decoded (read-edn (String. result-bytes StandardCharsets/UTF_8))]
-    (when-not (and (map? decoded) (safe-edn-data? decoded 0))
+    (when-not (and (map? decoded) (invariant/safe-edn-value? decoded 0))
       (throw (err/error :invariant/result-invalid "result artifact is not closed EDN" {})))
     (let [result (:result (invariant/run {:run/id "artifact-validation"
                                           :proposal/id (:proposal/id decoded)
@@ -473,11 +460,11 @@
       (verify-target! store result)
       (doseq [k [:details-ref :details/ref]]
         (when-let [ref (get result k)]
-          (when-not (and (string? ref) (re-matches #"^sha256:[0-9a-f]{64}$" ref))
+          (when-not (invariant/digest? ref)
             (throw (err/error :invariant/result-invalid "nested result reference is not a canonical digest" {:key k})))
           (let [details (cas/get-bytes (verifying-cas store) ref)
                 value (read-edn (String. details StandardCharsets/UTF_8))]
-            (when-not (and (some? value) (safe-edn-data? value 0))
+            (when-not (and (some? value) (invariant/safe-edn-value? value 0))
               (throw (err/error :invariant/result-invalid "details artifact is not closed EDN" {:key k :ref ref}))))))
       [result-id result])))
 
@@ -548,40 +535,45 @@
       (invariant/approval p a runs)
       (assoc a :proposal/id (str proposal-id) :status :rejected :activation-qualified? false))))
 
+(defn- commit-decision!
+  "The one durable decision-write path shared by approve! and reject!. `d` is the
+  validated decision map, `label` the :invariant_decisions.decision literal,
+  `did` the row id, `qualified?` the activation_qualified flag, and
+  `on-existing` maps a pre-existing row to the caller's own idempotent return.
+  A repeat whose digest matches the stored decision is idempotent; any other
+  decision on an already-decided proposal fails closed as
+  :invariant/decision-conflict."
+  [store proposal-id reviewer d label did qualified? on-existing]
+  (let [digest (cas-put! store d "application/edn")]
+    (sqlite/with-write-tx [conn (:sqlite store)]
+      (if-let [existing (first (sqlite/query-raw! conn "SELECT * FROM invariant_decisions WHERE proposal_id = ? LIMIT 1" [(str proposal-id)]))]
+        (if (= digest (:decision_digest existing))
+          (on-existing existing)
+          (throw (err/error :invariant/decision-conflict "proposal already has a terminal decision" {:proposal/id proposal-id :decision (:decision existing)})))
+        (do
+          (sqlite/insert-raw! conn
+            "INSERT INTO invariant_decisions (id,proposal_id,decision,reviewer,decision_digest,activation_qualified,reason,created_at) VALUES (?,?,?,?,?,?,?,?)"
+            [did (str proposal-id) label (str reviewer) digest qualified? (:reason d) (now)])
+          (assoc d :decision/id did :decision/digest digest))))))
+
 (defn approve!
   "Append a reviewer approval. Approval never mutates a proposal row."
   [store proposal-id reviewer opts]
   (stores store)
   (let [d (decision store proposal-id :approved reviewer opts)
-        did (str (or (:decision/id d) (id)))
-        digest (cas-put! store d "application/edn")]
-    (sqlite/with-write-tx [conn (:sqlite store)]
-      (if-let [existing (first (sqlite/query-raw! conn "SELECT * FROM invariant_decisions WHERE proposal_id = ? LIMIT 1" [(str proposal-id)]))]
-        (if (= digest (:decision_digest existing))
-          existing
-          (throw (err/error :invariant/decision-conflict "proposal already has a terminal decision" {:proposal/id proposal-id :decision (:decision existing)})))
-        (do
-          (sqlite/insert-raw! conn
-            "INSERT INTO invariant_decisions (id,proposal_id,decision,reviewer,decision_digest,activation_qualified,reason,created_at) VALUES (?,?,?,?,?,?,?,?)"
-            [did (str proposal-id) "approved" (str reviewer) digest (if (:activation-qualified? d) 1 0) (:reason d) (now)])
-          (assoc d :decision/id did :decision/digest digest))))))
+        did (str (or (:decision/id d) (id)))]
+    (commit-decision! store proposal-id reviewer d "approved" did
+                      (if (:activation-qualified? d) 1 0)
+                      identity)))
 
 (defn reject!
   [store proposal-id reviewer reason]
   (stores store)
   (let [d (decision store proposal-id :rejected reviewer {:reason (str reason)})
-        did (str (id))
-        digest (cas-put! store d "application/edn")]
-    (sqlite/with-write-tx [conn (:sqlite store)]
-      (if-let [existing (first (sqlite/query-raw! conn "SELECT * FROM invariant_decisions WHERE proposal_id = ? LIMIT 1" [(str proposal-id)]))]
-        (if (= digest (:decision_digest existing))
-          (assoc d :decision/id (:id existing) :decision/digest (:decision_digest existing))
-          (throw (err/error :invariant/decision-conflict "proposal already has a terminal decision" {:proposal/id proposal-id :decision (:decision existing)})))
-        (do
-          (sqlite/insert-raw! conn
-            "INSERT INTO invariant_decisions (id,proposal_id,decision,reviewer,decision_digest,activation_qualified,reason,created_at) VALUES (?,?,?,?,?,?,?,?)"
-            [did (str proposal-id) "rejected" (str reviewer) digest 0 (:reason d) (now)])
-          (assoc d :decision/id did :decision/digest digest))))))
+        did (str (id))]
+    (commit-decision! store proposal-id reviewer d "rejected" did 0
+                      (fn [existing]
+                        (assoc d :decision/id (:id existing) :decision/digest (:decision_digest existing))))))
 
 (defn- latest-approval [store proposal-id]
   (when-let [row (first (sqlite/query (:sqlite store)

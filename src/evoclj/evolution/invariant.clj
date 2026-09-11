@@ -30,7 +30,12 @@
 (defn- fail! [reason message data]
   (throw (err/error :invariant/invalid message (assoc data :reason reason))))
 
-(defn- digest? [x]
+(defn digest?
+  "True when x is a canonical \"sha256:<64 lowercase hex>\" content-address
+  digest string. The single definition of the digest shape, shared with
+  evoclj.store.invariant, which delegates here rather than duplicating
+  the regex."
+  [x]
   (and (string? x) (boolean (re-matches digest-re x))))
 
 (defn- ref? [x]
@@ -44,15 +49,22 @@
     (fail! :malformed-ref (str key " must be a sequence of non-empty refs") {:key key :value (err/sanitize xs)}))
   (vec xs))
 
-(defn- safe-value? [x depth]
+(defn safe-edn-value?
+  "True when x is closed EDN data for an invariant: nil, booleans, numbers,
+  strings, keywords, and UUIDs are leaves; vectors and sets recurse; maps
+  require keyword-or-string keys and recurse on values. The walk is depth
+  capped at 16 so a pathological nested value cannot exhaust the stack.
+  The single definition of this rule, shared with evoclj.store.invariant,
+  which delegates here rather than duplicating it."
+  [x depth]
   (if (> depth 16)
     false
     (cond
       (or (nil? x) (boolean? x) (number? x) (string? x) (keyword? x) (uuid? x)) true
-      (vector? x) (every? #(safe-value? % (inc depth)) x)
-      (set? x) (every? #(safe-value? % (inc depth)) x)
+      (vector? x) (every? #(safe-edn-value? % (inc depth)) x)
+      (set? x) (every? #(safe-edn-value? % (inc depth)) x)
       (map? x) (and (every? #(or (keyword? %) (string? %)) (keys x))
-                 (every? #(safe-value? % (inc depth)) (vals x)))
+                 (every? #(safe-edn-value? % (inc depth)) (vals x)))
       :else false)))
 
 (defn- reject-forbidden! [x]
@@ -74,7 +86,7 @@
   (let [op (:op dsl)]
     (when-not (contains? dsl-ops op)
       (fail! :dsl-op-unknown "declarative predicate operation is not allowed" {:op op}))
-    (when-not (safe-value? dsl 0)
+    (when-not (safe-edn-value? dsl 0)
       (fail! :dsl-opaque "declarative predicate contains an unsupported value" {:value (err/sanitize dsl)}))
     (cond
       (contains? #{:and :or} op)
@@ -114,7 +126,7 @@
           (fail! :digest-invalid "predicate digest must be a sha256 digest" {:value (err/sanitize (:digest predicate))})))
       :else
       (fail! :predicate-kind-unknown "predicate type is not supported" {:predicate/type kind})))
-  (when-not (safe-value? predicate 0)
+  (when-not (safe-edn-value? predicate 0)
     (fail! :predicate-opaque "predicate is not closed EDN data" {:value (err/sanitize predicate)}))
   (assoc predicate
          :predicate/type (or (:predicate/type predicate) (:type predicate))
@@ -221,7 +233,7 @@
       (fail! :proposal-mismatch "result envelope is bound to another proposal" {}))
     (when-not (= (:kind r) (:run/kind result))
       (fail! :run-kind-mismatch "result envelope is bound to another run kind" {}))
-    (when-not (safe-value? r 0) (fail! :run-opaque "run contains non-EDN data" {:value (err/sanitize r)}))
+    (when-not (safe-edn-value? r 0) (fail! :run-opaque "run contains non-EDN data" {:value (err/sanitize r)}))
     (assoc r :result result :gate (:gate/id result)
            :model/policy (:model/policy result)
            :deterministic? (:deterministic? result)
