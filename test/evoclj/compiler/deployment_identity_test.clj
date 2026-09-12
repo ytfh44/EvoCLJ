@@ -2,7 +2,6 @@
   "I1 tests for CodeImage / Deployment / Execution identity split."
   (:require [clojure.test :refer [deftest is testing]]
             [evoclj.compiler.core :as compiler-core]
-            [evoclj.eval.snapshot :as snapshot]
             [evoclj.genome.load :as load]
             [evoclj.genome.types :as types]
             [evoclj.provider.fixture :as fixture]
@@ -89,7 +88,7 @@
                                          (get-in deps-a [:capabilities :leases])))))
     (testing "compile output verifiable: code/id is H(abi, genome, resolution)"
       (let [expected (compiler-core/code-id (:abi compiled) (:code/genome-id compiled) (:code/resolution-id compiled))]
-        (is (= expected (:code/id compiled)) "code/id verifiable via snapshot helper")))
+        (is (= expected (:code/id compiled)) "code/id verifiable via the compiler helper")))
     (testing "code-id is deterministic across insertion order at every depth (GC-6)"
       (is (= (compiler-core/code-id
               {:kernel 1 :genome 1 :intent 1 :tool 1 :nested {:a 2 :b 1}}
@@ -127,16 +126,3 @@
       (is (= (:abi compiled) (:kernel/abi descriptor)))
       (is (= "1" (get-in descriptor [:adapter/builds :planner]))
           "adapter builds come from the Resolution binding names"))))
-
-(deftest snapshot-runtime-image-mirror-matches-compiler-formula
-  (let [compiled (compiler-core/compile-genome (seed-loaded-genome) (fixture-catalog))
-        program (:code/id compiled)
-        descriptor (compiler-core/default-runtime-descriptor compiled)]
-    (testing "eval-side mirror stays byte-identical to the compiler formula"
-      (is (= (compiler-core/runtime-image-id program descriptor)
-             (snapshot/runtime-image-id program descriptor))))
-    (testing "the mirror moves with the descriptor too"
-      (is (not= (snapshot/runtime-image-id program descriptor)
-                 (snapshot/runtime-image-id
-                  program
-                  (assoc descriptor :adapter/builds {:planner "2"})))))))

@@ -8,8 +8,7 @@
   difference between sides. The environment identity belongs to the
   experiment condition and never participates in phenotype hashing."
   (:require [evoclj.environment.revision :as rev]
-            [evoclj.environment.source :as src]
-            [evoclj.genome.hash :as hash]))
+            [evoclj.environment.source :as src]))
 
 (defn make-snapshot
   "Create a snapshot from an explicit sources map of source-id to
@@ -92,46 +91,16 @@
   [sources]
   (make-snapshot sources))
 
-(defn- canonical-edn-value
-  [v]
-  (cond
-    (map? v) (into (sorted-map) (map (fn [[k val]] [k (canonical-edn-value val)])) v)
-    (vector? v) (mapv canonical-edn-value v)
-    (set? v) (vec (sort-by pr-str (map canonical-edn-value v)))
-    (seq? v) (mapv canonical-edn-value v)
-    :else v))
-
 (defn execution-id
   "Fresh ExecutionId UUID per activation (I1)."
   []
   (java.util.UUID/randomUUID))
 
-;; --- RuntimeImage + ExecutionEnvironment mirror --------------------------------
-;; These eval-side mirrors exist because eval call sites need them, and their
-;; formulas MUST stay byte-identical to the compiler's — a difference would
-;; silently split eval-side identity from compiler-side identity. Each mirrors
-;; one compiler function: runtime-image-id mirrors
-;; evoclj.compiler.core/runtime-image-id and return-fingerprint mirrors
-;; evoclj.compiler.resolution/return-fingerprint. Both canonicalize before
-;; hashing (the descriptor with sorted maps; the program-image-id and the
-;; returned bytes appended verbatim).
-;;
-;; A mirror-consistency test pins the runtime-image-id equality
-;; (test/evoclj/compiler/deployment_identity_test.clj,
-;; snapshot-runtime-image-mirror-matches-compiler-formula); no equivalent test
-;; pins return-fingerprint against the compiler's formula.
-
-(defn runtime-image-id
-  "Mirror of evoclj.compiler.core/runtime-image-id: the RuntimeImageId over
-  runtime-descriptor || program-image-id. The SAME ProgramImage under
-  DIFFERENT runtime descriptors yields DIFFERENT ids — and the id still
-  does NOT imply identical SaaS model behavior (pair with an
-  ExecutionEnvironment record for observational provenance)."
-  [program-image-id runtime-descriptor]
-  (hash/text-digest (str (pr-str (canonical-edn-value runtime-descriptor)) program-image-id)))
-
-(defn return-fingerprint
-  "Mirror of evoclj.compiler.resolution/return-fingerprint: fingerprints the
-  returned BYTES only, never the behavior that produced them."
-  [result]
-  (hash/text-digest (pr-str result)))
+;; RuntimeImage / ExecutionEnvironment identity lives in the compiler:
+;; `evoclj.compiler.core/runtime-image-id` (RuntimeImageId) and
+;; `evoclj.compiler.resolution/return-fingerprint` (returned-bytes
+;; fingerprint). Eval call sites use those directly — see
+;; `evoclj.eval.runner/runtime-identity`, which calls the compiler's
+;; function. There is deliberately no eval-side mirror: a second copy
+;; can only drift, and the eval side would then split identity from the
+;; compiler's.
