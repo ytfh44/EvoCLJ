@@ -139,7 +139,6 @@
   (:require [evoclj.capability.core :as capability]
             [evoclj.genome.types :as types]
             [evoclj.intent.core :as intent]
-            [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
             [evoclj.runtime.orchestrator :as orchestrator]
             [evoclj.runtime.node :as node]
@@ -152,12 +151,6 @@
             [evoclj.store.session :as session]
             [evoclj.store.work :as work-store])
   (:import (java.nio.charset StandardCharsets)))
-;; PTC compatibility alias — max-tool-rounds-default now lives in
-;; evoclj.runtime.orchestrator, but baseline_test (P0 frozen) reads
-;; it from scheduler. Keep a private alias so the frozen
-;; characterization stays green through P4+ (value is still 4).
-(def ^:private max-tool-rounds-default 4)
-
 
 ;; --- executor trust boundary ------------------------------------------------
 
@@ -275,118 +268,6 @@
   (max 0 (dec (count (event/events-for-session (:sqlite (:stores executor))
                                                (:session/id pin))))))
 
-(defn- semantic-event-metadata
-  "Project only the frozen semantic identity into durable event metadata."
-  [result]
-  (if-let [spec (get-in result [:effect-journal :effect/semantic :spec])]
-    {:semantic/spec spec
-     :semantic/digest (get-in result [:effect-journal :effect/semantic :digest])}
-    {}))
-
-(defn- replay-evidence-ref!
-  "Persist one immutable replay-evidence envelope and return its CAS id.
-  A raw-intent envelope is written before dispatch; a later envelope with
-  normalized request and frozen descriptor is written after dispatch."
-  [executor intent result]
-  (put-payload! executor
-                (merge {:replay/version 1
-                        :raw-intent intent
-                        :canonicalization/version 1}
-                       (:replay/evidence result))))
-
-(defn- replay-event-metadata
-  [evidence-ref]
-  (cond-> {:replay/evidence-ref evidence-ref
-           :replay/evidence-digest evidence-ref}
-    (nil? evidence-ref) (assoc :replay/evidence-missing? true)))
-;; --- the intent effect transaction (Transaction Boundaries) ------------------
-
-(defn- dispatch-intent!
-  "Persist one validated intent's effect protocol through the broker
-  and feed the result back.
-
-  The scheduler persists :intent/proposed (chained to the
-  :node/completed that proposed it), then calls
-  evoclj.intent.dispatch! ONCE (the v0 broker is a single call; its
-  internal normalize/authorize/execute steps cannot be interleaved
-  with persistence), then persists the observable outcome:
-
-  - success    :intent/authorized → :provider/call-started (with the
-                idempotency key when the intent carries one) →
-                :provider/call-completed (result value as a CAS
-                artifact); the result is fed back into :outputs.
-  - denied     :intent/denied with the broker's :reason — NO provider
-                events (a denied intent never reaches a provider).
-  - other      :intent/failed with the dispatch error record as a CAS
-                artifact (:payload-ref).
-
-  A denied or failed intent is a node-level outcome: the session
-  continues. Returns {:last-event <the final event appended>
-  :outputs <the updated accumulated outputs>
-  :outcome :ok | :denied | :failed}."
-  [executor pin cause intent outputs]
-  (let [raw-evidence-ref (replay-evidence-ref! executor intent nil)
-        proposed (append-event! executor pin cause :intent/proposed nil
-                                (merge {:intent/id (:intent/id intent)
-                                        :intent/type (:intent/type intent)
-                                        :node/id (:node/id intent)}
-                                       (replay-event-metadata raw-evidence-ref)))
-        result (dispatch/dispatch! (:dispatch executor) intent)
-        evidence-ref (replay-evidence-ref! executor intent result)
-        evidence-metadata (replay-event-metadata evidence-ref)]
-    (if (= :ok (:result/status result))
-      (let [authorization (:authorization result)
-            tool-id (get-in intent [:payload :tool/id])
-            authorized (append-event!
-                        executor pin (:event/id proposed) :intent/authorized nil
-                        (merge {:intent/id (:intent/id intent)
-                                :intent/type (:intent/type intent)
-                                :authorization {:decision (:decision authorization)
-                                                :lease-id (:lease-id authorization)}}
-                               evidence-metadata
-                               (semantic-event-metadata result)))
-            started (append-event!
-                     executor pin (:event/id authorized) :provider/call-started nil
-                     (merge {:intent/id (:intent/id intent)
-                             :tool/id tool-id
-                             :idempotency/key (get-in intent [:metadata :idempotency/key])}
-                            evidence-metadata
-                            (semantic-event-metadata result)))
-            value-ref (put-payload! executor (:value result))
-            completed (append-event!
-                       executor pin (:event/id started) :provider/call-completed value-ref
-                       (merge {:intent/id (:intent/id intent)
-                               :tool/id tool-id
-                               :result/status :ok
-                               :replay/provider-result-ref value-ref
-                               :replay/provider-result-digest value-ref}
-                              evidence-metadata
-                              (semantic-event-metadata result)))]
-        {:last-event completed
-         :outputs (conj outputs (:value result))
-         :outcome :ok})
-      (if (= :capability/denied (:error/type result))
-        {:last-event (append-event!
-                      executor pin (:event/id proposed) :intent/denied nil
-                      (merge {:intent/id (:intent/id intent)
-                              :intent/type (:intent/type intent)
-                              :error/type :capability/denied
-                              :reason (get-in result [:error/data :reason])}
-                             evidence-metadata
-                             (semantic-event-metadata result)))
-         :outputs outputs
-         :outcome :denied}
-        {:last-event (append-event!
-                      executor pin (:event/id proposed) :intent/failed
-                      (put-payload! executor (dissoc result :usage))
-                      (merge {:intent/id (:intent/id intent)
-                              :intent/type (:intent/type intent)
-                              :error/type (:error/type result)}
-                             evidence-metadata
-                             (semantic-event-metadata result)))
-         :outputs outputs
-         :outcome :failed}))))
-
 (defn- record-bindings-degradation!
   "WO-B1: a failing durable-bindings query is NEVER silent. Append one
   typed causal event (:scheduler/bindings-degraded) carrying fully
@@ -399,24 +280,12 @@
                  {:degradation :bindings-fetch
                   :error (err/error-data t)}))
 
-(defn- fetch-bindings
-  "Current active ContextBindings for the session (from durable store).
-   WO-B1: a missing table or failing query no longer swallows silently —
-   the Throwable is recorded as a typed degradation event and the run
-   degrades to [] (the session continues without bindings, but the
-   degradation is counted on the causal log)."
-  [executor pin cause]
-  (try
-    (binding-store/active-bindings (:sqlite (:stores executor)) (:session/id pin))
-    (catch Throwable t
-      (record-bindings-degradation! executor pin cause t)
-      [])))
-
 (defn- restore-session-runtime!
   "WO-B1 production wiring: before Work dispatch, republish
   its durable bindings' runtime state into the executor's registries.
 
-  Failure discipline (same vocabulary as fetch-bindings):
+  Failure discipline (same vocabulary as evoclj.runtime.orchestrator's
+  bindings handling):
     - an INV-02 VERDICT (:store/binding-invalid — the pinned bundle can
       no longer be verified to exist) is fail-closed and ABORTS the run
       with that typed error; Work remains queued and never executes;

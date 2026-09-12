@@ -84,12 +84,12 @@ Any contract change must be backward compatible or be switched atomically in P6.
 
 ### C-Orchestrator — Scheduling Loop Contract
 
-- **Provider:** `evoclj.runtime.scheduler` (`run-session!`, `dispatch-with-tools!`, `dispatch-intent!`)
+- **Provider:** `evoclj.runtime.orchestrator` (`TraditionalOrchestrator` / DAGOrchestrator `orchestrate`, plus its `dispatch-intent!`); `evoclj.runtime.scheduler` drives it via `run-session!` → `dispatch-with-tools!`
 - **Consumer:** `evoclj.runtime.node / phenotype / session`
 - **Data:** `Intent = {:intent/type :intent/model-call :payload {:base/messages :requested-tools :model/id :options {:max-tool-rounds 4}} :budget}`; `Step = {:outputs [...] :last-event Event}`
 - **Invariants:**
-  - `max-tool-rounds` defaults to 4 (`max-tool-rounds-default`), sourced from `intent.payload.options.max-tool-rounds`, decremented each round; stops when `tool-calls` empty, `rounds==0`, or `tool-map` empty.
-  - Non `:intent/model-call` intents bypass Assembler and go directly to `dispatch-intent!`.
+  - `max-tool-rounds` defaults to 4 (`orchestrator/max-tool-rounds-default`), sourced from `intent.payload.options.max-tool-rounds`, decremented each round; stops when `tool-calls` empty, `rounds==0`, or `tool-map` empty.
+  - Non `:intent/model-call` intents bypass Assembler and go directly to the orchestrator's `dispatch-intent!`.
   - Each round produces `effective-intent` via Assembler (overwrites `:payload :messages/:tools`, retains `:base/messages/:requested-tools`); `dispatch-intent!` yields `value.tool-calls` to drive next round; unknown tool throws `:scheduler/unknown-tool`.
 - **Failure:** `:scheduler/unknown-tool`, `:provider/catalog-unresolved-tool` (S14 gate), `:intent/failed` (dispatch exception persisted).
 

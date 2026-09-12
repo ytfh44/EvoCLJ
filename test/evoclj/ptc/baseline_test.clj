@@ -5,6 +5,13 @@
   2. assembler pin keeps tools stable while refresh-context is variable
   3. sci/limits interrupt is not catchable inside SCI"
   (:require [clojure.test :refer [deftest is testing]]
+            ;; evoclj.runtime.node must load BEFORE evoclj.runtime.nodes.llm:
+            ;; node.clj requires its nodes.* handlers at the BOTTOM of the file
+            ;; (so the NodeHandler protocol var exists when their reify compiles),
+            ;; which means loading a handler namespace first leaves node.clj
+            ;; half-loaded at its own bottom require -> cyclic load. Naming node
+            ;; here establishes the order the runtime itself uses.
+            [evoclj.runtime.node]
             [evoclj.runtime.assembler :as assembler]
             [evoclj.sci.context :as sci-ctx]
             [evoclj.sci.computation :as sci-exec]))
@@ -35,8 +42,10 @@
         (is (= 4 rounds) "default max-tool-rounds should be 4")))))
 
 (deftest scheduler-max-tool-rounds-default-is-4
-  (testing "scheduler private max-tool-rounds-default is 4"
-    (let [v (var-get (requiring-resolve 'evoclj.runtime.scheduler/max-tool-rounds-default))]
+  (testing "orchestrator private max-tool-rounds-default is 4"
+    ;; PTC decoupling completed: the tool loop and its default live in
+    ;; evoclj.runtime.orchestrator; the scheduler no longer carries a copy.
+    (let [v (var-get (requiring-resolve 'evoclj.runtime.orchestrator/max-tool-rounds-default))]
       (is (= 4 v)))))
 
 (deftest max-tool-rounds-is-respected-via-mocked-dispatch
