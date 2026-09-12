@@ -100,8 +100,8 @@
       (is (= resolution (:resolution/id child-sess)) "same resolution as parent")
       (is (= phenotype (:phenotype/id child-sess)) "same phenotype as parent")
       (is (= gen (:generation/id child-sess)) "same generation as parent")
-      (is (= parent-id (subagent/get-parent-session-id db child-id)) "parent link stored")
-      (is (= [child-id] (subagent/child-session-ids db parent-id)) "child appears in parent's children")
+      (is (= parent-id (work-store/get-parent-session-id db child-id)) "parent link stored")
+      (is (= [child-id] (work-store/child-session-ids db parent-id)) "child appears in parent's children")
       ;; W2: the lifecycle truth is the child Work CAS — exactly one queued
       ;; :subagent/run Work carrying the spawn-time task digest, named by
       ;; the returned handle.
@@ -202,7 +202,7 @@
       (let [child-id (get-in res [:value :child/session-id])
             child (session/get-session db child-id)]
         (is (some? child) "child session exists in store")
-        (is (= parent-id (subagent/get-parent-session-id db child-id)) "link via dispatch")))))
+        (is (= parent-id (work-store/get-parent-session-id db child-id)) "link via dispatch")))))
 
   (deftest existing-tool-call-dispatch-still-green
     (testing "existing :intent/tool-call still dispatches through pipeline (regression)"

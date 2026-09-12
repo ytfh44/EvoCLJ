@@ -192,7 +192,7 @@
           "child inherits the broker leases (attenuated, never empty)")
       (let [child (session/get-session db child-id)]
         (is (some? child) "child session exists")
-        (is (= parent-id (subagent/get-parent-session-id db child-id)) "parent link stored")
+        (is (= parent-id (work-store/get-parent-session-id db child-id)) "parent link stored")
         (is (not (contains? child :state)) "session row has no lifecycle state"))
       ;; W2: the lifecycle truth is the child Work CAS — exactly one queued
       ;; :subagent/run Work, and the returned handle names it.

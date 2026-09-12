@@ -15,59 +15,6 @@
 
 (declare work-subtree-session-ids)
 
-(defn get-parent-session-id
-  "Return the parent session id (UUID) for `child-session-id`, or nil.
-  Uses Work graph (works.parent_work_id) - the single durable spawn truth."
-  [db child-session-id]
-  (let [spec (sqlite/db-spec db)
-        cid (types/session-id child-session-id)
-        sid (str cid)]
-    (when-let [row (first (sqlite/query spec
-                                        ["SELECT w2.session_id AS parent_session_id
-                                          FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
-                                          WHERE w1.session_id = ?
-                                            AND w1.parent_work_id IS NOT NULL
-                                          ORDER BY w1.created_at, w1.id
-                                          LIMIT 1"
-                                         sid]))]
-      (types/session-id (:parent_session_id row)))))
-
-(defn child-session-ids
-  "All child session ids spawned from `parent-session-id` via Work graph."
-  [db parent-session-id]
-  (let [spec (sqlite/db-spec db)
-        pid (str (types/session-id parent-session-id))
-        rows (try
-               (sqlite/query spec
-                             ["SELECT w1.session_id AS child_session_id
-                               FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
-                               WHERE w2.session_id = ?
-                               ORDER BY w1.created_at, w1.id"
-                              pid])
-               (catch Exception _ []))]
-    (->> rows
-         (map :child_session_id)
-         (map types/session-id)
-         distinct
-         vec)))
-
-(defn list-descendants
-  "Return all descendant session ids (UUIDs) transitively spawned from
-  `root-id` via Work graph (works.parent_work_id)."
-  [db root-id]
-  (let [root-id (types/session-id root-id)
-        spec (sqlite/db-spec db)
-        works (try (work-store/list-works spec root-id) (catch Exception _ []))
-        descendant-work-ids (try
-                              (mapcat #(work-store/work-descendants spec (:work/id %)) works)
-                              (catch Exception _ []))]
-    (->> descendant-work-ids
-         (map #(try (work-store/fetch-work spec %) (catch Exception _ nil)))
-         (keep :work/session-id)
-         (remove #(= root-id %))
-         distinct
-         vec)))
-
 (defn- work-subtree-session-ids
   "Session ids owning `work-id` and all its transitive Work descendants."
   [db work-id]
@@ -141,7 +88,7 @@
   "Atomically cancel `targets` in ONE BEGIN IMMEDIATE transaction on a single connection."
   [db direct-id parent-id targets reason]
   (let [spec (sqlite/db-spec db)
-        link-parent (into {} (map (fn [tid] [tid (try (get-parent-session-id db tid)
+        link-parent (into {} (map (fn [tid] [tid (try (work-store/get-parent-session-id db tid)
                                                      (catch Exception _ nil))])
                                   targets))
         parent-set (vec (distinct (filter some? (cons parent-id (vals link-parent)))))
@@ -245,7 +192,7 @@
     (if (= :cancelled (session-work-state db root-id))
       {:cancelled [] :already-cancelled? true :root/session-id root-id}
       (let [targets (cancel-targets db root-id)
-            parent-id (get-parent-session-id db root-id)
+            parent-id (work-store/get-parent-session-id db root-id)
             {:keys [cap-ids leases]} (cancel-subtree-tx! db root-id parent-id targets
                                                          (or reason :user-request))]
         (tombstone-memory-leases! cap-ids leases)
@@ -264,13 +211,13 @@
    (when db
      (let [sid (types/session-id session-id)
            cancel-fn (or cancel-fn cancel-subagent!)
-           direct-children (child-session-ids db sid)
+           direct-children (work-store/child-session-ids db sid)
            live? (fn [cid]
                    (try
                      (boolean
                       (some #(contains? #{:queued :running :waiting} (:work/state %))
                             (mapcat #(work-store/list-works (sqlite/db-spec db) %)
-                                    (cons cid (list-descendants db cid)))))
+                                    (cons cid (work-store/list-descendants db cid)))))
                      (catch Exception _ false)))]
        {:cancelled
         (vec

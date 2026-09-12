@@ -724,7 +724,7 @@
                               {:parent/session-id parent-id
                                :session/id requester}
                               nil @usage-atom))
-          (let [actual-parent (try (subagent/get-parent-session-id db child-id)
+          (let [actual-parent (try (work-store/get-parent-session-id db child-id)
                                    (catch Exception _ nil))]
             (and actual-parent (not= parent-id actual-parent)))
           (emit (result-error intent :capability/scope-denied
@@ -773,7 +773,7 @@
       (nil? cur) false
       (= ancestor cur) true
       (contains? seen cur) false
-      :else (recur (try (subagent/get-parent-session-id db cur)
+      :else (recur (try (work-store/get-parent-session-id db cur)
                          (catch Exception _ nil))
                     (conj seen cur)))))
 

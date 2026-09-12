@@ -165,22 +165,13 @@
 
 (defn list-descendants
   "Return all descendant session ids (UUIDs) transitively spawned from
-  `root-id` via Work graph (works.parent_work_id)."
+  `root-id` via Work graph (works.parent_work_id).
+
+  Delegates to evoclj.store.work/list-descendants, the single owner of
+  session-graph traversal (INV-05). Kept as a public entry point because
+  this namespace is the business layer callers already hold."
   [db root-id]
-  (let [root-id (types/session-id root-id)
-        spec (if (instance? evoclj.store.session_store.SessionStore db)
-               (ss/db-of db)
-               db)
-        works (try (work-store/list-works spec root-id) (catch Exception _ []))
-        descendant-work-ids (try
-                              (mapcat #(work-store/work-descendants spec (:work/id %)) works)
-                              (catch Exception _ []))]
-    (->> descendant-work-ids
-         (map #(try (work-store/fetch-work spec %) (catch Exception _ nil)))
-         (keep :work/session-id)
-         (remove #(= root-id %))
-         distinct
-         vec)))
+  (work-store/list-descendants db root-id))
 
 (defn get-session!
   "Fetch session or throw :store/session-not-found when missing.
@@ -201,12 +192,8 @@
 (defn child-session?
   "True when `session-id` is a child subagent session (has a parent Work).
   Parentage is resolved only from Work.parent_work_id; no event or helper-table
-  fallback is consulted. Lazy-requires subagent to avoid circular deps."
+  fallback is consulted."
   [store session-id]
   (try
-    (let [subagent-ns (try (requiring-resolve 'evoclj.runtime.subagent/get-parent-session-id)
-                           (catch Exception _ nil))]
-      (if subagent-ns
-        (boolean (@subagent-ns store session-id))
-        false))
+    (boolean (work-store/get-parent-session-id store session-id))
     (catch Exception _ false)))

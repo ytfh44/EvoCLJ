@@ -71,40 +71,6 @@
 (declare auto-deliver-child-terminal!)
 
 
-(defn get-parent-session-id
-  "Return the parent session id (UUID) for `child-session-id`, or nil.
-  Uses Work graph (works.parent_work_id) — the single durable spawn truth."
-  [db child-session-id]
-  (let [spec (sqlite/db-spec db)
-        cid (types/session-id child-session-id)
-        sid (str cid)]
-    (when-let [row (first (sqlite/query spec
-                                        ["SELECT w2.session_id AS parent_session_id
-                                          FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
-                                          WHERE w1.session_id = ?
-                                            AND w1.parent_work_id IS NOT NULL
-                                          ORDER BY w1.created_at, w1.id
-                                          LIMIT 1"
-                                         sid]))]
-      (types/session-id (:parent_session_id row)))))
-(defn child-session-ids
-  "All child session ids spawned from `parent-session-id` via Work graph."
-  [db parent-session-id]
-  (let [spec (sqlite/db-spec db)
-        pid (str (types/session-id parent-session-id))
-        rows (try
-               (sqlite/query spec
-                             ["SELECT w1.session_id AS child_session_id
-                               FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
-                               WHERE w2.session_id = ?
-                               ORDER BY w1.created_at, w1.id"
-                              pid])
-               (catch Exception _ []))]
-    (->> rows
-         (map :child_session_id)
-         (map types/session-id)
-         distinct
-         vec)))
 (def ^:const max-subagent-depth
   "Maximum nesting depth for subagent chains (S6). Parent depth +1 must be <= this.
   Fail-closed backstop; task-level planning (:task + :capabilities) is primary."
@@ -117,12 +83,12 @@
 
 (defn subagent-depth
   "Depth of session `sid` in the subagent tree. Root (no parent) has depth 0,
-  its child has depth 1, etc. Walks the Work graph via get-parent-session-id."
+  its child has depth 1, etc. Walks the Work graph via work-store/get-parent-session-id."
   [db sid]
   (loop [cur sid depth 0 seen #{}]
     (if (contains? seen cur)
       depth
-      (let [parent (try (get-parent-session-id db cur) (catch Exception _ nil))]
+      (let [parent (try (work-store/get-parent-session-id db cur) (catch Exception _ nil))]
         (if parent
           (recur parent (inc depth) (conj seen cur))
           depth)))))
@@ -141,7 +107,7 @@
                          :parent/depth parent-depth
                          :child/depth child-depth
                          :max-depth max-subagent-depth})))
-    (let [children (child-session-ids db parent-id)]
+    (let [children (work-store/child-session-ids db parent-id)]
       (when (>= (count children) max-spawns-per-parent)
         (throw (err/error :subagent/budget-exceeded
                           (str "subagent budget cap exceeded: parent already has " (count children) " children, max " max-spawns-per-parent)
@@ -510,7 +476,7 @@
         pin (if (map? child-session) child-session {:session/id child-session})
         executor (hydrate db pin)
         child-id (types/session-id (or (:session/id pin) (:session/id child-session)))
-        parent-id (try (get-parent-session-id db child-id) (catch Exception _ nil))
+        parent-id (try (work-store/get-parent-session-id db child-id) (catch Exception _ nil))
         reg (get-in executor [:dispatch :registry])]
     (when (and (some? reg) (instance? clojure.lang.Atom reg))
       (registry/register! reg (agent-spawn-provider db parent-id))
@@ -727,7 +693,7 @@
     (when-not w
       (throw (err/error :store/work-not-found "no work with this id" {:work/id work-id})))
     (let [child-id (:work/session-id w)
-          parent-id (try (get-parent-session-id db child-id) (catch Exception _ nil))
+          parent-id (try (work-store/get-parent-session-id db child-id) (catch Exception _ nil))
           task (when parent-id
                  (some (fn [ev]
                          (when (and (= :subagent/spawned (:event/type ev))
@@ -767,7 +733,7 @@
                  (map (fn [w]
                         (let [wid (:work/id w)
                               child-id (:work/session-id w)
-                              parent-id (try (get-parent-session-id db child-id)
+                              parent-id (try (work-store/get-parent-session-id db child-id)
                                              (catch Exception _ nil))]
                           (try
                             (let [task (child-task-for-work db wid)
@@ -1358,7 +1324,7 @@
           (if-not sess
             (cond-> {:found false :reason :session-not-found :session/id sid}
               (:work/id target) (assoc :work/id (:work/id target)))
-            (let [descendants (try (set (cancel/list-descendants db requester))
+            (let [descendants (try (set (work-store/list-descendants db requester))
                                    (catch Exception _ #{}))]
               (when-not (contains? descendants sid)
                 (throw (err/error :capability/scope-denied
@@ -1370,7 +1336,7 @@
                        :state (some-> (last (work-store/list-works (sqlite/db-spec db) (:session/id sess))) :work/state)
                        :phenotype/id (:phenotype/id sess)
                        :depth (try (subagent-depth db sid) (catch Exception _ nil))
-                       :children (try (child-session-ids db sid) (catch Exception _ []))}
+                       :children (try (work-store/child-session-ids db sid) (catch Exception _ []))}
                 (:work/id target) (assoc :work/id (:work/id target))))))))))
 
 (defn- resolve-cancel-target
@@ -1426,7 +1392,7 @@
                             {:value (err/sanitize authorized-request)})))
         (let [target (resolve-cancel-target db (:args authorized-request))
               sid (:session/id target)
-              descendants (try (set (cancel/list-descendants db requester))
+              descendants (try (set (work-store/list-descendants db requester))
                                (catch Exception _ #{}))]
           (when-not (contains? descendants sid)
             (throw (err/error :capability/scope-denied
