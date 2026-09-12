@@ -447,28 +447,13 @@
                       {:evidence-ref evidence-ref})))
   nil)
 
-(defn- canonical-edn
-  "Deterministic EDN form for hashing: maps sorted by their pr-str key
-  form, sets by their pr-str element form, collections realized eagerly
-  (the same convention as evoclj.eval.dataset and
-  evoclj.evolution.evidence)."
-  [x]
-  (cond
-    (map? x) (into (sorted-map-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map (fn [[k v]] [k (canonical-edn v)])) x)
-    (set? x) (into (sorted-set-by (fn [a b] (compare (pr-str a) (pr-str b))))
-                   (map canonical-edn) x)
-    (vector? x) (mapv canonical-edn x)
-    (seq? x) (mapv canonical-edn x)
-    :else x))
-
 (defn- body-ref
   "The content address of a case :body — the deterministic hash of its
-  canonical EDN form (the same canonical convention evoclj.eval.dataset
-  uses, at body granularity). The dedup key: a duplicate regression is
-  one whose failing input produces the same body address."
+  canonical EDN form (evoclj.genome.hash/canonical — the single GC-6 /
+  INV-05 convention — at body granularity). The dedup key: a duplicate
+  regression is one whose failing input produces the same body address."
   [body]
-  (hash/text-digest (pr-str (canonical-edn body))))
+  (hash/text-digest (pr-str (hash/canonical body))))
 
 (defn- new-evolved-case
   "Build the append-only case map for a confirmed regression: a fresh
