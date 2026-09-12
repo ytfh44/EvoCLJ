@@ -1,6 +1,8 @@
 (ns evoclj.store.work-property-test
   "Work×Session product + Work 7-state SM composition (100 rounds per law)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.properties :as prop]
@@ -110,3 +112,62 @@
            (= 2 orphans-before)
            (or (= 1 orphans-after) (= 1 (count (:recovered-queued report))))
            (not= :succeeded (:work/state w2-after))))))
+
+;; --- DB CHECK alignment (works.state is the single source of truth) ---------
+;;
+;; Mirrors evoclj.evolution.candidate-states-test/db-check-aligned: the Work
+;; db-state->kw mapping is pinned to the `works.state` CHECK parsed out of
+;; resources/migrations/018-work.sql. Without this pin, a stray extra spelling
+;; (e.g. the hyphen form "timed-out", which no migration admits and no reader
+;; ever needs) can sit in the mapping unnoticed.
+
+(defn- works-db-check-states
+  "Parse the `works.state` CHECK constraint from 018-work.sql and return the
+  set of DB strings it admits.
+
+  Disambiguation: migrations may contain more than one `state IN (...)` CHECK
+  (012-commands.sql admits a 6-value set sharing 'queued'/'running'/
+  'timed_out'/'cancelled'). We read only 018-work.sql and select the CHECK
+  whose inner list contains \"waiting\" — 'waiting' exists solely in the
+  works vocabulary, so it uniquely identifies the works table's constraint
+  (the same discriminator technique candidate-states-test uses with
+  \"materialized\")."
+  []
+  (let [sql (try (slurp (io/resource "migrations/018-work.sql"))
+                 (catch Exception _ ""))
+        sql (if (str/blank? sql)
+              (slurp "resources/migrations/018-work.sql")
+              sql)
+        matches (re-seq #"state\s+IN\s*\(([^)]+)\)" sql)
+        works-inner (some (fn [[_ inner]]
+                            (when (str/includes? inner "waiting") inner))
+                          matches)]
+    (when-not works-inner
+      (throw (ex-info "Could not parse works.state CHECK constraint"
+                      {:sql sql :matches matches})))
+    (->> (re-seq #"'([^']+)'" works-inner)
+         (map second)
+         set)))
+
+(deftest db-check-aligned
+  (testing "db-state->kw keys are exactly the works.state DB CHECK values"
+    (let [db-check (works-db-check-states)]
+      (is (= db-check (set (keys work/db-state->kw)))
+          (str "DB CHECK " db-check " vs db-state->kw keys "
+               (set (keys work/db-state->kw))))
+      (is (= 7 (count db-check)))
+      (is (= #{"queued" "running" "waiting" "succeeded"
+               "failed" "cancelled" "timed_out"}
+             db-check))))
+  (testing "kw->db-state is the inverse of db-state->kw"
+    (is (= work/db-state->kw
+           (into {} (map (fn [[k v]] [v k]) work/kw->db-state))))
+    (is (= work/kw->db-state
+           (into {} (map (fn [[k v]] [v k]) work/db-state->kw)))))
+  (testing "persisted keywords round-trip through DB mapping"
+    (doseq [[db kw] work/db-state->kw]
+      (is (= db (get work/kw->db-state kw)))
+      (is (= kw (get work/db-state->kw db)))))
+  (testing "DB strings cover exactly the persisted keyword values"
+    (is (= (works-db-check-states)
+           (set (vals work/kw->db-state))))))

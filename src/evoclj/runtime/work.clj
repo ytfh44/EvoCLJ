@@ -92,8 +92,7 @@
    "succeeded" :succeeded
    "failed"    :failed
    "cancelled" :cancelled
-   "timed_out" :timed-out
-   "timed-out" :timed-out})
+   "timed_out" :timed-out})
 
 (def kw->db-state
   "Keyword -> DB string. Every work state is persistable."
