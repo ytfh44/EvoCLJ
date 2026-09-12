@@ -31,7 +31,6 @@
   async callers may wrap in future/command. Child intents go through
   the broker with the child's attenuated leases."
    (:require [clojure.java.jdbc :as jdbc]
-             [evoclj.capability.mint :as mint]
              [evoclj.compiler.topology :as topology]
              [evoclj.genome.hash :as hash]
              [evoclj.genome.types :as types]
@@ -42,6 +41,7 @@
              [evoclj.runtime.phenotype :as phenotype]
              [evoclj.runtime.subagent-capability :as caps]
              [evoclj.runtime.subagent-cancel :as cancel]
+             [evoclj.runtime.subagent-lease :as lease]
              [evoclj.store.cas :as cas]
              [evoclj.store.event :as event]
              [evoclj.store.event-schema :as es]
@@ -115,18 +115,21 @@
                            :max-calls max-spawns-per-parent})))))
   nil)
 ;; ---------------------------------------------------------------------------
-;; S4 — global lease registry and session->leases index (cascade revoke)
+;; S4 — global lease registry (owned by evoclj.runtime.subagent-lease)
 ;; ---------------------------------------------------------------------------
+;; The registry lives in its own namespace so evoclj.runtime.subagent-cancel
+;; can require it directly instead of reaching it reflectively (INV-05).
+;; Re-exported here because this is the namespace callers and tests hold.
 
-(defonce subagent-lease-registry
-  (mint/create-lease-registry))
+(def subagent-lease-registry
+  "The global subagent lease registry (evoclj.runtime.subagent-lease/...)."
+  lease/subagent-lease-registry)
 
 (defn clear-subagent-lease-state!
   "Test helper — clear the global subagent lease registry.
-  Safe to call between fixtures."
+  Delegates to evoclj.runtime.subagent-lease."
   []
-  (reset! subagent-lease-registry {:evoclj.capability.mint/version 0})
-  nil)
+  (lease/clear-subagent-lease-state!))
 
 
 ;; ---------------------------------------------------------------------------

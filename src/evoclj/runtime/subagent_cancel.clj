@@ -7,6 +7,7 @@
   (:require [evoclj.capability.mint :as mint]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
+            [evoclj.runtime.subagent-lease :as lease]
             [evoclj.store.event :as event]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite]
@@ -65,8 +66,7 @@
                                all-db-rows)
         all-db-ids (mapv :id revocable-rows)
         all-leases (try
-                     (let [reg @(requiring-resolve 'evoclj.runtime.subagent/subagent-lease-registry)]
-                       (get @reg (types/session-id session-id) []))
+                     (get @lease/subagent-lease-registry (types/session-id session-id) [])
                      (catch Exception _ []))]
     {:all-db-ids all-db-ids
      :leases (vec all-leases)}))
@@ -75,7 +75,7 @@
   "Apply the in-memory half of durable-first revocation AFTER the DB transaction commits."
   [cap-ids leases]
   (try
-    (let [reg @(requiring-resolve 'evoclj.runtime.subagent/subagent-lease-registry)]
+    (let [reg lease/subagent-lease-registry]
       (doseq [id cap-ids]
         (let [cap-id (try (UUID/fromString (str id)) (catch Exception _ id))]
           (mint/revoke-lease! reg cap-id)))
