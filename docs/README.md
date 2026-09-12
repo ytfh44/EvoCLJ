@@ -20,6 +20,7 @@ profile P — never a global improvement proof).
 | [`semantic-verification.md`](semantic-verification.md) | Formal verification of the seven core semantic claims (no mocks, real namespaces, re-runnable scripts) | You are changing core invariants or auditing safety |
 | [`performance-baseline.md`](performance-baseline.md) | Measured benchmark baselines and regression ceilings (component) | You are optimizing or changing hot paths |
 | [`invariants.md`](invariants.md) | Shared invariant checklist: inherited Global Constraints GC-01–GC-24 plus repair invariants INV-01–INV-13, each with incident evidence, violation consequences, and its guarding test/script. Also the authoritative MCP/Skills closure state (the 2026-08-20 gap-closure report was superseded and has since been retired) | You are implementing or adversarially reviewing a repair work item (checklist step 5) |
+| [`canonical-conventions.md`](canonical-conventions.md) | The canonical-EDN map: `evoclj.genome.hash` is the sole owner, plus every deliberate variant (candidate-store, dag, patch-edn, resolution), the one known sharp edge in `compiler.core`, and the decision table for whether a copy may delegate | You are touching anything that hashes EDN content — identity bytes, pool keys, merge-plan or case-body digests |
 
 ## Suggested reading order
 
@@ -28,6 +29,7 @@ profile P — never a global improvement proof).
 3. [`models-integration.md`](models-integration.md) — how the runtime actually talks to language models.
 4. [`roadmap.md`](roadmap.md) — what exists and what is next.
 5. [`semantic-verification.md`](semantic-verification.md) and [`performance-baseline.md`](performance-baseline.md) — when you touch core logic or hot paths.
+6. [`canonical-conventions.md`](canonical-conventions.md) — before you touch anything that hashes EDN content.
 
 ## Quick orientation
 
