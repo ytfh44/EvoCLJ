@@ -43,12 +43,11 @@
        :reaper agent) and are closed asynchronously — side effects never
        run inside a swap!. shutdown! flushes the queue synchronously."
   (:require [clojure.walk :as walk]
+            [evoclj.genome.hash :as hash]
             [evoclj.kernel.error :as err]
             [evoclj.mcp.client :as mcp-client]
             [evoclj.store.event :as event]
-            [integrant.core :as ig])
-  (:import (java.nio.charset StandardCharsets)
-           (java.security MessageDigest)))
+            [integrant.core :as ig]))
 
 ;; --- diagnostic representation (display/audit ONLY) --------------------------
 
@@ -75,29 +74,21 @@
 
 ;; --- pool identity (stable fingerprints) -------------------------------------
 
-(defn- canonical-edn
-  "Order-stable transform of EDN data: maps become sorted maps (keys
-   ordered by their printed form), sets become vectors sorted by printed
-   element form, seqs become vectors; scalars pass through. Equal
-   contents therefore always print identically, regardless of map
-   construction order — the ordering guarantee the fingerprints below
-   depend on."
-  [v]
-  (cond
-    (map? v) (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
-                   (map (fn [[k x]] [(canonical-edn k) (canonical-edn x)]) v))
-    (set? v) (vec (sort-by pr-str (map canonical-edn (seq v))))
-    (seq? v) (mapv canonical-edn v)
-    :else v))
-
 (defn- stable-digest
-  "\"sha256:<64 lowercase hex>\" over the UTF-8 bytes of the canonical
-   EDN printing of `v` (evoclj.genome.hash style). Deterministic across
-   processes and JVM restarts; not reversible for practical purposes."
+  "The canonical content digest \"sha256:<64 lowercase hex>\" of `v`:
+  `evoclj.genome.hash/digest` — THE repo-wide GC-6 content-addressing
+  convention (INV-05). Deterministic across processes and JVM restarts;
+  not reversible for practical purposes.
+
+  Delegation, not a copy: this namespace previously carried its own
+  `canonical-edn` that was NOT equivalent to the owner. It lacked the
+  `vector?` branch entirely (so a vector's CONTENTS were never
+  normalized) and represented sets as sorted vectors rather than sorted
+  sets, so two logically identical configs whose secrets sat inside a
+  vector or set produced DIFFERENT fingerprints — violating the
+  identity guarantee documented on `transport-identity` (INV-01)."
   [v]
-  (let [ba (.getBytes (pr-str (canonical-edn v)) StandardCharsets/UTF_8)
-        ^bytes digest (.digest (MessageDigest/getInstance "SHA-256") ba)]
-    (str "sha256:" (apply str (map #(format "%02x" %) digest)))))
+  (hash/digest v))
 
 (defn credential-fingerprint
   "Stable \"sha256:<hex>\" fingerprint of the config's :auth/ref value.
