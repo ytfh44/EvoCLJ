@@ -206,35 +206,6 @@
 ;; the provider
 ;; ---------------------------------------------------------------------------
 
-(defn- close-owned!
-  "WO-M4: best-effort close of a CALL-SCOPED (non-pooled) managed client
-  record. evoclj.mcp.client/close! is already graceful and idempotent;
-  the guard here only catches a Throwable escaping OUTSIDE that
-  contract, reports it on stderr (swallowed failures must stay visible,
-  not silent), and never masks the original call outcome.
-
-  Mirror of evoclj.mcp.source/close-owned! — keep in lockstep until M11."
-  [managed]
-  (when managed
-    (try
-      (mcp-client/close! managed)
-      (catch Throwable t
-        (try
-          (binding [*out* *err*]
-            (println "[evoclj.provider.mcp-bridge] non-pooled client close failed:"
-                     (pr-str (err/sanitize t))))
-          ;; R2 (m1): the report path itself is error-proof — an Error
-          ;; escaping this finally-position guard used to mask the real
-          ;; outcome. Catch it too and fall back to one raw PrintStream
-          ;; line (System/err cannot throw on IO failure); only what even
-          ;; THAT throws is swallowed.
-          (catch Throwable report-ex
-            (try
-              (.println System/err
-                        (str "[evoclj.provider.mcp-bridge] non-pooled client close-failure report also failed: "
-                             (pr-str (err/sanitize report-ex))))
-              (catch Throwable _ nil))))))))
-
 (defrecord ToolEntry [descriptor manager conn-key transport-config mcp-name tool-id connection-id server-id]
   proto/Provider
   (describe [_] descriptor)
@@ -397,7 +368,7 @@
           ;; on the shared path). close! is idempotent/graceful,
           ;; close-owned! never masks the original outcome.
           (when @owned
-            (close-owned! @owned)))))))
+            (mcp-client/close-owned! "[evoclj.provider.mcp-bridge]" @owned)))))))
 
 (defn make-tool-entry
   "Create an immutable ToolEntry. Each entry is a distinct immutable value
