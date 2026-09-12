@@ -213,6 +213,37 @@
       (safe-close (:client managed))
       (assoc managed :closed? true :client nil :last-error nil))))
 
+(defn close-owned!
+  "WO-M4: best-effort close of a CALL-SCOPED (non-pooled) managed client
+   record. `close!` is already graceful and idempotent; the guard here
+   only catches a Throwable escaping OUTSIDE that contract, reports it on
+   stderr (swallowed failures must stay visible, not silent), and never
+   masks the original call outcome.
+
+   Single implementation (INV-05): both call-scoped callers
+   (evoclj.provider.mcp-bridge and evoclj.mcp.source) call this instead
+   of each carrying a copy. `label` is the caller's stderr tag.
+
+   The report path itself is error-proof — an Error escaping this
+   finally-position guard used to mask the real outcome. Catch it too and
+   fall back to one raw PrintStream line (System/err cannot throw on IO
+   failure); only what even THAT throws is swallowed."
+  [label managed]
+  (when managed
+    (try
+      (close! managed)
+      (catch Throwable t
+        (try
+          (binding [*out* *err*]
+            (println (str label " non-pooled client close failed:")
+                     (pr-str (err/sanitize t))))
+          (catch Throwable report-ex
+            (try
+              (.println System/err
+                        (str label " non-pooled client close-failure report also failed: "
+                             (pr-str (err/sanitize report-ex))))
+              (catch Throwable _ nil))))))))
+
 (defn closed?
   "True when the managed client record is nil or already closed."
   [managed]
