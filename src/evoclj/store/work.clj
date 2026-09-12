@@ -253,6 +253,76 @@
                 (sqlite/query db ["SELECT * FROM works ORDER BY created_at"]))]
      (mapv row->work rows))))
 
+;; ---------------------------------------------------------------------------
+;; Session-graph traversal over the Work graph
+;;
+;; SESSION parentage is read exclusively from works.parent_work_id — the single
+;; durable spawn truth (W2). These are the THREE traversals previously copied
+;; into evoclj.runtime.subagent, evoclj.runtime.subagent-cancel, and
+;; evoclj.store.session; this namespace is the owner because it is the Work-store
+;; layer, already owns list-works/work-descendants/fetch-work, and sits below all
+;; three callers in the dependency graph (nothing it requires reaches them).
+;;
+;; Every function coerces its `db` argument with sqlite/db-spec, so callers may
+;; pass any handle shape they already hold — a jdbc spec, a path string, the
+;; executor :stores map, or a SessionStore.
+;; ---------------------------------------------------------------------------
+
+(defn get-parent-session-id
+  "Return the parent session id (UUID) for `child-session-id`, or nil.
+  Uses the Work graph (works.parent_work_id) — the single durable spawn truth."
+  [db child-session-id]
+  (let [spec (sqlite/db-spec db)
+        cid (types/session-id child-session-id)
+        sid (str cid)]
+    (when-let [row (first (sqlite/query spec
+                                        ["SELECT w2.session_id AS parent_session_id
+                                          FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
+                                          WHERE w1.session_id = ?
+                                            AND w1.parent_work_id IS NOT NULL
+                                          ORDER BY w1.created_at, w1.id
+                                          LIMIT 1"
+                                         sid]))]
+      (types/session-id (:parent_session_id row)))))
+
+(defn child-session-ids
+  "All child session ids spawned from `parent-session-id` via the Work graph.
+  Never throws: an unreadable store yields []."
+  [db parent-session-id]
+  (let [spec (sqlite/db-spec db)
+        pid (str (types/session-id parent-session-id))
+        rows (try
+               (sqlite/query spec
+                             ["SELECT w1.session_id AS child_session_id
+                               FROM works w1 JOIN works w2 ON w1.parent_work_id = w2.id
+                               WHERE w2.session_id = ?
+                               ORDER BY w1.created_at, w1.id"
+                              pid])
+               (catch Exception _ []))]
+    (->> rows
+         (map :child_session_id)
+         (map types/session-id)
+         distinct
+         vec)))
+
+(defn list-descendants
+  "All descendant session ids (UUIDs) transitively spawned from `root-id`
+  via the Work graph (works.parent_work_id). Never throws: an unreadable
+  store yields []."
+  [db root-id]
+  (let [root-id (types/session-id root-id)
+        spec (sqlite/db-spec db)
+        works (try (list-works spec root-id) (catch Exception _ []))
+        descendant-work-ids (try
+                              (mapcat #(work-descendants spec (:work/id %)) works)
+                              (catch Exception _ []))]
+    (->> descendant-work-ids
+         (map #(try (fetch-work spec %) (catch Exception _ nil)))
+         (keep :work/session-id)
+         (remove #(= root-id %))
+         distinct
+         vec)))
+
 (defn dispatch-work!
   "queued -> running (CAS)."
   [db work-id]
