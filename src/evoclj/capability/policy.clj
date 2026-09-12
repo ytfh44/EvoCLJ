@@ -83,11 +83,9 @@
   denying. A capability is a bounded host-owned grant, so garbage
   never authorizes and never hides a caller bug (the same rule as
   evoclj.capability.lease)."
-  (:require [clojure.set :as set]
-            [evoclj.capability.constraint :as cstr]
+  (:require [evoclj.capability.constraint :as cstr]
             [evoclj.capability.grant :as grant]
             [evoclj.capability.lease :as lease]
-            [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err]
             [malli.core :as m]))
@@ -109,18 +107,9 @@
    :intent/memory-read :invoke
    :intent/memory-write :invoke})
 
-(def ^:private global-allowed-actions
-  (apply set/union (vals (rk/allowed-actions-by-kind))))
-
 (defn intent-action
   [intent]
   (get v0-actions (:intent/type intent)))
-
-(defn resolve-action
-  [target intent]
-  (if-let [ra (:required-action target)]
-    ra
-    (intent-action intent)))
 
 (defn resolve-target-action
   [target normalized-request intent]
