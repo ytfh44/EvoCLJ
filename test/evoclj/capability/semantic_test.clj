@@ -4,7 +4,7 @@
             [evoclj.capability.broker :as broker]
             [evoclj.capability.semantic :as semantic]
             [evoclj.intent.pipeline :as pipeline]
-            [evoclj.runtime.scheduler :as scheduler]))
+            [evoclj.runtime.orchestrator :as orchestrator]))
 
 (def ^:private intent
   {:intent/id "intent-1"
@@ -106,7 +106,7 @@
         spec (:binding/semantic-spec captured)
         journal (#'pipeline/effect-journal captured intent {:decision :allow}
                  :effect/committed)
-        events-meta (#'scheduler/semantic-event-metadata
+        events-meta (#'orchestrator/semantic-event-metadata
                      {:effect-journal (:effect-journal
                                        {:effect-journal journal})})]
     (is (= gmail-descriptor (:binding/descriptor captured)))

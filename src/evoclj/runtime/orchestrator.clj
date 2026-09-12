@@ -51,6 +51,20 @@
            :replay/evidence-digest evidence-ref}
     (nil? evidence-ref) (assoc :replay/evidence-missing? true)))
 
+(defn- semantic-event-metadata
+  "Project only the frozen semantic identity into durable event metadata.
+
+  Without this, a semantically-typed effect (a tool whose binding carries a
+  frozen :semantic/spec) would lose its semantic identity on the event log:
+  the journal records it, but the durable events that authorize and complete
+  the call would not, so an auditor reading events alone could not tell which
+  semantic contract was in force. Returns {} for legacy untyped bindings."
+  [result]
+  (if-let [spec (get-in result [:effect-journal :effect/semantic :spec])]
+    {:semantic/spec spec
+     :semantic/digest (get-in result [:effect-journal :effect/semantic :digest])}
+    {}))
+
 (defn- append-event!
   "Append one event to the session append-only log."
   [executor pin cause-event-id type payload-ref metadata]
@@ -97,7 +111,12 @@
              :provider/call-ambiguous-event/id (:event/id marker)}))))
 (defn- dispatch-intent!
   "Persist one validated intent through the broker and feed the result back.
-  Mirrors scheduler/dispatch-intent! exactly — single implementation in this namespace."
+
+  THE single implementation of the intent effect transaction: the scheduler
+  previously carried a byte-identical private copy, kept only as a PTC
+  compatibility shim; it is deleted, and this namespace owns the protocol.
+  The scheduler reaches it through
+  evoclj.runtime.scheduler/dispatch-with-tools! -> orchestrator/orchestrate."
   [executor pin cause intent outputs]
   (let [raw-evidence-ref (replay-evidence-ref! executor intent nil)
         proposed (append-event! executor pin cause :intent/proposed nil
@@ -121,13 +140,15 @@
                                 :intent/type (:intent/type intent)
                                 :authorization {:decision (:decision authorization)
                                                 :lease-id (:lease-id authorization)}}
-                               evidence-metadata))
+                               evidence-metadata
+                               (semantic-event-metadata result)))
             started (append-event!
                      executor pin (:event/id authorized) :provider/call-started nil
                      (merge {:intent/id (:intent/id intent)
                              :tool/id tool-id
                              :idempotency/key (get-in intent [:metadata :idempotency/key])}
-                            evidence-metadata))
+                            evidence-metadata
+                            (semantic-event-metadata result)))
             value-ref (put-payload! executor (:value result))
             completed (append-event!
                        executor pin (:event/id started) :provider/call-completed value-ref
@@ -136,7 +157,8 @@
                                :result/status :ok
                                :replay/provider-result-ref value-ref
                                :replay/provider-result-digest value-ref}
-                              evidence-metadata))]
+                              evidence-metadata
+                               (semantic-event-metadata result)))]
         {:last-event completed
          :outputs (conj outputs (:value result))
          :outcome :ok})
@@ -147,7 +169,8 @@
                               :intent/type (:intent/type intent)
                               :error/type :capability/denied
                               :reason (get-in result [:error/data :reason])}
-                             evidence-metadata))
+                             evidence-metadata
+                             (semantic-event-metadata result)))
          :outputs outputs
          :outcome :denied}
         {:last-event (append-event!
@@ -156,7 +179,8 @@
                       (merge {:intent/id (:intent/id intent)
                               :intent/type (:intent/type intent)
                               :error/type (:error/type result)}
-                             evidence-metadata))
+                             evidence-metadata
+                             (semantic-event-metadata result)))
          :outputs outputs
          :outcome :failed}))))
 
