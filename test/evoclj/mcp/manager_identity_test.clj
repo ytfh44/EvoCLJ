@@ -230,6 +230,36 @@
           "credential fingerprint canonicalizes too"))))
 
 ;; ===========================================================================
+;; ADVERSARIAL GUARD — canonical EDN ordering inside vectors and sets
+;; ===========================================================================
+;;
+;; The map guard above passes even when the canonicalizer recurses into
+;; map VALUES only shallowly. These two cover the collections the
+;; pre-fix manager canonicalizer got wrong: it had no `vector?` branch at
+;; all (a vector fell through to the scalar default, so its CONTENTS were
+;; never normalized) and it rendered sets as sorted vectors.
+
+(deftest guard-vector-contents-canonicalize-before-hashing
+  (testing "same secret inside a vector, different map key order => same identity"
+    (let [v1 [{:b 1 :a 2}]
+          v2 [{:a 2 :b 1}]]
+      (is (not= (pr-str v1) (pr-str v2)) "fixture sanity: printed forms differ")
+      (is (= (manager/credential-fingerprint {:auth/ref v1})
+             (manager/credential-fingerprint {:auth/ref v2}))
+          "a vector's element order/content is canonicalized, not passed through")
+      (is (= (manager/connection-key (assoc-in base-http-cfg [:headers] v1))
+             (manager/connection-key (assoc-in base-http-cfg [:headers] v2)))
+          "identity agrees for vector-valued secret fields"))))
+
+(deftest guard-set-contents-canonicalize-before-hashing
+  (testing "same secret as a set => same identity regardless of element order"
+    (let [s1 #{{:b 1 :a 2} {:d 4 :c 3}}
+          s2 #{{:c 3 :d 4} {:a 2 :b 1}}]
+      (is (= (manager/credential-fingerprint {:auth/ref s1})
+             (manager/credential-fingerprint {:auth/ref s2}))
+          "set contents are canonicalized element-wise"))))
+
+;; ===========================================================================
 ;; ADVERSARIAL GUARD — identity is fingerprinted, never placeholder/plain
 ;; ===========================================================================
 
