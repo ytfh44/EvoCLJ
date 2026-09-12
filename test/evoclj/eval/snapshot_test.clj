@@ -111,11 +111,11 @@
                       :interpreter/build "sci-0.15.58"
                       :adapter/builds {:planner "1"}}
           same-program (compiler-core/code-id abi gid rid)
-          runtime-a (snap/runtime-image-id program descriptor)
-          runtime-b (snap/runtime-image-id
+          runtime-a (compiler-core/runtime-image-id program descriptor)
+          runtime-b (compiler-core/runtime-image-id
                      same-program
                      (assoc descriptor :kernel/build :simulated-next-kernel))]
       (is (= program same-program) "ProgramImage stable across implementation change")
       (is (re-matches #"^sha256:[0-9a-f]{64}$" runtime-a))
       (is (not= runtime-a runtime-b) "RuntimeImageId moves with the implementation")
-      (is (= runtime-a (snap/runtime-image-id program descriptor)) "deterministic"))))
+      (is (= runtime-a (compiler-core/runtime-image-id program descriptor)) "deterministic"))))
