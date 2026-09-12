@@ -28,7 +28,30 @@
   hidden population.
 
   Error contract (Global Constraint 22 — plain serializable data):
-  :metrics/inference-invalid."
+  :metrics/inference-invalid.
+
+  PRODUCTION STATUS — deliberately available, deliberately un-wired.
+  No production namespace calls this yet: the F2 eval envelope
+  (evoclj.eval.core/record-eval-metrics!) records RAW metric values and
+  never summarizes them here, and the cycle harness reports the raw
+  records. That is a disposition, not neglect, and it follows the
+  precedent set by evoclj.eval.statistics, whose promotion-checks are
+  likewise pure, complete, and documented as un-wired until the profile
+  schema can carry their thresholds (see evoclj.eval.core's Step 5 note).
+
+  Consequences, stated so the next reader does not re-open this:
+
+  - The functions are used by this namespace's own test suite
+    (test/evoclj/metrics/inference_test.clj), which pins their real
+    behaviour — interval bounds, degenerate constant series, seeded
+    determinism, seed sensitivity, monotone width in p, and the
+    least-squares fit — so they are covered, not speculative.
+  - Wiring is additive: a caller that wants an interval or a trend
+    summary over collected metric values can call these directly; no
+    signature here assumes a particular report shape.
+  - Deleting would falsify evoclj.metrics.core's docstring reference
+    (src/evoclj/metrics/core.clj) naming this the epistemic complement
+    that keeps inferential claims out of the descriptive aggregates."
   (:require [evoclj.kernel.error :as err]))
 
 ;; --- shared input contract --------------------------------------------------------
