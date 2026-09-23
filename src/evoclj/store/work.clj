@@ -382,6 +382,17 @@
               (throw (err/error :store/work-not-found "no work" {:work/id work-id})))))))
     (fetch-work db work-id)))
 
+(defn cancel-work-on-conn!
+  "The cancel CAS on an EXISTING raw java.sql.Connection (the
+  transaction-internal form used by the subagent-cancel transaction; see
+  evoclj.store.sqlite/with-write-tx): `queued|running|waiting ->
+  cancelled`, returning the affected row count. The statement is owned
+  here so the cancel shape has one definition."
+  [conn work-id]
+  (sqlite/insert-raw! conn
+                      "UPDATE works SET state = 'cancelled', updated_at = ? WHERE id = ? AND state IN ('queued','running','waiting')"
+                      [(canonical-timestamp nil) (str work-id)]))
+
 (defn cancel-work!
   "queued|running|waiting -> cancelled (CAS). Idempotent: if already
   :cancelled, returns the row; if already another terminal, throws."

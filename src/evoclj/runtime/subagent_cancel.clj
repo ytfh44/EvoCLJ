@@ -8,6 +8,7 @@
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
             [evoclj.runtime.subagent-lease :as lease]
+            [evoclj.store.capability-store :as capability-store]
             [evoclj.store.event :as event]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite]
@@ -103,15 +104,11 @@
                               targets))]
     (sqlite/with-write-tx [conn spec]
       ;; 1. durable revoke first: every capability row, WHERE revoked = 0
-      (let [now (str (java.time.Instant/now))]
-        (doseq [id cap-ids]
-          (sqlite/insert-raw! conn "UPDATE capabilities SET revoked = 1, revoked_at = ? WHERE id = ? AND revoked = 0"
-                               [now (str id)])))
+      (doseq [id cap-ids]
+        (capability-store/revoke-capability-on-conn! conn id))
       ;; 2. CAS every target Work to :cancelled (non-terminal only)
-      (let [now (str (java.time.Instant/now))]
-        (doseq [wid work-ids]
-          (sqlite/insert-raw! conn "UPDATE works SET state = 'cancelled', updated_at = ? WHERE id = ? AND state IN ('queued','running','waiting')"
-                               [now (str wid)])))
+      (doseq [wid work-ids]
+        (work-store/cancel-work-on-conn! conn wid))
       ;; 3. cancel events: :session/cancelled per target + :subagent/cancelled
       ;;    on the immediate parent chain, sequenced inside the same tx
       (doseq [tid targets]

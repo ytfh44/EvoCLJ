@@ -178,16 +178,44 @@
       (jdbc/insert! conn :capabilities row))
     (fetch-capability db (:id row))))
 
+(defn revoke-capability-on-conn!
+  "Mark capability `cap-id` revoked on an EXISTING raw
+  java.sql.Connection (the transaction-internal form of
+  `revoke-capability!`; see evoclj.store.sqlite/with-write-tx). Returns
+  the affected row count. The SQL is owned here so every revoke site —
+  the single-row API, the subagent-cancel transaction, and recovery —
+  uses one statement shape (UPDATE ... WHERE revoked = 0)."
+  [conn cap-id]
+  (sqlite/insert-raw! conn
+                      "UPDATE capabilities SET revoked = 1, revoked_at = ? WHERE id = ? AND revoked = 0"
+                      [(str (java.time.Instant/now)) (str cap-id)]))
+
 (defn revoke-capability!
   "Mark capability `cap-id` as revoked: UPDATE WHERE revoked=0.
   Idempotent and durable-first: sets revoked=1 and revoked_at=NOW only
   when currently not revoked. Returns the updated normalized map, or nil
   when no such row exists. Caller must swap! cache only after this succeeds."
   [db cap-id]
-  (let [now (str (java.time.Instant/now))]
+  (sqlite/with-db [conn db]
+    (revoke-capability-on-conn! (:connection conn) cap-id))
+  (fetch-capability db cap-id))
+
+(defn revoke-capabilities-for-principal!
+  "Revoke every active capability row of one principal
+  (`principal-type`/`principal-id`, both strings). Returns the vector of
+  revoked capability ids — the rows that were active BEFORE the call
+  (idempotent: a second call returns [] because every row is already
+  revoked). The per-row revoke uses `revoke-capability-on-conn!`, so the
+  statement shape stays single-sourced."
+  [db principal-type principal-id]
+  (let [rows (sqlite/query db
+                           ["SELECT id FROM capabilities
+                              WHERE principal_type = ? AND principal_id = ? AND revoked = 0"
+                            (str principal-type) (str principal-id)])]
     (sqlite/with-db [conn db]
-      (jdbc/update! conn :capabilities {:revoked 1 :revoked_at now} ["id = ? AND revoked = 0" (str cap-id)]))
-    (fetch-capability db cap-id)))
+      (doseq [r rows]
+        (revoke-capability-on-conn! (:connection conn) (:id r))))
+    (mapv :id rows)))
 
 (defn list-capabilities
   "List capabilities, optionally filtered by {:principal-type t :principal-id id :subject-session-id s :resource-kind k :revoked? bool}."

@@ -59,6 +59,7 @@
             [clojure.string :as str]
             [evoclj.evolution.invariant :as invariant]
             [evoclj.kernel.error :as err]
+            [evoclj.store.capability-store :as capability-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.identity :as identity]
@@ -612,8 +613,9 @@
   "Act on Work-only orphaned children (find-orphaned-subagents): drive
   each orphaned child Work to :cancelled via CAS (a child whose parent
   already settled terminal must never run — structured concurrency)
-  and revoke its owning session's capability rows DB-first (UPDATE WHERE
-  revoked = 0). Queued orphans are NOT left for replay here (unlike
+  and revoke its owning session's capability rows DB-first
+  (capability-store/revoke-capabilities-for-principal! owns the
+  statement). Queued orphans are NOT left for replay here (unlike
   recover-works!): their parent is terminal, so redelivery would run an
   orphan. Already-terminal rows are untouched, so re-running is a no-op.
   Post-crash recovery owns no in-memory leases (the crashed process took
@@ -628,16 +630,9 @@
                     csid (:child/session-id o)]
                 (try (work-store/cancel-work! spec cwid)
                      (catch Exception _ nil))
-                (let [revoked (try
-                                (let [rows (sqlite/query spec ["SELECT id FROM capabilities WHERE principal_type = 'session' AND principal_id = ? AND revoked = 0"
-                                                             (str csid)])
-                                      now (str (java.time.Instant/now))]
-                                  (doseq [r rows]
-                                    (try (sqlite/exec! spec ["UPDATE capabilities SET revoked = 1, revoked_at = ? WHERE id = ? AND revoked = 0"
-                                                             now (:id r)])
-                                         (catch Exception _ nil)))
-                                  (mapv :id rows))
-                                (catch Exception _ []))]
+                (let [revoked (try (capability-store/revoke-capabilities-for-principal!
+                                    spec "session" (str csid))
+                                   (catch Exception _ []))]
                   (-> report
                       (update :recovered conj {:child/work-id cwid})
                       (update :revoked-capabilities into revoked)))))
