@@ -600,15 +600,6 @@
                                        :code/id code-id}))
      identity)))
 
-(defn- program-identity
-  "The ProgramImage triple off a compile-genome result, tolerant of the
-  historical :compiled/* key shape: {:genome/id :resolution/id :code/id}.
-  Session pins resolve program identity ONLY through this helper."
-  [compiled]
-  {:genome/id (or (:code/genome-id compiled) (:compiled/genome-id compiled))
-   :resolution/id (or (:code/resolution-id compiled) (:compiled/resolution-id compiled))
-   :code/id (or (:code/id compiled) (:compiled/code-id compiled))})
-
 (defn generation-identity
   "The compiled identity of `generation-id`'s Genome:
   {:generation/id :genome/id :resolution/id :code/id
@@ -624,13 +615,13 @@
     (let [bundle-root (resolve-bundle-root opts (:genome_id row))
           loaded (load-genome-for-execution bundle-root)
           compiled (compiler/compile-genome loaded provider-catalog)]
-      (when-not (= (:genome_id row) (:genome/id (program-identity compiled)))
+      (when-not (= (:genome_id row) (:genome/id (compiler/program-identity compiled)))
         (throw (err/error :cli/genome-mismatch
                           "the stored bundle does not compile to the generation's genome id"
                           {:generation/id generation-id
                            :generation/genome-id (:genome_id row)
-                           :compiled/genome-id (:genome/id (program-identity compiled))})))
-      (let [program (program-identity compiled)
+                           :compiled/genome-id (:genome/id (compiler/program-identity compiled))})))
+      (let [program (compiler/program-identity compiled)
             identity {:generation/id generation-id
                       :genome/id (:genome/id program)
                       :resolution/id (:resolution/id program)
@@ -836,13 +827,13 @@
     (let [generation (resolve-generation system opts genome-spec)
           loaded (load-genome-for-execution (:bundle-root generation))
           compiled (compiler/compile-genome loaded provider-catalog)]
-      (when-not (= (:genome/id generation) (:genome/id (program-identity compiled)))
+      (when-not (= (:genome/id generation) (:genome/id (compiler/program-identity compiled)))
         (throw (err/error :cli/genome-mismatch
                           "the resolved bundle does not compile to the generation's genome id"
                           {:generation/id (:generation/id generation)
                            :generation/genome-id (:genome/id generation)
-                           :compiled/genome-id (:genome/id (program-identity compiled))})))
-      (let [program (program-identity compiled)
+                           :compiled/genome-id (:genome/id (compiler/program-identity compiled))})))
+      (let [program (compiler/program-identity compiled)
             _ (ensure-identity-artifacts!
                 system
                 {:genome/id (:genome/id program)

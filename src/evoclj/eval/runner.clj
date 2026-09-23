@@ -226,16 +226,6 @@
      :issued-at now
      :expires-at expires}))
 
-(defn- program-identity
-  "The ProgramImage triple off a compile-genome result, tolerant of the
-  historical :compiled/* key shape: {:genome/id :resolution/id :code/id}.
-  The pin and every execution record below resolve program identity ONLY
-  through this helper — never by naming one key shape."
-  [compiled]
-  {:genome/id (or (:code/genome-id compiled) (:compiled/genome-id compiled))
-   :resolution/id (or (:code/resolution-id compiled) (:compiled/resolution-id compiled))
-   :code/id (or (:code/id compiled) (:compiled/code-id compiled))})
-
 (defn- runtime-identity
   "The RuntimeImageId + ExecutionEnvironment for one side's `compiled`
   map: the runtime descriptor comes from
@@ -246,7 +236,7 @@
   headers — the broker carries none, so SaaS builds stay unobserved; the
   record is observational provenance, never content identity)."
   [compiled case-map seed]
-  (let [program (:code/id (program-identity compiled))
+  (let [program (:code/id (compiler/program-identity compiled))
         runtime-id (compiler/runtime-image-id
                     program (compiler/default-runtime-descriptor compiled))
         observed (into (sorted-map)
@@ -291,7 +281,7 @@
   [evaluator stores loaded compiled]
   (let [db (:sqlite stores)
         cas-store (:cas stores)
-        program (program-identity compiled)
+        program (compiler/program-identity compiled)
         genome-id (:genome/id program)
         genome-body (.getBytes (load/index-body loaded) StandardCharsets/UTF_8)
         stored (:artifact/id (cas/put-bytes! cas-store genome-body {}))
@@ -337,7 +327,7 @@
   the side result once outputs exist). Returns the session id."
   [stores compiled generation-id runtime-env]
   (let [db (:sqlite stores)
-        program (program-identity compiled)
+        program (compiler/program-identity compiled)
         sid (:session/id
              (session/create-session!
               db
@@ -537,7 +527,7 @@
         {:side/kind side-kind
          :side/id side-id
          :side/instance-id (random-uuid)
-         :side/code-id (:code/id (program-identity compiled))
+         :side/code-id (:code/id (compiler/program-identity compiled))
          :side/runtime-image-id (:runtime/image-id runtime-env)
          :side/execution-environment
          (complete-environment (:execution-environment runtime-env)

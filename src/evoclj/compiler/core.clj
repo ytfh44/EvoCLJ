@@ -246,6 +246,20 @@
    :interpreter/build interpreter-build-id
    :adapter/builds (adapter-builds-from-resolution (:resolution compiled))})
 
+(defn program-identity
+  "The ProgramImage triple off a compile-genome result:
+  {:genome/id :resolution/id :code/id}. Tolerant of the historical
+  :compiled/* key shape (compiled genomes persisted or hand-built before
+  the I1 key rename carry :compiled/genome-id / :compiled/resolution-id /
+  :compiled/code-id instead of the :code/* keys), so this is the ONE
+  place that resolves program identity from either shape — session pins,
+  identity registration, and eval side records all go through it and
+  never name one key shape themselves."
+  [compiled]
+  {:genome/id (or (:code/genome-id compiled) (:compiled/genome-id compiled))
+   :resolution/id (or (:code/resolution-id compiled) (:compiled/resolution-id compiled))
+   :code/id (or (:code/id compiled) (:compiled/code-id compiled))})
+
 (defn runtime-image-id
   "The RuntimeImageId: sha256:<64 hex> over the canonical serialization of
   runtime-descriptor || program-image-id, where runtime-descriptor is a
