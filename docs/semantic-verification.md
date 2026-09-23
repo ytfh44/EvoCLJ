@@ -1,6 +1,6 @@
 # Semantic Verification Report
 
-**Scope:** formal model + real-code verification of the seven core semantic
+**Scope:** formal model + real-code verification of the nine core semantic
 claims of EvoCLJ, per subsystem. Every check drives the REAL production
 namespaces (no mocks); the models are stated explicitly and the invariant
 is enumerated exhaustively where the domain is finite.
@@ -11,7 +11,7 @@ is enumerated exhaustively where the domain is finite.
 for f in scripts/verify-semantics/verify*_*.clj; do clojure -M "$f"; done
 ```
 
-**Result:** 7/7 suites, 132 assertions, 0 failures (2026-08-14).
+**Result:** 9/9 suites, 161 assertions, 0 failures (2026-09-24).
 
 ---
 
@@ -121,6 +121,57 @@ is acyclic.
 acyclicity, terminal sinks, and reachability, then checks every ordered state
 pair against the production transition table.
 
+## 8. Session pin identity (GC 2, 20) — `verify8_pin_identity.clj`
+
+**Model.** A pin is `{session/id, code/id, deployment/id, execution/id}` and
+admission is a conjunction of existence and agreement constraints over the
+three I1 identity tables:
+
+    executions.deployment_id = pin.deployment/id
+    executions.code_image_id = pin.code/id          (agreement)
+    deployments.code_image_id = pin.code/id         (agreement)
+    code_images.id           = pin.code/id          (agreement)
+    every named row EXISTS                          (existence)
+
+    accept <=> all conjuncts hold
+
+**Enumerated.** The domain is finite (four ids, three tables, one row each),
+so the script drives the two failure modes that matter — a MISSING row and a
+DISAGREEING row — plus the consistent case.
+
+**Real code.** Real SQLite + real `store.migrate`: `store.identity/record-*!`
+write each row once and are idempotent under replay; the readers round-trip
+the rows; `store.session/create-session!` persists the identity triple on the
+sessions row and `row->session` reads it back; `runtime.hydrate/verify-pin!`
+admits the consistent pin and rejects (with `:hydrate/pin-mismatch`) both a
+pin whose rows disagree and a pin naming an unregistered execution. A session
+whose identity was never registered cannot be executed — the pin check is
+fail-closed, not fail-open.
+
+## 9. One hard-gate rule (GC 14) — `verify9_hard_gate_single_src.clj`
+
+**Model.** The G6 hard gate (`evoclj.eval.core`) and the eligibility decision
+(`evoclj.eval.compare`) answer the same question — does this summary violate
+the profile's cost/complexity thresholds? Two implementations could disagree;
+the claim is that the gate derives its reasons from
+`compare/thresholds-for` + `compare/guard-reason` over the SAME
+`metrics/cost-regressions` / `metrics/complexity-regressions` records, so the
+answers are equal by construction.
+
+**Enumerated (finite domain).** Cost over the max; complexity over the max;
+both over the max (cost is checked first); neither over the max; and
+complexity left informational when the profile omits the guard — for each,
+the eligibility reasons must equal the reasons recomputed independently
+through `guard-reason`, item for item.
+
+**Real code.** `compare/eligibility` returns exactly the reasons
+`compare/guard-reason` produces (and, for the sample floor, exactly what
+`statistics/promotion-checks` produces); `thresholds-for` merges the profile
+declaration over the canonical defaults; a sample below `:min-pairs` and one
+above `:max-candidate-failure-rate` are both ineligible. Structural half:
+`src/evoclj/eval/core.clj` contains no `metrics/ratio` call and no numeric
+cost threshold — it names the rule, not a second implementation of it.
+
 ---
 
 ## Summary of findings
@@ -131,9 +182,12 @@ pair against the production transition table.
 | 2 | Statement-level CAS is broken in 4/6 interleavings | Informational | Confirms the necessity of BEGIN IMMEDIATE; already relied upon, now formally justified |
 | 3 | Canary uniformity confirmed empirically (z ≤ 0.62 over 10k keys) | Informational | Binomial model holds; allocation percentages are accurate |
 | 4–7 | All invariants hold under exhaustive/real-code verification | — | No changes required |
+| 8 | The identity triple was written by the CLI but never read back by the pin check (a session could run against an unregistered identity) | High (correctness) | **Fixed**: the writers landed (C2.1) and `hydrate/verify-pin!` now fails closed on a missing or disagreeing row (C2.2); `verify8` pins the behavior |
+| 9 | The G6 gate and the eligibility decision could drift apart (two implementations of the same threshold rule) | Medium (integrity) | **Fixed**: the gate consumes `compare/thresholds-for` + `compare/guard-reason` (C1.1); `verify9` pins the equality and the absence of a second ratio implementation |
 
-The seven core semantic claims of the system — atomic CAS with a single
+The nine core semantic claims of the system — atomic CAS with a single
 winner, tamper-evident causal chains, deterministic proportional routing,
 hard-constraint-dominant lexicographic comparison, frozen evidence
-boundaries, canonical content identity, and a closed state machine — are
+boundaries, canonical content identity, a closed state machine, a
+fail-closed session pin identity, and a single hard-gate rule — are
 verified against the production code.

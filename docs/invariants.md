@@ -35,32 +35,32 @@ one-to-one with that list. Modality note: MUST/SHOULD strength follows the
 original text; this table flattens SHOULD items (GC-13, GC-21) to
 declarative form.
 
-| # | One-line summary |
-| --- | --- |
-| GC-01 | A Genome is immutable and content-addressed. |
-| GC-02 | Every session stays pinned to exactly one CodeImage/Deployment/Execution pin for its lifetime (I1 refines Genome+Resolution into CodeImage/Deployment). |
-| GC-03 | A live Execution must not modify its own CodeImage in place. |
-| GC-04 | Evolution produces successor candidates only through structured, deterministic mutations. |
-| GC-05 | Every mutation identifies parent Genome, evidence, hypothesis, risk class, operations, and expected effect. |
-| GC-06 | Mutation application is deterministic: same parent bytes + same mutation value ⇒ same candidate hash. |
-| GC-07 | Evolvable SCI code runs without ambient JVM, filesystem, process, network, secret, or database authority. |
-| GC-08 | All external effects cross the kernel-owned Intent/Capability Broker. |
-| GC-09 | Adding a visible action/tool must not itself grant resource authority. |
-| GC-10 | Episodic memory writes remain distinct from procedural Genome changes. |
-| GC-11 | Candidate evaluation uses an informationally isolated selection set unavailable to Executor, Diagnostician, and Mutator. |
-| GC-12 | A candidate must not modify the evaluator that judges that same candidate. |
-| GC-13 | Parent and candidate are evaluated as a paired comparison on the same case set and environment fixture. |
-| GC-14 | Hard safety/integrity/policy constraints dominate utility/cost metrics and are never collapsed into a compensating weighted score. |
-| GC-15 | Promotion is an atomic compare-and-set against the parent generation/current pointer. |
-| GC-16 | Rejected mutations remain durable, queryable negative evidence. |
-| GC-17 | Every promoted generation retains complete lineage: parent, mutation, evidence, evaluation, decision, deployment state. |
-| GC-18 | Rollback restores future generation selection only; it never claims to reverse already-committed external effects. |
-| GC-19 | Kernel source, authority root, audit root, evaluator-isolation root, and promotion root are not agent-mutable. |
-| GC-20 | Every externally visible effect is attributable to session-id, code-id, node-id, intent-id, authorization decision, and outcome (Principal replaces the code-image pin for attribution scope after I1/I2). |
-| GC-21 | Large immutable payloads are stored by content hash; SQLite rows hold references, not duplicated bodies. |
-| GC-22 | Public module boundaries exchange validated Clojure data only — no raw Java objects, lazy seqs, futures, or open resources across Genome/SCI/Intent/Event boundaries. |
-| GC-23 | Candidate evaluation workspaces, SCI contexts, session namespaces, and mutable temp state stay isolated from the current production generation. |
-| GC-24 | YAGNI for v1: no model-weight training, arbitrary JVM eval, arbitrary native codegen, persistent schema self-migration, automatic capability enlargement, or simultaneous evaluator/candidate co-evolution. |
+| # | One-line summary | Mechanical guard |
+| --- | --- | --- |
+| GC-01 | A Genome is immutable and content-addressed. | — |
+| GC-02 | Every session stays pinned to exactly one CodeImage/Deployment/Execution pin for its lifetime (I1 refines Genome+Resolution into CodeImage/Deployment). | `scripts/verify-semantics/verify8_pin_identity.clj` (identity rows written once, the sessions row carries the triple, a disagreeing or missing row is rejected with `:hydrate/pin-mismatch`); `evoclj.store.identity-test` (`session-row-carries-the-identity-triple`, `execution-without-its-deployment-fails-closed`) |
+| GC-03 | A live Execution must not modify its own CodeImage in place. | — |
+| GC-04 | Evolution produces successor candidates only through structured, deterministic mutations. | — |
+| GC-05 | Every mutation identifies parent Genome, evidence, hypothesis, risk class, operations, and expected effect. | — |
+| GC-06 | Mutation application is deterministic: same parent bytes + same mutation value ⇒ same candidate hash. | — |
+| GC-07 | Evolvable SCI code runs without ambient JVM, filesystem, process, network, secret, or database authority. | — |
+| GC-08 | All external effects cross the kernel-owned Intent/Capability Broker. | `evoclj.capability.mint-test` (`mint-records-in-registry`, registry version bumps through the single-source `capability.lease-registry`); `evoclj.capability.broker-resource-action-registry-test` (an unregistered kind is denied fail-closed) |
+| GC-09 | Adding a visible action/tool must not itself grant resource authority. | `evoclj.capability.lease-test` / `evoclj.capability.subject-anchor-test` (a lease grant never implies a resource action); C4.6 adds the exhaustive `capability.core/node-effects` case |
+| GC-10 | Episodic memory writes remain distinct from procedural Genome changes. | — |
+| GC-11 | Candidate evaluation uses an informationally isolated selection set unavailable to Executor, Diagnostician, and Mutator. | `evoclj.eval.dataset-test` (`harness-cases-load-from-a-set-record`) + `evoclj.eval.core-test` (`registered-harness-sets-join-the-selection-cases`, `harness-case-id-conflicts-fail-closed`) — the selection set stays unavailable to Executor/Diagnostician/Mutator |
+| GC-12 | A candidate must not modify the evaluator that judges that same candidate. | — |
+| GC-13 | Parent and candidate are evaluated as a paired comparison on the same case set and environment fixture. | `evoclj.eval.paired-test` (`paired-sides-stamp-one-environment-snapshot`, `paired-sides-without-a-snapshot-stamp-nothing`) — one captured snapshot stamps both sides |
+| GC-14 | Hard safety/integrity/policy constraints dominate utility/cost metrics and are never collapsed into a compensating weighted score. | `scripts/verify-semantics/verify9_hard_gate_single_src.clj` (eligibility reasons == `compare/guard-reason` over the same regression records; hard/utility/cost/complexity/sample short-circuit; `eval/core.clj` carries no second ratio implementation) |
+| GC-15 | Promotion is an atomic compare-and-set against the parent generation/current pointer. | — |
+| GC-16 | Rejected mutations remain durable, queryable negative evidence. | — |
+| GC-17 | Every promoted generation retains complete lineage: parent, mutation, evidence, evaluation, decision, deployment state. | — |
+| GC-18 | Rollback restores future generation selection only; it never claims to reverse already-committed external effects. | — |
+| GC-19 | Kernel source, authority root, audit root, evaluator-isolation root, and promotion root are not agent-mutable. | — |
+| GC-20 | Every externally visible effect is attributable to session-id, code-id, node-id, intent-id, authorization decision, and outcome (Principal replaces the code-image pin for attribution scope after I1/I2). | `scripts/verify-semantics/verify8_pin_identity.clj` + `evoclj.store.identity-test` — the sessions row persists code_image_id/deployment_id/execution_id, so every effect is attributable to the pinned identity triple |
+| GC-21 | Large immutable payloads are stored by content hash; SQLite rows hold references, not duplicated bodies. | — |
+| GC-22 | Public module boundaries exchange validated Clojure data only — no raw Java objects, lazy seqs, futures, or open resources across Genome/SCI/Intent/Event boundaries. | — |
+| GC-23 | Candidate evaluation workspaces, SCI contexts, session namespaces, and mutable temp state stay isolated from the current production generation. | — |
+| GC-24 | YAGNI for v1: no model-weight training, arbitrary JVM eval, arbitrary native codegen, persistent schema self-migration, automatic capability enlargement, or simultaneous evaluator/candidate co-evolution. | — |
 
 ---
 
