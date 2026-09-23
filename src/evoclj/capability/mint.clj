@@ -16,18 +16,17 @@
             [evoclj.capability.budget :as budget]
             [evoclj.capability.constraint :as cstr]
             [evoclj.capability.grant :as grant]
+            [evoclj.capability.lease-registry :as lease-registry]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err]
             [evoclj.store.budget-store :as budget-store])
   (:import (java.util Date UUID)))
 
-(def ^:private registry-version-key ::version)
-
 (defn- bump-version!
-  "Increment version in registry atom; returns new version."
+  "Increment version in registry atom; returns new version (delegates
+  to the shared evoclj.capability.lease-registry slot)."
   [registry]
-  (swap! registry update registry-version-key (fnil inc 0))
-  (get @registry registry-version-key))
+  (lease-registry/bump-registry-version! registry))
 (defn normalize-authority
   "Normalize a durable-authority argument into an explicit AuthorityStore,
   or nil for the legacy memory-only path.
@@ -244,9 +243,9 @@
 
 (defn create-lease-registry
   "A verifiable lease ledger: an atom mapping :cap/id -> {:lease <sealed> :revoked? <bool>}
-  plus a monotonic ::version bumped on each durable success. Fresh registry starts at 0."
+  plus a monotonic version slot bumped on each durable success. Fresh registry starts at 0."
   []
-  (atom {registry-version-key 0}))
+  (atom {lease-registry/registry-version-key 0}))
 
 (defn get-lease
   "Look up a recorded lease by :cap/id, or nil when not recorded."
@@ -345,9 +344,10 @@
        (filterv (fn [l] (= principal (:principal l))))))
 
 (defn registry-version
-  "Return monotonic version of registry (0 if uninitialized)."
+  "Return monotonic version of registry (0 if uninitialized) —
+  delegates to the shared evoclj.capability.lease-registry slot."
   [registry]
-  (get @registry registry-version-key 0))
+  (lease-registry/registry-version registry))
 
 (defn hydrate-registry!
   "Restart hydration: load all active (revoked=0) capabilities from DB into `registry`

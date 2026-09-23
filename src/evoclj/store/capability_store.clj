@@ -15,6 +15,7 @@
             [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [clojure.string :as str]
+            [evoclj.capability.lease-registry :as lease-registry]
             [evoclj.capability.resource-kind :as rk]
             [evoclj.store.sqlite :as sqlite]
             [malli.core :as m]))
@@ -239,11 +240,14 @@
                      rows)
         entries (into {} (map (fn [l] [(:cap/id l) {:lease l :revoked? false}]) leases))]
     (swap! registry (fn [m]
-                      (-> (merge (select-keys m [:evoclj.capability.mint/version]) entries)
-                          (assoc :evoclj.capability.mint/version (inc (get m :evoclj.capability.mint/version 0))))))
+                      (-> (merge (select-keys m [lease-registry/registry-version-key])
+                                 entries)
+                          (assoc lease-registry/registry-version-key
+                                 (inc (get m lease-registry/registry-version-key 0))))))
     (count entries)))
 
 (defn registry-version
-  "Return the cache version of `registry` (0 if uninitialized)."
+  "Return the cache version of `registry` (0 if uninitialized) —
+  delegates to the shared evoclj.capability.lease-registry slot."
   [registry]
-  (get @registry :evoclj.capability.mint/version 0))
+  (lease-registry/registry-version registry))

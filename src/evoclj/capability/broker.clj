@@ -66,6 +66,7 @@
   intent), because garbage never authorizes and never hides a caller
   bug."
   (:require [clojure.set :as set]
+            [evoclj.capability.mint :as cap-mint]
             [evoclj.capability.policy :as policy]
             [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.semantic :as semantic]
@@ -166,7 +167,9 @@
                       "normalized request must carry a :resource map"
                       {:value (err/sanitize normalized-request)})))
     (let [lease-reg (or lease-registry leases-registry revocation-registry)
-          revoked? (fn [lease] (when lease-reg (boolean (get-in @lease-reg [(:cap/id lease) :revoked?]))))
+          revoked? (fn [lease] (when lease-reg
+                                 (cap-mint/lease-revoked? lease-reg
+                                                           (:cap/id lease))))
           principal (policy/intent-principal intent)
           resource (:resource normalized-request)
           semantic (semantic-state resource)

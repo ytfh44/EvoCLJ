@@ -179,17 +179,21 @@
 (defn get-lease
   "Look up a recorded lease by :cap/id, or nil (delegates to mint)."
   [registry cap-id]
-  (get-in @registry [cap-id :lease]))
+  (let [f (requiring-resolve 'evoclj.capability.mint/get-lease)]
+    (@f registry cap-id)))
 
 (defn lease-revoked?
-  "True when the lease with :cap/id is recorded as revoked."
+  "True when the lease with :cap/id is recorded as revoked
+  (delegates to mint)."
   [registry cap-id]
-  (boolean (get-in @registry [cap-id :revoked?])))
+  (let [f (requiring-resolve 'evoclj.capability.mint/lease-revoked?)]
+    (@f registry cap-id)))
 
 (defn revoked?
-  "Alias of lease-revoked? for ANY kind."
+  "Alias of lease-revoked? for ANY kind (delegates to mint)."
   [registry cap-id]
-  (lease-revoked? registry cap-id))
+  (let [f (requiring-resolve 'evoclj.capability.mint/revoked?)]
+    (@f registry cap-id)))
 
 (defn revoke-lease!
   "Revoke the recorded lease with :cap/id, idempotent.

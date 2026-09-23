@@ -19,9 +19,10 @@
   consumers require it directly, so the reflection is gone rather than
   relocated.
 
-  Depends only on evoclj.capability.mint; nothing it requires reaches
-  runtime.subagent, so the edge is acyclic."
-  (:require [evoclj.capability.mint :as mint]))
+  Depends only on evoclj.capability.mint (plus the leaf version slot);
+  nothing it requires reaches runtime.subagent, so the edge is acyclic."
+  (:require [evoclj.capability.lease-registry :as lease-registry]
+            [evoclj.capability.mint :as mint]))
 
 (defonce subagent-lease-registry
   (mint/create-lease-registry))
@@ -30,5 +31,5 @@
   "Test helper — clear the global subagent lease registry.
   Safe to call between fixtures."
   []
-  (reset! subagent-lease-registry {:evoclj.capability.mint/version 0})
+  (reset! subagent-lease-registry {lease-registry/registry-version-key 0})
   nil)

@@ -187,11 +187,14 @@
   [lease {:keys [now principal registry]}]
   (cap-schema/validate-lease lease)
   (when (some? registry)
-    (let [rec (get @registry (:cap/id lease))]
-      (when (or (nil? rec) (:revoked? rec))
-        (throw (err/error :capability/revoked
-                          "lease is revoked or was never issued by the fs lease issuer"
-                          {:cap/id (:cap/id lease)})))))
+    ;; Fail-closed: an unregistered lease is NOT a grant (the issuer is the
+    ;; only source), so "no entry" counts as revoked — unlike the broker,
+    ;; where an absent registry means "no revocation tracking".
+    (when (or (nil? (cap-mint/get-lease registry (:cap/id lease)))
+              (cap-mint/lease-revoked? registry (:cap/id lease)))
+      (throw (err/error :capability/revoked
+                        "lease is revoked or was never issued by the fs lease issuer"
+                        {:cap/id (:cap/id lease)}))))
   (let [t (or now (Date.))]
     (when-not (lease/valid-at? lease t)
       (throw (err/error :capability/expired

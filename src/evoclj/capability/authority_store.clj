@@ -21,7 +21,8 @@
     - [[MemoryAuthorityStore]] wraps an atom and is the TYPE-visible
       memory-only authority used by unit tests that want no DB. It makes
       the memory-only path explicit rather than an arity side-effect."
-  (:require [evoclj.kernel.error :as err]
+  (:require [evoclj.capability.lease-registry :as lease-registry]
+            [evoclj.kernel.error :as err]
             [evoclj.store.capability-store :as cap-store]))
 
 ;; ---------------------------------------------------------------------------
@@ -112,7 +113,8 @@
     nil)
   (hydrate! [_ registry]
     (let [entries (into {} (map (fn [[id l]] [id {:lease l :revoked? false}]) @state))]
-      (swap! registry (fn [m] (merge (select-keys m [:evoclj.capability.mint/version]) entries)))
+      (swap! registry (fn [m] (merge (select-keys m [lease-registry/registry-version-key])
+                                     entries)))
       (count entries)))
   (active-by-principal [_ principal]
     (->> @state
