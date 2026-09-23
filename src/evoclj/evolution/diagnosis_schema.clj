@@ -99,14 +99,29 @@
    [:confidence {:optional true} [:fn confidence?]]
    [:confidence-band [:enum :low :medium :high]]])
 
+(def DiagnosisIdSchema
+  "The content address of a diagnosis body."
+  [:fn types/artifact-id?])
+
 (def DiagnosisSchema
   "The Diagnosis artifact: a content-addressed :diagnosis/id, the
   :evidence/id provenance of the frozen evidence pack it was derived
   from, and the bounded :hypotheses vector."
   [:map {:closed true}
-   [:diagnosis/id [:fn types/artifact-id?]]
+   [:diagnosis/id DiagnosisIdSchema]
    [:evidence/id [:fn types/artifact-id?]]
    [:hypotheses [:vector HypothesisSchema]]])
+
+(def SubjectSchema
+  "The immutable subject identity a diagnosis is produced for: the
+  artifact revision, the workspace it was observed in, and optionally
+  the workspace snapshot. Late-result admission compares these fields
+  (see diagnose/freshness) — a different workspace is a scope
+  mismatch, a different revision or snapshot is stale."
+  [:map {:closed true}
+   [:artifact/revision [:fn types/artifact-id?]]
+   [:workspace/id string?]
+   [:snapshot/id {:optional true} [:fn types/artifact-id?]]])
 
 (def PatternDiagnosticianConfigSchema
   "The deterministic pattern adapter's constructor config — plain
@@ -135,6 +150,26 @@
   (if-let [expl (m/explain HypothesisSchema hypothesis)]
     (schema-error! :diagnosis/hypothesis-invalid "hypothesis" expl)
     hypothesis))
+
+(defn validate-diagnosis-id
+  "Validate a diagnosis content address. Returns it unchanged, or
+  throws :diagnosis/id-invalid."
+  [id]
+  (if (m/validate DiagnosisIdSchema id)
+    id
+    (throw (err/error :diagnosis/id-invalid
+                      "diagnosis id is not a content address"
+                      {:diagnosis/id id}))))
+
+(defn validate-subject
+  "Validate an immutable subject identity. Returns it unchanged, or
+  throws :observation/subject-invalid."
+  [subject]
+  (if-let [expl (m/explain SubjectSchema subject)]
+    (throw (err/error :observation/subject-invalid
+                      "observation subject is not a valid immutable identity"
+                      {:errors (me/humanize expl)}))
+    subject))
 
 (defn validate-diagnosis
   "Validate a Diagnosis artifact. Returns it unchanged, or throws

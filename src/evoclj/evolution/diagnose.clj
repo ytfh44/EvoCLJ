@@ -95,9 +95,23 @@
   free-form diagnosis can directly alter the Genome; this is enforced
   by design — the API does not exist.
 
+  LATE-RESULT GUARDS (component): an asynchronous observation captures
+  a token with `capture-token` (the subject identity + the diagnosis id
+  it was produced for), and a late result is admitted only through
+  `guard-async-result`, which compares the captured subject with the
+  current one via `freshness`: a different workspace is a scope
+  mismatch, a different artifact revision (or, when the capture carried
+  one, snapshot) is stale, anything else is fresh. A token that does
+  not match the presented subject + diagnosis id is rejected with
+  :observation/token-mismatch — fail-closed. The guards own no
+  surface registry, scheduler, or control authority; they compare
+  immutable identities and return decisions.
+
   Error contract (Global Constraint 22 — plain serializable data):
   :diagnosis/config-invalid, :diagnosis/hypothesis-invalid,
-  :diagnosis/invalid, :diagnosis/store-invalid, :diagnosis/id-mismatch,
+  :diagnosis/invalid, :diagnosis/id-invalid, :diagnosis/store-invalid,
+  :diagnosis/id-mismatch, :observation/subject-invalid,
+  :observation/token-mismatch (the late-result guards),
   :evolution/hypothesis-confidence-invalid (the kernel ranking gate).
   Invalid evidence packs are rejected with the component
   :evidence/pack-invalid error; CAS/store errors propagate as-is."
@@ -429,3 +443,73 @@
                       VALUES (?, ?, ?, ?)"
                      id diagnosis-media-type size (str (java.time.Instant/now))])
       diagnosis)))
+
+;; ---------------------------------------------------------------------------
+;; Late-result guards
+;; ---------------------------------------------------------------------------
+
+(defn capture-token
+  "Capture the immutable identity that an asynchronous observation may
+  later use for admission. The token is bound to the subject identity
+  the diagnosis was produced for and to the diagnosis id."
+  [subject diagnosis-id]
+  (ds/validate-subject subject)
+  (ds/validate-diagnosis-id diagnosis-id)
+  {:observation/id diagnosis-id
+   :subject subject})
+
+(defn freshness
+  "Compare a captured subject identity with the current one.
+
+  A different workspace is a scope mismatch, not merely stale data. A
+  same-workspace revision or snapshot change is stale."
+  [captured current-subject]
+  (ds/validate-subject captured)
+  (ds/validate-subject current-subject)
+  (cond
+    (not= (:workspace/id captured) (:workspace/id current-subject))
+    {:status :scope-mismatch
+     :captured captured
+     :current current-subject}
+
+    (or (not= (:artifact/revision captured)
+              (:artifact/revision current-subject))
+        (and (contains? captured :snapshot/id)
+             (not= (:snapshot/id captured)
+                   (:snapshot/id current-subject))))
+    {:status :stale
+     :captured captured
+     :current current-subject}
+
+    :else
+    {:status :fresh
+     :captured captured
+     :current current-subject}))
+
+(defn guard-async-result
+  "Return an explicit accept/reject decision for a late async result.
+
+  The result is accepted only when the caller presents the token created
+  from this exact (subject, diagnosis id) pair and the current subject
+  still has the captured identity. Stale or cross-workspace results are
+  returned as rejected decisions and must not mutate current state."
+  [token subject diagnosis-id current-subject]
+  (ds/validate-subject subject)
+  (ds/validate-subject current-subject)
+  (when-not (and (= (:observation/id token) diagnosis-id)
+                 (= (:subject token) subject))
+    (throw (err/error :observation/token-mismatch
+                      "asynchronous observation token does not match its subject"
+                      {:observation/id (:observation/id token)
+                       :diagnosis/id diagnosis-id})))
+  (let [comparison (freshness subject current-subject)]
+    (if (= :fresh (:status comparison))
+      {:decision :accept
+       :reason :fresh
+       :diagnosis/id diagnosis-id
+       :subject current-subject}
+      {:decision :reject
+       :reason (:status comparison)
+       :diagnosis/id diagnosis-id
+       :captured (:captured comparison)
+       :current (:current comparison)})))

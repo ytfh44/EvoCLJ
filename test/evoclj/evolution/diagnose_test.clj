@@ -731,3 +731,101 @@
     (is (= :diagnosis/hypothesis-invalid
            (thrown-error-type #(ds/validate-hypothesis
                                 (hypothesis {:confidence -0.1})))))))
+
+;; ============================================================================
+;; component — late-result guards (observation)
+;; ============================================================================
+
+(def ^:private revision-a (str "sha256:" (apply str (repeat 64 "a"))))
+(def ^:private revision-b (str "sha256:" (apply str (repeat 64 "b"))))
+
+(def ^:private guard-subject
+  {:artifact/revision revision-a
+   :workspace/id "workspace-1"})
+
+(def ^:private guard-diagnosis-id placeholder-hash)
+
+(deftest same-subject-is-fresh-and-admitted
+  (let [token (diag/capture-token guard-subject guard-diagnosis-id)]
+    (is (= {:observation/id guard-diagnosis-id :subject guard-subject} token))
+    (is (= :fresh (:status (diag/freshness guard-subject guard-subject))))
+    (is (= {:decision :accept
+            :reason :fresh
+            :diagnosis/id guard-diagnosis-id
+            :subject guard-subject}
+           (diag/guard-async-result token guard-subject guard-diagnosis-id
+                                    guard-subject)))))
+
+(deftest changed-revision-rejects-late-result
+  (let [token (diag/capture-token guard-subject guard-diagnosis-id)
+        current (assoc guard-subject :artifact/revision revision-b)]
+    (is (= :stale (:status (diag/freshness guard-subject current))))
+    (is (= :reject (:decision (diag/guard-async-result token guard-subject
+                                                       guard-diagnosis-id
+                                                       current))))
+    (is (= :stale (:reason (diag/guard-async-result token guard-subject
+                                                    guard-diagnosis-id
+                                                    current))))))
+
+(deftest changed-snapshot-rejects-late-result
+  (let [captured (assoc guard-subject :snapshot/id revision-a)
+        token (diag/capture-token captured guard-diagnosis-id)
+        current (assoc captured :snapshot/id revision-b)]
+    (is (= :stale (:status (diag/freshness captured current))))
+    (is (= :reject (:decision (diag/guard-async-result token captured
+                                                       guard-diagnosis-id
+                                                       current))))))
+
+(deftest different-workspace-is-not-admitted-as-stale
+  (let [current (assoc guard-subject :workspace/id "workspace-2")
+        token (diag/capture-token guard-subject guard-diagnosis-id)]
+    (is (= :scope-mismatch (:status (diag/freshness guard-subject current))))
+    (is (= {:decision :reject
+            :reason :scope-mismatch
+            :diagnosis/id guard-diagnosis-id
+            :captured guard-subject
+            :current current}
+           (diag/guard-async-result token guard-subject guard-diagnosis-id
+                                    current)))))
+
+(deftest mismatched-token-fails-closed
+  (testing "a token bound to another diagnosis id is rejected"
+    (let [token (diag/capture-token guard-subject revision-b)]
+      (is (= :observation/token-mismatch
+             (thrown-error-type
+              #(diag/guard-async-result token guard-subject guard-diagnosis-id
+                                        guard-subject))))))
+  (testing "a token bound to another subject is rejected"
+    (let [token (diag/capture-token (assoc guard-subject :workspace/id "workspace-2")
+                                    guard-diagnosis-id)]
+      (is (= :observation/token-mismatch
+             (thrown-error-type
+              #(diag/guard-async-result token guard-subject guard-diagnosis-id
+                                        guard-subject)))))))
+
+(deftest guards-validate-their-identity-inputs
+  (testing "capture-token rejects a malformed subject"
+    (is (= :observation/subject-invalid
+           (thrown-error-type #(diag/capture-token {:workspace/id "w"}
+                                                   guard-diagnosis-id))))
+    (is (= :observation/subject-invalid
+           (thrown-error-type
+            #(diag/capture-token (assoc guard-subject :unexpected true)
+                                 guard-diagnosis-id)))))
+  (testing "capture-token rejects a non-content-address diagnosis id"
+    (is (= :diagnosis/id-invalid
+           (thrown-error-type #(diag/capture-token guard-subject "not-an-id")))))
+  (testing "freshness validates both identities"
+    (is (= :observation/subject-invalid
+           (thrown-error-type #(diag/freshness guard-subject
+                                               (assoc guard-subject
+                                                      :artifact/revision "nope")))))
+    (is (= :observation/subject-invalid
+           (thrown-error-type #(diag/freshness {:workspace/id "w"}
+                                               guard-subject)))))
+  (testing "guard-async-result validates the current subject"
+    (let [token (diag/capture-token guard-subject guard-diagnosis-id)]
+      (is (= :observation/subject-invalid
+             (thrown-error-type
+              #(diag/guard-async-result token guard-subject guard-diagnosis-id
+                                        (assoc guard-subject :snapshot/id "nope"))))))))
