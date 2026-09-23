@@ -26,9 +26,8 @@
                     evoclj.promotion.current (the CURRENT
                     compare-and-set — Global Constraint 15 makes the
                     promotion transaction the pointer authority)
-    episodic_memory evoclj.store.memory-store AND
-                    evoclj.provider.memory (removed by the memory
-                    provider's handle routing)"
+    episodic_memory evoclj.store.memory-store (the memory provider
+                    holds the handle and issues no SQL of its own)"
   (:require [clojure.java.io :as io]
             [clojure.string :as str]))
 
@@ -83,8 +82,7 @@
    "candidates"      #{"src/evoclj/store/candidate_store.clj"}
    "kernel_state"    #{"src/evoclj/store/current_store.clj"
                        "src/evoclj/promotion/current.clj"}
-   "episodic_memory" #{"src/evoclj/store/memory_store.clj"
-                       "src/evoclj/provider/memory.clj"}})
+   "episodic_memory" #{"src/evoclj/store/memory_store.clj"}})
 
 (defn- write-targets
   "The state tables a single exec-call form writes, as a set of table

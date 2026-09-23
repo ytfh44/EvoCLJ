@@ -9,10 +9,10 @@
   The handle's db is NOT exposed via keyword access — deftype implements
   no ILookup, so (:db handle) is nil. The field itself is a public final
   JVM field (Clojure cannot make deftype fields private) and is reachable
-  as (.-db handle); db-of below is the sanctioned accessor for
-  evoclj.provider.memory, which needs the raw spec for its
-  episodic_memory queries. Other callers should pass the handle to
-  memory-read/memory-write!/memory-delete! rather than reach into it.
+  as (.-db handle), but there is deliberately NO accessor: every caller —
+  including evoclj.provider.memory — passes the handle to
+  memory-read / read-memory-value / memory-write! / memory-delete!, so the
+  handle is the only way in and the statement shapes have one owner.
 
   FK existence (Fleet P5/F): episodic_memory.session_id
   REFERENCES sessions(id) (011), so a write for an unknown session fails
@@ -37,10 +37,6 @@
                       {:reason :sqlite-missing})))
   (->MemoryStore db))
 
-(defn db-of [^MemoryStore s] (.-db ^MemoryStore s))
-;; Note: db-of is for evoclj.provider.memory's episodic_memory queries only;
-;; it is not exported as a generic escape hatch (package-private via doc).
-
 (defn memory-read
   "Read episodic memory content for (session-id, key) via MemoryStore, or nil."
   [^MemoryStore store session-id memory-key]
@@ -48,9 +44,27 @@
     (throw (err/error :store/memory-invalid
                       "memory-read requires a MemoryStore"
                       {:reason :not-a-memory-store})))
-  (let [db (db-of store)]
-    (first (sqlite/query db ["SELECT content FROM episodic_memory WHERE session_id = ? AND memory_key = ?"
-                          (str session-id) (name memory-key)]))))
+  (first (sqlite/query (.-db store)
+                       ["SELECT content FROM episodic_memory WHERE session_id = ? AND memory_key = ?"
+                        (str session-id) (name memory-key)])))
+
+(defn read-memory-value
+  "The provider-shaped read of one episodic-memory entry:
+
+      {:memory/key <keyword> :memory/content <decoded EDN|nil>
+       :memory/found <boolean>}
+
+  The stored content is EDN text written by memory-write!; this is the
+  single decode site (evoclj.provider.memory consumes it)."
+  [^MemoryStore store session-id memory-key]
+  (let [row (memory-read store session-id memory-key)]
+    (if row
+      {:memory/key memory-key
+       :memory/content (clojure.edn/read-string (:content row))
+       :memory/found true}
+      {:memory/key memory-key
+       :memory/content nil
+       :memory/found false})))
 
 (defn memory-write!
   "UPSERT episodic memory via MemoryStore. FK at rest (011) ensures session exists."
@@ -59,10 +73,9 @@
     (throw (err/error :store/memory-invalid
                       "memory-write! requires a MemoryStore"
                       {:reason :not-a-memory-store})))
-  (let [db (db-of store)
-        now (str (Instant/now))]
-    (sqlite/exec! db ["INSERT OR REPLACE INTO episodic_memory (session_id, memory_key, content, created_at) VALUES (?, ?, ?, ?)"
-                      (str session-id) (name memory-key) (pr-str content) now])))
+  (sqlite/exec! (.-db store)
+                ["INSERT OR REPLACE INTO episodic_memory (session_id, memory_key, content, created_at) VALUES (?, ?, ?, ?)"
+                 (str session-id) (name memory-key) (pr-str content) (str (Instant/now))]))
 
 (defn memory-delete!
   "Delete memory key for session via MemoryStore."
@@ -71,5 +84,6 @@
     (throw (err/error :store/memory-invalid
                       "memory-delete! requires a MemoryStore"
                       {:reason :not-a-memory-store})))
-  (sqlite/exec! (db-of store) ["DELETE FROM episodic_memory WHERE session_id = ? AND memory_key = ?"
-                                            (str session-id) (name memory-key)]))
+  (sqlite/exec! (.-db store)
+                ["DELETE FROM episodic_memory WHERE session_id = ? AND memory_key = ?"
+                 (str session-id) (name memory-key)]))

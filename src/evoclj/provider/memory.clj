@@ -14,7 +14,6 @@
             [evoclj.provider.protocol :as proto]
             [evoclj.sci.boundary :as boundary]
             [evoclj.store.memory-store :as ms]
-            [evoclj.store.sqlite :as sqlite]
             [malli.core :as m]))
 
 (def ^:private memory-descriptor
@@ -59,8 +58,6 @@
     (throw (err/error :provider/request-invalid
                       "execute-request! requires a normalized request"
                       {:value (err/sanitize authorized-request)}))))
-
-(defn- now-utc [] (str (java.time.Instant/now)))
 
 (defn- normalize-store
   "Normalize :store arg to a MemoryStore handle. Accepts a MemoryStore,
@@ -116,35 +113,20 @@
           (swap! count inc)
           (let [args (:args authorized-request)
                 session-id (:session/id args)
-                op (:memory/op args)
-                db (ms/db-of mem-store)]
+                op (:memory/op args)]
             (when-not (uuid? session-id)
               (throw (err/error :provider/request-invalid
                                 "normalized memory request must carry a uuid :session/id"
                                 {:value (err/sanitize args)})))
             (case op
+              ;; every episodic_memory statement is owned by
+              ;; evoclj.store.memory-store; the provider only holds the handle.
               :read
-              (let [row (first (sqlite/query db
-                                             ["SELECT content FROM episodic_memory
-                                               WHERE session_id = ? AND memory_key = ?"
-                                              (str session-id) (name (:memory/key args))]))]
-                (if row
-                  {:memory/key (:memory/key args)
-                   :memory/content (clojure.edn/read-string (:content row))
-                   :memory/found true}
-                  {:memory/key (:memory/key args)
-                   :memory/content nil
-                   :memory/found false}))
+              (ms/read-memory-value mem-store session-id (:memory/key args))
               :write
               (do
-                (sqlite/exec! db
-                              ["INSERT OR REPLACE INTO episodic_memory
-                                (session_id, memory_key, content, created_at)
-                                VALUES (?, ?, ?, ?)"
-                               (str session-id)
-                               (name (:memory/key args))
-                               (pr-str (:memory/content args))
-                               (now-utc)])
+                (ms/memory-write! mem-store session-id (:memory/key args)
+                                  (:memory/content args))
                 {:memory/key (:memory/key args)
                  :memory/written true})
               (throw (err/error :provider/request-invalid
