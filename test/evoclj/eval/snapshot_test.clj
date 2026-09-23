@@ -100,6 +100,28 @@
       (is (some? (snap/revision-for s :skills/user)))
       (is (nil? (snap/revision-for s :mcp/github))))))
 
+(deftest live-sources-reads-the-e4-per-source-state
+  (testing "capture-snapshot pins the E4 registry's per-source current revisions"
+    (let [registry (reg/create-registry)
+          r1 (rev/payload->id "skill-e4-v1")
+          r2 (rev/payload->id "mcp-e4-v1")]
+      (swap! registry assoc
+             :per-source {:skills/user {:current r1 :last-good r1 :seq 1 :status :ok}
+                          :mcp/github {:current nil :last-good r2 :seq 1 :status :degraded}})
+      (let [sources (snap/live-sources registry)]
+        (is (= r1 (:skills/user sources)))
+        (is (= r2 (:mcp/github sources))
+            "a source with no current revision pins its last-good revision"))
+      (let [s (snap/capture-snapshot registry)]
+        (is (snap/snapshot? s))
+        (is (= r1 (snap/revision-for s :skills/user)))
+        (is (= r2 (snap/revision-for s :mcp/github))))))
+  (testing "an E4 source that never published anything is absent (no fabricated revision)"
+    (let [registry (reg/create-registry)]
+      (swap! registry assoc
+             :per-source {:skills/user {:current nil :last-good nil :seq 0 :status :ok}})
+      (is (= {} (snap/live-sources registry))))))
+
 (deftest program-image-excludes-runtime-implementation
   (testing "same ABI/Genome/Resolution keeps the ProgramImage while RuntimeImageId differs"
     (let [abi {:kernel 1 :genome 1 :intent 1 :tool 1}

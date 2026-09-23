@@ -435,12 +435,14 @@
   "The component paired-selection evaluator context (a subset of the
   orchestrator evaluator — the same :genome/roots and :programs, plus
   the optional :model/registry / :model/resource keys that switch on
-  real model execution for :llm topologies)."
+  real model execution for :llm topologies, and the optional
+  :environment/snapshot the paired runner stamps on both sides)."
   [evaluator]
   (select-keys evaluator
                [:provider/catalog :selection/cases :selection/fixtures
                 :programs :seed :equivalence/by-keyword :artifact/root
-                :genome/roots :model/registry :model/resource]))
+                :genome/roots :model/registry :model/resource
+                :environment/snapshot]))
 
 ;; --- :not-run records (never implicit passes) ----------------------------------------
 

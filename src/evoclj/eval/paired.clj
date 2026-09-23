@@ -413,15 +413,21 @@
   [evaluator request case-map repetition pair-index seed order equiv-fn]
   (let [side-id {:parent (:parent-generation request)
                  :candidate (:candidate-id request)}
+        ;; GC-13: ONE environment fixture for both sides of the pair — the
+        ;; evaluator's :environment/snapshot (when the host captured one) is
+        ;; read once here and stamped on both sides, never per side.
+        env-snapshot (:environment/snapshot evaluator)
         side-results (into {}
                            (map (fn [kind]
                                   [kind
                                    (runner/run-side!
                                     evaluator
-                                    {:genome/root (resolve-genome-root evaluator (side-id kind))
-                                     :side/kind kind
-                                     :side/id (side-id kind)
-                                     :generation/id (:parent-generation request)}
+                                    (cond-> {:genome/root (resolve-genome-root evaluator (side-id kind))
+                                             :side/kind kind
+                                             :side/id (side-id kind)
+                                             :generation/id (:parent-generation request)}
+                                      env-snapshot
+                                      (assoc :environment/snapshot env-snapshot))
                                     case-map seed)]))
                            order)
         parent-side (:parent side-results)

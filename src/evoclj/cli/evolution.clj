@@ -592,21 +592,23 @@
         parent-genome-id (session/generation-genome-id system generation-id)
         parent-root (session/resolve-bundle-root opts parent-genome-id)
         cands (candidates-for-generation system generation-id)
+        snapshot (session/environment-snapshot system)
         roots (into {generation-id parent-root}
                     (map (fn [c]
                            [(str (:candidate/id c))
                             (session/candidate-bundle-root opts (:candidate/genome-id c))])
                          cands))]
-    {:store (:store es)
-     :provider/catalog (:provider/catalog es)
-     :kernel/abi (:kernel/abi es)
-     :profiles (:profiles es)
-     :genome/roots roots
-     :selection/cases (:selection/cases es)
-     :selection/fixtures (:selection/fixtures es)
-     :replay/cases (:replay/cases es)
-     :replay/fixtures (:replay/fixtures es)
-     :programs (fn [_loaded] [session/route-descriptor])}))
+    (cond-> {:store (:store es)
+             :provider/catalog (:provider/catalog es)
+             :kernel/abi (:kernel/abi es)
+             :profiles (:profiles es)
+             :genome/roots roots
+             :selection/cases (:selection/cases es)
+             :selection/fixtures (:selection/fixtures es)
+             :replay/cases (:replay/cases es)
+             :replay/fixtures (:replay/fixtures es)
+             :programs (fn [_loaded] [session/route-descriptor])}
+      snapshot (assoc :environment/snapshot snapshot))))
 
 (defn- build-loop-promotion-system
   "The promotion-system value the scheduler runner reuses (mirrors the

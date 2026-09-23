@@ -324,8 +324,10 @@
   scheduler anchors its causal chain on it). The root event metadata
   carries the RuntimeImageId and the ExecutionEnvironment skeleton
   (observed binding + request params; the return fingerprint lands on
-  the side result once outputs exist). Returns the session id."
-  [stores compiled generation-id runtime-env]
+  the side result once outputs exist), plus the paired run's
+  :environment/snapshot when the host captured one (GC-13: the SAME
+  fixture value on both sides of a pair). Returns the session id."
+  [stores compiled generation-id runtime-env env-snapshot]
   (let [db (:sqlite stores)
         program (compiler/program-identity compiled)
         sid (:session/id
@@ -344,8 +346,10 @@
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
-                          :metadata {:runtime/image-id (:runtime/image-id runtime-env)
-                                     :execution-environment (:execution-environment runtime-env)}})
+                          :metadata (cond-> {:runtime/image-id (:runtime/image-id runtime-env)
+                                             :execution-environment (:execution-environment runtime-env)}
+                                      env-snapshot
+                                      (assoc :environment/snapshot env-snapshot))})
     sid))
 
 ;; --- side usage (component counters, Feature C) ------------------------------
@@ -440,6 +444,9 @@
        :side/instance-id <uuid>      ; the FRESH Phenotype INSTANCE marker
        :side/code-id <sha256>        ; the ProgramImage (:code/id) this side pinned
        :side/runtime-image-id <sha256> ; the RuntimeImageId recorded for this side
+       :side/environment-snapshot <EnvironmentSnapshot | nil> ; the paired run's
+       ;   frozen environment fixture (evoclj.eval.snapshot) — the SAME value
+       ;   on both sides of a pair when the host captured one (GC-13)
        :side/execution-environment <map> ; completed observational provenance (return fingerprint over outputs)
        :side/session-id <uuid>       ; the fresh pinned session
        :side/status :completed | :failed | :budget-exhausted
@@ -475,7 +482,9 @@
             ;; create session FIRST so leases can bind SessionPrincipal(sid) (I2)
             _ (register-compiled-artifacts! evaluator stores loaded compiled)
             runtime-env (runtime-identity compiled case-map seed)
-            sid (create-pinned-session! stores compiled generation-id runtime-env)
+            env-snapshot (:environment/snapshot opts)
+            sid (create-pinned-session! stores compiled generation-id runtime-env
+                                        env-snapshot)
             ;; H1 Hydration factory — authenticate the pinned identity via
             ;; the single hydration path (fail-closed: every identity id
             ;; the pin carries must have its row and the row must name
@@ -529,6 +538,7 @@
          :side/instance-id (random-uuid)
          :side/code-id (:code/id (compiler/program-identity compiled))
          :side/runtime-image-id (:runtime/image-id runtime-env)
+         :side/environment-snapshot env-snapshot
          :side/execution-environment
          (complete-environment (:execution-environment runtime-env)
                                 {:output-ref (:output-ref run)

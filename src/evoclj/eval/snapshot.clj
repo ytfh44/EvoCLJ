@@ -46,22 +46,55 @@
   [snapshot]
   (:sources snapshot))
 
+(defn- per-source-revision-id
+  "The revision id a registry per-source entry currently serves, or nil.
+
+  Two shapes exist: the E1/E2 registry stores the revision RECORD under
+  :current, the E4 pinned state stores the revision ID string. :last-good
+  is the fallback in both (a source whose current publication is absent
+  still serves its last good revision)."
+  [entry]
+  (let [cur (or (:current entry) (:last-good entry))]
+    (cond
+      (string? cur) cur
+      (map? cur) (or (:revision/id cur) (:revision-id cur))
+      :else nil)))
+
 (defn live-sources
   "Current live revision set from a registry atom.
-  Reads history for per-source latest, falling back to current and to
-  live source payload when a source has not yet been published."
+
+  Reads the registry's :per-source entries when present (:current,
+  falling back to :last-good — the revision each source last served);
+  otherwise reads :history for the per-source latest, falling back to
+  :current and to the live source payload when a source has not yet
+  been published."
   [registry]
   (when-not (instance? clojure.lang.Atom registry)
     (throw (ex-info "registry must be an atom" {:registry registry})))
   (let [state @registry
+        per-source (:per-source state)
         history (:history state)
         sources (:sources state)
-        latest (reduce (fn [m r] (assoc m (:source/id r) (:revision/id r))) {} history)
-        latest (if (seq latest)
-                 latest
-                 (if-let [cur (:current state)]
-                   {(:source/id cur) (:revision/id cur)}
-                   {}))
+        from-per-source (reduce-kv (fn [m sid entry]
+                                     (if-let [rid (per-source-revision-id entry)]
+                                       (assoc m sid rid)
+                                       m))
+                                   {}
+                                   (or per-source {}))
+        latest (cond
+                 (seq from-per-source)
+                 from-per-source
+
+                 (seq history)
+                 (reduce (fn [m r] (assoc m (:source/id r) (:revision/id r)))
+                         {} history)
+
+                 (:current state)
+                 (if-let [rid (per-source-revision-id state)]
+                   {(:source/id (:current state)) rid}
+                   {})
+
+                 :else {})
         full (reduce (fn [m [sid src]]
                        (if (contains? m sid)
                          m

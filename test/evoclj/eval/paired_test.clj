@@ -41,10 +41,13 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.compiler.resolution :as resolution]
+            [evoclj.environment.revision :as rev]
             [evoclj.eval.paired :as paired]
+            [evoclj.eval.snapshot :as snap]
             [evoclj.genome.types :as types]
             [evoclj.genome.hash :as hash]
-            [evoclj.provider.protocol :as proto])
+            [evoclj.provider.protocol :as proto]
+            [evoclj.store.event :as event])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file FileVisitOption Files LinkOption Paths)
            (java.nio.file.attribute FileAttribute)))
@@ -278,6 +281,65 @@
       (is (apply distinct? seeds-a)))
     (testing "the seed base is reported on the result"
       (is (= seed-base (:seed/base result-a))))))
+
+;; ============================================================================
+;; Step 4 (GC-13) — ONE environment fixture for both sides of a pair
+;; ============================================================================
+
+(deftest paired-sides-stamp-one-environment-snapshot
+  (let [fixture (snap/make-snapshot {:skills/user (rev/payload->id "skill-v1")
+                                     :mcp/github (rev/payload->id "mcp-v1")})
+        appended (atom [])
+        real-append @#'event/append-event!
+        result (with-redefs [event/append-event!
+                             (fn [& args]
+                               ;; append-event!'s 2-arity delegates to its
+                               ;; 3-arity through this var, so record only the
+                               ;; full call: one entry per logical append.
+                               (when (= 3 (count args))
+                                 (swap! appended conj (second args)))
+                               (apply real-append args))]
+                 (paired/run-paired-selection!
+                  (evaluator {:sel/c1 (selection-case :sel/c1 "hi")} (atom [])
+                             {:environment/snapshot fixture})
+                  (request [:sel/c1] 1)))
+        roots (filterv #(= :session/created (:event/type %)) @appended)]
+    (testing "both sides' sessions are stamped with the SAME snapshot"
+      (is (= 2 (count roots)) "one :session/created per side")
+      (is (= 1 (count (distinct (map #(get-in % [:metadata :environment/snapshot :environment/id])
+                                     roots))))
+          "ONE environment fixture: both sides carry the same :environment/id")
+      (is (every? #(= fixture (get-in % [:metadata :environment/snapshot])) roots)
+          "the fixture value itself — one capture, two sides"))
+    (testing "each side result carries the fixture it ran under"
+      (let [pair (first (:pairs result))]
+        (is (= fixture (get-in pair [:sides :parent :side/environment-snapshot])))
+        (is (= fixture (get-in pair [:sides :candidate :side/environment-snapshot])))))))
+
+(deftest paired-sides-without-a-snapshot-stamp-nothing
+  ;; Zero-configuration invariance: a host that captured no environment
+  ;; snapshot gets the shipped behavior — no :environment/snapshot key in
+  ;; the :session/created metadata and a nil :side/environment-snapshot.
+  (let [appended (atom [])
+        real-append @#'event/append-event!
+        result (with-redefs [event/append-event!
+                             (fn [& args]
+                               ;; append-event!'s 2-arity delegates to its
+                               ;; 3-arity through this var, so record only the
+                               ;; full call: one entry per logical append.
+                               (when (= 3 (count args))
+                                 (swap! appended conj (second args)))
+                               (apply real-append args))]
+                 (paired/run-paired-selection!
+                  (evaluator {:sel/c1 (selection-case :sel/c1 "hi")} (atom []))
+                  (request [:sel/c1] 1)))
+        roots (filterv #(= :session/created (:event/type %)) @appended)]
+    (is (= 2 (count roots)))
+    (is (every? #(not (contains? (:metadata %) :environment/snapshot)) roots))
+    (is (every? nil? (map #(get-in % [:sides :parent :side/environment-snapshot])
+                          (:pairs result))))
+    (is (every? nil? (map #(get-in % [:sides :candidate :side/environment-snapshot])
+                          (:pairs result))))))
 
 ;; ============================================================================
 ;; Step 2 — execution order alternates pair by pair

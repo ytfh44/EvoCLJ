@@ -48,6 +48,7 @@
             [evoclj.compiler.core :as compiler]
             [evoclj.config :as config]
             [evoclj.eval.profile :as profile]
+            [evoclj.eval.snapshot :as snapshot]
             [evoclj.evolution.core :as evolution]
             [evoclj.evolution.demo-mutator :as demo-mutator]
             [evoclj.kernel.error :as err]
@@ -671,24 +672,37 @@
   (edn/read-string
    (String. (cas/get-bytes (:cas store) artifact-id) StandardCharsets/UTF_8)))
 
+(defn environment-snapshot
+  "The frozen environment fixture for an evaluation run: the host
+  environment registry's current publication state as an
+  EnvironmentSnapshot (evoclj.eval.snapshot), or nil when the host
+  carries no :environment/registry. Captured ONCE per evaluator build so
+  both sides of every pair compare under the SAME fixture (GC-13)."
+  [system]
+  (when-let [registry (:environment/registry system)]
+    (snapshot/capture-snapshot registry)))
+
 (defn build-evaluator
   "The component evaluator value for one candidate, assembled from the
   host's eval-system component (:kernel/abi, :profiles,
   :provider/catalog, and the hidden cases/fixtures a host injected
-  through config :overrides) plus the resolved bundle roots."
+  through config :overrides) plus the resolved bundle roots and the
+  host's environment snapshot (when it carries an environment registry)."
   [system parent-gen-id parent-root cand candidate-root]
-  (let [es (:eval/system system)]
-    {:store (:store es)
-     :provider/catalog (:provider/catalog es)
-     :kernel/abi (:kernel/abi es)
-     :profiles (:profiles es)
-     :genome/roots {parent-gen-id parent-root
-                    (str (:candidate/id cand)) candidate-root}
-     :selection/cases (:selection/cases es)
-     :selection/fixtures (:selection/fixtures es)
-     :replay/cases (:replay/cases es)
-     :replay/fixtures (:replay/fixtures es)
-     :programs (fn [_loaded] [route-descriptor])}))
+  (let [es (:eval/system system)
+        snapshot (environment-snapshot system)]
+    (cond-> {:store (:store es)
+             :provider/catalog (:provider/catalog es)
+             :kernel/abi (:kernel/abi es)
+             :profiles (:profiles es)
+             :genome/roots {parent-gen-id parent-root
+                            (str (:candidate/id cand)) candidate-root}
+             :selection/cases (:selection/cases es)
+             :selection/fixtures (:selection/fixtures es)
+             :replay/cases (:replay/cases es)
+             :replay/fixtures (:replay/fixtures es)
+             :programs (fn [_loaded] [route-descriptor])}
+      snapshot (assoc :environment/snapshot snapshot))))
 
 ;; ============================================================================
 ;; `run` — execute one session pinned to a generation

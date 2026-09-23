@@ -673,6 +673,8 @@
              :replay/cases (or (:replay/cases config) {})
              :replay/fixtures (or (:replay/fixtures config) {})}
       judge-registry (assoc :equivalence/by-keyword judge-registry)
+      (contains? config :environment/snapshot)
+      (assoc :environment/snapshot (:environment/snapshot config))
       (contains? config :model/registry)
       (assoc :model/registry (:model/registry config))
       (contains? config :model/resource)
