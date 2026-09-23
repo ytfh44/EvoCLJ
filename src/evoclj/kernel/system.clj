@@ -372,7 +372,14 @@
   executor carries a CodeModeOrchestrator closing over the built
   Computation, and the scheduler executes model code via
   SandboxExecute with broker-crossing toolFns. The default never
-  changes under a host: enabling CodeMode is a config decision."
+  changes under a host: enabling CodeMode is a config decision.
+
+  CONTEXT COMPRESSION (P10) is likewise opt-in: a config :compacter (any
+  evoclj.context.compression.compacter/Compacter) plus an optional
+  :compacter/opts map are carried onto the executor and its per-session
+  :build map, where the orchestrator hands them to the request assembler.
+  Without the key no compacter is injected and prompt assembly is
+  byte-identical to the shipped behavior."
   (let [limits (or (:scheduler config) {})
         raw-ptc (or (:ptc config) {:enabled? false})
         enabled? (boolean (:enabled? raw-ptc))
@@ -382,7 +389,12 @@
               (merge computation {:enabled? true})
               {:enabled? false})
         orchestrator (when enabled?
-                       (orchestrator/->CodeModeOrchestrator computation))]
+                       (orchestrator/->CodeModeOrchestrator computation))
+        compression (cond-> {}
+                      (:compacter config)
+                      (assoc :compacter (:compacter config))
+                      (contains? config :compacter/opts)
+                      (assoc :compacter/opts (:compacter/opts config)))]
     (cond-> {:scheduler scheduler/run-session!
              :stores {:sqlite (:sqlite (:store config))
                       :cas (:cas (:store config))}
@@ -390,13 +402,15 @@
              :limits limits
              :ptc ptc
              :build (fn [phenotype]
-                      (cond-> {:phenotype phenotype
-                               :stores {:sqlite (:sqlite (:store config))
-                                        :cas (:cas (:store config))}
-                               :dispatch (:dispatch config)
-                               :ptc ptc}
+                      (cond-> (merge {:phenotype phenotype
+                                      :stores {:sqlite (:sqlite (:store config))
+                                               :cas (:cas (:store config))}
+                                      :dispatch (:dispatch config)
+                                      :ptc ptc}
+                                     compression)
                         orchestrator (assoc :orchestrator orchestrator)))}
-      orchestrator (assoc :orchestrator orchestrator))))
+      orchestrator (assoc :orchestrator orchestrator)
+      (seq compression) (merge compression))))
 
 (defmethod ig/halt-key! :runtime/executor
   [_ _component]

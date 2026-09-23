@@ -15,8 +15,16 @@
   emits the code_execution function tool alongside existing tools for
   model visibility. The wire declaration is the single source in
   evoclj.tool.specs/code-execution-wire-tool (INV-05, no duplication).
-  Fail-safe: without the flag the tool is not declared."
-  (:require [evoclj.context.materializer :as mat]
+  Fail-safe: without the flag the tool is not declared.
+
+  P10 context compression (OPTIONAL): when opts carries :compacter (any
+  evoclj.context.compression.compacter/Compacter) the assembler runs it
+  over a string history and substitutes the compressed envelope prefix
+  when — and only when — the compacter's trigger fired. Without the key
+  the history passes through untouched (the shipped behavior)."
+  (:require [evoclj.context.compression.apply :as apply]
+            [evoclj.context.compression.compacter :as compression]
+            [evoclj.context.materializer :as mat]
             [evoclj.context.prompt-trust :as trust]
             [evoclj.environment.revision :as rev]
             [evoclj.kernel.error :as err]
@@ -59,6 +67,25 @@
    :tools (vec (or (:tools prepared) []))
    :options (or (:options base-call) {})})
 
+(defn- compress-history
+  "The optional context-compression seam (P10): when `opts` carries a
+  :compacter (any evoclj.context.compression.compacter/Compacter) and
+  `history` is a non-empty string, run the compacter and REPLACE the
+  history with the compressed envelope prefix — but ONLY when the
+  compacter's trigger says it actually compressed (an untriggered
+  compacter returns a `:task/id \"noop\"` envelope, and substituting that
+  would replace the history with a placeholder).
+
+  No compacter (or a non-string/empty history) returns the history
+  UNCHANGED — the shipped behavior, byte for byte."
+  [history compacter compacter-opts]
+  (if (and compacter (string? history) (seq history))
+    (let [result (compression/run history compacter (or compacter-opts {}))]
+      (if (true? (get-in result [:trigger :trigger/compressed?]))
+        (apply/envelope-prefix (:envelope result))
+        history))
+    history))
+
 (defn base->prepared
   "Assemble PreparedModelCall.
 
@@ -67,12 +94,19 @@
   catalog: map source-id -> revision-id (current catalog)
   tool-catalog-binding: {:binding/id :revision/ids ...} or nil
   history: string or vector of messages
-  opts: {:cas <cas-config-or-map-or-path> :policy <host-policy> :ptc <ptc-map>}
+  opts: {:cas <cas-config-or-map-or-path> :policy <host-policy> :ptc <ptc-map>
+         :compacter <Compacter> :compacter/opts <map>}
 
   :ptc in opts controls CodeMode declaration (P9): when
   (:enabled? (:ptc opts)) is truthy and the tool surface has tools,
   the code_execution function tool (single source in tool.specs) is
   emitted alongside existing tools. Otherwise not declared (fail-safe).
+
+  :compacter in opts is the OPTIONAL context-compression seam: when
+  present, a string history is run through the compacter and replaced
+  by the compressed envelope prefix IF the compacter's trigger fired
+  (see compress-history). Absent, the history is passed through
+  untouched.
 
   Returns a PreparedModelCall map that additionally carries
   :prompt/provenance — a structured header attributing each message to a
@@ -84,8 +118,10 @@
    (base->prepared base-call session-bindings catalog tool-catalog-binding nil {}))
   ([base-call session-bindings catalog tool-catalog-binding history]
    (base->prepared base-call session-bindings catalog tool-catalog-binding history {}))
-  ([base-call session-bindings catalog tool-catalog-binding history {:keys [cas policy ptc] :as opts}]
+  ([base-call session-bindings catalog tool-catalog-binding history
+    {:keys [cas policy ptc compacter] :as opts}]
    (let [ptc-enabled? (or (ptc-enabled? opts) (ptc-enabled? ptc))
+         history (compress-history history compacter (:compacter/opts opts))
          base-messages (:base/messages base-call (:messages base-call []))
          requested-tools-raw (:requested-tools base-call (:tools base-call))
          requested-tools (maybe-include-code-execution (or requested-tools-raw []) ptc-enabled?)
@@ -178,7 +214,8 @@
 
 (defn assemble
   "Scheduler-facing wrapper for base->prepared. Takes base-call and opts map with
-  :session-bindings, :tool-catalog/binding, :cas, :history, :policy, :catalog, :ptc."
+  :session-bindings, :tool-catalog/binding, :cas, :history, :policy, :catalog,
+  :ptc, and the optional :compacter / :compacter/opts injection."
   [base-call opts]
   (let [session-bindings (:session-bindings opts)
         tool-binding (:tool-catalog/binding opts)
@@ -187,7 +224,12 @@
         history (:history opts)
         policy (:policy opts)
         ptc (:ptc opts)]
-    (base->prepared base-call (or session-bindings []) (or catalog {}) tool-binding (or history "") {:cas cas :policy policy :ptc ptc})))
+    (base->prepared base-call (or session-bindings []) (or catalog {}) tool-binding
+                    (or history "")
+                    (cond-> {:cas cas :policy policy :ptc ptc}
+                      (:compacter opts) (assoc :compacter (:compacter opts))
+                      (contains? opts :compacter/opts)
+                      (assoc :compacter/opts (:compacter/opts opts))))))
 
 (defn rebuild-context
   "Rebuild only the context portion for next round, keeping pinned

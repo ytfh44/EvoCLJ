@@ -10,6 +10,7 @@
   only with paths under a throwaway temp root."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest testing is]]
+            [evoclj.context.compression.compacter :as compacter]
             [evoclj.evolution.core :as evolution]
             [evoclj.evolution.default-mutator :as default-mutator]
             [evoclj.evolution.diagnose :as diagnose]
@@ -208,6 +209,33 @@
         (is (types/session-id? (:event/session-id promo)))))
     (testing "halt! closes cleanly and returns nil"
       (is (nil? (sys/halt! system))))))
+
+(deftest executor-carries-the-optional-compacter-injection
+  ;; P10: a host that injects a Compacter gets it carried onto the executor
+  ;; AND onto every per-session :build map (where the orchestrator hands it
+  ;; to the request assembler); a host that injects none carries no key.
+  (let [stub (reify compacter/Compacter
+               (compress [_ _ _] {:envelope nil :footer "stub"}))
+        cfg (-> (config-for (temp-dir))
+                (assoc-in [:runtime/executor :compacter] stub)
+                (assoc-in [:runtime/executor :compacter/opts] {:token-threshold 7}))
+        system (sys/init cfg)]
+    (try
+      (let [executor (:runtime/executor system)
+            built ((:build executor) {:compiled {}})]
+        (is (= stub (:compacter executor)))
+        (is (= {:token-threshold 7} (:compacter/opts executor)))
+        (is (= stub (:compacter built))
+            "the per-session build map carries the injection")
+        (is (= {:token-threshold 7} (:compacter/opts built))))
+      (finally (sys/halt! system))))
+  (testing "a host that injects no compacter carries no compression keys"
+    (let [system (sys/init (config-for (temp-dir)))]
+      (try
+        (let [executor (:runtime/executor system)]
+          (is (not (contains? executor :compacter)))
+          (is (not (contains? ((:build executor) {:compiled {}}) :compacter))))
+        (finally (sys/halt! system))))))
 
 ;; ============================================================================
 ;; Step 2 — halt! twice is safe

@@ -78,6 +78,17 @@
     :payload-ref payload-ref
     :metadata metadata}))
 
+(defn- compression-opts
+  "The executor's optional context-compression injection (P10): the
+  :compacter / :compacter/opts a host put on the executor, forwarded to
+  the request assembler. Empty when the host injected none — the shipped
+  prompt-assembly path stays byte-identical."
+  [executor]
+  (cond-> {}
+    (:compacter executor) (assoc :compacter (:compacter executor))
+    (contains? executor :compacter/opts)
+    (assoc :compacter/opts (:compacter/opts executor))))
+
 (defn- ambiguous-provider-event
   "Find a durable recovery marker for this provider intent."
   [executor pin intent]
@@ -438,11 +449,12 @@
                                 (catch Throwable _ nil))
                 prepared (try
                            (assembler/assemble current-base-call
-                                               {:session-bindings bindings
-                                                :tool-catalog/binding pinned
-                                                :cas cas
-                                                :history ""
-                                                :ptc ptc})
+                                               (merge {:session-bindings bindings
+                                                       :tool-catalog/binding pinned
+                                                       :cas cas
+                                                       :history ""
+                                                       :ptc ptc}
+                                                      (compression-opts executor)))
                            (catch Throwable _ nil))
                 tool-map (if prepared (:tool-map prepared) (tool-map-of current-intent))
                 effective-intent (project-model-intent current-intent current-base-call prepared)
@@ -538,11 +550,12 @@
                                     (catch Throwable _ nil))
                     prepared (try
                                (assembler/assemble current-base-call
-                                                   {:session-bindings bindings
-                                                    :tool-catalog/binding pinned
-                                                    :cas cas
-                                                    :history ""
-                                                    :ptc ptc})
+                                                   (merge {:session-bindings bindings
+                                                           :tool-catalog/binding pinned
+                                                           :cas cas
+                                                           :history ""
+                                                           :ptc ptc}
+                                                          (compression-opts executor)))
                                (catch Throwable _ nil))
                     tool-map (if prepared (:tool-map prepared) (tool-map-of current-intent))
                     effective-intent (project-model-intent current-intent current-base-call prepared)
