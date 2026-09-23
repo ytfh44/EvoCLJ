@@ -63,18 +63,17 @@
   :unsupported-node-type and :node/type carries the offending type)."
   (:require [evoclj.capability.core :as capability]
             [evoclj.kernel.error :as err]
+            [evoclj.node.types :as node-types]
             [evoclj.store.schema :as schema]
             [malli.core :as m]))
 
 (def syntax-node-types
-  "The normative v0 syntax node type set — every type the compiler knows syntactically (definition).
-  Syntax IS the executable set: every known type has a runtime handler (see executable-node-types).
-  The :route reservation was removed (ExtraModules repair): it declared only a single :next edge
-  and no branch attributes, so it carried no semantics a plain edge does not already carry —
-  all v0 control flow is :sci decisions + :loop iteration + :tool/:llm/:emit terminals.
-  Reserving it widened syntax without execution meaning; it is rejected as an unknown type now
-  and returns with a handler plus edge schema when branching semantics are specified."
-  #{:llm :sci :tool :loop :emit :memory/read :memory/write})
+  "The normative v0 syntax node type set — every type the compiler knows
+  syntactically (definition). Syntax IS the executable set: every known
+  type has a runtime handler (see executable-node-types). The vocabulary
+  itself lives in evoclj.node.types (the single definition the runtime's
+  handler registry consumes too)."
+  node-types/node-types)
 
 (def executable-node-types
   "The subset of syntax-node-types the runtime can execute today (handler exists).
@@ -82,24 +81,16 @@
   syntax type has a handler, this equals syntax-node-types. Callers may still pass a narrowed
   feature set, in which case excluded syntax types are rejected with
   :topology/unsupported-node-type."
-  #{:llm :sci :tool :loop :emit :memory/read :memory/write})
+  node-types/node-types)
 
 (def ^:private required-keys
-  "Per-type keys a node must declare. A :loop carries an explicit
-  Region/Loop shape: :body is the iterated node id, :exit is the normal
-  successor, :until is the done? program id, and :max-iterations is a
-  positive integer."
-{:llm #{:model}
-   :sci #{:program}
-   :tool #{:tool}
-   :loop #{:exit :body :until :max-iterations}
-   :emit #{}
-   :memory/read #{:memory}
-   :memory/write #{:memory}})
+  "Per-type keys a node must declare (evoclj.node.types/required-keys)."
+  node-types/required-keys)
 
 (def ^:private attribute-keys
-  "Keys whose value must be a keyword when present."
-  [:model :program :tool :memory :next :exit :body :until])
+  "Keys whose value must be a keyword when present
+  (evoclj.node.types/attribute-keys)."
+  node-types/attribute-keys)
 
 (def ^:private schema-keys
   "Optional typing keys whose value must be a registered schema keyword."

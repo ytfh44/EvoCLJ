@@ -4,6 +4,7 @@
             [evoclj.capability.core :as capability]
             [evoclj.intent.core :as intent]
             [evoclj.intent.dispatch :as dispatch]
+            [evoclj.node.types :as node-types]
             [evoclj.provider.fixture :as fixture]
             [evoclj.provider.registry :as registry]))
 
@@ -44,7 +45,29 @@
             {:nodes {:sci {:node/type :sci}
                      :emit {:node/type :emit}
                      :loop {:node/type :loop}}}))))
-)
+  (testing "the dispatch is exhaustive over the node vocabulary"
+    (is (= #{:tool/call :model/call :memory/read :memory/write}
+           (into #{} (mapcat (fn [t] (capability/node-effects {:node/type t})))
+                 [:tool :llm :memory/read :memory/write])))
+    (is (every? (fn [t] (set? (capability/node-effects {:node/type t})))
+                [:sci :emit :loop])))
+  (testing "an unknown node type fails closed"
+    (let [e (try (capability/node-effects {:node/type :node/bogus})
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (= :capability/unknown-node-type (:error/type (ex-data e))))
+      (is (= :node/bogus (:node/type (ex-data e)))))
+    (let [e (try (capability/node-effects {:node/type nil})
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (= :capability/unknown-node-type (:error/type (ex-data e))))))
+  (testing "the vocabulary has one definition"
+    (is (= node-types/node-types
+           (set (keys node-types/required-keys)))
+        "every node type declares its required keys")
+    (is (every? (set node-types/attribute-keys)
+                [:model :program :tool :memory :next :exit :body :until]))))
+
 
 (deftest granted-effects-come-from-lease-resource-and-action
   (let [grants [(lease {:kind :model :id "provider/model"} #{:invoke})

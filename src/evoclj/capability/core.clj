@@ -16,7 +16,8 @@
   handle and fails closed with :capability/handle-invalid."
   (:require [clojure.set :as set]
             [evoclj.capability.schema :as lease-schema]
-            [evoclj.kernel.error :as err]))
+            [evoclj.kernel.error :as err]
+            [evoclj.node.types :as node-types]))
 ;; ----------------------------------------------------------------------
 ;; Sealed CapabilityHandle (S5)
 ;; ----------------------------------------------------------------------
@@ -101,16 +102,28 @@ h)
 
 (defn node-effects
   "The set of effects a runtime node can produce, given its descriptor.
-  Pure nodes produce no effect; tool nodes produce #{:tool/call}; llm
-  nodes produce #{:model/call}."
+  Pure nodes (:sci/:emit/:loop) produce no effect; :tool nodes produce
+  #{:tool/call}; :llm nodes produce #{:model/call}; :memory/read and
+  :memory/write produce their own effect.
+
+  The dispatch is an EXHAUSTIVE case over evoclj.node.types/node-types
+  (the single vocabulary): an unknown node type throws
+  :capability/unknown-node-type instead of silently looking like a pure
+  node, so an effect calculation can never under-report because a type
+  was misspelled."
   [node]
-  (let [node-type (:node/type node)]
-    (cond
-      (= :tool node-type) #{:tool/call}
-      (= :llm node-type) #{:model/call}
-      (= :memory/read node-type) #{:memory/read}
-      (= :memory/write node-type) #{:memory/write}
-      :else #{})))
+  (case (:node/type node)
+    :tool #{:tool/call}
+    :llm #{:model/call}
+    :memory/read #{:memory/read}
+    :memory/write #{:memory/write}
+    :sci #{}
+    :emit #{}
+    :loop #{}
+    (throw (err/error :capability/unknown-node-type
+                      "node type is not in the v0 vocabulary"
+                      {:node/type (:node/type node)
+                       :node-types node-types/node-types}))))
 
 (defn topology-effects
   "The union of effects for all nodes in a compiled topology."

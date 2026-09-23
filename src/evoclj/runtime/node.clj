@@ -120,6 +120,7 @@
   in-progress namespace immediately, so no load-order cycle occurs."
   (:require [evoclj.intent.schema :as intent-schema]
             [evoclj.kernel.error :as err]
+            [evoclj.node.types :as node-types]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m]))
 
@@ -144,22 +145,19 @@
   {:wall-ms 1000})
 
 (def syntax-node-types
-  "The v0 syntax node type set, mirroring
-  evoclj.compiler.topology/syntax-node-types (definition). Every known
-  type has a handler — the :route reservation was removed (it declared
-  only a single :next edge with no branch attributes, no semantics a
-  plain edge lacks). A test asserts syntax sets stay equal across
-  compiler and runtime so Definition > validation holds."
-  #{:llm :sci :tool :loop :emit :memory/read :memory/write})
+  "The v0 syntax node type set — the SAME value as
+  evoclj.compiler.topology/syntax-node-types, both aliasing
+  evoclj.node.types/node-types (the single definition). Every known
+  type has a handler."
+  node-types/node-types)
 
 (def executable-node-types
   "The subset of syntax-node-types the runtime can execute today
-  (handler exists), mirroring
-  evoclj.compiler.topology/executable-node-types. Every syntax type has
-  a handler, so this equals syntax-node-types; the separate def stays
-  so Definition > validation (only executable types are representable
-  via compile) keeps a named executable side."
-  #{:llm :sci :tool :loop :emit :memory/read :memory/write})
+  (handler exists) — the same value as the syntax set (every syntax
+  type has a handler); the separate def stays so Definition >
+  validation (only executable types are representable via compile)
+  keeps a named executable side."
+  node-types/node-types)
 
 
 ;; --- the shared transition schema ------------------------------------------
@@ -290,19 +288,15 @@
   input-event)
 
 (def ^:private handler-required-keys
-  "Per-handler required node keys, mirroring the compiler's
-  evoclj.compiler.topology/required-keys for the implemented types."
-  {:sci #{:program}
-   :tool #{:tool}
-   :loop #{:body :exit :until :max-iterations}
-   :emit #{}
-   :memory/read #{:memory}
-   :memory/write #{:memory}})
+  "Per-handler required node keys — evoclj.node.types/required-keys, the
+  single table the compiler validates against too (so the runtime can no
+  longer accept a node the compiler would reject)."
+  node-types/required-keys)
 
 (def ^:private handler-attribute-keys
-  "Node keys whose value must be a keyword when present (mirrors the
-  compiler's attribute rule)."
-  [:program :tool :next :exit :body :until :memory])
+  "Node keys whose value must be a keyword when present —
+  evoclj.node.types/attribute-keys."
+  node-types/attribute-keys)
 
 (defn validate-node!
   "Validate the compiled node map for `expected-type` (the handler's
