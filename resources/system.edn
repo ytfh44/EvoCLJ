@@ -162,8 +162,10 @@
   :diagnostician {:task/success-threshold 1.0
                   :max-hypotheses 3
                   :confidence-band :medium}
-  ;; no Mutator adapter ships in v0: nothing is proposed until a host
-  ;; registers one (YAGNI, Global Constraint 24)
+  ;; :mutator :none — the CLI host ships the no-op adapter explicitly:
+  ;; `evoclj evolve` proposes nothing until an operator configures a
+  ;; mutator (the demo/LLM adapter, or the built-in DefaultMutator by
+  ;; omitting the key). YAGNI, Global Constraint 24.
   :mutator :none
   :budget-profile {:max-candidates 3}
   :programs-registry []

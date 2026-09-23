@@ -48,7 +48,9 @@
     :evolution/system   {:store {...} :provider-catalog {...}
                          :genome-root <dir> | :genome-loader <fn>
                          :candidates-dir <dir> :diagnostician {...}
-                         :mutator <fn> | :none :budget-profile {...}
+                         :mutator <fn> | :none | <omitted = the
+                                  built-in DefaultMutator>
+                         :budget-profile {...}
                          :programs-registry [...]
                          ;; optional LLM-driven adapters (opt-in): a
                          ;; :diagnostician/:mutator {:type :llm ...} map is
@@ -100,6 +102,7 @@
             [evoclj.eval.profile :as profile]
             [evoclj.evolution.budget :as budget]
             [evoclj.evolution.core :as evolution]
+            [evoclj.evolution.default-mutator :as default-mutator]
             [evoclj.evolution.diagnose :as diagnose]
             [evoclj.evolution.llm-diagnostician :as llm-diag]
             [evoclj.evolution.llm-mutator :as llm-mut]
@@ -421,9 +424,10 @@
 ;; --- :evolution/system ------------------------------------------------------------
 
 (defn- no-op-mutator
-  "The v0 default Mutator adapter: proposes nothing. A host that has
-  not registered a mutator never materializes candidates (YAGNI, Global
-  Constraint 24); tests inject real/fake adapters through the config."
+  "The explicitly-OFF Mutator adapter: proposes nothing. This is what
+  :none builds. A host that omits :mutator gets the built-in
+  DefaultMutator instead (it proposes one real mutation); a host that
+  wants no candidate at all must say :none."
   []
   (reify evolution/Mutator
     (propose-mutations [_ _context] nil)))
@@ -465,28 +469,32 @@
 
 (defn- build-mutator
   "Build the Mutator from config:
-    - nil / :none yield the no-op adapter (v0 default);
+    - nil / an EMPTY map mean nothing configured, and nothing
+      configured is the BUILT-IN DEFAULT: the deterministic
+      DefaultMutator (evoclj.evolution.default-mutator), which proposes
+      one real mutation (the seed Genome's programs/route.clj
+      :replace-form). A host that wants no candidate at all says so
+      explicitly with :none;
+    - :none yields the no-op adapter (explicitly off);
     - an object already satisfying the Mutator protocol passes through
       unchanged (dependency injection — e.g. a DefaultMutator record);
       this branch is checked BEFORE the map branch because records ARE
       maps (a record would otherwise fall into the map handling and be
       rejected as an unknown :type);
     - a function passes through (wrapped into the protocol);
-    - an EMPTY map means nothing configured — like :none, it yields
-      the no-op adapter;
     - a NON-EMPTY map must be a {:type :llm ...} config and becomes
       the LLM adapter (evoclj.evolution.llm-mutator) closed over the
       host-built :model-call closure; a missing or unknown :type fails
       closed (:evolution/system-invalid)."
   [config model-call]
   (cond
-    (nil? config) (no-op-mutator)
+    (nil? config) (default-mutator/default-mutator)
     (= :none config) (no-op-mutator)
     (fn? config) (reify evolution/Mutator
                    (propose-mutations [_ context]
                      (config context)))
     (satisfies? evolution/Mutator config) config
-    (and (map? config) (empty? config)) (no-op-mutator)
+    (and (map? config) (empty? config)) (default-mutator/default-mutator)
     (map? config)
     (if (= :llm (:type config))
       (let [allowed #{:type :model/id :max-mutations :risk :system-prompt}
@@ -561,10 +569,11 @@
   plain data; the diagnostician and mutator are constructed here
   (or injected as objects/fns — Step 4). The :mutator accepts a
   Mutator protocol object (passed through unchanged), a fn (wrapped
-  into the protocol), :none / absent / an EMPTY map (nothing
-  configured — the no-op adapter), or a {:type :llm ...} map; a
-  non-empty map without a known :type fails closed
-  (:evolution/system-invalid).
+  into the protocol), :none (explicitly OFF — the no-op adapter),
+  absent / an EMPTY map (nothing configured — the built-in
+  DefaultMutator, which proposes one real mutation), or a
+  {:type :llm ...} map; a non-empty map without a known :type fails
+  closed (:evolution/system-invalid).
 
   OPTIONAL LLM-DRIVEN ADAPTERS (opt-in): when :diagnostician or
   :mutator is a {:type :llm ...} map, the host builds ONCE a :model-call

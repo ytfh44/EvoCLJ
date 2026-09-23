@@ -177,12 +177,16 @@ Environment overrides: EVOCLJ_CATALOG_URL, EVOCLJ_CATALOG_CACHE_DIR.
 
 ## LLM-driven evolution
 
-The deterministic pattern Diagnostician (component) and the no-op
-default Mutator are the shipped defaults, but both evolution adapters
-can be switched to LLM-driven ones by configuring a `{:type :llm ...}`
-map in `resources/system.edn`. LLM evolution is strictly OPT-IN — the
-shipped `:diagnostician` pattern map and `:mutator :none` stay
-unchanged until an operator enables it.
+The deterministic pattern Diagnostician (component) and the built-in
+`DefaultMutator` (one deterministic `programs/route.clj`
+`:replace-form` proposal) are the shipped defaults, and both evolution
+adapters can be switched to LLM-driven ones by configuring a
+`{:type :llm ...}` map in `resources/system.edn`. LLM evolution is
+strictly OPT-IN — the shipped `:diagnostician` pattern map and the
+default mutator stay unchanged until an operator enables it. A host
+that wants NO candidate at all configures `:mutator :none` (the no-op
+adapter); omitting `:mutator` means the built-in default, not
+"propose nothing".
 
 ### Enabling it in system.edn
 
@@ -193,7 +197,8 @@ adapters to their `:llm` forms:
     :evolution/system
     {:store {...}
      :diagnostician {:task/success-threshold 1.0 ...}   ; shipped default
-     :mutator :none                                      ; shipped default
+     ;; :mutator omitted -> the built-in DefaultMutator (proposes one
+    ;; deterministic mutation); set :mutator :none to propose nothing.
      ...
      ;; --- enable LLM-driven evolution (uncomment to turn on) ---
      ;; :model/registry #ig/ref :model/registry
@@ -223,7 +228,7 @@ If an `:llm` adapter is configured but `:model/registry` or
 `:dispatch` is missing, the host FAILS CLOSED with
 `:evolution/system-invalid` (reason `:llm-needs-model-registry` /
 `:llm-needs-dispatch`) — it never silently falls back to the pattern
-adapter or the no-op mutator.
+adapter or the default mutator.
 
 ### The :model-call injection contract
 

@@ -339,10 +339,19 @@
           evo (evo-system-with-mutator record)]
       (is (satisfies? evolution/Mutator (:mutator evo)))
       (is (identical? record (:mutator evo)))))
-  (testing "an empty map means nothing configured: the no-op adapter"
-    (let [evo (evo-system-with-mutator {})]
+  (testing "an empty map means nothing configured: the BUILT-IN
+            DefaultMutator (which proposes one real mutation)"
+    (let [evo (evo-system-with-mutator {})
+          proposals (evolution/propose-mutations
+                     (:mutator evo)
+                     {:parent-genome {:files {"programs/route.clj"
+                                              {:digest (str "sha256:" (apply str (repeat 64 "a")))}}}})]
       (is (satisfies? evolution/Mutator (:mutator evo)))
-      (is (nil? (evolution/propose-mutations (:mutator evo) {})))))
+      (is (instance? evoclj.evolution.default_mutator.DefaultMutator
+                     (:mutator evo)))
+      (is (= 1 (count proposals)) "one candidate materializes without host config")
+      (is (= :program (:risk (first proposals))))
+      (is (= :replace-form (:op (first (:ops (first proposals))))))))
   (testing ":none yields the no-op adapter"
     (let [evo (evo-system-with-mutator :none)]
       (is (satisfies? evolution/Mutator (:mutator evo)))

@@ -192,8 +192,9 @@ the demo is reproducible run after run.
 
 - **`:config/profile-not-found`** — the `:demo` profile is built-in:
   it needs no config file, but the profile must be *selected*
-  (`EVOCLJ_PROFILE=demo`). Without it the CLI ships the v0 no-op
-  mutator and `evolve` proposes nothing.
+  (`EVOCLJ_PROFILE=demo`). Without it the CLI host ships `:mutator
+  :none`, so `evolve` proposes nothing (the kernel's own default when
+  `:mutator` is omitted is the built-in `DefaultMutator`).
 - **`no CURRENT generation`** — the state dir was not provisioned
   (Step 0). `recovery` (`evoclj recovery`) is the read-only integrity
   report.
