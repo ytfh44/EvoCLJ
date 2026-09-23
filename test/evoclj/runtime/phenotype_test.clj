@@ -5,7 +5,7 @@
   runtime-deps — the map of stores/providers/capabilities/program
   sources the HOST injects — into a live Phenotype:
 
-    {:session/id <uuid> :phenotype/id ...
+    {:session/id <uuid> :code/id ...
      :compiled <CompiledGenome>   ; the SAME immutable value, shared
      :sci-runtime ...             ; a FRESH isolated SCI runtime
      :providers ...               ; host's registry, by reference
@@ -96,7 +96,7 @@
 (defn- echo-lease
   "A valid CapabilityLease granting this phenotype's exact id the
   :fixture/echo :invoke action for the next minute."
-  [phenotype-id]
+  [code-id]
   (let [now (java.util.Date.)]
     {:cap/id (random-uuid)
      :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
@@ -314,7 +314,7 @@
                                  (assoc-in deps [:program-sources :program/route]
                                            :not-a-string))]
         (is (= :runtime/source-missing (:error/type (ex-data e))))))
-    (testing "a CompiledGenome without a canonical phenotype id is rejected"
+    (testing "a CompiledGenome without a canonical code id is rejected"
       (let [e (instantiate-error (dissoc compiled :code/id) deps)]
         (is (= :runtime/invalid-compiled (:error/type (ex-data e)))))
       (let [e (instantiate-error (assoc compiled :code/id "G42") deps)]

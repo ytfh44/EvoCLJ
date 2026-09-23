@@ -11,7 +11,7 @@
  (def ^:private session-id #uuid "11111111-1111-4111-8111-111111111111")
  (def ^:private parent-work-id #uuid "44444444-4444-4444-8444-444444444444")
  (def ^:private child-session-id #uuid "33333333-3333-4333-8333-333333333333")
-(def ^:private phenotype-id
+(def ^:private code-id
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 (def ^:private cas-ref
   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
@@ -23,7 +23,7 @@
   {:intent/id intent-id
    :intent/type type
    :session/id session-id
-   :phenotype/id phenotype-id
+   :code/id code-id
    :node/id node-id
    :cause/event-id cause-event-id
    :payload payload

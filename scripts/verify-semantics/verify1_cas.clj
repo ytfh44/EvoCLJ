@@ -2,6 +2,7 @@
   "Semantic verification #1 — atomic CURRENT compare-and-set.
   Model + real-code check."
   (:require [clojure.java.jdbc :as jdbc]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.sqlite :as sqlite]
             [evoclj.store.migrate :as migrate]
             [evoclj.promotion.current :as current]))
@@ -90,6 +91,16 @@
     ;; an explicit java.sql.Connection via jdbc/get-connection (the
     ;; same split promote.clj follows).
     (sqlite/with-db [spec db]
+      ;; FK targets first: generations.genome_id -> genomes(id) -> artifacts(hash)
+      ;; and generations.resolution_id -> artifacts(hash) (migration 009).
+      (doseq [[h mt] [[(apply str (repeat 64 "a")) "application/octet-stream"]
+                      [(apply str (repeat 64 "b")) "application/octet-stream"]
+                      [(apply str (repeat 64 "d")) "application/octet-stream"]
+                      [(apply str (repeat 64 "c")) "application/edn"]]]
+        (artifact/ensure-artifact! spec (str "sha256:" h) mt 0))
+      (artifact/ensure-genome! spec (str "sha256:" (apply str (repeat 64 "a"))))
+      (artifact/ensure-genome! spec (str "sha256:" (apply str (repeat 64 "b"))))
+      (artifact/ensure-genome! spec (str "sha256:" (apply str (repeat 64 "d"))))
       (jdbc/insert! spec :generations
                     {:id "G42" :genome_id (str "sha256:" (apply str (repeat 64 "a")))
                      :resolution_id (str "sha256:" (apply str (repeat 64 "c")))

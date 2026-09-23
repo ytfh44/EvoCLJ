@@ -35,7 +35,7 @@
 ;; --- fixture helpers --------------------------------------------------------
 
 (def ^:private hex64
-  "64 hex chars for a canonical \"sha256:<64 hex>\" phenotype id."
+  "64 hex chars for a canonical \"sha256:<64 hex>\" code id."
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 (defn- rs
@@ -43,7 +43,7 @@
   ([] (rs {}))
   ([overrides]
    (merge {:session/id (random-uuid)
-           :phenotype/id (str "sha256:" hex64)
+           :code/id (str "sha256:" hex64)
            :node/id :node/router
            :outputs []
            :budget {:wall-ms 1000}}
@@ -121,7 +121,7 @@
       (is (= :intent/tool-call (:intent/type intent)))
       (is (= {:tool/id :fixture/echo :args {:text "hi"}} (:payload intent)))
       (is (= (:session/id rs) (:session/id intent)))
-      (is (= (:phenotype/id rs) (:phenotype/id intent)))
+      (is (= (:code/id rs) (:code/id intent)))
       (is (= (:node/id rs) (:node/id intent)))
       (is (= (:event/id input) (:cause/event-id intent)))
       (is (uuid? (:intent/id intent)))
@@ -178,7 +178,7 @@
       (is (= :intent/tool-call (:intent/type intent)))
       (is (= {:tool/id :fixture/echo :args {:text "hello"}} (:payload intent)))
       (is (= sid (:session/id intent)))
-      (is (= (:phenotype/id rs) (:phenotype/id intent)))
+      (is (= (:code/id rs) (:code/id intent)))
       (is (= :node/echo-tool (:node/id intent)))
       (is (= 41 (:cause/event-id intent)))
       (is (= {:wall-ms 2500} (:budget intent)))

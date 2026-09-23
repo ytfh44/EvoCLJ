@@ -553,14 +553,14 @@
     - the I1 identity rows (code_images / deployments / executions) the
       session pin and the hydrate pin check authenticate against.
 
-  `identity` carries :code/id (or the legacy :phenotype/id), :deployment/id,
-  :execution/id, and the :abi when the caller compiled the genome."
+  `identity` carries :code/id, :deployment/id, :execution/id, and the
+  :abi when the caller compiled the genome."
   ([system identity]
    (ensure-identity-artifacts! system identity nil))
   ([system identity loaded]
    (let [db (db-of system)
          genome-id (:genome/id identity)
-         code-id (or (:code/id identity) (:phenotype/id identity))]
+         code-id (:code/id identity)]
      (if loaded
        (let [body (.getBytes (load/index-body loaded)
                              StandardCharsets/UTF_8)
@@ -607,12 +607,11 @@
   [compiled]
   {:genome/id (or (:code/genome-id compiled) (:compiled/genome-id compiled))
    :resolution/id (or (:code/resolution-id compiled) (:compiled/resolution-id compiled))
-   :code/id (or (:code/id compiled) (:compiled/code-id compiled)
-                (:compiled/phenotype-id compiled) (:phenotype/id compiled))})
+   :code/id (or (:code/id compiled) (:compiled/code-id compiled))})
 
 (defn generation-identity
   "The compiled identity of `generation-id`'s Genome:
-  {:generation/id :genome/id :resolution/id :phenotype/id :code/id
+  {:generation/id :genome/id :resolution/id :code/id
    :deployment/id :execution/id :abi}, the genome id verified against
   the generation row (:cli/genome-mismatch when the stored bundle
   compiles to a different address)."
@@ -635,7 +634,6 @@
             identity {:generation/id generation-id
                       :genome/id (:genome/id program)
                       :resolution/id (:resolution/id program)
-                      :phenotype/id (:code/id program)
                       :code/id (:code/id program)
                       :deployment/id (:deployment/id compiled)
                       :execution/id (:execution/id compiled)
@@ -658,7 +656,6 @@
               db
               {:genome/id (:genome/id identity)
                :resolution/id (:resolution/id identity)
-               :phenotype/id (:phenotype/id identity)
                :code/id (:code/id identity)
                :deployment/id (:deployment/id identity)
                :execution/id (:execution/id identity)
@@ -666,7 +663,7 @@
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id
-                          :phenotype/id (:phenotype/id identity)
+                          :code/id (:code/id identity)
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
@@ -850,7 +847,6 @@
                 system
                 {:genome/id (:genome/id program)
                  :resolution/id (:resolution/id program)
-                 :phenotype/id (:code/id program)
                  :code/id (:code/id program)
                  :deployment/id (:deployment/id compiled)
                  :execution/id (:execution/id compiled)
@@ -860,14 +856,13 @@
             cas-store (cas-of system)
             reg (:provider/registry system)
             usage (atom {})
-            phenotype-id (:code/id program)
+            code-id (:code/id program)
             sid (:session/id
                  (session/create-session!
                   db
                   {:genome/id (:genome/id program)
                    :resolution/id (:resolution/id program)
-                   :phenotype/id phenotype-id
-                   :code/id (:code/id program)
+                   :code/id code-id
                    :deployment/id (:deployment/id compiled)
                    :execution/id (:execution/id compiled)
                    :generation/id (:generation/id generation)}))
@@ -878,8 +873,8 @@
             ;; building a second executor.
             _ (hydrate/verify-pin! db sid)
             lease-registry (cap-mint/create-lease-registry)
-            leases (concat (mapv #(tool-lease sid phenotype-id % lease-registry) tools)
-                             (mapv #(model-lease sid phenotype-id % lease-registry) models))
+            leases (concat (mapv #(tool-lease sid code-id % lease-registry) tools)
+                             (mapv #(model-lease sid code-id % lease-registry) models))
             leases (vec leases)
             model-reg (:model/registry system)
             ph (phenotype/instantiate
@@ -897,7 +892,7 @@
         (event/append-event! db
                              {:session/id sid
                               :generation/id (:generation/id generation)
-                              :phenotype/id phenotype-id
+                              :code/id code-id
                               :event/type :session/created
                               :prev/event-id nil
                               :payload-ref nil
@@ -1025,7 +1020,7 @@
         s (session-or-throw! system sid)
         events (event/events-for-session (db-of system) sid)]
     {:session/id sid
-     :session (select-keys s [:genome/id :resolution/id :phenotype/id
+     :session (select-keys s [:genome/id :resolution/id :code/id
                               :generation/id])
      :capabilities/authorized
      (mapv #(get-in % [:metadata :authorization])

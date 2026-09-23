@@ -73,7 +73,7 @@
 
 (def ^:private genome-id (str "sha256:" hex64))
 (def ^:private resolution-id (str "sha256:" (apply str (repeat 64 "c"))))
-(def ^:private phenotype-id (str "sha256:" (apply str (repeat 64 "b"))))
+(def ^:private code-id (str "sha256:" (apply str (repeat 64 "b"))))
 (def ^:private generation-id "generation-1")
 (def ^:private now "2025-01-01T00:00:00Z")
 (def ^:private placeholder-hash (str "sha256:" (apply str (repeat 64 "0"))))
@@ -125,7 +125,7 @@
     ;; Fleet P5/FK: artifacts/genomes must exist before generations insert
     (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
     (artifact/ensure-artifact! db resolution-id "application/octet-stream" 0)
-    (artifact/ensure-artifact! db phenotype-id "application/octet-stream" 0)
+    (artifact/ensure-artifact! db code-id "application/octet-stream" 0)
     (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
@@ -152,7 +152,7 @@
                      :generation_id generation-id
                      :genome_id genome-id
                      :resolution_id resolution-id
-                     :phenotype_id phenotype-id
+                     :phenotype_id code-id
                      :state "running"
                      :created_at now}))
     (doseq [i (range 3)]
@@ -162,7 +162,7 @@
                          event_type, cause_event_id, payload_ref, payload,
                          prev_hash, event_hash, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                     (str sid) (inc i) generation-id phenotype-id
+                     (str sid) (inc i) generation-id code-id
                      (name :node/completed) nil nil
                      (pr-str {:marker "trace-payload"})
                      nil placeholder-hash now]))

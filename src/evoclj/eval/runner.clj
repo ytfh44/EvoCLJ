@@ -57,7 +57,7 @@
     :model/registry  — the kernel-owned model registry atom (the
       result of evoclj.provider.model-registry/build-model-registry);
       when PRESENT the broker context is built with :model-registry
-      injected AND a model lease for this side's exact phenotype id,
+      injected AND a model lease for this side's exact code id,
       so the llm node's :intent/model-call intents (attributed to the
       side phenotype) dispatch through dispatch!/pipeline to real
       providers. When ABSENT no model lease and no :model-registry
@@ -234,8 +234,7 @@
   [compiled]
   {:genome/id (or (:code/genome-id compiled) (:compiled/genome-id compiled))
    :resolution/id (or (:code/resolution-id compiled) (:compiled/resolution-id compiled))
-   :code/id (or (:code/id compiled) (:compiled/code-id compiled)
-                (:compiled/phenotype-id compiled) (:phenotype/id compiled))})
+   :code/id (or (:code/id compiled) (:compiled/code-id compiled))})
 
 (defn- runtime-identity
   "The RuntimeImageId + ExecutionEnvironment for one side's `compiled`
@@ -344,7 +343,6 @@
               db
               {:genome/id (:genome/id program)
                :resolution/id (:resolution/id program)
-               :phenotype/id (:code/id program)
                :code/id (:code/id program)
                :deployment/id (:deployment/id compiled)
                :execution/id (:execution/id compiled)
@@ -352,7 +350,7 @@
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id
-                          :phenotype/id (:code/id program)
+                          :code/id (:code/id program)
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
@@ -450,7 +448,7 @@
 
       {:side/kind ... :side/id ...
        :side/instance-id <uuid>      ; the FRESH Phenotype INSTANCE marker
-       :side/phenotype-id <sha256>   ; the ProgramImage (:code/id) this side pinned
+       :side/code-id <sha256>        ; the ProgramImage (:code/id) this side pinned
        :side/runtime-image-id <sha256> ; the RuntimeImageId recorded for this side
        :side/execution-environment <map> ; completed observational provenance (return fingerprint over outputs)
        :side/session-id <uuid>       ; the fresh pinned session
@@ -539,7 +537,7 @@
         {:side/kind side-kind
          :side/id side-id
          :side/instance-id (random-uuid)
-         :side/phenotype-id (:code/id (program-identity compiled))
+         :side/code-id (:code/id (program-identity compiled))
          :side/runtime-image-id (:runtime/image-id runtime-env)
          :side/execution-environment
          (complete-environment (:execution-environment runtime-env)

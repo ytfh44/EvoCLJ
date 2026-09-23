@@ -157,7 +157,7 @@
   (event/append-event! db
                        {:session/id sid
                         :generation/id gen
-                        :phenotype/id phenotype
+                        :code/id phenotype
                         :event/type :session/created
                         :prev/event-id nil
                         :payload-ref nil
@@ -428,7 +428,7 @@
       (event/append-event! db
                            {:session/id sid
                             :generation/id child-generation
-                            :phenotype/id phenotype
+                            :code/id phenotype
                             :event/type :session/created
                             :prev/event-id nil
                             :payload-ref nil

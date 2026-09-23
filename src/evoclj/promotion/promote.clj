@@ -328,9 +328,9 @@
   transaction (same Connection), delegating to the store's single event
   write path (evoclj.store.event/append-event-on-conn!) so the event is
   committed under the canonical v2 header — session, seq, type, prev id,
-  payload-ref, prev-hash, created-at, generation id, phenotype id, the
+  payload-ref, prev-hash, created-at, generation id, code id, the
   exact stored metadata EDN bytes, and causal-links (INV-05; closes the
-  GC-20 gap where the promotion's generation/phenotype/payload columns
+  GC-20 gap where the promotion's generation/code-image/payload columns
   sat outside the commitment). The strict predecessor is the session's
   latest event. Returns
   {:event/id <int> :event/seq <int> :event/hash sha256:<64 hex>}.
@@ -338,7 +338,7 @@
   back."
   [conn session-key event-type metadata ts]
   (let [session-id (types/session-id session-key)
-        ;; session must exist and carry phenotype/generation (validated earlier via read-event-anchor! but re-read for event fields)
+        ;; session must exist and carry code-image/generation (validated earlier via read-event-anchor! but re-read for event fields)
         sess (first (raw-query conn "SELECT generation_id, phenotype_id FROM sessions WHERE id = ?" [session-key]))
         _ (when-not sess
             (throw (err/error :store/session-not-found
@@ -354,7 +354,7 @@
             conn
             {:session/id session-key
              :generation/id (:generation_id sess)
-             :phenotype/id (:phenotype_id sess)
+             :code/id (:phenotype_id sess)
              :event/type event-type
              :prev/event-id cause-id
              :payload-ref nil

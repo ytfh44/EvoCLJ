@@ -80,7 +80,7 @@
   {:intent/id (java.util.UUID/randomUUID)
    :intent/type :intent/model-call
    :session/id (java.util.UUID/randomUUID)
-   :phenotype/id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   :code/id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
    :node/id :node/planner
    :cause/event-id 1
    :payload {:model/id (or model :deepseek-v4-flash)

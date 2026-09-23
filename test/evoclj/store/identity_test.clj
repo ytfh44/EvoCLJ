@@ -56,6 +56,9 @@
   (artifact/ensure-artifact! db genome "application/octet-stream" 0)
   (artifact/ensure-artifact! db resolution "application/edn" 0)
   (artifact/ensure-artifact! db phenotype "application/edn" 0)
+  ;; the sessions.phenotype_id column (the frozen CodeImageId column, FK to
+  ;; artifacts) must resolve for every pinned code id the fixtures use
+  (artifact/ensure-artifact! db code-id "application/edn" 0)
   (artifact/ensure-genome! db genome)
   (sqlite/with-db [conn db]
     (jdbc/insert! conn :generations
@@ -194,7 +197,6 @@
         identity {:generation/id gen
                   :genome/id gid
                   :resolution/id rid
-                  :phenotype/id cid
                   :code/id cid
                   :deployment/id did
                   :execution/id eid
@@ -224,7 +226,6 @@
                                        {:generation/id gen
                                         :genome/id gid
                                         :resolution/id rid
-                                        :phenotype/id cid
                                         :code/id cid
                                         :deployment/id did
                                         :execution/id eid})
@@ -246,10 +247,12 @@
                                    "evoclj-identity-cas-"
                                    (make-array java.nio.file.attribute.FileAttribute 0))))
         unregistered-code (str "sha256:" (apply str (repeat 64 "7")))
+        ;; the artifacts row exists (the sessions.phenotype_id FK) but the
+        ;; code_images row does NOT — that is the failure the scan reports
+        _ (artifact/ensure-artifact! db unregistered-code "application/edn" 0)
         bad (session/create-session! db {:generation/id gen
                                          :genome/id genome
                                          :resolution/id resolution
-                                         :phenotype/id phenotype
                                          :code/id unregistered-code})
         _ (identity/record-code-image! db (code-identity))
         _ (identity/record-deployment! db (deployment-identity))
@@ -257,7 +260,6 @@
         good (session/create-session! db {:generation/id gen
                                           :genome/id genome
                                           :resolution/id resolution
-                                          :phenotype/id phenotype
                                           :code/id code-id
                                           :deployment/id deployment-id
                                           :execution/id execution-id})
@@ -285,7 +287,6 @@
                                    {:generation/id gen
                                     :genome/id genome
                                     :resolution/id resolution
-                                    :phenotype/id phenotype
                                     :code/id code-id
                                     :deployment/id deployment-id
                                     :execution/id execution-id})
@@ -295,18 +296,17 @@
       (is (= code-id (:code_image_id row)))
       (is (= deployment-id (:deployment_id row)))
       (is (= (str execution-id) (:execution_id row))))
-    (testing "the public Session contract exposes them and keeps the legacy key"
+    (testing "the public Session contract exposes the identity triple"
       (is (= code-id (:code/id s)))
       (is (= deployment-id (:deployment/id s)))
       (is (= execution-id (:execution/id s)))
-      (is (= phenotype (:phenotype/id s)))
       (is (= s (session/get-session db (:session/id s)))))
-    (testing "a session without the optional identity keys falls back to the phenotype column"
+    (testing "a session pinned only to its code id omits the optional ids"
       (let [s2 (session/create-session! db
                                         {:generation/id gen
                                          :genome/id genome
                                          :resolution/id resolution
-                                         :phenotype/id phenotype})
+                                         :code/id phenotype})
             row2 (first (sqlite/query db ["SELECT * FROM sessions WHERE id = ?"
                                           (str (:session/id s2))]))]
         (is (= phenotype (:code_image_id row2)))

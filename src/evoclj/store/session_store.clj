@@ -20,7 +20,7 @@
   it only enforces FK existence at write time (Fleet P5/F) via
   VerifiedDigest and DB FKs (011).
 
-  P5/F FK existence (Fleet P5/F): genome/phenotype/resolution references
+  P5/F FK existence (Fleet P5/F): genome/code-image/resolution references
   are existence proofs (VerifiedDigest) at the app boundary and FOREIGN
   KEYs at rest (011). Raw payload_ref strings are not proofs and are
   rejected where a proof is required (existence/ensure-proof).
@@ -71,10 +71,10 @@
              {:timestamp ts}))
 
 (defn- row->session
-  "Convert a sessions DB row into the public Session contract map. The
-  I1 identity triple is emitted only when the row carries it; :code/id
-  falls back to the legacy phenotype_id column (migration 014 backfilled
-  it), so the code identity is always readable."
+  "Convert a sessions DB row into the public Session contract map. :code/id
+  is read from the code_image_id column, falling back to the frozen
+  phenotype_id column (NOT NULL; migration 014 backfilled code_image_id
+  from it), so the code identity is always readable."
   [row]
   (let [code-id (or (:code_image_id row) (:phenotype_id row))
         execution-id (:execution_id row)]
@@ -82,7 +82,6 @@
              :generation/id (:generation_id row)
              :genome/id (:genome_id row)
              :resolution/id (:resolution_id row)
-             :phenotype/id (:phenotype_id row)
              :created-at (Date/from (Instant/parse (:created_at row)))
              :routing (when (some? (:routing_deployment_version row))
                         {:deployment-version (:routing_deployment_version row)
@@ -115,10 +114,10 @@
         sid (or (:session/id request) (UUID/randomUUID))
         genome-proof (:genome/existence-proof request)
         resolution-proof (:resolution/existence-proof request)
-        phenotype-proof (:phenotype/existence-proof request)
+        code-proof (:code/existence-proof request)
         genome-digest (proof->digest genome-proof)
         resolution-digest (proof->digest resolution-proof)
-        phenotype-digest (proof->digest phenotype-proof)
+        code-digest (proof->digest code-proof)
         ts (sqlite/canonical-timestamp (:created-at request) invalid-timestamp)]
     (sqlite/with-db [conn db]
       (sqlite/set-busy-timeout! conn 10000)
@@ -132,13 +131,13 @@
                      :generation_id (:generation/id request)
                      :genome_id (or genome-digest (:genome/id request))
                      :resolution_id (or resolution-digest (:resolution/id request))
-                     :phenotype_id (or phenotype-digest (:phenotype/id request))
-                     ;; I1 identity columns: the code image falls back to
-                     ;; the pinned :phenotype/id (same CodeImageId), the
-                     ;; deployment/execution ids come from the compiled
-                     ;; identity the caller registered.
-                     :code_image_id (or (:code/id request)
-                                        (:phenotype/id request))
+                     :phenotype_id (or code-digest (:code/id request))
+                     ;; I1 identity columns: phenotype_id is the frozen
+                     ;; column name for the pinned CodeImageId (the same
+                     ;; value as code_image_id); the deployment/execution
+                     ;; ids come from the compiled identity the caller
+                     ;; registered.
+                     :code_image_id (:code/id request)
                      :deployment_id (:deployment/id request)
                      :execution_id (some-> (:execution/id request) str)
                      :routing_deployment_version (:deployment-version (:routing request))

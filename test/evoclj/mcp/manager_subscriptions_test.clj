@@ -70,7 +70,7 @@
                        :state "created" :created_at "2025-01-01T00:00:00Z"}))
       (let [created (event/append-event!
                      db {:session/id sid :generation/id gen
-                         :phenotype/id phenotype :event/type :session/created
+                         :code/id phenotype :event/type :session/created
                          :prev/event-id nil :payload-ref nil :metadata {}})]
         {:db db :session/id sid :created-event-id (:event/id created)
          :path path}))))
@@ -87,7 +87,7 @@
   [store-info]
   (fn [] {:session/id (:session/id store-info)
           :generation/id gen
-          :phenotype/id phenotype
+          :code/id phenotype
           :prev/event-id (:created-event-id store-info)}))
 
 ;; ---------------------------------------------------------------------------

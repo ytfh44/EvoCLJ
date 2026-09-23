@@ -47,7 +47,7 @@
 (defn- session-request
   [gen-id genome resolution phenotype]
   {:generation/id gen-id :genome/id genome :resolution/id resolution
-   :phenotype/id phenotype})
+   :code/id phenotype})
 
 ;; ---------------------------------------------------------------------------
 ;; R: narrow handles — raw maps rejected

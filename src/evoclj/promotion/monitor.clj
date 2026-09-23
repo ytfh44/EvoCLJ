@@ -341,7 +341,7 @@
                           "the operator session must carry its :session/created root event first"
                           {:session/id session-key})))
       {:generation/id (:generation_id sess)
-       :phenotype/id (:phenotype_id sess)
+       :code/id (:phenotype_id sess)
        :prev/event-id tip})))
 
 (def ^:private active-work-states
@@ -449,7 +449,7 @@
         stop-event (event/append-event! db
                                         {:session/id (types/session-id session-key)
                                          :generation/id (:generation/id anchor)
-                                         :phenotype/id (:phenotype/id anchor)
+                                         :code/id (:code/id anchor)
                                          :event/type :promotion/canary-stopped
                                          :prev/event-id (:prev/event-id anchor)
                                          :payload-ref artifact-id
@@ -568,7 +568,7 @@
                 advance-event (event/append-event! db
                                                    {:session/id (types/session-id session-key)
                                                     :generation/id (:generation/id anchor)
-                                                    :phenotype/id (:phenotype/id anchor)
+                                                    :code/id (:code/id anchor)
                                                     :event/type :promotion/canary-advanced
                                                     :prev/event-id (:prev/event-id anchor)
                                                     :payload-ref artifact-id

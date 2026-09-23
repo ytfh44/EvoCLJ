@@ -84,12 +84,12 @@
   (seed-generation! db)
   (let [s (session/create-session! db {:genome/id genome
                                        :resolution/id resolution
-                                       :phenotype/id phenotype
+                                       :code/id phenotype
                                        :generation/id gen})
         sid (:session/id s)
         _ (event/append-event! db {:session/id sid
                                    :generation/id gen
-                                   :phenotype/id phenotype
+                                   :code/id phenotype
                                    :event/type :session/created
                                    :prev/event-id nil
                                    :payload-ref nil
@@ -474,12 +474,12 @@
         _ (cas/put-bytes! cas (.getBytes "pheno payload 2" StandardCharsets/UTF_8) {:media-type "text/plain"})
         _ (binding/reload! db sid logical bundle2 {:cas cas})
         after-reload-pheno (first (sqlite/query db ["SELECT phenotype_id, generation_id, genome_id, resolution_id FROM sessions WHERE id = ?" (str sid)]))]
-    (testing "PhenotypeID / Resolution / GenomeID unchanged after activate"
+    (testing "CodeImageId / Resolution / GenomeID unchanged after activate"
       (is (= (:phenotype_id before-pheno) (:phenotype_id after-pheno)))
       (is (= (:generation_id before-pheno) (:generation_id after-pheno)))
       (is (= (:genome_id before-pheno) (:genome_id after-pheno)))
       (is (= (:resolution_id before-pheno) (:resolution_id after-pheno))))
-    (testing "PhenotypeID unchanged after reload"
+    (testing "CodeImageId unchanged after reload"
       (is (= (:phenotype_id before-pheno) (:phenotype_id after-reload-pheno)))
       (is (= (:generation_id before-pheno) (:generation_id after-reload-pheno))))))
 

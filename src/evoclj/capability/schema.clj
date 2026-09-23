@@ -94,7 +94,7 @@
    [:operator OperatorPrincipalSchema]])
 
 (def PhenotypeIdSchema
-  "Legacy phenotype id kept for migration compat (not part of principal)."
+  "Legacy code id kept for migration compat (not part of principal)."
   [:string {:min 1}])
 
 (defn session-principal

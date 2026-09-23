@@ -15,7 +15,7 @@
            (java.nio.file.attribute FileAttribute)
            (java.util Date UUID)))
 
-(defn- phenotype-id []
+(defn- code-id []
   "sha256:0000000000000000000000000000000000000000000000000000000000000000")
 
 (defn- temp-db []
@@ -24,7 +24,7 @@
         db (sqlite/spec p)
         genome "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         resolution "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-        phenotype (phenotype-id)
+        phenotype (code-id)
         generation "memory-dispatch-generation"
         session "00000000-0000-0000-0000-0000000000dd"]
     (migrate/migrate! db)
@@ -69,7 +69,7 @@
   {:intent/id (random-uuid)
    :intent/type type
    :session/id session
-   :phenotype/id (phenotype-id)
+   :code/id (code-id)
    :node/id :node/mem
    :cause/event-id 1
    :payload payload
@@ -91,7 +91,7 @@
           s (UUID/fromString "00000000-0000-0000-0000-0000000000dd")
           c (atom 0)
           ctx (broker-context nil (mem/memory-provider {:store db :execution-count c})
-                              (lease (phenotype-id)))
+                              (lease (code-id)))
           w (dispatch/dispatch! ctx (make-intent :intent/memory-write s
                                                  {:memory/key :note :memory/content {:v 1}}))
           r (dispatch/dispatch! ctx (make-intent :intent/memory-read s

@@ -32,7 +32,7 @@
 (def ^:private gen-id "generation-1")
 (def ^:private genome-id (str "sha256:" (apply str (repeat 64 "a"))))
 (def ^:private resolution-id (str "sha256:" (apply str (repeat 64 "b"))))
-(def ^:private phenotype-id (str "sha256:" (apply str (repeat 64 "c"))))
+(def ^:private code-id (str "sha256:" (apply str (repeat 64 "c"))))
 
 (defn- fresh-db []
   (let [db (temp-db-path)]
@@ -46,7 +46,7 @@
       (when-not (first (jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen-id]))
         (try (jdbc/insert! conn :artifacts {:hash genome-id :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
         (try (jdbc/insert! conn :artifacts {:hash resolution-id :media_type "application/edn" :size 64 :created_at now}) (catch Exception _ nil))
-        (try (jdbc/insert! conn :artifacts {:hash phenotype-id :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
+        (try (jdbc/insert! conn :artifacts {:hash code-id :media_type "application/octet-stream" :size 64 :created_at now}) (catch Exception _ nil))
         (try (jdbc/insert! conn :genomes {:id genome-id :created_at now}) (catch Exception _ nil))
         (jdbc/insert! conn :generations
                       {:id gen-id
@@ -61,14 +61,14 @@
                      :generation_id gen-id
                      :genome_id genome-id
                      :resolution_id resolution-id
-                     :phenotype_id phenotype-id
+                     :phenotype_id code-id
                      :state "created"
                      :created_at now
                      :updated_at nil}))
     (event/append-event! db
                          {:session/id sid
                           :generation/id gen-id
-                          :phenotype/id phenotype-id
+                          :code/id code-id
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil

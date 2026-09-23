@@ -11,14 +11,14 @@
 
   Public Session contract (docs 'Detailed Public Data Contracts'):
   :session/id, :generation/id, :genome/id, :resolution/id,
-  :phenotype/id, :created-at, :routing. Pinned identity fields
+  :code/id, :created-at, :routing. Pinned identity fields
   are immutable after insert.
 
   Fleet R horizontal (narrow handle): this namespace is the business
   layer; persistence is via evoclj.store.session-store/SessionStore
   (opaque deftype). Raw maps are rejected (definition > validation).
   Fleet S2: Session is immutable pin; lifecycle is Work.
-  Fleet P5/F: genome/phenotype/resolution existence is enforced via
+  Fleet P5/F: genome/code-image/resolution existence is enforced via
   VerifiedDigest and FK at rest (011).
   W1 (Work unified lifecycle): Session is immutable context (pin:
   Genome/Resolution/CodeImage/Deployment/Generation). The durable
@@ -47,21 +47,16 @@
 
 (def CreateSessionRequest
   "The create-session! input contract. The pinned identity fields are
-  content-addressed ids; :generation/id is required because the
-  sessions.generation_id column is NOT NULL and references
-  generations; :routing and :created-at are optional. Unknown keys are
-  rejected: trust boundaries use closed maps.
-
-  The I1 identity triple :code/id / :deployment/id / :execution/id is
-  OPTIONAL here (the executor's compiled genome carries it and every
-  host caller passes it); a session without them pins only the legacy
-  :phenotype/id column."
+  content-addressed ids; :code/id is the CodeImageId the session runs
+  (required), :generation/id is required because the
+  sessions.generation_id column is NOT NULL and references generations;
+  the DeploymentId/ExecutionId and :routing/:created-at are optional.
+  Unknown keys are rejected: trust boundaries use closed maps."
   [:map {:closed true}
    [:session/id {:optional true} uuid?]
    [:genome/id [:fn types/genome-id?]]
    [:resolution/id [:fn types/resolution-id?]]
-   [:phenotype/id [:fn types/artifact-id?]]
-   [:code/id {:optional true} [:fn types/code-id?]]
+   [:code/id [:fn types/code-id?]]
    [:deployment/id {:optional true} [:fn types/deployment-id?]]
    [:execution/id {:optional true} [:fn types/execution-id?]]
    [:generation/id string?]
@@ -69,20 +64,20 @@
    [:created-at {:optional true} [:fn inst?]]
    [:genome/existence-proof {:optional true} any?]
    [:resolution/existence-proof {:optional true} any?]
-   [:phenotype/existence-proof {:optional true} any?]])
+   [:code/existence-proof {:optional true} any?]])
 
 (def SessionSchema
   "The public Session contract map returned by create-session! and
-  get-session. Immutable pin - no state machine. The I1 identity triple
-  is optional: rows written before the identity tables existed carry
-  only the legacy :phenotype/id column."
+  get-session. Immutable pin - no state machine. :code/id is always
+  present (read from the row's code_image_id column, falling back to the
+  frozen phenotype_id column, migration 014); the DeploymentId and
+  ExecutionId are present when the row carries them."
   [:map {:closed true}
    [:session/id uuid?]
    [:generation/id string?]
    [:genome/id [:fn types/genome-id?]]
    [:resolution/id [:fn types/resolution-id?]]
-   [:phenotype/id [:fn types/artifact-id?]]
-   [:code/id {:optional true} [:fn types/code-id?]]
+   [:code/id [:fn types/code-id?]]
    [:deployment/id {:optional true} [:fn types/deployment-id?]]
    [:execution/id {:optional true} [:fn types/execution-id?]]
    [:created-at [:fn inst?]]
@@ -137,7 +132,7 @@
 (declare get-session)
 
 (defn create-session!
-  "Create a new session with pinned Genome/Resolution/Phenotype/Generation.
+  "Create a new session with pinned Genome/Resolution/CodeImage/Generation.
   Returns the public Session contract map (immutable pin, no state machine)."
   [store request]
   (validate-create-request request)

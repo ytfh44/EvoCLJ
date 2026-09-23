@@ -148,12 +148,12 @@
               db
               {:genome/id genome
                :resolution/id resolution
-               :phenotype/id phenotype
+               :code/id phenotype
                :generation/id g42}))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id g42
-                          :phenotype/id phenotype
+                          :code/id phenotype
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
@@ -170,7 +170,7 @@
               db
               {:genome/id genome
                :resolution/id resolution
-               :phenotype/id phenotype
+               :code/id phenotype
                :generation/id g43}))]
     (work-store/create-work! db {:work/id (java.util.UUID/randomUUID)
                                  :work/type :session/run

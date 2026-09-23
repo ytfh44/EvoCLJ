@@ -64,7 +64,7 @@
                         (:tools node) (assoc :tools (:tools node)))
               intent (intent/model-call
                       (:session/id runtime-state)
-                      (:phenotype/id runtime-state)
+                      (:code/id runtime-state)
                       (:node/id runtime-state)
                       (:event/id input-event)
                       payload

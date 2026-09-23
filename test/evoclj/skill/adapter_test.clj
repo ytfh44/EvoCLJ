@@ -96,9 +96,9 @@
   (artifact/ensure-artifact! db phenotype "application/edn" 0)
   (artifact/ensure-genome! db genome)
   (seed-gen! db)
-  (let [s (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen})
+  (let [s (session/create-session! db {:genome/id genome :resolution/id resolution :code/id phenotype :generation/id gen})
         sid (:session/id s)
-        _ (event/append-event! db {:session/id sid :generation/id gen :phenotype/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})]
+        _ (event/append-event! db {:session/id sid :generation/id gen :code/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})]
     sid))
 
 (defn- write-skill!

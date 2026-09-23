@@ -162,14 +162,14 @@
   generation row sessions are pinned to (current = 1: the seed
   generation IS the CURRENT pointer, Database Invariant 6). Returns
   [db-spec db-path]."
-  [genome-id resolution-id phenotype-id]
+  [genome-id resolution-id code-id]
   (let [path (temp-db-path)
         db (sqlite/spec path)]
     (migrate/migrate! db)
     (doseq [[artifact-id media-type]
             [[genome-id "application/octet-stream"]
              [resolution-id "application/edn"]
-             [phenotype-id "application/edn"]]]
+             [code-id "application/edn"]]]
       (artifact/ensure-artifact! db artifact-id media-type 0))
     (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
@@ -227,25 +227,25 @@
         compiled (core/compile-genome loaded (fixture-catalog))
         genome-id (:code/genome-id compiled)
         resolution-id (:code/resolution-id compiled)
-        phenotype-id (:code/id compiled)
+        code-id (:code/id compiled)
         executions (atom 0)
         reg (registry/create-registry)
         _ (registry/register! reg (fixture/echo-provider
                                    {:execution-count executions}))
         _ (registry/register! reg (fixture/non-idempotent-provider))
         usage (atom {})
-        [db db-path] (fresh-db genome-id resolution-id phenotype-id)
+        [db db-path] (fresh-db genome-id resolution-id code-id)
         sid (:session/id
              (session/create-session!
               db
               {:genome/id genome-id
                :resolution/id resolution-id
-               :phenotype/id phenotype-id
+               :code/id code-id
                :generation/id generation-id}))
         _ (event/append-event! db
                                {:session/id sid
                                 :generation/id generation-id
-                                :phenotype/id phenotype-id
+                                :code/id code-id
                                 :event/type :session/created
                                 :prev/event-id nil
                                 :payload-ref nil
@@ -425,7 +425,7 @@
                   "W2: the Session row is an immutable pin; completion lives in Work and events")
               (is (= (:code/genome-id compiled) (:genome/id s)))
               (is (= (:code/resolution-id compiled) (:resolution/id s)))
-              (is (= (:code/id compiled) (:phenotype/id s))))))))))
+              (is (= (:code/id compiled) (:code/id s))))))))))
 
 ;; ============================================================================
 ;; The route program contract (the rest of the M3/M4 decision table)

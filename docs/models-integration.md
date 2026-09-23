@@ -242,7 +242,7 @@ lease are injected locally):
 
 Attribution is kernel-deterministic (Global Constraint 20): a fixed
 `session-id` over `evoclj/evolution/session`, a content-addressed
-`phenotype-id` (`sha256:...`, from `evoclj/evolution`), the
+`code-id` (`sha256:...`, from `evoclj/evolution`), the
 `:node/evolution` node, and `cause/event-id 0`. The adapters never
 call a provider directly (Global Constraint 8) — every external effect
 crosses the broker. Error data is EDN-safe and sanitized (Global

@@ -122,7 +122,7 @@
           (when (and sess last-id)
             (let [req {:session/id tid
                        :generation/id (:generation/id sess)
-                       :phenotype/id (:phenotype/id sess)
+                       :code/id (:code/id sess)
                        :event/type :session/cancelled
                        :prev/event-id last-id
                        :payload-ref nil
@@ -134,7 +134,7 @@
               (when (and psess plast-id)
                 (let [req {:session/id edge-parent
                            :generation/id (:generation/id psess)
-                           :phenotype/id (:phenotype/id psess)
+                           :code/id (:code/id psess)
                            :event/type :subagent/cancelled
                            :prev/event-id plast-id
                            :payload-ref nil

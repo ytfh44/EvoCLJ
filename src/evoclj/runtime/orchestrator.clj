@@ -72,7 +72,7 @@
    (:sqlite (:stores executor))
    {:session/id (:session/id pin)
     :generation/id (:generation/id pin)
-    :phenotype/id (:phenotype/id pin)
+    :code/id (:code/id pin)
     :event/type type
     :prev/event-id cause-event-id
     :payload-ref payload-ref
@@ -237,7 +237,7 @@
   [intent cause tool-call tool-id]
   (intent/tool-call
    (:session/id intent)
-   (:phenotype/id intent)
+   (:code/id intent)
    (:node/id intent)
    cause
    {:tool/id tool-id :args (:tool/arguments tool-call)}
@@ -257,7 +257,7 @@
 
   tool-map is a map of tool-id (string/keyword) to tool declaration.
   executor is the runtime executor holding :dispatch (broker context)
-  and :stores. pin holds session/phenotype/node attribution, cause is
+  and :stores. pin holds session/code-image/node attribution, cause is
   the causal event id. Each returned fn takes a single EDN args value,
   materializes it, builds a validated :intent/tool-call via
   intent/tool-call, dispatches through pipeline/pipeline (single
@@ -283,8 +283,8 @@
                (fn [args]
                  (let [safe-args (boundary/materialize-edn args {:max-depth 64 :max-size 100000})
                        session-id (or (:session/id pin) (:session/id executor) (random-uuid))
-                       raw-pid (or (:phenotype/id pin) (:phenotype/id executor))
-                       phenotype-id (if (and (string? raw-pid) (re-matches #"^sha256:[0-9a-f]{64}$" raw-pid))
+                       raw-pid (or (:code/id pin) (:code/id executor))
+                       code-id (if (and (string? raw-pid) (re-matches #"^sha256:[0-9a-f]{64}$" raw-pid))
                                       raw-pid
                                       (str "sha256:" (apply str (repeat 64 "a"))))
                        raw-nid (or (:node/id pin) :sandbox)
@@ -292,7 +292,7 @@
                        cause-id (let [c (if (map? cause) (:event/id cause) cause)]
                                   (if (int? c) c 1))
                        budget (or (:budget pin) {:wall-ms 1000})
-                       intent (intent/tool-call session-id phenotype-id node-id cause-id {:tool/id kw :args safe-args} budget)
+                       intent (intent/tool-call session-id code-id node-id cause-id {:tool/id kw :args safe-args} budget)
                        result (pipeline/pipeline broker-ctx intent)]
                    (if (= :ok (:result/status result))
                      (boundary/materialize-edn (:value result) {:max-depth 64 :max-size 100000})

@@ -134,7 +134,7 @@
                             {:session/id parent-id})))
         (let [req {:session/id parent-id
                    :generation/id (:generation/id parent)
-                   :phenotype/id (:phenotype/id parent)
+                   :code/id (:code/id parent)
                    :event/type :subagent/result
                    :prev/event-id prev-id
                    :causal-links #{{:from terminal-event-id :type :subagent/result}}

@@ -72,8 +72,8 @@
   row and the fixture episodes."
   (str "sha256:" (apply str (repeat 64 "f"))))
 
-(def ^:private fixture-phenotype-id
-  "A canonical phenotype id (64 hex chars) for the fixture
+(def ^:private fixture-code-id
+  "A canonical code id (64 hex chars) for the fixture
   session/event rows."
   (str "sha256:" (apply str (repeat 64 "a"))))
 
@@ -298,7 +298,7 @@
       (doseq [[artifact-id media-type]
               [[genome-id "application/octet-stream"]
                [fixture-resolution-id "application/edn"]
-               [fixture-phenotype-id "application/edn"]]]
+               [fixture-code-id "application/edn"]]]
         (artifact/ensure-artifact! db artifact-id media-type 0))
       (artifact/ensure-genome! db genome-id))
     (sqlite/with-db [conn db]
@@ -336,7 +336,7 @@
                        :generation_id generation-id
                        :genome_id genome-id
                        :resolution_id fixture-resolution-id
-                       :phenotype_id fixture-phenotype-id
+                       :phenotype_id fixture-code-id
                        :state state
                        :created_at "2025-01-02T00:00:00Z"}))
       (doseq [[id sid type] events]
@@ -345,7 +345,7 @@
                        :session_id (str sid)
                        :event_seq id
                        :generation_id generation-id
-                       :phenotype_id fixture-phenotype-id
+                       :phenotype_id fixture-code-id
                        :event_type type
                        :cause_event_id (when (> id 1) (dec id))
                        :payload_ref nil

@@ -134,7 +134,7 @@
   [genome-id & [overrides]]
   (merge {:genome/id genome-id
           :resolution/id resolution
-          :phenotype/id phenotype
+          :code/id phenotype
           :generation/id gen}
          overrides))
 
@@ -144,7 +144,7 @@
   [sid & [overrides]]
   (merge {:session/id sid
           :generation/id gen
-          :phenotype/id phenotype
+          :code/id phenotype
           :event/type :intent/proposed
           :prev/event-id nil
           :payload-ref nil
@@ -570,7 +570,7 @@
           (is (not (contains? s :state)))
           (is (= [genome-id resolution phenotype gen]
                  [(:genome/id s) (:resolution/id s)
-                  (:phenotype/id s) (:generation/id s)]))))
+                  (:code/id s) (:generation/id s)]))))
       (testing "the terminal Work is reconstructed from the reopened database"
         (is (= :succeeded (:work/state (work-store/fetch-work db2 work-id))))
         (is (empty? (recovery/find-orphaned-works db2))))

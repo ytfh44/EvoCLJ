@@ -143,13 +143,13 @@
         compiled (core/compile-genome loaded provider-catalog)
         genome-id (:code/genome-id compiled)
         resolution-id (:code/resolution-id compiled)
-        phenotype-id (:code/id compiled)
+        code-id (:code/id compiled)
         db-path (str (Files/createTempFile "evoclj-inj-" ".db" (make-array FileAttribute 0)))
         _ (track! db-path)
         db (sqlite/spec db-path)
         _ (migrate/migrate! db)
         _ (sqlite/with-db [conn db]
-            (doseq [artifact-id [genome-id resolution-id phenotype-id]]
+            (doseq [artifact-id [genome-id resolution-id code-id]]
               (jdbc/execute!
                conn
                ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
@@ -183,12 +183,12 @@
               db
               {:genome/id genome-id
                :resolution/id resolution-id
-               :phenotype/id phenotype-id
+               :code/id code-id
                :generation/id generation-id}))
         _ (event/append-event! db
                                {:session/id sid
                                 :generation/id generation-id
-                                :phenotype/id phenotype-id
+                                :code/id code-id
                                 :event/type :session/created
                                 :prev/event-id nil
                                 :payload-ref nil

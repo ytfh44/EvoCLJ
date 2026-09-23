@@ -109,11 +109,11 @@
   (let [sid (:session/id
              (session/create-session! db {:genome/id genome
                                           :resolution/id resolution
-                                          :phenotype/id phenotype
+                                          :code/id phenotype
                                           :generation/id gen}))]
     (event/append-event! db {:session/id sid
                              :generation/id gen
-                             :phenotype/id phenotype
+                             :code/id phenotype
                              :event/type :session/created
                              :prev/event-id nil
                              :payload-ref nil

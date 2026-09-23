@@ -35,16 +35,16 @@
 
   SESSION PINNING (Global Constraint 2 — never assume, always read):
   run-session! reads the session from the store and verifies its
-  pinned :genome/id, :resolution/id, and :phenotype/id agree with the
+  pinned :genome/id, :resolution/id, and :code/id agree with the
   executor's compiled genome (evoclj.compiler.core returns
   :code/genome-id, :code/resolution-id,
   :code/id) before touching anything. A disagreement is
   :scheduler/pin-mismatch — the scheduler refuses to run a session
-  against the wrong phenotype (the session's pinned identity is the
+  against the wrong code image (the session's pinned identity is the
   store's contract, not the executor's claim).
 
   LIFECYCLE: Work is the sole durable lifecycle (W2). Sessions are
-  immutable identity pins (pinned genome/resolution/phenotype/generation)
+  immutable identity pins (pinned genome/resolution/code-image/generation)
   with no runtime state machine — the runtime no longer drives any Session
   transition. run-session! accepts a session with no terminal Work and
   drives its ONE Work (:session/run) queued → running → (waiting →)
@@ -119,7 +119,7 @@
 
   Error contract (Global Constraint 22 — plain serializable data):
   :scheduler/executor-invalid (:reason distinguishes :not-a-map,
-  :phenotype-missing, :phenotype-id-invalid, :compiled-missing,
+  :phenotype-missing, :code-id-invalid, :compiled-missing,
   :topology-missing, :entry-missing, :nodes-missing, :stores-invalid,
   :sqlite-missing, :cas-missing, :dispatch-invalid),
   :scheduler/session-invalid (:reason :not-found, :already-terminal,
@@ -163,7 +163,7 @@
 
 (defn- validate-executor!
   "Validate the executor trust boundary: a map wiring a live phenotype
-  (canonical :phenotype/id, a :compiled genome carrying a compiled
+  (canonical :code/id, a :compiled genome carrying a compiled
   :topology), the opened :stores (:sqlite + :cas), and a :dispatch
   broker context. Every failure throws :scheduler/executor-invalid
   with a distinguishing :reason (host-side bug; garbage never runs)."
@@ -176,12 +176,11 @@
                              "executor must carry a :phenotype map"
                              phenotype)))
     (when-not (or (types/artifact-id? (:code/id phenotype))
-                  (types/artifact-id? (:phenotype/id phenotype))
                   (types/artifact-id? (:code/id (:compiled phenotype)))
                   (types/artifact-id? (:compiled/code-id (:compiled phenotype))))
-      (throw (executor-error :phenotype-id-invalid
-                             "executor phenotype must carry a canonical :code/id (or legacy :phenotype/id)"
-                             (or (:code/id phenotype) (:phenotype/id phenotype)))))
+      (throw (executor-error :code-id-invalid
+                             "executor phenotype must carry a canonical :code/id"
+                             (:code/id phenotype))))
     (when-not (map? (:compiled phenotype))
       (throw (executor-error :compiled-missing
                              "executor phenotype must carry a :compiled genome"
@@ -254,7 +253,7 @@
    (:sqlite (:stores executor))
    {:session/id (:session/id pin)
     :generation/id (:generation/id pin)
-    :phenotype/id (:phenotype/id pin)
+    :code/id (:code/id pin)
     :event/type type
     :prev/event-id cause-event-id
     :payload-ref payload-ref
@@ -615,7 +614,7 @@
   "Execute ONE session against the executor's phenotype topology
   (deterministic single-session FIFO — v0 has no concurrency).
 
-  Reads the session's pinned genome/resolution/phenotype from the
+  Reads the session's pinned genome/resolution/code-image from the
   store and verifies them against the executor's compiled genome
   (never assumes the pin), walks the compiled topology from :entry,
   steps each node's handler, dispatches every emitted intent through
@@ -674,12 +673,12 @@
                           {:reason :resolution
                            :session/resolution-id (:resolution/id pin)
                            :executor/resolution-id (or (:compiled/resolution-id compiled) (:code/resolution-id compiled) (:resolution/id compiled))})))
-      (let [pin-code (or (:code/id pin) (:phenotype/id pin))
-            exec-code (or (:code/id (:phenotype executor)) (:phenotype/id (:phenotype executor)))]
+      (let [pin-code (:code/id pin)
+            exec-code (:code/id (:phenotype executor))]
         (when (and pin-code exec-code (not= pin-code exec-code))
           (throw (err/error :scheduler/pin-mismatch
                             "session pin disagrees with the executor's code image"
-                            {:reason :phenotype
+                            {:reason :code
                              :session/code-id pin-code
                              :executor/code-id exec-code}))))
     (let [topology (get-in executor [:phenotype :compiled :topology])
@@ -762,7 +761,7 @@
                                           :step (inc steps)
                                           :node/type (:node/type node)})
                           runtime-state {:session/id (:session/id pin)
-                                         :phenotype/id (:phenotype/id pin)
+                                         :code/id (:code/id pin)
                                          :node/id node-id
                                          :outputs outputs
                                          :sci-runtime (:sci-runtime (:phenotype executor))

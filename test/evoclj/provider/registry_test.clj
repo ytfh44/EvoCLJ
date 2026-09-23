@@ -53,7 +53,7 @@
    :retry {:safe? true}})
 
 (def ^:private session-id #uuid "11111111-1111-4111-8111-111111111111")
-(def ^:private phenotype-id
+(def ^:private code-id
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 (def ^:private issued-at (java.util.Date. 1700000000000))
 (def ^:private expires-at (java.util.Date. 1700003600000)) ; issued-at + 1h
@@ -63,7 +63,7 @@
 (defn- echo-intent
   "A validated :intent/tool-call for :fixture/echo carrying args."
   [args]
-  (intent/tool-call session-id phenotype-id :node/tool 17
+  (intent/tool-call session-id code-id :node/tool 17
                     {:tool/id :fixture/echo :args args}
                     {:wall-ms 1000}))
 
@@ -71,13 +71,13 @@
   "A validated :intent/tool-call for :fixture/path-resolve carrying
   args."
   [args]
-  (intent/tool-call session-id phenotype-id :node/tool 17
+  (intent/tool-call session-id code-id :node/tool 17
                     {:tool/id :fixture/path-resolve :args args}
                     {:wall-ms 1000}))
 
 (defn- lease-for
   "A valid CapabilityLease granting :invoke on the given resource
-  (tool or filesystem) to phenotype-id."
+  (tool or filesystem) to code-id."
   [resource]
   {:cap/id #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
    :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}

@@ -35,7 +35,7 @@
                        shared provider executed exactly once per tool
                        node per session;
   - no cross-session leakage: every event row carries its own
-    session id and the pinned generation/phenotype identity; every
+    session id and the pinned generation/code-image identity; every
     non-root :cause/event-id resolves to an event id in the SAME
     session's own log; global event ids are unique; and each
     session's final outputs artifact contains only that session's own
@@ -76,7 +76,7 @@
 
 (def ^:private genome-id (str "sha256:" hex64))
 (def ^:private resolution-id (str "sha256:" (apply str (repeat 64 "c"))))
-(def ^:private phenotype-id (str "sha256:" (apply str (repeat 64 "b"))))
+(def ^:private code-id (str "sha256:" (apply str (repeat 64 "b"))))
 (def ^:private generation-id "generation-1")
 
 ;; --- temp stores --------------------------------------------------------------
@@ -148,7 +148,7 @@
     (doseq [[artifact-id media-type]
             [[genome-id "application/octet-stream"]
              [resolution-id "application/edn"]
-             [phenotype-id "application/edn"]]]
+             [code-id "application/edn"]]]
       (artifact/ensure-artifact! db artifact-id media-type 0))
     (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
@@ -177,7 +177,7 @@
   no session shares a runtime with a concurrently running session),
   but the shared sqlite db, CAS root, registry, leases, and usage
   atom. Every session carries the SAME pinned identity (same logical
-  genome/resolution/phenotype — separate instances of one Phenotype).
+  genome/resolution/code-image — separate instances of one Phenotype).
   Returns the executor map."
   [shared compiled]
   {:phenotype (phenotype/instantiate
@@ -205,12 +205,12 @@
               db
               {:genome/id genome-id
                :resolution/id resolution-id
-               :phenotype/id phenotype-id
+               :code/id code-id
                :generation/id generation-id}))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id
-                          :phenotype/id phenotype-id
+                          :code/id code-id
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
@@ -249,13 +249,12 @@
   "A minimal CompiledGenome value carrying the stress topology —
   constructed directly, exactly as the component scheduler tests do."
   [fixture-topology]
-  {:code/id phenotype-id
+  {:code/id code-id
    :code/genome-id genome-id
    :code/resolution-id resolution-id
-   :compiled/code-id phenotype-id
+   :compiled/code-id code-id
    :compiled/genome-id genome-id
    :compiled/resolution-id resolution-id
-   :compiled/phenotype-id phenotype-id
    :abi {}
    :manifest {}
    :topology (topology/compile-topology fixture-topology)
@@ -372,8 +371,8 @@
                 (str "every event of " sid " belongs to " sid))
             (is (every? #(= generation-id (:generation/id %)) evs)
                 (str "every event of " sid " carries the pinned generation"))
-            (is (every? #(= phenotype-id (:phenotype/id %)) evs)
-                (str "every event of " sid " carries the pinned phenotype"))
+            (is (every? #(= code-id (:code/id %)) evs)
+                (str "every event of " sid " carries the pinned code image"))
             (is (every? (fn [e]
                           (let [c (:prev/event-id e)]
                             (or (nil? c) (contains? own-ids c))))
@@ -384,7 +383,7 @@
          (let [s (session/get-session db (:session/id o))]
            (is (= genome-id (:genome/id s)))
            (is (= resolution-id (:resolution/id s)))
-           (is (= phenotype-id (:phenotype/id s)))
+           (is (= code-id (:code/id s)))
            (is (not (contains? s :state))
                "W2: the row keeps identity only; completion lives in Work and events"))))
     (testing "each session's final outputs contain EXACTLY that session's own task text (no cross-session value leakage)"

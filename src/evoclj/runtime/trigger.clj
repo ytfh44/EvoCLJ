@@ -382,14 +382,14 @@
 
 (defn- audit-anchor
   "The anchor for one audit event: the session's pinned
-  :generation/id and :phenotype/id and the id of its newest event as
+  :generation/id and :code/id and the id of its newest event as
   the linear :prev/event-id (the promotion event-anchoring pattern).
   nil when the session has no events yet (or does not exist)."
   [store session-id]
   (let [events (event/events-for-session store session-id)]
     (when-let [newest (last events)]
       {:generation/id (:generation/id newest)
-       :phenotype/id (:phenotype/id newest)
+       :code/id (:code/id newest)
        :prev/event-id (:event/id newest)})))
 
 (defn- append-audit!
@@ -415,7 +415,7 @@
                   store
                   {:session/id session-id
                    :generation/id (:generation/id anchor)
-                   :phenotype/id (:phenotype/id anchor)
+                   :code/id (:code/id anchor)
                    :event/type (if (= :denied status)
                                  :action/denied
                                  :action/executed)

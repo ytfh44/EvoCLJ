@@ -26,7 +26,7 @@
   {:intent/id #uuid "00000000-0000-0000-0000-000000000012"
    :intent/type :intent/tool-call
    :session/id session-id
-   :phenotype/id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   :code/id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
    :node/id :node/tool
    :cause/event-id 1
    :payload {:tool/id :gmail.send :args {}}

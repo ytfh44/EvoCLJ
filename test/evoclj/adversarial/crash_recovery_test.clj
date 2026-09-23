@@ -198,12 +198,12 @@
               db
               {:genome/id genome-id
                :resolution/id parent-resolution
-               :phenotype/id phenotype
+               :code/id phenotype
                :generation/id seed-gen}))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id seed-gen
-                          :phenotype/id phenotype
+                          :code/id phenotype
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
@@ -263,7 +263,7 @@
             _ (event/append-event! db
                                    {:session/id sid
                                     :generation/id seed-gen
-                                    :phenotype/id phenotype
+                                    :code/id phenotype
                                     :event/type :intent/proposed
                                     :prev/event-id (:event/id created)
                                     :payload-ref id
@@ -421,7 +421,7 @@
         intent {:intent/id (random-uuid)
                 :intent/type :intent/tool-call
                 :session/id sid
-                :phenotype/id phenotype
+                :code/id phenotype
                 :node/id :node/tool
                 :cause/event-id 1
                 :payload {:tool/id :fixture/non-idempotent :args {:text "hi"}}
@@ -435,7 +435,7 @@
         proposed (event/append-event! db
                                        {:session/id sid
                                         :generation/id seed-gen
-                                        :phenotype/id phenotype
+                                        :code/id phenotype
                                         :event/type :intent/proposed
                                         :prev/event-id (:event/id created)
                                         :payload-ref request-id
@@ -443,7 +443,7 @@
         normalized (event/append-event! db
                                         {:session/id sid
                                          :generation/id seed-gen
-                                         :phenotype/id phenotype
+                                         :code/id phenotype
                                          :event/type :intent/normalized
                                          :prev/event-id (:event/id proposed)
                                          :payload-ref request-id
@@ -451,7 +451,7 @@
         authorized (event/append-event! db
                                         {:session/id sid
                                          :generation/id seed-gen
-                                         :phenotype/id phenotype
+                                         :code/id phenotype
                                          :event/type :intent/authorized
                                          :prev/event-id (:event/id normalized)
                                          :payload-ref nil
@@ -459,7 +459,7 @@
         started (event/append-event! db
                                      {:session/id sid
                                       :generation/id seed-gen
-                                      :phenotype/id phenotype
+                                      :code/id phenotype
                                       :event/type :provider/call-started
                                       :prev/event-id (:event/id authorized)
                                       :payload-ref nil

@@ -62,7 +62,7 @@
      :principal-type (:principal_type row)
      :principal-id (:principal_id row)
      :subject-session-id (:subject_session_id row)
-     :subject-phenotype-id (:subject_phenotype_id row)
+     :subject-code-id (:subject_phenotype_id row)
      :resource-kind (:resource_kind row)
      :resource-id (:resource_id row)
      :resource-edn (:resource_edn row)
@@ -151,7 +151,7 @@
      :principal_type (str ptype)
      :principal_id (str pid)
      :subject_session_id (str pid)
-     :subject_phenotype_id (str (or (:subject-phenotype-id lease) (:subject_phenotype_id lease) pid))
+     :subject_phenotype_id (str (or (:subject-code-id lease) (:subject_phenotype_id lease) pid))
      :resource_kind rkind-name
      :resource_edn (or resource-edn (pr-str {:kind (keyword rkind-name) :id (str rid)}))
      :resource_id (str rid)

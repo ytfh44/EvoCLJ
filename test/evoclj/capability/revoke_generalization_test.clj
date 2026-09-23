@@ -31,8 +31,8 @@
    :resource {:kind :tool :id tool-id}
    :args {:text "hi"}})
 
-(defn- tool-intent [session-id phenotype-id tool-id]
-  (intent/tool-call session-id phenotype-id :node/test 1 {:tool/id tool-id :args {:text "hi"}} {:wall-ms 1000}))
+(defn- tool-intent [session-id code-id tool-id]
+  (intent/tool-call session-id code-id :node/test 1 {:tool/id tool-id :args {:text "hi"}} {:wall-ms 1000}))
 
 (defn- model-normalized [model-id]
   {:tool/id :model/call
@@ -40,10 +40,10 @@
    :model/id model-id
    :messages [{:role :user :content "hi"}]})
 
-(defn- model-intent [session-id phenotype-id model-id]
-  (intent/model-call session-id phenotype-id :node/test 1 {:model/id model-id :messages [{:role :user :content "hi"}]} {:wall-ms 1000}))
+(defn- model-intent [session-id code-id model-id]
+  (intent/model-call session-id code-id :node/test 1 {:model/id model-id :messages [{:role :user :content "hi"}]} {:wall-ms 1000}))
 
-(defn- fs-intent [session-id phenotype-id mount-id path]
+(defn- fs-intent [session-id code-id mount-id path]
   (intent/tool-call session-a phenotype-p1 :node/test 1 {:tool/id :filesystem/generic :args {:mount/id mount-id :path path :operation :read}} {:wall-ms 1000}))
 
 ;; ---------------------------------------------------------------------------

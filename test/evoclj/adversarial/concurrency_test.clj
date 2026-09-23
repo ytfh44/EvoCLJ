@@ -137,7 +137,7 @@
   "The compiled ResolutionId every generation row carries."
   (str "sha256:" (apply str (repeat 64 "b"))))
 
-(def ^:private phenotype-id
+(def ^:private code-id
   "The phenotype every session pins to (the seed's compiled Phenotype)."
   (str "sha256:" (apply str (repeat 64 "c"))))
 
@@ -222,7 +222,7 @@
       (doseq [[artifact-id media-type]
               [[parent-genome-id "application/octet-stream"]
                [resolution-id "application/edn"]
-               [phenotype-id "application/edn"]
+               [code-id "application/edn"]
                [evidence-id "application/edn"]]]
         (jdbc/insert! conn :artifacts
                       {:hash artifact-id
@@ -427,12 +427,12 @@
               db
               {:genome/id parent-genome-id
                :resolution/id resolution-id
-               :phenotype/id phenotype-id
+               :code/id code-id
                :generation/id seed-generation-id}))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id seed-generation-id
-                          :phenotype/id phenotype-id
+                          :code/id code-id
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
@@ -922,7 +922,7 @@
                     db
                     {:genome/id parent-genome-id
                      :resolution/id resolution-id
-                     :phenotype/id phenotype-id
+                     :code/id code-id
                      :generation/id gen}))})))
 
 (deftest session-creation-races-with-current-change
@@ -980,7 +980,7 @@
                           (and (= seed-generation-id (:generation_id t))
                                (= parent-genome-id (:genome_id t))
                                (= resolution-id (:resolution_id t))
-                               (= phenotype-id (:phenotype_id t))))
+                               (= code-id (:phenotype_id t))))
                         tuples)
                 "every session's pinned identity tuple is exactly the seed's")
             (let [p (deref-or-fail t-p)]

@@ -75,7 +75,7 @@
 (defn- valid-cap [id sess-id]
   {:id id
    :subject-session-id sess-id
-   :subject-phenotype-id (str "sha256:" (apply str (repeat 64 "e")))
+   :subject-code-id (str "sha256:" (apply str (repeat 64 "e")))
    :resource-kind "tool"
    :resource-id "tool-1"
    :actions ["invoke" "read"]

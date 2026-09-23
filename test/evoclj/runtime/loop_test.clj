@@ -82,7 +82,7 @@
 
 (def ^:private genome-id (str "sha256:" hex64))
 (def ^:private resolution-id (str "sha256:" (apply str (repeat 64 "c"))))
-(def ^:private phenotype-id (str "sha256:" (apply str (repeat 64 "b"))))
+(def ^:private code-id (str "sha256:" (apply str (repeat 64 "b"))))
 (def ^:private generation-id "generation-1")
 
 ;; --- temp stores ------------------------------------------------------------
@@ -126,7 +126,7 @@
   (let [db (sqlite/spec (temp-db-path))]
     (migrate/migrate! db)
     (sqlite/with-db [conn db]
-      (doseq [artifact-id [genome-id resolution-id phenotype-id]]
+      (doseq [artifact-id [genome-id resolution-id code-id]]
         (jdbc/execute!
          conn
          ["INSERT OR IGNORE INTO artifacts (hash, media_type, size, created_at)
@@ -193,13 +193,12 @@
   "A minimal CompiledGenome value carrying a loop fixture topology —
   constructed directly (see the namespace docstring)."
   [fixture-topology]
-  {:code/id phenotype-id
+  {:code/id code-id
    :code/genome-id genome-id
    :code/resolution-id resolution-id
-   :compiled/code-id phenotype-id
+   :compiled/code-id code-id
    :compiled/genome-id genome-id
    :compiled/resolution-id resolution-id
-   :compiled/phenotype-id phenotype-id
    :abi {}
    :manifest {:capabilities/requested #{:tool/call}}
    :requested-capabilities #{:tool/call}
@@ -282,7 +281,7 @@
                db
                {:genome/id genome-id
                 :resolution/id resolution-id
-                :phenotype/id phenotype-id
+                :code/id code-id
                 :generation/id generation-id}))
          sid (try
                (sqlite/with-db [conn db]
@@ -292,7 +291,7 @@
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id
-                          :phenotype/id phenotype-id
+                          :code/id code-id
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
@@ -504,7 +503,7 @@
         runtime (until-runtime)
         rs (fn [overrides]
              (merge {:session/id (random-uuid)
-                     :phenotype/id (str "sha256:" hex64)
+                     :code/id (str "sha256:" hex64)
                      :node/id :node/loop
                      :outputs []
                      :sci-runtime runtime}

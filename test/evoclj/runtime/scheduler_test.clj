@@ -3,7 +3,7 @@
 
   run-session! executes the phenotype's compiled topology (the
   executor map's :phenotype :compiled :topology) against a session the
-  test pinned to the SAME genome/resolution/phenotype ids, walking
+  test pinned to the SAME genome/resolution/code-image ids, walking
   nodes from :entry, stepping each node's handler, dispatching every
   emitted intent through evoclj.intent.dispatch! (the broker), feeding
   the provider results back into the session's accumulated outputs,
@@ -42,7 +42,7 @@
   sci → tool → emit (Step 1/2), boom → emit (Step 4), and tool → emit
   (the denied-intent test). The scheduler reads only the pinned
   identity (:compiled/genome-id, :compiled/resolution-id,
-  :compiled/phenotype-id) and the compiled :topology from the
+  :compiled/code-id) and the compiled :topology from the
   phenotype, so a directly constructed CompiledGenome is a faithful
   test double.
 
@@ -82,7 +82,7 @@
 
 (def ^:private genome-id (str "sha256:" hex64))
 (def ^:private resolution-id (str "sha256:" (apply str (repeat 64 "c"))))
-(def ^:private phenotype-id (str "sha256:" (apply str (repeat 64 "b"))))
+(def ^:private code-id (str "sha256:" (apply str (repeat 64 "b"))))
 (def ^:private generation-id "generation-1")
 
 ;; --- temp stores ------------------------------------------------------------
@@ -126,7 +126,7 @@
     (migrate/migrate! db)
     (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
     (artifact/ensure-artifact! db resolution-id "application/edn" 0)
-    (artifact/ensure-artifact! db phenotype-id "application/edn" 0)
+    (artifact/ensure-artifact! db code-id "application/edn" 0)
     (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
@@ -176,11 +176,10 @@
   "A minimal CompiledGenome value carrying a custom executable
   topology — constructed directly (see the namespace docstring)."
   [fixture-topology]
-  {:code/id phenotype-id
-   :compiled/code-id phenotype-id
+  {:code/id code-id
+   :compiled/code-id code-id
    :compiled/genome-id genome-id
    :compiled/resolution-id resolution-id
-   :compiled/phenotype-id phenotype-id
    :abi {}
    :manifest {}
    :topology (topology/compile-topology fixture-topology)
@@ -254,7 +253,7 @@
                 db
                 {:genome/id genome-id
                  :resolution/id resolution-id
-                 :phenotype/id phenotype-id
+                 :code/id code-id
                  :generation/id generation-id}))
               (catch Exception _ placeholder))
         sid (if (= sid placeholder)
@@ -269,7 +268,7 @@
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id
-                          :phenotype/id phenotype-id
+                          :code/id code-id
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
@@ -524,7 +523,7 @@
                            (session/create-session!
                             db {:genome/id genome-id
                                 :resolution/id resolution-id
-                                :phenotype/id phenotype-id
+                                :code/id code-id
                                 :generation/id generation-id}))
         wrong-type-id (java.util.UUID/randomUUID)
         running-id (java.util.UUID/randomUUID)

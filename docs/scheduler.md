@@ -70,7 +70,7 @@ For N sessions × M events run concurrently:
    stored event's hash from its own canonical header and checks the
    `prev-hash` linkage per session; it must pass for every session.
 2. **No cross-session leakage** — every event row carries its own
-   session id and the session's pinned generation/phenotype identity
+   session id and the session's pinned generation/code-image identity
    (Global Constraint 20); the store enforces that every non-root
    `:prev/event-id` is the **immediate predecessor in the same
    session** (`:event/seq = prev-seq + 1`; `:store/prev-not-immediate` /

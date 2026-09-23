@@ -17,7 +17,7 @@
   only validated, fully serializable Clojure data crosses this
   boundary (Global Constraint 22). Attribution is a parameter, never
   guessed: the intents a handler constructs carry :session/id,
-  :phenotype/id, and :node/id from runtime-state and :cause/event-id
+  :code/id, and :node/id from runtime-state and :cause/event-id
   from the input-event (Global Constraint 20 — every externally
   visible effect is attributable).
 
@@ -48,7 +48,7 @@
   designed here, normative for component):
 
     {:session/id #uuid \"...\"          ; REQUIRED attribution
-     :phenotype/id \"sha256:<64 hex>\"  ; REQUIRED attribution
+     :code/id \"sha256:<64 hex>\"       ; REQUIRED attribution
      :node/id :node/x                  ; REQUIRED attribution (the
                                        ;   node being stepped)
      :outputs [...]                    ; REQUIRED accumulated session
@@ -102,7 +102,7 @@
   Error contract (Global Constraint 22 — plain serializable data):
   :node/runtime-invalid (malformed runtime-state; :reason
   distinguishes :not-a-map, :session-id-invalid,
-  :phenotype-id-invalid, :node-id-invalid, :outputs-invalid,
+  :code-id-invalid, :node-id-invalid, :outputs-invalid,
   :budget-invalid, :sci-runtime-missing), :node/input-invalid
   (malformed input-event or tool args; :reason :not-a-map,
   :event-id-invalid, :args-invalid), :node/invalid (malformed node or
@@ -230,7 +230,7 @@
 (defn validate-runtime-state!
   "Validate the per-session runtime-state contract (see the namespace
   docstring): a map carrying uuid :session/id, canonical
-  :phenotype/id, keyword :node/id, and vector :outputs, with an
+  :code/id, keyword :node/id, and vector :outputs, with an
   optional schema-valid :budget. Other keys (:sci-runtime, :limits,
   :providers, ...) pass through untouched — handlers never read
   providers. Throws :node/runtime-invalid with a distinguishing
@@ -247,11 +247,11 @@
                         "runtime-state must carry a uuid :session/id"
                         {:reason :session-id-invalid
                          :value (err/sanitize sid)}))))
-  (when-not (intent-schema/phenotype-id? (:phenotype/id runtime-state))
+  (when-not (intent-schema/code-id? (:code/id runtime-state))
     (throw (err/error :node/runtime-invalid
-                      "runtime-state must carry a canonical :phenotype/id"
-                      {:reason :phenotype-id-invalid
-                       :value (err/sanitize (:phenotype/id runtime-state))})))
+                      "runtime-state must carry a canonical :code/id"
+                      {:reason :code-id-invalid
+                       :value (err/sanitize (:code/id runtime-state))})))
   (when-not (keyword? (:node/id runtime-state))
     (throw (err/error :node/runtime-invalid
                       "runtime-state must carry a keyword :node/id"

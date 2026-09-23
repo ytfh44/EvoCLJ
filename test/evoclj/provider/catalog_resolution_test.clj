@@ -38,12 +38,12 @@
 ;; --- shared test values ----------------------------------------------------
 
 (def ^:private session-id #uuid "00000000-0000-4000-a000-000000000000")
-(def ^:private phenotype-id
+(def ^:private code-id
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
 (defn- tool-lease
   "A valid CapabilityLease granting :invoke on :fixture/echo to
-  phenotype-id."
+  code-id."
   []
   {:cap/id (random-uuid)
    :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
@@ -56,7 +56,7 @@
 (defn- echo-intent
   "A validated :intent/tool-call for :fixture/echo carrying args."
   [args]
-  (intent/tool-call session-id phenotype-id :node/tool 17
+  (intent/tool-call session-id code-id :node/tool 17
                     {:tool/id :fixture/echo :args args}
                     {:wall-ms 1000}))
 

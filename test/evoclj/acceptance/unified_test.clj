@@ -302,8 +302,8 @@
                                            :created_at "2025-01-01T00:00:00Z"})
               (when-not (first (clojure.java.jdbc/query conn ["SELECT id FROM generations WHERE id = ?" gen]))
                 (clojure.java.jdbc/insert! conn :generations {:id gen :genome_id genome :resolution_id resolution :parent_id nil :state "active" :current 0 :created_at "2025-01-01T00:00:00Z"})))
-          sid (:session/id (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen}))
-          _ (event/append-event! db {:session/id sid :generation/id gen :phenotype/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
+          sid (:session/id (session/create-session! db {:genome/id genome :resolution/id resolution :code/id phenotype :generation/id gen}))
+          _ (event/append-event! db {:session/id sid :generation/id gen :code/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
           cas-root (Files/createTempDirectory "evoclj-unified-cas-" (make-array FileAttribute 0))
           cas-handle (cas/->cas (str cas-root))
           registry (reg/create-registry)
@@ -325,8 +325,8 @@
           before (first (store-binding/active-bindings db sid))
           before-rev (:revision/id before)
           ;; second session for new activation test
-          sid2 (:session/id (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen}))
-          _ (event/append-event! db {:session/id sid2 :generation/id gen :phenotype/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
+          sid2 (:session/id (session/create-session! db {:genome/id genome :resolution/id resolution :code/id phenotype :generation/id gen}))
+          _ (event/append-event! db {:session/id sid2 :generation/id gen :code/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
           ;; refresh catalog to v2
           _ (fake/set-payload! source "skill v2")
           refresh-res (reg/refresh! registry)
@@ -436,7 +436,7 @@
             rid "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             p1 (compiler-core/code-id abi gid rid)
             p2 (compiler-core/code-id abi gid rid)]
-        (is (= p1 p2) "phenotype identical despite different snapshots")
+        (is (= p1 p2) "code identical despite different snapshots")
         (is (not (str/includes? p1 (str (:environment/id captured)))) "environment id not hashed into phenotype")))))
 
 ;; ---------------------------------------------------------------------------

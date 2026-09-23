@@ -49,7 +49,7 @@
    [:event/seq pos-int?]
    [:session/id uuid?]
    [:generation/id string?]
-   [:phenotype/id [:fn types/artifact-id?]]
+   [:code/id [:fn types/artifact-id?]]
    [:event/type keyword?]
    [:prev/event-id [:maybe pos-int?]]
    [:causal-links {:optional true} [:set CausalLinkSchema]]
@@ -64,7 +64,7 @@
   [:map {:closed true}
    [:session/id [:fn types/session-id?]]
    [:generation/id string?]
-   [:phenotype/id [:fn types/artifact-id?]]
+   [:code/id [:fn types/artifact-id?]]
    [:event/type keyword?]
    [:prev/event-id {:optional true} [:maybe pos-int?]]
    [:causal-links {:optional true} [:set CausalLinkSchema]]

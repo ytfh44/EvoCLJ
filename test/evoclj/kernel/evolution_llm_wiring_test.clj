@@ -45,8 +45,8 @@
    :input-schema :schema/route-input
    :output-schema :schema/intent-or-route})
 
-(defn- evolution-phenotype-id
-  "The kernel-deterministic phenotype id the host's :model-call closure
+(defn- evolution-code-id
+  "The kernel-deterministic code id the host's :model-call closure
   attributes every evolution model call to (the lease subject must
   match it exactly)."
   []
@@ -199,7 +199,7 @@
     (artifact/ensure-artifact! db genome-id "application/octet-stream"
                                 (alength genome-body))
     (artifact/ensure-artifact! db resolution-id "application/edn" 0)
-    (artifact/ensure-artifact! db (evolution-phenotype-id) "application/octet-stream" 0)
+    (artifact/ensure-artifact! db (evolution-code-id) "application/octet-stream" 0)
     (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
@@ -216,13 +216,13 @@
                      :generation_id generation-id
                      :genome_id genome-id
                      :resolution_id resolution-id
-                     :phenotype_id (evolution-phenotype-id)
+                     :phenotype_id (evolution-code-id)
                      :state "completed"
                      :created_at "2025-01-02T00:00:00Z"})
       (let [created (event/append-event!
                      db {:session/id episode-id
                          :generation/id generation-id
-                         :phenotype/id (evolution-phenotype-id)
+                         :code/id (evolution-code-id)
                          :event/type :session/created
                          :prev/event-id nil
                          :payload-ref nil
@@ -230,7 +230,7 @@
             completed (event/append-event!
                        db {:session/id episode-id
                            :generation/id generation-id
-                           :phenotype/id (evolution-phenotype-id)
+                           :code/id (evolution-code-id)
                            :event/type :session/completed
                            :prev/event-id (:event/id created)
                            :payload-ref nil

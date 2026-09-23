@@ -6,7 +6,7 @@
   must cross the kernel-owned Intent/Capability Broker, so the component scheduler dispatches the emitted intent). The handler builds a
   validated :intent/memory-read or :intent/memory-write from the node
   config and the runtime-state, with attribution from runtime-state and
-  the input-event (:session/id, :phenotype/id, :node/id,
+  the input-event (:session/id, :code/id, :node/id,
   :cause/event-id — Global Constraint 20), via the pure
   evoclj.intent.core/memory-read / memory-write constructors. The
   result is a :continue transition with no outputs (the provider value
@@ -55,7 +55,7 @@
   [runtime-state input-event node key budget]
   (intent/memory-read
    (:session/id runtime-state)
-   (:phenotype/id runtime-state)
+   (:code/id runtime-state)
    (:node/id runtime-state)
    (:event/id input-event)
    (cond-> {:memory/key key}
@@ -66,7 +66,7 @@
   [runtime-state input-event node key value budget]
   (intent/memory-write
    (:session/id runtime-state)
-   (:phenotype/id runtime-state)
+   (:code/id runtime-state)
    (:node/id runtime-state)
    (:event/id input-event)
    {:memory/key key :memory/content value}

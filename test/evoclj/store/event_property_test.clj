@@ -39,10 +39,10 @@
   (prop/for-all [_ (gen/return nil)]
     (let [{:keys [db path]} (temp-db)
           now (Date.)
-          root {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          root {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                 :event/type :session/created :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {}}
           e1 (event/append-event! db root)
-          bad-prev {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          bad-prev {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                     :event/type :tool/invoke :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {}}
           ok? (try (event/append-event! db bad-prev) false (catch Exception e (= :store/event-invalid (:error/type (ex-data e)))))]
       (try (clojure.java.io/delete-file path) (catch Exception _ nil))
@@ -52,9 +52,9 @@
   (prop/for-all [seed (gen/choose 0 1000)]
     (let [{:keys [db path]} (temp-db)
           now (Date.)
-          e1 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          e1 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                       :event/type :session/created :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {}})
-          e2 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          e2 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                       :event/type :tool/invoke :prev/event-id (:event/id e1) :causal-links #{} :payload-ref nil :created-at now :metadata {}})]
       (try (clojure.java.io/delete-file path) (catch Exception _ nil))
       (and (= 1 (:event/seq e1)) (= 2 (:event/seq e2)) (= (:event/id e1) (:prev/event-id e2))))))
@@ -63,11 +63,11 @@
   (prop/for-all [_ (gen/return nil)]
     (let [{:keys [db path]} (temp-db)
           now (Date.)
-          e-a1 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          e-a1 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                         :event/type :session/created :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {}})
-          e-b1 (event/append-event! db {:session/id sid-b :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          e-b1 (event/append-event! db {:session/id sid-b :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                         :event/type :session/created :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {}})
-          e-a2 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          e-a2 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                         :event/type :subagent/result :prev/event-id (:event/id e-a1) :causal-links #{{:from (:event/id e-b1) :type :subagent/result}} :payload-ref nil :created-at now :metadata {:child/session-id sid-b}})]
       (try (clojure.java.io/delete-file path) (catch Exception _ nil))
       (and (= 2 (:event/seq e-a2)) (= 1 (count (:causal-links e-a2))) (= (:event/id e-b1) (:from (first (:causal-links e-a2))))))))
@@ -76,10 +76,10 @@
   (prop/for-all [_ (gen/return nil)]
     (let [{:keys [db path]} (temp-db)
           now (Date.)
-          e1 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          e1 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                       :event/type :session/created :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {}})
           bogus 999999]
-      (try (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      (try (event/append-event! db {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                     :event/type :tool/invoke :prev/event-id (:event/id e1) :causal-links #{{:from bogus :type :test}} :payload-ref nil :created-at now :metadata {}})
            false
            (catch Exception e (= :store/causal-link-not-found (:error/type (ex-data e))))))))
@@ -88,7 +88,7 @@
   (prop/for-all [_ (gen/return nil)]
     (let [{:keys [db path]} (temp-db)
           now (Date.)
-          root {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          root {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                 :event/type :session/created :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {}}
           e1 (event/append-event! db root)
           with-prev-fails? (try (event/append-event! db (assoc root :prev/event-id 1)) false (catch Exception e (= :store/event-invalid (:error/type (ex-data e)))))
@@ -123,7 +123,7 @@
     (let [{:keys [db]} @shared-seq-db
           _ (clean-seq-events! db)
           now (Date.)
-          _ (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          _ (event/append-event! db {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                      :event/type :session/created :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {}})
           ;; The shared DB cannot be cleaned (the append-only trigger rejects
           ;; DELETE), so rows accumulate across trials: the predecessor must
@@ -131,7 +131,7 @@
           ;; row is a fork and is rejected by the strict predecessor rule.
           _ (loop [prev-id (:event/id (last (event/events-for-session db sid-a))) i 1]
               (when (< i n)
-                (let [e (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                (let [e (event/append-event! db {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                                  :event/type :tool/invoke :prev/event-id prev-id :causal-links #{} :payload-ref nil :created-at now :metadata {:i i}})]
                   (recur (:event/id e) (inc i)))))
           events (event/events-for-session db sid-a)
@@ -143,7 +143,7 @@
   (prop/for-all [_ (gen/return nil)]
     (let [{:keys [db path]} (temp-db)
           now (Date.)
-          e1 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          e1 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                       :event/type :session/created :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {:secret "a"}})
           chain-before (:valid? (event/verify-event-chain db sid-a))]
       (try (do (sqlite/exec! db ["DROP TRIGGER IF EXISTS events_no_update"])

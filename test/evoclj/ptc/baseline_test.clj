@@ -30,7 +30,7 @@
     (let [h ((requiring-resolve 'evoclj.runtime.nodes.llm/llm-handler))
           runtime-state {:compiled {:resolution {:models {:planner {:provider-model "openai/gpt-4o-mini"}}}}
                          :session/id (random-uuid)
-                         :phenotype/id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                         :code/id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                          :node/id :n1
                          :event/id (random-uuid)
                          :outputs []}
@@ -68,7 +68,7 @@
     (let [h ((requiring-resolve 'evoclj.runtime.nodes.llm/llm-handler))
           runtime-state {:compiled {:resolution {:models {:planner {:provider-model "openai/gpt-4o-mini"}}}}
                          :session/id (random-uuid)
-                         :phenotype/id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                         :code/id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                          :node/id :n1
                          :event/id (random-uuid)
                          :outputs []}

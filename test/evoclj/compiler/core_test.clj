@@ -7,7 +7,7 @@
   compile-program-descriptor) into a pure CompiledGenome and derives
   the Phenotype ID. The Phenotype ID formula is normative:
 
-    phenotype-id = SHA256(kernel-abi || genome-id || resolution-id)
+    code-id = SHA256(kernel-abi || genome-id || resolution-id)
 
   where kernel-abi is the manifest's :abi map serialized canonically
   (sorted keys), genome-id and resolution-id are the canonical

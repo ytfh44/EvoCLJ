@@ -472,16 +472,16 @@
 ;; candidate/history paths.
 ;; ============================================================================
 
-(def ^:private mutator-phenotype-id
+(def ^:private mutator-code-id
   "The deterministic content-addressed subject the evolution adapters
   are attributed to (the same derivation as
   evoclj.kernel.system/build-model-call: sha256 of the
   \"evoclj/evolution\" prefix — here a fixed fixture digest)."
   (str "sha256:" (apply str (repeat 64 "e"))))
 
-(def ^:private sibling-phenotype-id
-  "A different phenotype id — a sibling from the same Genome is a
-  different subject and must NOT match a lease for mutator-phenotype-id
+(def ^:private sibling-code-id
+  "A different code id — a sibling from the same Genome is a
+  different subject and must NOT match a lease for mutator-code-id
   (Global Constraint 9)."
   (str "sha256:" (apply str (repeat 64 "f"))))
 
@@ -676,14 +676,14 @@
 
 (defn- tool-intent
   "A validated :intent/tool-call for one evolution retrieval tool,
-  attributed to `phenotype-id` in `session` (defaults to the
+  attributed to `code-id` in `session` (defaults to the
   mutator's session). Authorization keys on the session principal
   (I2): a lease binds ONE exact session, so the sibling subject
   dispatches under its own session and is denied."
-  ([phenotype-id tool-id args]
-   (tool-intent session-id phenotype-id tool-id args))
-  ([session phenotype-id tool-id args]
-   (intent/tool-call session phenotype-id :node/evolution 0
+  ([code-id tool-id args]
+   (tool-intent session-id code-id tool-id args))
+  ([session code-id tool-id args]
+   (intent/tool-call session code-id :node/evolution 0
                      {:tool/id tool-id :args args}
                      {:wall-ms 1000 :max-steps 1})))
 
@@ -730,10 +730,10 @@
           ctx (broker-context
                [(evo-tools/evidence-provider store)]
                [(evo-tools/evolution-tool-lease
-                 mutator-phenotype-id :evolution/evidence
+                 mutator-code-id :evolution/evidence
                  {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
-                  ctx (tool-intent mutator-phenotype-id :evolution/evidence
+                  ctx (tool-intent mutator-code-id :evolution/evidence
                                    {:evidence/id (:evidence/id pack)}))]
       (is (= :ok (:result/status result)))
       (is (= :allow (get-in result [:authorization :decision])))
@@ -753,10 +753,10 @@
           ctx (broker-context
                [(evo-tools/evidence-provider store)]
                [(evo-tools/evolution-tool-lease
-                 mutator-phenotype-id :evolution/evidence
+                 mutator-code-id :evolution/evidence
                  {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
-                  ctx (tool-intent mutator-phenotype-id :evolution/evidence
+                  ctx (tool-intent mutator-code-id :evolution/evidence
                                    {:candidate/id cid}))]
       (is (= :ok (:result/status result)))
       (is (= (:evidence/id pack) (get-in result [:value :evidence/id])))
@@ -770,10 +770,10 @@
           ctx (broker-context
                [(evo-tools/evidence-provider store)]
                [(evo-tools/evolution-tool-lease
-                 mutator-phenotype-id :evolution/evidence
+                 mutator-code-id :evolution/evidence
                  {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
-                  ctx (tool-intent mutator-phenotype-id :evolution/evidence
+                  ctx (tool-intent mutator-code-id :evolution/evidence
                                    {:candidate/id (uuid-of 99)}))]
       (is (= :ok (:result/status result)))
       (is (= {:found false :reason :candidate-not-found
@@ -790,10 +790,10 @@
           ctx (broker-context
                [(evo-tools/history-provider store)]
                [(evo-tools/evolution-tool-lease
-                 mutator-phenotype-id :evolution/history
+                 mutator-code-id :evolution/history
                  {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
-                  ctx (tool-intent mutator-phenotype-id :evolution/history
+                  ctx (tool-intent mutator-code-id :evolution/history
                                    {:generation-lineage ["generation-1"]}))]
       (is (= :ok (:result/status result)))
       (let [entries (:value result)]
@@ -807,10 +807,10 @@
             ctx (broker-context
                  [(evo-tools/history-provider store)]
                  [(evo-tools/evolution-tool-lease
-                   mutator-phenotype-id :evolution/history
+                   mutator-code-id :evolution/history
                    {:issued-at issued-at :expires-at expires-at :session/id session-id})])
             result (dispatch/dispatch!
-                    ctx (tool-intent mutator-phenotype-id :evolution/history
+                    ctx (tool-intent mutator-code-id :evolution/history
                                      {:generation-lineage ["generation-1"]
                                       :limit 2}))]
         (is (= :ok (:result/status result)))
@@ -825,10 +825,10 @@
           ctx (broker-context
                [(evo-tools/history-provider store)]
                [(evo-tools/evolution-tool-lease
-                 mutator-phenotype-id :evolution/history
+                 mutator-code-id :evolution/history
                  {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
-                  ctx (tool-intent mutator-phenotype-id :evolution/history
+                  ctx (tool-intent mutator-code-id :evolution/history
                                    {:generation-lineage ["generation-1"]}))]
       (is (= :ok (:result/status result)))
       (is (= 50 (count (:value result))))))
@@ -838,10 +838,10 @@
           ctx (broker-context
                [(evo-tools/history-provider store)]
                [(evo-tools/evolution-tool-lease
-                 mutator-phenotype-id :evolution/history
+                 mutator-code-id :evolution/history
                  {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
-                  ctx (tool-intent mutator-phenotype-id :evolution/history
+                  ctx (tool-intent mutator-code-id :evolution/history
                                    {:generation-lineage ["generation-1"]
                                     :limit 501}))]
       (is (= :error (:result/status result)))
@@ -857,10 +857,10 @@
           ctx (broker-context
                [(evo-tools/evidence-provider store)]
                [(evo-tools/evolution-tool-lease
-                 mutator-phenotype-id :evolution/evidence
+                 mutator-code-id :evolution/evidence
                  {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           result (dispatch/dispatch!
-                  ctx (tool-intent sibling-session-id sibling-phenotype-id :evolution/evidence
+                  ctx (tool-intent sibling-session-id sibling-code-id :evolution/evidence
                                    {:evidence/id placeholder-hash}))]
       (is (= :error (:result/status result)))
       (is (= :capability/denied (:error/type result)))
@@ -871,7 +871,7 @@
                [(evo-tools/history-provider store)]
                [])
           result (dispatch/dispatch!
-                  ctx (tool-intent mutator-phenotype-id :evolution/history
+                  ctx (tool-intent mutator-code-id :evolution/history
                                    {:generation-lineage ["generation-1"]}))]
       (is (= :error (:result/status result)))
       (is (= :capability/denied (:error/type result)))
@@ -891,20 +891,20 @@
                [(evo-tools/evidence-provider store)
                 (evo-tools/history-provider store)]
                [(evo-tools/evolution-tool-lease
-                 mutator-phenotype-id :evolution/evidence
+                 mutator-code-id :evolution/evidence
                  {:issued-at issued-at :expires-at expires-at :session/id session-id})
                 (evo-tools/evolution-tool-lease
-                 mutator-phenotype-id :evolution/history
+                 mutator-code-id :evolution/history
                  {:issued-at issued-at :expires-at expires-at :session/id session-id})])
           before (store-snapshot store)
           _ (dispatch/dispatch!
-             ctx (tool-intent mutator-phenotype-id :evolution/evidence
+             ctx (tool-intent mutator-code-id :evolution/evidence
                               {:evidence/id (:evidence/id pack)}))
           _ (dispatch/dispatch!
-             ctx (tool-intent mutator-phenotype-id :evolution/evidence
+             ctx (tool-intent mutator-code-id :evolution/evidence
                               {:candidate/id (uuid-of 92)}))
           _ (dispatch/dispatch!
-             ctx (tool-intent mutator-phenotype-id :evolution/history
+             ctx (tool-intent mutator-code-id :evolution/history
                               {:generation-lineage ["generation-1"]}))
           after (store-snapshot store)]
       (is (= :pure (:effect evo-tools/evidence-tool-descriptor)))

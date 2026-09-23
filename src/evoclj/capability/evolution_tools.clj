@@ -330,12 +330,12 @@
   against. Principal equality is identity (I2): only the exact principal
   matches.
 
-  Required: principal (Principal tagged union) or legacy phenotype-id+session opts,
+  Required: principal (Principal tagged union) or legacy code-id+session opts,
   tool-id (keyword).
   Optional opts: :cap-id (default a fresh uuid), :issued-at (default
   now), :expires-at (default one hour after :issued-at), :constraints
   (default {}), :registry (optional LeaseRegistry atom), :principal
-  (Principal), legacy :session/id + phenotype-id.
+  (Principal), legacy :session/id + code-id.
 
   Delegates to evoclj.capability.mint/mint-lease! (P2 single issuance
   surface)."
@@ -353,8 +353,8 @@
                     ;; Explicit :principal in opts overrides
                     (:principal opts) (:principal opts)
                     (get opts :principal) (get opts :principal)
-                    ;; Legacy: principal-or-phenotype is phenotype-id string, opts carries :session/id
-                    :else (let [phenotype-id principal-or-phenotype
+                    ;; Legacy: principal-or-phenotype is code-id string, opts carries :session/id
+                    :else (let [code-id principal-or-phenotype
                                 session-id (or (:session/id opts) (:session-id opts) (:principal/session-id opts))]
                             (if session-id
                               {:principal/type :session :session/id session-id}
@@ -374,7 +374,7 @@
   evolution retrieval leases for ONE principal, so the mutator can
   retrieve evidence and history through the broker. Optional opts are
   forwarded to evolution-tool-lease (including :registry). Principal may be
-  a Principal map or legacy phenotype-id with :session/id in opts."
+  a Principal map or legacy code-id with :session/id in opts."
   [principal & [opts]]
   (mapv #(evolution-tool-lease principal % opts)
         [evidence-tool-id history-tool-id]))

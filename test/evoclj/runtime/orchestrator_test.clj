@@ -18,7 +18,7 @@
 (def ^:private hex64 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 (def ^:private genome-id (str "sha256:" hex64))
 (def ^:private resolution-id (str "sha256:" (apply str (repeat 64 "c"))))
-(def ^:private phenotype-id (str "sha256:" (apply str (repeat 64 "b"))))
+(def ^:private code-id (str "sha256:" (apply str (repeat 64 "b"))))
 (def ^:private generation-id "generation-1")
 (def ^:private temp-paths (atom []))
 (defn- temp-db-path [] (let [p (str (Files/createTempFile "orch-test-db" ".sqlite" (make-array FileAttribute 0)))] (swap! temp-paths conj p) p))
@@ -36,15 +36,15 @@
     (migrate/migrate! db)
     (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
     (artifact/ensure-artifact! db resolution-id "application/edn" 0)
-    (artifact/ensure-artifact! db phenotype-id "application/edn" 0)
+    (artifact/ensure-artifact! db code-id "application/edn" 0)
     (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations {:id generation-id :genome_id genome-id :resolution_id resolution-id :parent_id nil :state "active" :current 0 :created_at "2025-01-01T00:00:00Z"}))
     db))
 (defn- fresh-cas [] (cas/->cas (temp-cas-dir)))
 (defn- create-pinned-session [db]
-  (let [sid (:session/id (session/create-session! db {:genome/id genome-id :resolution/id resolution-id :phenotype/id phenotype-id :generation/id generation-id}))]
-    (event/append-event! db {:session/id sid :generation/id generation-id :phenotype/id phenotype-id :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
+  (let [sid (:session/id (session/create-session! db {:genome/id genome-id :resolution/id resolution-id :code/id code-id :generation/id generation-id}))]
+    (event/append-event! db {:session/id sid :generation/id generation-id :code/id code-id :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
     sid))
 
 (deftest four-round-behavior-default-is-4
@@ -58,8 +58,8 @@
           chain-nodes {:n0 {:node/type :tool :tool :fixture/echo :next :n1}
                        :n1 {:node/type :tool :tool :fixture/echo :next :n2}
                        :n2 {:node/type :emit}}
-          executor {:phenotype {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-id
-                                :compiled {:compiled/genome-id genome-id :compiled/resolution-id resolution-id :compiled/phenotype-id phenotype-id
+          executor {:phenotype {:session/id #uuid "00000000-0000-4000-a000-000000000000" :code/id code-id
+                                :compiled {:compiled/genome-id genome-id :compiled/resolution-id resolution-id :compiled/code-id code-id
                                            :topology {:entry :n0 :nodes chain-nodes :limits {:max-steps 1}}}}
                     :stores {:sqlite db :cas cas-root}
                     :dispatch {:leases [] :catalog {}}}
@@ -75,8 +75,8 @@
   (testing "model requesting an unknown tool fails the session"
     (let [db (fresh-db) cas-root (fresh-cas)
           model-call-count (atom 0) tool-call-count (atom 0)
-          executor {:phenotype {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-id
-                                :compiled {:compiled/genome-id genome-id :compiled/resolution-id resolution-id :compiled/phenotype-id phenotype-id
+          executor {:phenotype {:session/id #uuid "00000000-0000-4000-a000-000000000000" :code/id code-id
+                                :compiled {:compiled/genome-id genome-id :compiled/resolution-id resolution-id :compiled/code-id code-id
                                            :topology {:entry :llm :nodes {:llm {:node/type :llm :model/id "fake/model" :tools [{:tool/id :echo-tool :name "echo_tool"}] :next :done} :done {:node/type :emit}} :limits {:max-steps 64}}}}
                     :stores {:sqlite db :cas cas-root}
                     :dispatch {:leases [] :catalog {}}}
@@ -97,15 +97,15 @@
   (testing "payload :options :max-tool-rounds 2 limits the tool loop to 2 rounds"
     (let [db (fresh-db) cas-root (fresh-cas)
           model-calls (atom 0) tool-calls (atom 0)
-          executor {:phenotype {:session/id #uuid "00000000-0000-4000-a000-000000000000" :phenotype/id phenotype-id
-                                :compiled {:compiled/genome-id genome-id :compiled/resolution-id resolution-id :compiled/phenotype-id phenotype-id
+          executor {:phenotype {:session/id #uuid "00000000-0000-4000-a000-000000000000" :code/id code-id
+                                :compiled {:compiled/genome-id genome-id :compiled/resolution-id resolution-id :compiled/code-id code-id
                                            :topology {:entry :llm :nodes {:llm {:node/type :llm :model/id "fake/model"}} :limits {:max-steps 64}}}}
                     :stores {:sqlite db :cas cas-root}
                     :dispatch {:leases [] :catalog {}}}
           sid (create-pinned-session db)
-          intent {:intent/id (str (random-uuid)) :intent/type :intent/model-call :session/id sid :phenotype/id phenotype-id :node/id :llm :budget {:wall-ms 1000}
+          intent {:intent/id (str (random-uuid)) :intent/type :intent/model-call :session/id sid :code/id code-id :node/id :llm :budget {:wall-ms 1000}
                   :payload {:base/messages [{:role :user :content "hi"}] :messages [{:role :user :content "hi"}] :tools [{:name "echo_tool" :tool :echo-tool}] :requested-tools [{:tool/id :echo-tool :name "echo_tool"}] :model/id "fake/model" :options {:max-tool-rounds 2}}}
-          _ (event/append-event! db {:session/id sid :generation/id generation-id :phenotype/id phenotype-id :event/type :session/started :prev/event-id (:event/id (first (event/events-for-session db sid))) :payload-ref nil :metadata {}})
+          _ (event/append-event! db {:session/id sid :generation/id generation-id :code/id code-id :event/type :session/started :prev/event-id (:event/id (first (event/events-for-session db sid))) :payload-ref nil :metadata {}})
           pin2 (session/get-session db sid)
           cause-id (:event/id (last (event/events-for-session db sid)))
           orch (sut/->TraditionalOrchestrator)]
@@ -135,7 +135,7 @@
           intent {:intent/id "late-intent"
                   :intent/type :intent/tool-call
                   :session/id sid
-                  :phenotype/id phenotype-id
+                  :code/id code-id
                   :node/id :tool
                   :metadata {:idempotency/key "late-key"}
                   :payload {:tool/id :fixture/echo
@@ -149,7 +149,7 @@
                                    db
                                    {:session/id sid
                                     :generation/id generation-id
-                                    :phenotype/id phenotype-id
+                                    :code/id code-id
                                     :event/type :provider/call-ambiguous
                                     :prev/event-id (:event/id tip)
                                     :payload-ref nil
@@ -184,7 +184,7 @@
           intent {:intent/id "projection-intent"
                   :intent/type :intent/model-call
                   :session/id sid
-                  :phenotype/id phenotype-id
+                  :code/id code-id
                   :node/id :llm
                   :budget {:wall-ms 1000}
                   :payload {:model/id "fake/model"
@@ -230,7 +230,7 @@
           intent {:intent/id "codemode-projection-intent"
                   :intent/type :intent/model-call
                   :session/id sid
-                  :phenotype/id phenotype-id
+                  :code/id code-id
                   :node/id :llm
                   :budget {:wall-ms 1000}
                   :payload {:model/id "fake/model"

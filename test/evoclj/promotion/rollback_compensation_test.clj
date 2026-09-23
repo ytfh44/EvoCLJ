@@ -9,15 +9,15 @@
   "Minimal event constructor: type, generation, and a few identifying
   fields. Missing fields stay absent so we also exercise fail-soft nil
   filling."
-  [type generation-id & {:keys [session-id phenotype-id intent-id timestamp]
+  [type generation-id & {:keys [session-id code-id intent-id timestamp]
                          :or   {session-id   (java.util.UUID/randomUUID)
-                                phenotype-id "ART-1"
+                                code-id "ART-1"
                                 intent-id    "INT-1"
                                 timestamp    "2024-01-01T00:00:00Z"}}]
   (cond-> {:event/type   type
            :generation/id generation-id}
     true        (assoc :session/id session-id)
-    true        (assoc :phenotype/id phenotype-id)
+    true        (assoc :code/id code-id)
     true        (assoc :intent/id intent-id)
     timestamp   (assoc :timestamp timestamp)))
 
@@ -48,17 +48,17 @@
     (is (= 3 (:count m)))
     (is (= [{:event/type   :intent/invoked
              :session/id   (:session/id e1)
-             :phenotype/id "ART-1"
+             :code/id "ART-1"
              :intent/id    "INT-1"
              :timestamp    "t1"}
             {:event/type   :memory/write
              :session/id   (:session/id e2)
-             :phenotype/id "ART-1"
+             :code/id "ART-1"
              :intent/id    "INT-2"
              :timestamp    "t2"}
             {:event/type   :effect/emitted
              :session/id   (:session/id e3)
-             :phenotype/id "ART-1"
+             :code/id "ART-1"
              :intent/id    "INT-3"
              :timestamp    "t3"}]
            (:effects m)))))
@@ -74,12 +74,12 @@
         m (rc/compensation-manifest gen [keep-1 drop-1 keep-2 drop-2])
         expected-1 {:event/type   :intent/invoked
                     :session/id   (:session/id keep-1)
-                    :phenotype/id "ART-1"
+                    :code/id "ART-1"
                     :intent/id    "K1"
                     :timestamp    "2024-01-01T00:00:00Z"}
         expected-2 {:event/type   :memory/write
                     :session/id   nil
-                    :phenotype/id "ART-1"
+                    :code/id "ART-1"
                     :intent/id    "K2"
                     :timestamp    nil}]
     (is (= 2 (:count m)))
@@ -88,5 +88,5 @@
       (let [last-effect (second (:effects m))]
         (is (nil? (:session/id last-effect)))
         (is (nil? (:timestamp last-effect)))
-        (is (= "ART-1" (:phenotype/id last-effect)))
+        (is (= "ART-1" (:code/id last-effect)))
         (is (= "K2" (:intent/id last-effect)))))))

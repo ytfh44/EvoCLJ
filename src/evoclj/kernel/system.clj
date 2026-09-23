@@ -506,8 +506,8 @@
   Attribution is kernel-deterministic (Global Constraint 20 — every
   externally visible effect is auditable, never random):
     - a fixed session id over \"evoclj/evolution/session\";
-    - a deterministic content-addressed phenotype id derived from
-      \"evoclj/evolution\" (satisfies the intent PhenotypeIdSchema);
+    - a deterministic content-addressed code id derived from
+      \"evoclj/evolution\" (satisfies the intent CodeIdSchema);
     - the :node/evolution node and a 0 cause/event-id.
 
   Contract (returned to the adapters): the dispatch result when
@@ -517,7 +517,7 @@
   [dispatch-context model-registry model-lease prefix]
   (let [session-id (UUID/nameUUIDFromBytes
                     (.getBytes (str prefix "/session") StandardCharsets/UTF_8))
-        phenotype-id (hash/text-digest prefix)
+        code-id (hash/text-digest prefix)
         local-ctx (assoc dispatch-context
                          :model-registry model-registry
                          :leases (if model-lease
@@ -525,7 +525,7 @@
                                    (:leases dispatch-context)))]
     (fn [model-id messages options]
       (let [intent (intent-core/model-call
-                    session-id phenotype-id :node/evolution 0
+                    session-id code-id :node/evolution 0
                     {:model/id model-id
                      :messages messages
                      :options options}

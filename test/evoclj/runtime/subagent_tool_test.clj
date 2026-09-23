@@ -64,7 +64,7 @@
              (catch Exception _))))
     db))
 
- (defn- parent-lease [session-id phenotype-id actions]
+ (defn- parent-lease [session-id code-id actions]
   (mint/mint-lease! nil {:principal {:principal/type :session :session/id session-id}
                          :resource {:kind :tool :id :fixture/echo}
                          :actions actions
@@ -102,12 +102,12 @@
   ([db identity]
    (let [sess (session/create-session! db {:genome/id (:genome/id identity)
                                            :resolution/id (:resolution/id identity)
-                                           :phenotype/id (:code/id identity)
+                                           :code/id (:code/id identity)
                                            :generation/id gen})
          sid (:session/id sess)]
      (event/append-event! db {:session/id sid
                               :generation/id gen
-                              :phenotype/id (:code/id identity)
+                              :code/id (:code/id identity)
                               :event/type :session/created
                               :prev/event-id nil
                               :payload-ref nil
@@ -217,7 +217,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/tool-call
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:tool/id :agent/spawn
@@ -249,7 +249,7 @@
             status-intent {:intent/id (random-uuid)
                            :intent/type :intent/tool-call
                            :session/id parent-id
-                           :phenotype/id phenotype
+                           :code/id phenotype
                            :node/id :node/tool
                            :cause/event-id cause2
                            :payload {:tool/id :agent/status
@@ -274,7 +274,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/subagent-spawn
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:parent/session-id parent-id
@@ -317,7 +317,7 @@
                   intent {:intent/id (random-uuid)
                           :intent/type :intent/tool-call
                           :session/id parent-id
-                          :phenotype/id phenotype
+                          :code/id phenotype
                           :node/id :node/tool
                           :cause/event-id cause-id
                           :payload {:tool/id :agent/spawn :args {:task "too-deep via tool"}}
@@ -352,7 +352,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/tool-call
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:tool/id :agent/spawn :args {:task "no lease"}}
@@ -375,7 +375,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/tool-call
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:tool/id :agent/spawn :args {:task "wrong lease"}}
@@ -396,7 +396,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/tool-call
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:tool/id :agent/spawn :args {:task "no provider"}}
@@ -420,7 +420,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/subagent-spawn
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:parent/session-id (random-uuid)
@@ -442,7 +442,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/subagent-spawn
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:parent/session-id parent-id
@@ -465,7 +465,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/subagent-spawn
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:parent/session-id parent-id
@@ -487,7 +487,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/subagent-spawn
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:parent/session-id parent-id
@@ -529,7 +529,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/subagent-result
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:parent/session-id parent-id
@@ -561,7 +561,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/subagent-result
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:parent/session-id parent-id
@@ -582,7 +582,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/subagent-cancel
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:target/session-id session-id
@@ -606,7 +606,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/subagent-cancel
                   :session/id outsider-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:target/session-id session-id
@@ -640,7 +640,7 @@
                      {:intent/id (random-uuid)
                       :intent/type :intent/tool-call
                       :session/id requester
-                      :phenotype/id phenotype
+                      :code/id phenotype
                       :node/id :node/tool
                       :cause/event-id cause-id
                       :payload {:tool/id :agent/status
@@ -676,7 +676,7 @@
                      (dispatch/dispatch! ctx {:intent/id (random-uuid)
                                               :intent/type :intent/subagent-cancel
                                               :session/id parent-id
-                                              :phenotype/id phenotype
+                                              :code/id phenotype
                                               :node/id :node/tool
                                               :cause/event-id cause-id
                                               :payload payload
@@ -715,7 +715,7 @@
                    (dispatch/dispatch! ctx {:intent/id (random-uuid)
                                             :intent/type :intent/tool-call
                                             :session/id requester
-                                            :phenotype/id phenotype
+                                            :code/id phenotype
                                             :node/id :node/tool
                                             :cause/event-id cause-id
                                             :payload {:tool/id :agent/cancel :args args}

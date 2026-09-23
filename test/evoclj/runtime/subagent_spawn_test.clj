@@ -55,7 +55,7 @@
              (catch Exception _))))
     db))
 
-(defn- parent-lease [session-id phenotype-id actions]
+(defn- parent-lease [session-id code-id actions]
   (mint/mint-lease! nil {:principal {:principal/type :session :session/id session-id}
                          :resource {:kind :tool :id :fixture/echo}
                          :actions actions
@@ -64,11 +64,11 @@
                          :expires-at expires-at}))
 
 (defn- create-parent-session! [db]
-  (let [sess (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen})
+  (let [sess (session/create-session! db {:genome/id genome :resolution/id resolution :code/id phenotype :generation/id gen})
         sid (:session/id sess)]
     (event/append-event! db {:session/id sid
                              :generation/id gen
-                             :phenotype/id phenotype
+                             :code/id phenotype
                              :event/type :session/created
                              :prev/event-id nil
                              :payload-ref nil
@@ -85,7 +85,7 @@
 ;; ===========================================================================
 
 (deftest spawn-creates-child-session-with-parent-link
-  (testing "spawn creates child row pinned to parent genome/resolution/phenotype and records parent link"
+  (testing "spawn creates child row pinned to parent genome/resolution/code-image and records parent link"
     (let [db (fresh-db)
           parent (create-parent-session! db)
           parent-id (:session/id parent)
@@ -98,7 +98,7 @@
         (is (not (contains? child-sess :state)) "session row has no lifecycle state")
       (is (= genome (:genome/id child-sess)) "same genome as parent")
       (is (= resolution (:resolution/id child-sess)) "same resolution as parent")
-      (is (= phenotype (:phenotype/id child-sess)) "same phenotype as parent")
+      (is (= phenotype (:code/id child-sess)) "same phenotype as parent")
       (is (= gen (:generation/id child-sess)) "same generation as parent")
       (is (= parent-id (work-store/get-parent-session-id db child-id)) "parent link stored")
       (is (= [child-id] (work-store/child-session-ids db parent-id)) "child appears in parent's children")
@@ -187,7 +187,7 @@
           intent {:intent/id (random-uuid)
                   :intent/type :intent/subagent-spawn
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:parent/session-id parent-id
@@ -223,7 +223,7 @@
             intent {:intent/id (random-uuid)
                     :intent/type :intent/tool-call
                     :session/id sid
-                    :phenotype/id phenotype
+                    :code/id phenotype
                     :node/id :node/tool
                     :cause/event-id 1
                     :payload {:tool/id :fixture/echo :args {:text "hello"}}

@@ -907,7 +907,7 @@
        store
        {:session/id (:session/id ctx)
         :generation/id (:generation/id ctx)
-        :phenotype/id (:phenotype/id ctx)
+        :code/id (:code/id ctx)
         :event/type :mcp/progress
         :prev/event-id (:prev/event-id ctx)
         :payload-ref nil

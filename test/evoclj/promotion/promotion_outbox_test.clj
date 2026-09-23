@@ -110,8 +110,8 @@
   evaluation-id)
 
 (defn- operator-session! [db]
-  (let [sid (:session/id (session/create-session! db {:genome/id parent-genome :resolution/id parent-resolution :phenotype/id phenotype :generation/id seed-gen}))]
-    (event/append-event! db {:session/id sid :generation/id seed-gen :phenotype/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
+  (let [sid (:session/id (session/create-session! db {:genome/id parent-genome :resolution/id parent-resolution :code/id phenotype :generation/id seed-gen}))]
+    (event/append-event! db {:session/id sid :generation/id seed-gen :code/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
     sid))
 
 (defn- promotion-fixture

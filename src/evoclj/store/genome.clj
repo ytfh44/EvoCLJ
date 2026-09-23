@@ -42,13 +42,12 @@
   - Writes bundle EDN to CAS (media-type application/edn)
   - Registers the artifact row for the bundle
   - Upserts meta key genome:bundle:<gid> -> bundle-cas-address
-  - Ensures artifact rows for genome-id, resolution-id, phenotype-id
+  - Ensures artifact rows for genome-id, resolution-id, code-id
   - Ensures genome row for genome-id"
   [cas-store db loaded-for-exec provider-catalog]
   (let [gid (:genome/id loaded-for-exec)
         rid (:resolution/id loaded-for-exec)
-        pid (or (:phenotype/id loaded-for-exec)
-                (:code/id loaded-for-exec))
+        pid (:code/id loaded-for-exec)
         body (.getBytes (pr-str {:catalog provider-catalog
                                  :loaded (-> loaded-for-exec
                                              (dissoc :genome/root :genome/id))})

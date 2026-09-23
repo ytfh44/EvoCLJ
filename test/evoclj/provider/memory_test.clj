@@ -42,7 +42,7 @@
   {:intent/id (random-uuid)
    :intent/type :intent/memory-read
    :session/id session
-   :phenotype/id "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+   :code/id "sha256:0000000000000000000000000000000000000000000000000000000000000000"
    :node/id :node/mem
    :cause/event-id 1
    :payload (cond-> {:memory/key key}
@@ -54,7 +54,7 @@
   {:intent/id (random-uuid)
    :intent/type :intent/memory-write
    :session/id session
-   :phenotype/id "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+   :code/id "sha256:0000000000000000000000000000000000000000000000000000000000000000"
    :node/id :node/mem
    :cause/event-id 1
    :payload {:memory/key key :memory/content content}

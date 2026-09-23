@@ -112,7 +112,7 @@
   [decision]
   (merge {:genome/id genome
           :resolution/id resolution
-          :phenotype/id phenotype}
+          :code/id phenotype}
          (select-keys decision [:generation/id :routing])))
 
 (defn- error-type

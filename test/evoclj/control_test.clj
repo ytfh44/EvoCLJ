@@ -71,7 +71,7 @@
   [db sid]
   (event/append-event! db {:session/id sid
                            :generation/id generation
-                           :phenotype/id phenotype
+                           :code/id phenotype
                            :event/type :session/created
                            :prev/event-id nil
                            :causal-links #{}
@@ -95,7 +95,7 @@
    db
    {:session/id target
     :generation/id generation
-    :phenotype/id phenotype
+    :code/id phenotype
     :prev/event-id (:event/id root)
     :causal-links #{}}
    req))

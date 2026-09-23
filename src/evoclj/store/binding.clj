@@ -4,9 +4,9 @@
   A session binding pins a logical identifier (e.g. [:skill \"debugging\"])
   to an exact immutable bundle revision for the lifetime of the session,
   until an explicit reload moves it to a new revision. Bindings are
-  runtime environment — they never touch PhenotypeID or Resolution
+  runtime environment — they never touch CodeImageId or Resolution
   (stored in generations/sessions) and installing an unused Skill does
-  not change PhenotypeID.
+  not change CodeImageId.
 
   Refresh vs reload (normative):
   - refresh changes the registry's current revision (the catalog
@@ -60,14 +60,14 @@
   - WO-B4: when the caller supplies a filesystem lease (`:fs-lease`,
     plus an optional `:fs-lease-registry` atom for revocation/recording
     checks), activate!/reload!/restore! RE-verify it fail-closed against
-    the session's pinned phenotype BEFORE any runtime state is
+    the session's pinned code image BEFORE any runtime state is
     published — a stale/expired/revoked lease is rejected with a typed
     error, never silently honored. Without an `:fs-lease` the engine
     grants no filesystem access (no lease, no grant).
 
   Phenotype invariant: this namespace never reads or writes
   generations.genome_id, generations.resolution_id or sessions.phenotype_id
-  except to fetch the session's pinned generation/phenotype for the
+  except to fetch the session's pinned generation/code-image for the
   event's causal chain; it never mutates them."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
@@ -303,7 +303,7 @@
 
 (defn- append-binding-event!
   "Append an auditable binding event (:binding/activated, :binding/reloaded, :binding/deactivated).
-  Uses the session's pinned generation/phenotype and chains to the latest event.
+  Uses the session's pinned generation/code-image and chains to the latest event.
 
   Why retry (not deny) on a lost tip race: concurrent binding lifecycle
   intents for DISTINCT logical-ids are independent — event order between
@@ -329,7 +329,7 @@
                             {:session/id sid :event/type event-type})))
         (let [req {:session/id sid
                    :generation/id generation_id
-                   :phenotype/id phenotype_id
+                   :code/id phenotype_id
                    :event/type event-type
                    :prev/event-id cause
                    :payload-ref nil
@@ -805,7 +805,7 @@
     :mount-registry — atom map mount-id -> mount
     :context-store  — atom from evoclj.context.binding/create-store
     :fs-lease       — optional filesystem CapabilityLease (B4): RE-verified
-                      fail-closed against the session's pinned phenotype
+                      fail-closed against the session's pinned code image
                       before any runtime state is published
     :fs-lease-registry — optional atom from
                       evoclj.mount.filesystem/create-lease-registry for
@@ -842,7 +842,7 @@
      (validate-bundle-exists bundle registry cas-handle)
      (validate-sibling-surfaces bundle)
      ;; B4: if the caller granted a filesystem lease, RE-verify it
-     ;; fail-closed against the session's pinned phenotype before any
+     ;; fail-closed against the session's pinned code image before any
      ;; runtime state is published.
      (verify-binding-fs-lease! db session-id (:fs-lease opts) opts)
      (let [id (try
@@ -1072,7 +1072,7 @@
                       bindings)]
     ;; ---- phase 1: verify EVERYTHING before publishing ANYTHING ----
     ;; B4: if the caller granted a filesystem lease, RE-verify it once
-    ;; fail-closed against the session's pinned phenotype before any
+    ;; fail-closed against the session's pinned code image before any
     ;; binding is republished (a stale/expired/revoked lease aborts the
     ;; restore rather than being silently honored).
     (verify-binding-fs-lease! db session-id (:fs-lease opts) opts)

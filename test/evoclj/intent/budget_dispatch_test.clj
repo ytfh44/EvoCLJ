@@ -9,7 +9,7 @@
             [evoclj.store.sqlite :as sqlite]))
 
 (def ^:private session-id #uuid "11111111-1111-4111-8111-111111111111")
-(def ^:private phenotype-id
+(def ^:private code-id
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 (def ^:private cap-id #uuid "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 (def ^:private issued-at (java.util.Date. 0))
@@ -53,7 +53,7 @@
                                            :usage (atom {})
                                            :now (constantly (java.util.Date. 1700000000000))
                                            :db db})
-        make-intent #(intent/tool-call session-id phenotype-id :node/tool 42
+        make-intent #(intent/tool-call session-id code-id :node/tool 42
                                        {:tool/id :fixture/echo :args {:text "hi"}}
                                        {:wall-ms 1000})
         first-result (dispatch/dispatch! ctx (make-intent))

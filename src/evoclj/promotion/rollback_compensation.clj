@@ -40,7 +40,7 @@
   "The projection of each matching event we surface in the manifest.
   `:timestamp` falls back to `:created-at` when the canonical `:timestamp`
   key is absent (defensive, fail-soft)."
-  [:event/type :session/id :phenotype/id :intent/id :timestamp])
+  [:event/type :session/id :code/id :intent/id :timestamp])
 
 ;; --- helpers -----------------------------------------------------------------
 
@@ -58,7 +58,7 @@
   [event]
   {:event/type  (:event/type event)
    :session/id  (:session/id event)
-   :phenotype/id (:phenotype/id event)
+   :code/id (:code/id event)
    :intent/id   (:intent/id event)
    :timestamp   (or (:timestamp event) (:created-at event))})
 
@@ -70,7 +70,7 @@
 
   Returns a map:
     {:generation/id <str>
-     :effects      [{:event/type ... :session/id ... :phenotype/id ...
+     :effects      [{:event/type ... :session/id ... :code/id ...
                      :intent/id ... :timestamp ...} ...]
      :count        <int>}
 

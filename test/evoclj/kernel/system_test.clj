@@ -145,7 +145,7 @@
                            {:generation/id "generation-1"
                             :genome/id sha256-id
                             :resolution/id sha256-id
-                            :phenotype/id sha256-id}))
+                            :code/id sha256-id}))
 
 ;; ============================================================================
 ;; Step 1 — init/halt with temporary DB/CAS

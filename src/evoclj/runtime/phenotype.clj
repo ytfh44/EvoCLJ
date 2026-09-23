@@ -27,7 +27,7 @@
   ;;     :stores ...}
 
   PhenotypeId legacy alias is removed (I1 break compat). The old
-  :phenotype/id and :compiled/phenotype-id keys are no longer emitted
+  :code/id and :compiled/code-id keys are no longer emitted
   or accepted.
 
   THE PHENOTYPE OWNS ONE THING: its isolated SCI runtime. instantiate
@@ -94,7 +94,7 @@
   "Validate the CompiledGenome trust boundary: a map carrying a
   canonical :code/id (CodeImageId) and a :programs map. Every failure
   throws :runtime/invalid-compiled with a distinguishing :reason.
-  Legacy :compiled/phenotype-id is no longer accepted (I1 break compat)."
+  Legacy :compiled/code-id is no longer accepted (I1 break compat)."
   [compiled-genome]
   (when-not (map? compiled-genome)
     (throw (err/error :runtime/invalid-compiled
@@ -254,7 +254,7 @@
   code data while owning independent SCI contexts and distinct
   DeploymentIds when configured with different leases or bindings.
   Constraints 3, 22, 23.
-  PhenotypeId legacy alias (:phenotype/id, :compiled/phenotype-id) is removed.
+  PhenotypeId legacy alias (:code/id, :compiled/code-id) is removed.
 
   Throws ExceptionInfo with a stable :error/type:
   :runtime/invalid-compiled, :runtime/deps-invalid, or

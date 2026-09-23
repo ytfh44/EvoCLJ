@@ -49,7 +49,7 @@
                          :remote-effect :filesystem-read}]})
             intent {:intent/id #uuid "00000000-0000-0000-0000-000000000001"
                     :intent/type :intent/tool-call
-                    :phenotype/id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    :code/id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     :session/id #uuid "00000000-0000-0000-0000-000000000002"
                     :node/id :node/tool :cause/event-id 1
                     :payload {:tool/id :mcp/read_file :args {:path "/etc/shadow"}}

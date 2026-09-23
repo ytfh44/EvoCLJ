@@ -61,11 +61,11 @@
                          :expires-at expires-at}))
 
 (defn- create-parent-session! [db]
-  (let [sess (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen})
+  (let [sess (session/create-session! db {:genome/id genome :resolution/id resolution :code/id phenotype :generation/id gen})
         sid (:session/id sess)]
     (event/append-event! db {:session/id sid
                              :generation/id gen
-                             :phenotype/id phenotype
+                             :code/id phenotype
                              :event/type :session/created
                              :prev/event-id nil
                              :payload-ref nil
@@ -144,7 +144,7 @@
           intent {:intent/id (UUID/randomUUID)
                   :intent/type :intent/tool-call
                   :session/id parent-id
-                  :phenotype/id phenotype
+                  :code/id phenotype
                   :node/id :node/tool
                   :cause/event-id cause-id
                   :payload {:tool/id :agent/spawn

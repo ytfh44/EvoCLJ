@@ -50,7 +50,7 @@
   [:map {:closed true}
    [:session/id [:fn types/session-id?]]
    [:generation/id string?]
-   [:phenotype/id [:fn types/artifact-id?]]
+   [:code/id [:fn types/artifact-id?]]
    [:prev/event-id [:maybe pos-int?]]
    [:causal-links {:optional true} [:set event-schema/CausalLinkSchema]]
    [:control ControlRequestSchema]])

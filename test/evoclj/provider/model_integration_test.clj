@@ -73,7 +73,7 @@
 
 (def ^:private session-id #uuid "00000000-0000-4000-a000-000000000000")
 
-(defn- phenotype-id
+(defn- code-id
   []
   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 
@@ -131,7 +131,7 @@
                           :issued-at (java.util.Date. 0)
                           :expires-at (java.util.Date. 9999999999999)}]})
           i (intent/model-call
-             session-id (phenotype-id) :node/planner 7
+             session-id (code-id) :node/planner 7
              {:model/id "deepseek/deepseek-v4-flash"
               :messages [{:role :user :content "hello"}]}
              {:wall-ms 5000})
@@ -149,7 +149,7 @@
           ctx (dispatch/make-broker-context
                {:registry (atom {}) :model-registry model-reg})
           i (intent/model-call
-             (java.util.UUID/randomUUID) (phenotype-id) :node/planner 7
+             (java.util.UUID/randomUUID) (code-id) :node/planner 7
              {:model/id "deepseek/deepseek-v4-flash"
               :messages [{:role :user :content "hello"}]}
              {:wall-ms 5000})
@@ -163,7 +163,7 @@
           ctx (dispatch/make-broker-context
                {:registry (atom {}) :model-registry model-reg})
           i (intent/model-call
-             (java.util.UUID/randomUUID) (phenotype-id) :node/planner 7
+             (java.util.UUID/randomUUID) (code-id) :node/planner 7
              {:model/id "deepseek/deepseek-v4-flash"
               :messages [{:role :user :content "hello"}]}
              {:wall-ms 5000})
@@ -175,7 +175,7 @@
   (testing "the handler resolves the alias via the compiled resolution"
     (let [handler (llm/llm-handler)
           runtime-state {:session/id (java.util.UUID/randomUUID)
-                         :phenotype/id (phenotype-id)
+                         :code/id (code-id)
                          :node/id :node/planner
                          :outputs []
                          :compiled {:resolution {:models {:planner {:alias :reasoning/high
@@ -195,7 +195,7 @@
   (testing "unresolved alias fails closed"
     (let [handler (llm/llm-handler)
           runtime-state {:session/id (java.util.UUID/randomUUID)
-                         :phenotype/id (phenotype-id)
+                         :code/id (code-id)
                          :node/id :node/planner
                          :outputs []
                          :compiled {:resolution {:models {}}}}

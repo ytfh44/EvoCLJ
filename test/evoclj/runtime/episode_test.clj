@@ -61,7 +61,7 @@
 
 (def ^:private genome-id (str "sha256:" hex64))
 (def ^:private resolution-id (str "sha256:" (apply str (repeat 64 "c"))))
-(def ^:private phenotype-id (str "sha256:" (apply str (repeat 64 "b"))))
+(def ^:private code-id (str "sha256:" (apply str (repeat 64 "b"))))
 (def ^:private generation-id "generation-1")
 
 ;; --- temp stores ------------------------------------------------------------
@@ -107,7 +107,7 @@
     (doseq [[artifact-id media-type]
             [[genome-id "application/octet-stream"]
              [resolution-id "application/edn"]
-             [phenotype-id "application/edn"]]]
+             [code-id "application/edn"]]]
       (artifact/ensure-artifact! db artifact-id media-type 0))
     (artifact/ensure-genome! db genome-id)
     (sqlite/with-db [conn db]
@@ -148,13 +148,12 @@
   "A minimal CompiledGenome value carrying a custom executable
   topology — constructed directly (see the scheduler-test docstring)."
   [fixture-topology]
-  {:code/id phenotype-id
+  {:code/id code-id
    :code/genome-id genome-id
    :code/resolution-id resolution-id
-   :compiled/code-id phenotype-id
+   :compiled/code-id code-id
    :compiled/genome-id genome-id
    :compiled/resolution-id resolution-id
-   :compiled/phenotype-id phenotype-id
    :abi {}
    :manifest {}
    :topology (topology/compile-topology fixture-topology)
@@ -225,7 +224,7 @@
                db
                {:genome/id genome-id
                 :resolution/id resolution-id
-                :phenotype/id phenotype-id
+                :code/id code-id
                 :generation/id generation-id}))
          sid (try
                (sqlite/with-db [conn db]
@@ -235,7 +234,7 @@
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id
-                          :phenotype/id phenotype-id
+                          :code/id code-id
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil

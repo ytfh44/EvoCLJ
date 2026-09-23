@@ -257,12 +257,12 @@
               db
               {:genome/id (:code/genome-id compiled)
                :resolution/id (:code/resolution-id compiled)
-               :phenotype/id (:code/id compiled)
+               :code/id (:code/id compiled)
                :generation/id "generation-1"}))
         _ (event/append-event! db
                                {:session/id sid
                                 :generation/id "generation-1"
-                                :phenotype/id (:code/id compiled)
+                                :code/id (:code/id compiled)
                                 :event/type :session/created
                                 :prev/event-id nil
                                 :payload-ref nil

@@ -333,7 +333,7 @@
   AFTER the rollback transaction committed (the documented deviation —
   append-event! owns its own BEGIN IMMEDIATE transaction). The event
   is anchored to the operator session: its :generation/id and
-  :phenotype/id are the session's pinned values (append-event!
+  :code/id are the session's pinned values (append-event!
   enforces the match), its :cause is the session's newest event, and
   the metadata carries the move and the reason. A failed append is
   loud — the rollback itself is already committed, and the operator
@@ -350,7 +350,7 @@
     (event/append-event! db
                          {:session/id (types/session-id session-key)
                           :generation/id (:generation_id sess)
-                          :phenotype/id (:phenotype_id sess)
+                          :code/id (:phenotype_id sess)
                           :event/type :promotion/rollback
                           :prev/event-id tip
                           :payload-ref nil

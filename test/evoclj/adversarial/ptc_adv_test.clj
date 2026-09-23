@@ -24,7 +24,7 @@
             [evoclj.helpers :as helpers]))
 
 (def ^:private hex-a (apply str (repeat 64 "a")))
-(def ^:private phenotype-id (str "sha256:" hex-a))
+(def ^:private code-id (str "sha256:" hex-a))
 
 (defn- fake-executor []
   {:ptc {:enabled? true}
@@ -33,7 +33,7 @@
 
 (defn- pin []
   {:session/id (random-uuid)
-   :phenotype/id phenotype-id
+   :code/id code-id
    :generation/id "g1"})
 
 (defn- cause []
@@ -277,16 +277,16 @@
 
 (deftest gc20-attribution-present-in-intents-and-events
   (testing "GC-20: intent core requires attribution — missing fields are rejected"
-    (let [e (try (intent-core/tool-call nil phenotype-id :node/x 1 {:tool/id :echo :args {}} {:wall-ms 1000})
+    (let [e (try (intent-core/tool-call nil code-id :node/x 1 {:tool/id :echo :args {}} {:wall-ms 1000})
                  nil
                  (catch clojure.lang.ExceptionInfo ex ex))]
       (is (some? e) "nil session-id must be rejected")
       (is (= :intent/schema-invalid (:error/type (ex-data e))))))
   (testing "GC-20: valid intent carries attribution"
     (let [sid (random-uuid)
-          intent (intent-core/tool-call sid phenotype-id :node/x 1 {:tool/id :echo :args {:v 1}} {:wall-ms 1000})]
+          intent (intent-core/tool-call sid code-id :node/x 1 {:tool/id :echo :args {:v 1}} {:wall-ms 1000})]
       (is (= sid (:session/id intent)))
-      (is (= phenotype-id (:phenotype/id intent)))
+      (is (= code-id (:code/id intent)))
       (is (= :node/x (:node/id intent)))
       (is (= 1 (:cause/event-id intent)))
       (is (= :intent/tool-call (:intent/type intent)))))
@@ -295,7 +295,7 @@
           cm (orch/->CodeModeOrchestrator c)
           executor (fake-executor)
           pi {:session/id #uuid "11111111-1111-4111-8111-111111111111"
-              :phenotype/id phenotype-id
+              :code/id code-id
               :node/id :test-node}
           ca {:event/id 42}
           echo-tool {:name "echo" :tool :echo :description "echo"}
@@ -319,22 +319,22 @@
           (is (= :ok (:outcome res)))
           (is (some? @captured) "pipeline received intent")
           (is (= #uuid "11111111-1111-4111-8111-111111111111" (:session/id @captured)) "session attributed")
-          (is (= phenotype-id (:phenotype/id @captured)) "phenotype attributed")
+          (is (= code-id (:code/id @captured)) "phenotype attributed")
           (is (= :test-node (:node/id @captured)) "node attributed")
           (is (= 1 (:cause/event-id @captured)) "cause attributed"))))))
 
 (deftest gc20-events-are-attributable-when-writing
   (testing "GC-20: event header attribution is preserved as plain data"
     (let [sid (random-uuid)
-          pid phenotype-id
+          pid code-id
           nid :node/test
-          hdr {:session/id sid :phenotype/id pid :node/id nid :cause/event-id 42}
+          hdr {:session/id sid :code/id pid :node/id nid :cause/event-id 42}
           payload {:note "gc20"}]
       (is (= sid (:session/id hdr)) "session in header")
-      (is (= pid (:phenotype/id hdr)) "phenotype in header")
+      (is (= pid (:code/id hdr)) "phenotype in header")
       (is (= nid (:node/id hdr)) "node in header")
       (is (= "gc20" (:note payload)) "payload preserved")
       ;; verify header round-trips through EDN boundary
       (let [materialized (boundary/materialize-edn hdr {:max-depth 64 :max-size 1000})]
         (is (= sid (:session/id materialized)))
-        (is (= pid (:phenotype/id materialized)))))))
+        (is (= pid (:code/id materialized)))))))

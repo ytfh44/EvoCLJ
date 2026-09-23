@@ -38,7 +38,7 @@
         genome-id (:artifact/id
                    (cas/put-bytes! cas-store genome-bytes {}))
         resolution-id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-        phenotype-id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        code-id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         model-value {:model/output {:text "hi"}
                      :usage {:model-input-tokens 100 :model-output-tokens 50}
                      :model-cost-units 0.75}
@@ -55,7 +55,7 @@
       (doseq [[artifact-id media-type]
               [[genome-id "application/octet-stream"]
                [resolution-id "application/edn"]
-               [phenotype-id "application/edn"]
+               [code-id "application/edn"]
                [model-ref "application/edn"]
                [tool-ref "application/edn"]]]
         (jdbc/insert! conn :artifacts
@@ -85,7 +85,7 @@
                        :generation_id generation
                        :genome_id genome-id
                        :resolution_id resolution-id
-                       :phenotype_id phenotype-id
+                       :phenotype_id code-id
                        :state "completed"
                        :created_at "2025-01-02T00:00:00Z"}))
       (doseq [[id session generation payload-ref]
@@ -97,7 +97,7 @@
                        :session_id session
                        :event_seq 1
                        :generation_id generation
-                       :phenotype_id phenotype-id
+                       :phenotype_id code-id
                        :event_type ":provider/call-completed"
                        :cause_event_id nil
                        :payload_ref payload-ref

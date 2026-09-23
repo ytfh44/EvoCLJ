@@ -215,7 +215,7 @@
 
   Side effects:
   - inserts an immutable Session identity row with the same :genome/id,
-    :resolution/id, :phenotype/id, and :generation/id as the parent
+    :resolution/id, :code/id, and :generation/id as the parent
     (pinned identity, never assumes).
   - appends a :session/created root event for the child (so its chain is valid).
   - derives child leases via derive-child-leases (Grant meet, not identity)
@@ -260,7 +260,7 @@
           _ (check-depth-and-budget! db parent-id)
           child-request (cond-> {:genome/id (:genome/id parent)
                                  :resolution/id (:resolution/id parent)
-                                 :phenotype/id (:phenotype/id parent)
+                                 :code/id (:code/id parent)
                                  :generation/id (:generation/id parent)}
                           ;; A child session is a sub-activation INSIDE the
                           ;; parent's execution: when the parent pin carries
@@ -279,7 +279,7 @@
           _ (event/append-event! db
                                  {:session/id child-id
                                   :generation/id (:generation/id parent)
-                                  :phenotype/id (:phenotype/id parent)
+                                  :code/id (:code/id parent)
                                   :event/type :session/created
                                   :prev/event-id nil
                                   :payload-ref nil
@@ -300,7 +300,7 @@
           _ (event/append-event! db
                                  {:session/id parent-id
                                   :generation/id (:generation/id parent)
-                                  :phenotype/id (:phenotype/id parent)
+                                  :code/id (:code/id parent)
                                   :event/type :subagent/spawned
                                   :prev/event-id cause-id
                                   :payload-ref nil
@@ -830,7 +830,7 @@
               (cond-> {:found true
                        :session/id (:session/id sess)
                        :state (some-> (last (work-store/list-works (sqlite/db-spec db) (:session/id sess))) :work/state)
-                       :phenotype/id (:phenotype/id sess)
+                       :code/id (:code/id sess)
                        :depth (try (subagent-depth db sid) (catch Exception _ nil))
                        :children (try (work-store/child-session-ids db sid) (catch Exception _ []))}
                 (:work/id target) (assoc :work/id (:work/id target))))))))))

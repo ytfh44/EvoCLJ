@@ -75,7 +75,7 @@
              (catch Exception _))))
     {:db path :stores {:sqlite path :cas cas-store} :identity identity}))
 
-(defn- parent-lease [session-id phenotype-id actions]
+(defn- parent-lease [session-id code-id actions]
   (mint/mint-lease! nil {:principal {:principal/type :session :session/id session-id}
                          :resource {:kind :tool :id :fixture/echo}
                          :actions actions
@@ -86,12 +86,12 @@
 (defn- create-parent-session! [db identity]
   (let [sess (session/create-session! db {:genome/id (:genome/id identity)
                                           :resolution/id (:resolution/id identity)
-                                          :phenotype/id (:code/id identity)
+                                          :code/id (:code/id identity)
                                           :generation/id gen})
         sid (:session/id sess)]
     (event/append-event! db {:session/id sid
                              :generation/id gen
-                             :phenotype/id (:code/id identity)
+                             :code/id (:code/id identity)
                              :event/type :session/created
                              :prev/event-id nil
                              :payload-ref nil
@@ -261,7 +261,7 @@
           prev-id (:event/id (last (event/events-for-session db child-id)))
           terminal (event/append-event! db {:session/id child-id
                                             :generation/id gen
-                                            :phenotype/id (:code/id identity)
+                                            :code/id (:code/id identity)
                                             :event/type :session/failed
                                             :prev/event-id prev-id
                                             :payload-ref nil

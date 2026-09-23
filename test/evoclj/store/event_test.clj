@@ -83,7 +83,7 @@
   [sid & [overrides]]
   (merge {:session/id sid
           :generation/id gen
-          :phenotype/id phenotype
+          :code/id phenotype
           :event/type :intent/proposed
           :prev/event-id nil
           :causal-links #{}
@@ -373,7 +373,7 @@
     (is (= 1 (:event/seq e)))
     (is (uuid? (:session/id e)))
     (is (= gen (:generation/id e)))
-    (is (= phenotype (:phenotype/id e)))
+    (is (= phenotype (:code/id e)))
     (is (= :session/created (:event/type e)))
     (is (nil? (:prev/event-id e)))
     (is (nil? (:cause/event-id e)))
@@ -542,7 +542,7 @@
         middle-event (event/append-event! db (base-event sid {:prev/event-id (:event/id root-event)}))
         rows (sqlite/query db ["SELECT * FROM events ORDER BY event_seq"])]
     (is (= [1 2] (mapv :event_seq rows)))
-    (testing "rewriting the stored phenotype identity breaks the hash"
+    (testing "rewriting the stored code identity breaks the hash"
       (let [db-copy (fresh-db)
             _ (seed-session! db-copy sid)
             tampered (mapv #(if (= (:event_seq %) (:event/seq middle-event))

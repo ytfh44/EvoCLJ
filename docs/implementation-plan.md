@@ -7,6 +7,8 @@
 **Tech Stack:** JVM Clojure; EDN; Integrant for host-system lifecycle; Malli for runtime schemas; Babashka SCI for restricted evolvable programs; rewrite-clj for source-preserving structural patches; SQLite JDBC for durable metadata/event state; filesystem content-addressed storage for large immutable artifacts; `clojure.test` plus property/integration/adversarial test layers.
 
 > **Refinement note (2026-09):** the milestone bodies below are the as-written v0 plan (unchecked boxes, early API sketches with `:subject` / `:cause/event-id` / `PhenotypeId`). Landed refinements supersede those sketches: I1 ProgramImage/RuntimeImage/ExecutionEnvironment split, I2 Principal single field, C1–C3 Grant algebra, P1 AuthorityStore DB truth, E1 prev+causal-links with the v2 event header, H1 hydration, W1/W2 Work sole lifecycle, the closed lease schema, and fallback-deny MCP projections. For the current truth see [`invariants.md`](invariants.md) (INV-01–INV-13) and [`formal/`](formal/). The Global Constraints section directly below remains normative.
+>
+> **Refinement note addendum (I1 identity key rename):** the session/event/intent attribution key is now `:code/id` (CodeImageId) — the `:phenotype/id` spelling is gone from every public contract, and `:phenotype_id` survives ONLY as the frozen SQLite column name in `sessions`/`events` (migration 014 backfills `code_image_id` from it). This is a ONE-TIME BREAK COMPAT: the v2 event header hashes the field, so event chains written before the rename fail `verify-event-chain` and old state directories must be re-created. `:compiled/phenotype-id`, `:side/phenotype-id`, `:phenotype/existence-proof`, `phenotype-id?`/`PhenotypeIdSchema`, and the `:phenotype-id-invalid`/`:phenotype` error reasons were renamed or removed in the same pass.
 
 ## Global Constraints
 
@@ -29,7 +31,7 @@
 17. Every promoted generation MUST retain complete lineage: parent, mutation, evidence, evaluation, decision, and deployment state.
 18. Rollback MUST restore future generation selection only; it MUST NOT claim to reverse already-committed external effects.
 19. Kernel source, authority root, audit root, evaluator-isolation root, and promotion root MUST NOT be agent-mutable.
-20. Every externally visible effect MUST be attributable to `session-id`, `phenotype-id`, `node-id`, `intent-id`, authorization decision, and outcome.
+20. Every externally visible effect MUST be attributable to `session-id`, `code-id`, `node-id`, `intent-id`, authorization decision, and outcome.
 21. All large immutable payloads MUST be stored by content hash; SQLite rows SHOULD store references rather than duplicated payload bodies.
 22. All public module boundaries MUST use validated Clojure data; raw Java objects, lazy sequences, futures, and open resources MUST NOT cross Genome/SCI/Intent/Event boundaries.
 23. Candidate evaluation workspaces, SCI contexts, session namespaces, and mutable temporary state MUST be isolated from the current production generation.

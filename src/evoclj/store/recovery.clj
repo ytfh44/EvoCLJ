@@ -545,7 +545,7 @@
                              conn
                              {:session/id sid
                               :generation/id (:generation/id pin)
-                              :phenotype/id (:phenotype/id pin)
+                              :code/id (:code/id pin)
                               :event/type :provider/call-ambiguous
                               :prev/event-id tip
                               :causal-links #{}

@@ -189,10 +189,10 @@
   "A migrated database backed by a fresh temp file, seeded with the
   generation row sessions are pinned to (current = 1) and all compiled
   identity rows required by session foreign keys."
-  [genome-id resolution-id phenotype-id]
+  [genome-id resolution-id code-id]
   (let [genome-id (or genome-id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         resolution-id (or resolution-id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-        phenotype-id (or phenotype-id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        code-id (or code-id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
         path (temp-db-path)
         db (sqlite/spec path)]
     (migrate/migrate! db)
@@ -200,7 +200,7 @@
       (doseq [[artifact-id media-type]
               [[genome-id "application/octet-stream"]
                [resolution-id "application/edn"]
-               [phenotype-id "application/edn"]]]
+               [code-id "application/edn"]]]
         (jdbc/insert! conn :artifacts
                       {:hash artifact-id
                        :media_type media-type
@@ -234,7 +234,7 @@
   [compiled loaded registry leases usage]
   (let [[db db-path] (fresh-db (or (:compiled/genome-id compiled) (:code/genome-id compiled) (:genome/id compiled) "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                                (or (:compiled/resolution-id compiled) (:code/resolution-id compiled) "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                               (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))
+                               (or (:compiled/code-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))
         cas-root (temp-cas-dir)
         ph (phenotype/instantiate
             compiled
@@ -261,12 +261,12 @@
               db
               {:genome/id (or (:compiled/genome-id compiled) (:code/genome-id compiled) (:genome/id compiled) "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                :resolution/id (or (:compiled/resolution-id compiled) (:code/resolution-id compiled) "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-               :phenotype/id (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+               :code/id (or (:compiled/code-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                :generation/id generation-id}))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id
-                          :phenotype/id (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+                          :code/id (or (:compiled/code-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
@@ -410,7 +410,7 @@
 
 (deftest network-capability-beyond-host-grant-is-denied
   (let [compiled (compiled-fixture "network-capability")
-        pid (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")]
+        pid (or (:compiled/code-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")]
     (testing "the request compiles — a manifest capability REQUEST is a
               declaration, never authority (Global Constraint 9)"
       (is (re-matches pid-pattern pid)))
@@ -440,7 +440,7 @@
 
 (deftest broader-filesystem-scope-than-host-grant-is-denied
   (let [compiled (compiled-fixture "filesystem-escalation")
-        pid (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        pid (or (:compiled/code-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
         host-grant (fs-lease child-cap-id pid "/protected/work")
         root-intent (tool-call-intent pid :fixture/path-resolve {:path "/"})
         root-request {:tool/id :fixture/path-resolve
@@ -491,8 +491,8 @@
 (deftest capability-id-reuse-by-child-extension-is-denied
   (let [parent (core/compile-genome (seed-loaded) (fixture-catalog))
         child (compiled-fixture "child-extension")
-        parent-pid (or (:compiled/phenotype-id parent) (:code/id parent) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
-        child-pid (or (:compiled/phenotype-id child) (:code/id child) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")]
+        parent-pid (or (:compiled/code-id parent) (:code/id parent) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        child-pid (or (:compiled/code-id child) (:code/id child) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")]
     (testing "the child/future extension is a DIFFERENT phenotype from its parent"
       (is (re-matches pid-pattern parent-pid))
       (is (re-matches pid-pattern child-pid))
@@ -563,7 +563,7 @@
             :capability/scope-denied (decided on the NORMALIZED resource)"
     (let [executions (atom 0)
           compiled (compiled-fixture "filesystem-escalation")
-          pid (or (:compiled/phenotype-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+          pid (or (:compiled/code-id compiled) (:code/id compiled) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
           reg (registry/create-registry)
           _ (registry/register! reg
                                 (fixture/path-resolve-provider
@@ -607,7 +607,7 @@
                                                               (route-descriptor))
                                                reg
                                                [(tool-lease parent-cap-id
-                                                            (or (:compiled/phenotype-id parent) (:code/id parent) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+                                                            (or (:compiled/code-id parent) (:code/id parent) "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                                                             :fixture/echo)]
                                                usage)
           sid (create-pinned-session executor child)

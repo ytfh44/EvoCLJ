@@ -448,8 +448,8 @@
         parent-env (:side/execution-environment parent-side)
         candidate-env (:side/execution-environment candidate-side)]
     (testing "the sides are comparable despite different ProgramImages"
-      (is (not= (:side/phenotype-id parent-side)
-                (:side/phenotype-id candidate-side))
+      (is (not= (:side/code-id parent-side)
+                (:side/code-id candidate-side))
           "different bundles, different ProgramImages — comparison still runs")
       (is (= :parent-wins (:status (:case/outcome pair)))
           "the decision derives from scores, never from image equality"))

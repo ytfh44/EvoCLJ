@@ -104,12 +104,12 @@
                      :parent_id nil :state "active" :current 0 :created_at now})))
   (let [s (session/create-session! db {:genome/id genome
                                        :resolution/id resolution
-                                       :phenotype/id phenotype
+                                       :code/id phenotype
                                        :generation/id gen})
         sid (:session/id s)]
     (event/append-event! db {:session/id sid
                              :generation/id gen
-                             :phenotype/id phenotype
+                             :code/id phenotype
                              :event/type :session/created
                              :prev/event-id nil
                              :payload-ref nil

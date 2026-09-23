@@ -58,7 +58,7 @@
   (merge {:generation/id gen
           :genome/id genome
           :resolution/id resolution
-          :phenotype/id phenotype}
+          :code/id phenotype}
          (apply merge overrides)))
 
 (defn- tx-error [f]
@@ -73,12 +73,12 @@
     (is (instance? java.util.UUID (:session/id s)))
     (is (= gen (:generation/id s)))
     (is (= [genome resolution phenotype]
-           [(:genome/id s) (:resolution/id s) (:phenotype/id s)]))
+           [(:genome/id s) (:resolution/id s) (:code/id s)]))
     (is (= created-at (:created-at s)))
     (is (not (contains? s :state)))
     (is (= [genome resolution phenotype gen]
            [(:genome/id fetched) (:resolution/id fetched)
-            (:phenotype/id fetched) (:generation/id fetched)]))))
+            (:code/id fetched) (:generation/id fetched)]))))
 
 (deftest supplied-session-id-round-trips
   (let [db (fresh-db)
@@ -152,7 +152,7 @@
     (is (= :succeeded (:work/state (work-store/fetch-work db work-id))))
     (is (= [genome resolution phenotype gen]
            [(:genome/id fetched) (:resolution/id fetched)
-            (:phenotype/id fetched) (:generation/id fetched)]))
+            (:code/id fetched) (:generation/id fetched)]))
     (is (not (contains? fetched :state)))))
 
 (deftest session-descendants-follow-work-parentage

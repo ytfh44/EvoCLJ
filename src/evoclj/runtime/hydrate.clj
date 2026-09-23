@@ -89,9 +89,7 @@
        :generation/id (:generation/id m)
        :genome/id (or (:genome/id m) (:genome_id m))
        :resolution/id (or (:resolution/id m) (:resolution_id m))
-       :code/id (or (:code/id m) (:code-image/id m) (:code_image_id m)
-                    (:phenotype/id m) (:phenotype_id m)
-                    (:code/id (:phenotype m)))
+       :code/id (or (:code/id m) (:code-image/id m) (:code_image_id m))
        :deployment/id (or (:deployment/id m) (:deployment_id m))
        :execution/id (or (:execution/id m) (:execution_id m))})
 
@@ -240,7 +238,7 @@
                    {:session/id (or (:session/id pin) (UUID/randomUUID))
                     :genome/id (:genome/id pin)
                     :resolution/id (:resolution/id pin)
-                    :code/id (or (:code/id pin) (:phenotype/id pin) (:code_image_id pin))
+                    :code/id (or (:code/id pin) (:code_image_id pin))
                     :deployment/id (:deployment/id pin)
                     :execution/id (:execution/id pin)
                     :generation/id (:generation/id pin)}))]
@@ -256,7 +254,7 @@
         (merge norm
                {:genome/id (or (:genome/id norm) (:genome/id sess))
                 :resolution/id (or (:resolution/id norm) (:resolution/id sess))
-                :code/id (or (:code/id norm) (:code/id sess) (:phenotype/id sess))
+                :code/id (or (:code/id norm) (:code/id sess))
                 :generation/id (or (:generation/id norm) (:generation/id sess))})
         norm))))
 

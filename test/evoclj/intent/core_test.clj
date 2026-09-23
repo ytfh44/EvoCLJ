@@ -28,7 +28,7 @@
 
 (def ^:private intent-id #uuid "22222222-2222-4222-8222-222222222222")
 (def ^:private session-id #uuid "11111111-1111-4111-8111-111111111111")
-(def ^:private phenotype-id
+(def ^:private code-id
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 (def ^:private node-id :node/tool)
 (def ^:private cause-event-id 17)
@@ -49,7 +49,7 @@
   {:intent/id intent-id
    :intent/type type
    :session/id session-id
-   :phenotype/id phenotype-id
+   :code/id code-id
    :node/id node-id
    :cause/event-id cause-event-id
    :payload (get payloads type)
@@ -60,7 +60,7 @@
   (mapv intent-for (keys payloads)))
 
 (def ^:private base-keys
-  #{:intent/id :intent/type :session/id :phenotype/id
+  #{:intent/id :intent/type :session/id :code/id
     :node/id :cause/event-id :payload :budget :metadata})
 
 ;; --- shared helpers --------------------------------------------------------
@@ -191,7 +191,7 @@
     (let [a {:payload {:args {:text "hi"} :tool/id :fixture/echo}
              :intent/id intent-id
              :cause/event-id cause-event-id
-             :phenotype/id phenotype-id
+             :code/id code-id
              :node/id node-id
              :session/id session-id
              :budget {:wall-ms 1000}
@@ -200,7 +200,7 @@
           b {:intent/id intent-id
              :intent/type :intent/tool-call
              :session/id session-id
-             :phenotype/id phenotype-id
+             :code/id code-id
              :node/id node-id
              :cause/event-id cause-event-id
              :payload {:tool/id :fixture/echo :args {:text "hi"}}
@@ -244,12 +244,12 @@
            :intent/finish core/finish
            :intent/fail core/fail}]
     (let [payload (get payloads type)
-          i (ctor session-id phenotype-id node-id cause-event-id payload budget)]
+          i (ctor session-id code-id node-id cause-event-id payload budget)]
       (testing (str (name type) " carries attribution, payload, and budget")
         (is (uuid? (:intent/id i)))
         (is (= type (:intent/type i)))
         (is (= session-id (:session/id i)))
-        (is (= phenotype-id (:phenotype/id i)))
+        (is (= code-id (:code/id i)))
         (is (= node-id (:node/id i)))
         (is (= cause-event-id (:cause/event-id i)))
         (is (= payload (:payload i)))
@@ -262,31 +262,31 @@
 
 (deftest constructors-assign-fresh-intent-ids
   (let [payload (get payloads :intent/tool-call)]
-    (is (not= (:intent/id (core/tool-call session-id phenotype-id node-id
+    (is (not= (:intent/id (core/tool-call session-id code-id node-id
                                           cause-event-id payload budget))
-              (:intent/id (core/tool-call session-id phenotype-id node-id
+              (:intent/id (core/tool-call session-id code-id node-id
                                           cause-event-id payload budget))))))
 
 (deftest constructors-reject-invalid-attribution
   (let [payload (get payloads :intent/tool-call)]
-    (testing "a malformed phenotype id fails at construction"
+    (testing "a malformed code id fails at construction"
       (is-ctor-error #(core/tool-call session-id "not-a-hash" node-id
                                       cause-event-id payload budget)
                      :intent/schema-invalid))
     (testing "a non-uuid session id fails at construction"
-      (is-ctor-error #(core/tool-call "session" phenotype-id node-id
+      (is-ctor-error #(core/tool-call "session" code-id node-id
                                       cause-event-id payload budget)
                      :intent/schema-invalid))
     (testing "a negative budget fails at construction"
-      (is-ctor-error #(core/tool-call session-id phenotype-id node-id
+      (is-ctor-error #(core/tool-call session-id code-id node-id
                                       cause-event-id payload {:wall-ms -1})
                      :intent/schema-invalid))
     (testing "a payload violating the type contract fails at construction"
-      (is-ctor-error #(core/tool-call session-id phenotype-id node-id
+      (is-ctor-error #(core/tool-call session-id code-id node-id
                                       cause-event-id {:tool/id "x"} budget)
                      :intent/schema-invalid))
     (testing "a Java object in the payload fails at construction"
-      (is-ctor-error #(core/tool-call session-id phenotype-id node-id
+      (is-ctor-error #(core/tool-call session-id code-id node-id
                                       cause-event-id
                                       {:tool/id :fixture/echo
                                        :args {:text (java.io.File. ".")}}

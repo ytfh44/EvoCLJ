@@ -20,7 +20,7 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private hex-a (apply str (repeat 64 "a")))
-(def ^:private phenotype-id (str "sha256:" hex-a))
+(def ^:private code-id (str "sha256:" hex-a))
 
 (defn- fake-executor []
   {:ptc {:enabled? true}
@@ -29,7 +29,7 @@
 
 (defn- pin []
   {:session/id (random-uuid)
-   :phenotype/id phenotype-id
+   :code/id code-id
    :generation/id "g1"})
 
 (defn- cause []

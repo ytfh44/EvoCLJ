@@ -360,10 +360,10 @@
     ;; ensure artifacts for generation BEFORE insert - use compiled identities (real FK targets)
     (let [genome-id (:genome/id g1)
           resolution-id (:code/resolution-id compiled)
-          phenotype-id (:code/id compiled)]
+          code-id (:code/id compiled)]
       (artifact/ensure-artifact! db genome-id "application/octet-stream" 0)
       (artifact/ensure-artifact! db resolution-id "application/edn" 0)
-      (artifact/ensure-artifact! db phenotype-id "application/octet-stream" 0)
+      (artifact/ensure-artifact! db code-id "application/octet-stream" 0)
       (artifact/ensure-genome! db genome-id)
       (sqlite/with-db [conn db]
         (jdbc/insert! conn :generations
@@ -463,12 +463,12 @@
               db
               {:genome/id (:code/genome-id compiled)
                :resolution/id (:code/resolution-id compiled)
-               :phenotype/id (:code/id compiled)
+               :code/id (:code/id compiled)
                :generation/id gen}))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id gen
-                          :phenotype/id (:code/id compiled)
+                          :code/id (:code/id compiled)
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil

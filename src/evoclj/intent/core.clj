@@ -84,12 +84,12 @@
   is required and never defaulted: the caller (the runtime node
   executor) must supply the real session, phenotype, node, and cause
   event (Global Constraint 20)."
-  [type session-id phenotype-id node-id cause-event-id payload budget]
+  [type session-id code-id node-id cause-event-id payload budget]
   (normalize-intent
    {:intent/id (random-uuid)
     :intent/type type
     :session/id session-id
-    :phenotype/id phenotype-id
+    :code/id code-id
     :node/id node-id
     :cause/event-id cause-event-id
     :payload payload
@@ -98,50 +98,50 @@
 
 (defn model-call
   "Build a validated :intent/model-call intent requesting a model call
-  for the given session/phenotype/node attribution, cause event, payload
+  for the given session/code-image/node attribution, cause event, payload
   ({:model/id ... :messages [...]}), and budget."
-  [session-id phenotype-id node-id cause-event-id payload budget]
-  (assemble! :intent/model-call session-id phenotype-id node-id
+  [session-id code-id node-id cause-event-id payload budget]
+  (assemble! :intent/model-call session-id code-id node-id
              cause-event-id payload budget))
 
 (defn tool-call
   "Build a validated :intent/tool-call intent requesting a tool
-  invocation for the given session/phenotype/node attribution, cause
+  invocation for the given session/code-image/node attribution, cause
   event, payload ({:tool/id ... :args {...}}), and budget."
-  [session-id phenotype-id node-id cause-event-id payload budget]
-  (assemble! :intent/tool-call session-id phenotype-id node-id
+  [session-id code-id node-id cause-event-id payload budget]
+  (assemble! :intent/tool-call session-id code-id node-id
              cause-event-id payload budget))
 
 (defn memory-read
   "Build a validated :intent/memory-read intent requesting an episodic
-  memory read for the given session/phenotype/node attribution, cause
+  memory read for the given session/code-image/node attribution, cause
   event, payload ({:memory/key ...}), and budget."
-  [session-id phenotype-id node-id cause-event-id payload budget]
-  (assemble! :intent/memory-read session-id phenotype-id node-id
+  [session-id code-id node-id cause-event-id payload budget]
+  (assemble! :intent/memory-read session-id code-id node-id
              cause-event-id payload budget))
 
 (defn memory-write
   "Build a validated :intent/memory-write intent requesting an episodic
-  memory write for the given session/phenotype/node attribution, cause
+  memory write for the given session/code-image/node attribution, cause
   event, payload ({:memory/key ... :memory/content ...}), and budget.
   Episodic memory writes stay distinct from procedural Genome changes
   (Global Constraint 10)."
-  [session-id phenotype-id node-id cause-event-id payload budget]
-  (assemble! :intent/memory-write session-id phenotype-id node-id
+  [session-id code-id node-id cause-event-id payload budget]
+  (assemble! :intent/memory-write session-id code-id node-id
              cause-event-id payload budget))
 
 (defn finish
   "Build a validated :intent/finish intent carrying the task result for
-  the given session/phenotype/node attribution, cause event, payload
+  the given session/code-image/node attribution, cause event, payload
   ({:value ...}), and budget."
-  [session-id phenotype-id node-id cause-event-id payload budget]
-  (assemble! :intent/finish session-id phenotype-id node-id
+  [session-id code-id node-id cause-event-id payload budget]
+  (assemble! :intent/finish session-id code-id node-id
              cause-event-id payload budget))
 
 (defn fail
   "Build a validated :intent/fail intent carrying a failure message for
-  the given session/phenotype/node attribution, cause event, payload
+  the given session/code-image/node attribution, cause event, payload
   ({:message ...}), and budget."
-  [session-id phenotype-id node-id cause-event-id payload budget]
-  (assemble! :intent/fail session-id phenotype-id node-id
+  [session-id code-id node-id cause-event-id payload budget]
+  (assemble! :intent/fail session-id code-id node-id
              cause-event-id payload budget))

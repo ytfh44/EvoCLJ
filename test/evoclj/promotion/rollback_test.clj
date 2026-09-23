@@ -205,12 +205,12 @@
               db
               {:genome/id genome-id
                :resolution/id parent-resolution
-               :phenotype/id phenotype
+               :code/id phenotype
                :generation/id generation-id}))]
     (event/append-event! db
                          {:session/id sid
                           :generation/id generation-id
-                          :phenotype/id phenotype
+                          :code/id phenotype
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil

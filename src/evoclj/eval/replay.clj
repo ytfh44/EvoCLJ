@@ -491,7 +491,7 @@
   (let [topology (get-in phenotype [:compiled :topology])
         entry (:entry topology)
         max-steps (get-in topology [:limits :max-steps])
-        phenotype-id (or (:code/id phenotype) (:phenotype/id phenotype))
+        code-id (:code/id phenotype)
         seed {:event/id 1 :event/type :session/started :payload task-input}
         finish (fn [status error outputs intent-outcomes]
                  {:run/status status
@@ -508,7 +508,7 @@
                                       :node/id node-id}
                              outputs intent-outcomes)
                      (let [runtime-state {:session/id session-id
-                                          :phenotype/id phenotype-id
+                                          :code/id code-id
                                           :node/id node-id
                                           :outputs outputs
                                           :sci-runtime (:sci-runtime phenotype)}

@@ -81,11 +81,11 @@
           now (Date.)
           sid-a #uuid "00000000-0000-4000-a000-000000000000"
           sid-b #uuid "00000000-0000-4000-a000-000000000001"
-          e-a1 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          e-a1 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                         :event/type :session/created :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {}})
-          e-b1 (event/append-event! db {:session/id sid-b :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          e-b1 (event/append-event! db {:session/id sid-b :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                         :event/type :session/created :prev/event-id nil :causal-links #{} :payload-ref nil :created-at now :metadata {}})
-          e-a2 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :phenotype/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          e-a2 (event/append-event! db {:session/id sid-a :generation/id "gen-1" :code/id "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                                         :event/type :tool/invoke :prev/event-id (:event/id e-a1) :causal-links #{{:from (:event/id e-b1) :type :test}} :payload-ref nil :created-at now :metadata {}})
           events-a (event/events-for-session db sid-a)
           seqs (map :event/seq events-a)

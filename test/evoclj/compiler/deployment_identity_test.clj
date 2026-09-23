@@ -28,7 +28,7 @@
   (assoc (load/load-genome (fixture-root))
          :programs [(route-descriptor)]))
 
-(defn- lease [phenotype-id tool-id]
+(defn- lease [code-id tool-id]
   {:cap/id (random-uuid)
    :principal {:principal/type :session :session/id #uuid "00000000-0000-4000-a000-000000000000"}
    :resource {:kind :tool :id tool-id}

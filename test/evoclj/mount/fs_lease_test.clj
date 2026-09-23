@@ -117,9 +117,9 @@
 
 (defn- seed-session! [db]
   (seed-generation! db)
-  (let [s (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id pid1 :generation/id gen})
+  (let [s (session/create-session! db {:genome/id genome :resolution/id resolution :code/id pid1 :generation/id gen})
         sid (:session/id s)
-        _ (event/append-event! db {:session/id sid :generation/id gen :phenotype/id pid1 :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})]
+        _ (event/append-event! db {:session/id sid :generation/id gen :code/id pid1 :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})]
     sid))
 
 (defn- make-skill-bundle

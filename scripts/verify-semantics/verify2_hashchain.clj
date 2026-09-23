@@ -3,6 +3,7 @@
   Inductive property: tampering row k without recomputing k+1..n is
   ALWAYS detected at k (own hash) or k+1 (prev-hash link)."
   (:require [clojure.java.jdbc :as jdbc]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.sqlite :as sqlite]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.event :as event]
@@ -21,6 +22,14 @@
       db (sqlite/spec p)]
   (try
     (migrate/migrate! db)
+    ;; FK targets first: generations.genome_id -> genomes(id) -> artifacts(hash),
+    ;; generations.resolution_id -> artifacts(hash), sessions.phenotype_id ->
+    ;; artifacts(hash) (migrations 009/011).
+    (doseq [[h mt] [[hex64 "application/octet-stream"]
+                    [hex64b "application/edn"]
+                    [hex64c "application/edn"]]]
+      (artifact/ensure-artifact! db (str "sha256:" h) mt 0))
+    (artifact/ensure-genome! db (str "sha256:" hex64))
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id "G42" :genome_id (str "sha256:" hex64)
@@ -29,21 +38,21 @@
                      :created_at "2025-01-01T00:00:00Z"}))
     (let [sid (:session/id (session/create-session! db {:genome/id (str "sha256:" hex64)
                                                         :resolution/id (str "sha256:" hex64b)
-                                                        :phenotype/id (str "sha256:" hex64c)
+                                                        :code/id (str "sha256:" hex64c)
                                                         :generation/id "G42"}))
           root (event/append-event! db {:session/id sid :generation/id "G42"
-                                        :phenotype/id (str "sha256:" hex64c)
+                                        :code/id (str "sha256:" hex64c)
                                         :event/type :session/created
-                                        :cause/event-id nil :payload-ref nil
+                                        :prev/event-id nil :payload-ref nil
                                         :metadata {}})
           ;; chain of 10 events
           seqs (loop [i 2 prev (:event/id root) acc [root]]
                  (if (> i 10)
                    acc
                    (let [e (event/append-event! db {:session/id sid :generation/id "G42"
-                                                    :phenotype/id (str "sha256:" hex64c)
+                                                    :code/id (str "sha256:" hex64c)
                                                     :event/type :intent/proposed
-                                                    :cause/event-id prev :payload-ref nil
+                                                    :prev/event-id prev :payload-ref nil
                                                     :metadata {:i i}})]
                      (recur (inc i) (:event/id e) (conj acc e)))))]
       (check! "untampered chain verifies"

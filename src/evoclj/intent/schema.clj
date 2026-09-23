@@ -8,7 +8,7 @@
     {:intent/id #uuid \"...\"
      :intent/type :intent/tool-call
      :session/id #uuid \"...\"
-     :phenotype/id \"sha256:...\"
+     :code/id \"sha256:...\"
      :node/id :node/tool
      :cause/event-id 17
      :payload {...}
@@ -28,25 +28,25 @@
   failure throws :intent/schema-invalid (or :intent/not-edn-safe) with
   a fully serializable Malli explanation (safe for pr-str / clojure.edn
   read-string round-tripping)."
-  (:require [evoclj.kernel.error :as err]
+  (:require [evoclj.genome.types :as types]
+            [evoclj.kernel.error :as err]
             [evoclj.sci.boundary :as boundary]
             [evoclj.tool.specs :as tool.specs]
             [malli.core :as m]))
 
 ;; --- identifiers ------------------------------------------------------------
 
-(def ^:private sha256-id-re #"^sha256:[0-9a-f]{64}$")
-
-(defn phenotype-id?
-  "True when x is a canonical PhenotypeId: a \"sha256:<64 hex>\" string,
-  the same content-addressed form used for Genome/Resolution/Artifact
-  IDs in evoclj.genome.types."
+(defn code-id?
+  "True when x is a canonical CodeImageId (I1): a \"sha256:<64 hex>\"
+  string. Delegates to evoclj.genome.types/code-id? — the ONE predicate
+  for the content-addressed id form used by Genome/Resolution/Artifact/
+  CodeImage ids."
   [x]
-  (and (string? x) (boolean (re-matches sha256-id-re x))))
+  (types/code-id? x))
 
-(def PhenotypeIdSchema
-  "A canonical content-addressed PhenotypeId string."
-  [:fn phenotype-id?])
+(def CodeIdSchema
+  "A canonical content-addressed CodeImageId string."
+  [:fn code-id?])
 
 ;; --- intent type and budget -------------------------------------------------
 
@@ -191,7 +191,7 @@
    [:intent/id uuid?]
    [:intent/type [:= type]]
    [:session/id uuid?]
-   [:phenotype/id PhenotypeIdSchema]
+   [:code/id CodeIdSchema]
    [:node/id keyword?]
    [:cause/event-id int?]
    [:payload payload-schema]

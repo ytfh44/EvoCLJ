@@ -6,6 +6,7 @@
   so the pack (id + content) is invariant to late arrivals.
   Real code: evoclj.evolution.evidence/build-evidence-pack."
   (:require [clojure.java.jdbc :as jdbc]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.sqlite :as sqlite]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.event :as event]
@@ -29,6 +30,14 @@
       db (sqlite/spec p)]
   (try
     (migrate/migrate! db)
+    ;; FK targets first: generations.genome_id -> genomes(id) -> artifacts(hash),
+    ;; generations.resolution_id -> artifacts(hash), sessions.phenotype_id ->
+    ;; artifacts(hash) (migrations 009/011).
+    (doseq [[h mt] [[hex64 "application/octet-stream"]
+                    [hex64b "application/edn"]
+                    [hex64c "application/edn"]]]
+      (artifact/ensure-artifact! db (str "sha256:" h) mt 0))
+    (artifact/ensure-genome! db (str "sha256:" hex64))
     (sqlite/with-db [conn db]
       (jdbc/insert! conn :generations
                     {:id gen :genome_id (str "sha256:" hex64)
@@ -44,23 +53,24 @@
                 (sqlite/exec! db
                               ["INSERT INTO sessions
                                  (id, generation_id, genome_id, resolution_id,
-                                  phenotype_id, state, created_at)
-                               VALUES (?, ?, ?, ?, ?, ?, ?)"
+                                  phenotype_id, code_image_id, state, created_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                                (str sid) gen (str "sha256:" hex64)
                                (str "sha256:" hex64b) (str "sha256:" hex64c)
+                               (str "sha256:" hex64c)
                                "completed" now])
                 (let [ev1 (:event/id (event/append-event! db {:session/id sid
                                                               :generation/id gen
-                                                              :phenotype/id (str "sha256:" hex64c)
+                                                              :code/id (str "sha256:" hex64c)
                                                               :event/type :session/created
-                                                              :cause/event-id nil
+                                                              :prev/event-id nil
                                                               :payload-ref nil
                                                               :metadata {}}))
                       ev2 (:event/id (event/append-event! db {:session/id sid
                                                               :generation/id gen
-                                                              :phenotype/id (str "sha256:" hex64c)
+                                                              :code/id (str "sha256:" hex64c)
                                                               :event/type :intent/proposed
-                                                              :cause/event-id ev1
+                                                              :prev/event-id ev1
                                                               :payload-ref nil
                                                               :metadata {}}))]
                   ;; first/last_event_id are REAL event ids (FKs); the

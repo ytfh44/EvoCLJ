@@ -56,7 +56,7 @@ declarative form.
 | GC-17 | Every promoted generation retains complete lineage: parent, mutation, evidence, evaluation, decision, deployment state. |
 | GC-18 | Rollback restores future generation selection only; it never claims to reverse already-committed external effects. |
 | GC-19 | Kernel source, authority root, audit root, evaluator-isolation root, and promotion root are not agent-mutable. |
-| GC-20 | Every externally visible effect is attributable to session-id, execution-id, node-id, intent-id, authorization decision, and outcome (Principal replaces phenotype pin for attribution scope after I1/I2). |
+| GC-20 | Every externally visible effect is attributable to session-id, code-id, node-id, intent-id, authorization decision, and outcome (Principal replaces the code-image pin for attribution scope after I1/I2). |
 | GC-21 | Large immutable payloads are stored by content hash; SQLite rows hold references, not duplicated bodies. |
 | GC-22 | Public module boundaries exchange validated Clojure data only — no raw Java objects, lazy seqs, futures, or open resources across Genome/SCI/Intent/Event boundaries. |
 | GC-23 | Candidate evaluation workspaces, SCI contexts, session namespaces, and mutable temp state stay isolated from the current production generation. |

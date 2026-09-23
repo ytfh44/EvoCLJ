@@ -125,7 +125,7 @@
 (def ^:private judge-session-id
   #uuid "00000000-0000-0000-0000-0000000000cc")
 
-(defn- model-lease [phenotype-id]
+(defn- model-lease [code-id]
   (let [now (Date.)]
     {:cap/id (UUID/randomUUID)
      :principal {:principal/type :session :session/id judge-session-id}
@@ -142,13 +142,13 @@
   Attribution is a fixed judge uuid (the host uses deterministic ids;
 
   the test uses a fixed uuid for the same reason)."
-  [broker model-registry lease phenotype-id]
+  [broker model-registry lease code-id]
   (let [ctx (assoc broker :model-registry model-registry
                    :leases (conj (:leases broker) lease))
         session-id judge-session-id]
     (fn [model-id messages options]
       (let [intent (intent/model-call
-                    session-id phenotype-id :node/judge 0
+                    session-id code-id :node/judge 0
                     {:model/id model-id :messages messages :options options}
                     {:wall-ms 1000 :max-steps 1})]
         (dispatch/dispatch! ctx intent)))))

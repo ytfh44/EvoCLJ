@@ -7,6 +7,7 @@
             [evoclj.genome.load :as load]
             [evoclj.compiler.core :as compiler]
             [evoclj.runtime.hydrate :as hydrate]
+            [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.genome :as store-genome]
@@ -58,9 +59,9 @@
     path))
 (defn- seed-identity!
   "Seed artifacts, genomes, and a generation row so create-session! FK checks pass."
-  [db genome-id resolution-id phenotype-id generation-id]
+  [db genome-id resolution-id code-id generation-id]
   (sqlite/with-db [conn db]
-    (doseq [h [genome-id resolution-id phenotype-id]]
+    (doseq [h [genome-id resolution-id code-id]]
       (try (jdbc/insert! conn :artifacts {:hash h :media_type "application/octet-stream" :size 0 :created_at now})
            (catch Exception _)))
     (try (jdbc/insert! conn :genomes {:id genome-id :created_at now})
@@ -69,17 +70,17 @@
          (catch Exception _))))
 
 (defn- create-pinned-session!
-  [db genome-id resolution-id phenotype-id generation-id]
-  (seed-identity! db genome-id resolution-id phenotype-id generation-id)
+  [db genome-id resolution-id code-id generation-id]
+  (seed-identity! db genome-id resolution-id code-id generation-id)
   (let [sess (session/create-session! db
                                       {:genome/id genome-id
                                        :resolution/id resolution-id
-                                       :phenotype/id phenotype-id
+                                       :code/id code-id
                                        :generation/id generation-id})]
     (event/append-event! db
                          {:session/id (:session/id sess)
                           :generation/id generation-id
-                          :phenotype/id phenotype-id
+                          :code/id code-id
                           :event/type :session/created
                           :prev/event-id nil
                           :payload-ref nil
@@ -233,7 +234,6 @@
                        db
                        (cond-> {:genome/id fake-genome
                                 :resolution/id fake-resolution
-                                :phenotype/id fake-phenotype
                                 :code/id code-id
                                 :generation/id fake-gen}
                          deployment-id (assoc :deployment/id deployment-id)
@@ -277,6 +277,9 @@
     (testing "a code image row naming another genome is a code-image mismatch"
       (let [pin-code (str "sha256:" (apply str (repeat 64 "7")))
             other-genome (str "sha256:" (apply str (repeat 64 "9")))]
+        ;; the artifacts row satisfies the sessions.phenotype_id FK (the
+        ;; frozen CodeImageId column); the code_images row is what disagrees
+        (artifact/ensure-artifact! db pin-code "application/edn" 0)
         (identity/record-code-image! db {:code/id pin-code
                                          :code/genome-id other-genome
                                          :code/resolution-id fake-resolution

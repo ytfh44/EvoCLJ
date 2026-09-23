@@ -7,7 +7,7 @@
   dispatches the emitted intent). The handler builds a validated
   :intent/tool-call from the node config (:tool — the tool id) and the
   input-event's :payload (the args map), with attribution from
-  runtime-state and the input-event (:session/id, :phenotype/id,
+  runtime-state and the input-event (:session/id, :code/id,
   :node/id, :cause/event-id — Global Constraint 20), via the pure
   evoclj.intent.core/tool-call constructor. The result is a :continue
   transition with no outputs and the node's :next as the successor."
@@ -44,7 +44,7 @@
         (let [budget (or (:budget runtime-state) node/default-budget)
               intent (intent/tool-call
                       (:session/id runtime-state)
-                      (:phenotype/id runtime-state)
+                      (:code/id runtime-state)
                       (:node/id runtime-state)
                       (:event/id input-event)
                       {:tool/id (:tool node) :args args}

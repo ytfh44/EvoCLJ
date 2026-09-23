@@ -41,7 +41,7 @@
   ALERT: appends exactly ONE audit event (:monitor/regression-alert)
   to the session's append-only log through
   evoclj.store.event/append-event!, anchored to the session's pinned
-  generation/phenotype and its newest event (the promotion
+  generation/code-image and its newest event (the promotion
   event-anchoring pattern). It performs NO other state mutation — no
   generation, session-state, or CURRENT-pointer writes.
 
@@ -257,7 +257,7 @@
 
 (defn- read-anchor!
   "The audit-event anchor for `session-key`: the session's pinned
-  :generation/id, :phenotype/id, and :resolution/id (the rollback
+  :generation/id, :code/id, and :resolution/id (the rollback
   promotion-system needs a valid resolution; the alert event ignores
   it) and the id of its newest event as the linear :prev/event-id —
   mirroring the promotion event-anchoring pattern. Throws
@@ -272,7 +272,7 @@
                         "cannot anchor the regression audit event to an unknown session"
                         {:session/id session-key})))
     {:generation/id (:generation_id sess)
-     :phenotype/id (:phenotype_id sess)
+     :code/id (:phenotype_id sess)
      :resolution/id (:resolution_id sess)
      :prev/event-id tip}))
 
@@ -292,7 +292,7 @@
       (event/append-event! store
                            {:session/id (types/session-id session-key)
                             :generation/id (:generation/id anchor)
-                            :phenotype/id (:phenotype/id anchor)
+                            :code/id (:code/id anchor)
                             :event/type alert-event-type
                             :prev/event-id (:prev/event-id anchor)
                             :payload-ref nil

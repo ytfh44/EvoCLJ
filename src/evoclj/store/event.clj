@@ -41,7 +41,7 @@
       prev-hash             previous event's :event-hash (empty for seq 1)
       created-at            canonical ISO-8601 instant
       generation-id         session-pinned generation
-      phenotype-id          session-pinned code-image identity
+      code-id               session-pinned code-image identity
       metadata-edn          EXACT stored payload EDN string (pr-str bytes)
       causal-links-edn      pr-str of the sorted from/type edge vector (open-close brackets when empty)
 
@@ -130,7 +130,7 @@
 (defn- canonical-header
   "Deterministic v2 header hashed for :event-hash: the legacy 7 lines
   (session, seq, type, prev, payload-ref, prev-hash, created-at) plus
-  generation-id, phenotype-id, the exact stored metadata EDN string,
+  generation-id, code-id, the exact stored metadata EDN string,
   and the canonical causal-links encoding — one field per line, nil as
   an empty line. See the ns docstring for the exact field order."
   [h]
@@ -142,7 +142,7 @@
        (or (:prev-hash h) "") "\n"
        (:created-at h) "\n"
        (or (:generation/id h) "") "\n"
-       (or (:phenotype/id h) "") "\n"
+       (or (:code/id h) "") "\n"
        (or (:metadata-edn h) "") "\n"
        (or (:causal-links-edn h) "")))
 
@@ -229,7 +229,7 @@
    :prev-hash (:prev_hash row)
    :created-at (:created_at row)
    :generation/id (:generation_id row)
-   :phenotype/id (:phenotype_id row)
+   :code/id (:phenotype_id row)
    :metadata-edn (or (:payload row) "")
    :causal-links-edn (canonical-causal-links links)})
 
@@ -243,7 +243,7 @@
       :event/seq (:event_seq row)
       :session/id (UUID/fromString (:session_id row))
       :generation/id (:generation_id row)
-      :phenotype/id (:phenotype_id row)
+      :code/id (:phenotype_id row)
       :event/type (keyword (:event_type row))
       :prev/event-id prev-id
       :causal-links (or links #{})
@@ -371,7 +371,7 @@
                 :prev-hash prev-hash
                 :created-at ts
                 :generation/id (:generation/id event)
-                :phenotype/id (:phenotype/id event)
+                :code/id (:code/id event)
                 :metadata-edn payload
                 :causal-links-edn (canonical-causal-links causal-links)}
         ev-hash (event-hash header)]
@@ -381,7 +381,7 @@
                      event_type, cause_event_id, prev_event_id, payload_ref, payload,
                      prev_hash, event_hash, created_at)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                 [session-key new-seq (:generation/id event) (:phenotype/id event)
+                 [session-key new-seq (:generation/id event) (:code/id event)
                   (type->db type) prev-id prev-id (:payload-ref event) payload
                   prev-hash ev-hash ts])
     (let [row (first (sqlite/query-raw! conn "SELECT * FROM events
@@ -552,7 +552,7 @@
   Precise coverage claim. For a v2 row, verification failing means one
   of these stored fields was altered after append: session id, seq,
   type, prev id, payload-ref, prev-hash, created-at, generation id,
-  phenotype id, metadata (payload EDN bytes), or causal-links. For a
+  code id, metadata (payload EDN bytes), or causal-links. For a
   legacy row, only the legacy 7 fields (session..created-at) are
   covered. Positional :prev-hash linkage is always checked. NOT
   covered: the autoincrement row id, the sessions-table pin (checked at

@@ -222,7 +222,7 @@
                                                           :expires-at (java.util.Date. 4102444800000)}]})
           executor {:dispatch broker}
           pin {:session/id session-id
-               :phenotype/id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+               :code/id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                :node/id :sandbox}
           cause 1
           fns (#'orch/make-tool-fns {"echo" {:tool/id :echo}} executor pin cause)

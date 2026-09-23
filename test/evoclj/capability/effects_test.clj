@@ -7,7 +7,7 @@
             [evoclj.provider.fixture :as fixture]
             [evoclj.provider.registry :as registry]))
 
-(def ^:private phenotype-id
+(def ^:private code-id
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
 (def ^:private session-id
@@ -89,7 +89,7 @@
                  :effects #{:model/call}
                  :requested-capabilities #{:model/call}})
         tool-intent (intent/tool-call
-                     session-id phenotype-id :node/tool 7
+                     session-id code-id :node/tool 7
                      {:tool/id :fixture/echo :args {:text "blocked"}}
                      {:wall-ms 1000})
         result (dispatch/dispatch! broker tool-intent)]

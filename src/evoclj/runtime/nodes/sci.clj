@@ -73,7 +73,7 @@
   attribution against the Intent ABI; a malformed request throws
   (:node/invalid for an unknown intent type, :intent/schema-invalid
   for a malformed payload)."
-  [request session-id phenotype-id node-id cause-event-id budget]
+  [request session-id code-id node-id cause-event-id budget]
   (when-not (and (map? request) (keyword? (:intent/type request)))
     (throw (err/error :node/invalid
                       "program decision action must be an intent request map"
@@ -81,17 +81,17 @@
                        :value (err/sanitize request)})))
   (let [payload (:payload request)]
     (case (:intent/type request)
-      :intent/tool-call (intent/tool-call session-id phenotype-id node-id
+      :intent/tool-call (intent/tool-call session-id code-id node-id
                                           cause-event-id payload budget)
-      :intent/model-call (intent/model-call session-id phenotype-id node-id
+      :intent/model-call (intent/model-call session-id code-id node-id
                                             cause-event-id payload budget)
-      :intent/memory-read (intent/memory-read session-id phenotype-id node-id
+      :intent/memory-read (intent/memory-read session-id code-id node-id
                                               cause-event-id payload budget)
-      :intent/memory-write (intent/memory-write session-id phenotype-id node-id
+      :intent/memory-write (intent/memory-write session-id code-id node-id
                                                 cause-event-id payload budget)
-      :intent/finish (intent/finish session-id phenotype-id node-id
+      :intent/finish (intent/finish session-id code-id node-id
                                     cause-event-id payload budget)
-      :intent/fail (intent/fail session-id phenotype-id node-id
+      :intent/fail (intent/fail session-id code-id node-id
                                 cause-event-id payload budget)
       (throw (err/error :node/invalid
                         "program decision carries an unknown intent type"
@@ -103,9 +103,9 @@
   Returns {:intents [...]} on success, or {:error <serializable error
   data>} when the evolvable output is not a valid decision — a runtime
   failure, converted to data (never thrown out of the handler)."
-  [value session-id phenotype-id node-id cause-event-id budget]
+  [value session-id code-id node-id cause-event-id budget]
   (try
-    {:intents (mapv #(construct-intent % session-id phenotype-id node-id
+    {:intents (mapv #(construct-intent % session-id code-id node-id
                                        cause-event-id budget)
                     (decision-requests value))}
     (catch clojure.lang.ExceptionInfo e
@@ -151,7 +151,7 @@
                 conversion (construct-intents
                             value
                             (:session/id runtime-state)
-                            (:phenotype/id runtime-state)
+                            (:code/id runtime-state)
                             (:node/id runtime-state)
                             (:event/id input-event)
                             (or (:budget runtime-state) node/default-budget))]
