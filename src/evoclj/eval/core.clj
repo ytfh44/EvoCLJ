@@ -201,6 +201,7 @@
             [malli.error :as me]
             [evoclj.eval.compare :as compare]
             [evoclj.eval.dataset :as dataset]
+            [evoclj.eval.evaluator-contract :as contract]
             [evoclj.eval.gates :as gates]
             [evoclj.eval.metrics :as metrics]
             [evoclj.eval.paired :as paired]
@@ -270,21 +271,18 @@
 
 (defn- validate-evaluator!
   [evaluator]
-  (when-not (map? evaluator)
-    (throw (evaluator-error :not-a-map
-                            "evaluator must be a map" evaluator)))
-  (doseq [[k reason] [[:store :store-missing]
-                      [:provider/catalog :catalog-missing]
-                      [:kernel/abi :abi-missing]
-                      [:profiles :profiles-missing]
-                      [:genome/roots :genome-roots-missing]
-                      [:replay/cases :replay-cases-missing]
-                      [:replay/fixtures :replay-fixtures-missing]
-                      [:selection/fixtures :selection-fixtures-missing]]]
-    (when-not (contains? evaluator k)
-      (throw (evaluator-error reason
-                              (str "evaluator is missing the " k " key")
-                              evaluator))))
+  (contract/validate-evaluator!
+   {:error-fn evaluator-error
+    :label "evaluator"
+    :required [[:store :store-missing]
+               [:provider/catalog :catalog-missing]
+               [:kernel/abi :abi-missing]
+               [:profiles :profiles-missing]
+               [:genome/roots :genome-roots-missing]
+               [:replay/cases :replay-cases-missing]
+               [:replay/fixtures :replay-fixtures-missing]
+               [:selection/fixtures :selection-fixtures-missing]]}
+   evaluator)
   (let [store (:store evaluator)]
     (when-not (and (map? store) (contains? store :sqlite)
                    (contains? store :cas))

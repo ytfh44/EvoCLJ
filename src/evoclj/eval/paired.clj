@@ -91,8 +91,9 @@
   :eval/paired-case-not-found, :eval/paired-case-invalid,
   :eval/paired-equiv-unknown, :eval/paired-result-contaminated."
   (:require [evoclj.eval.runner :as runner]
-             [evoclj.eval.leakage :as leakage]
+            [evoclj.eval.leakage :as leakage]
             [evoclj.eval.equivalence :as equivalence]
+            [evoclj.eval.evaluator-contract :as contract]
             [evoclj.genome.hash :as hash]
             [evoclj.kernel.error :as err]
             [evoclj.runtime.usage :as usage])
@@ -175,16 +176,12 @@
 
 (defn- validate-evaluator!
   [evaluator]
-  (when-not (map? evaluator)
-    (throw (context-error :not-a-map
-                          "paired evaluator context must be a map"
-                          evaluator)))
-  (doseq [[k reason] [[:provider/catalog :catalog-missing]
-                      [:selection/cases :cases-missing]]]
-    (when-not (contains? evaluator k)
-      (throw (context-error reason
-                            (str "paired evaluator context is missing the " k " key")
-                            evaluator))))
+  (contract/validate-evaluator!
+   {:error-fn context-error
+    :label "paired evaluator context"
+    :required [[:provider/catalog :catalog-missing]
+               [:selection/cases :cases-missing]]}
+   evaluator)
   (when-let [root (:artifact/root evaluator)]
     (when-not (string? root)
       (throw (context-error :artifact-root-invalid

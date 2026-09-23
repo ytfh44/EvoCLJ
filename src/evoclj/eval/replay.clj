@@ -110,6 +110,7 @@
   :eval/replay-fixture-missing, :eval/replay-equiv-unknown."
   (:require [evoclj.compiler.core :as compiler]
             [evoclj.eval.equivalence :as equivalence]
+            [evoclj.eval.evaluator-contract :as contract]
             [evoclj.genome.hash :as genome-hash]
             [evoclj.genome.load :as load]
             [evoclj.intent.dispatch :as dispatch]
@@ -373,18 +374,13 @@
 
 (defn- validate-evaluator!
   [evaluator]
-  (when-not (map? evaluator)
-    (throw (context-error :not-a-map
-                          "replay evaluator context must be a map"
-                          evaluator)))
-  (doseq [[k reason] [[:provider/catalog :catalog-missing]
-                      [:replay/cases :cases-missing]
-                      [:replay/fixtures :fixtures-missing]]]
-    (when-not (contains? evaluator k)
-      (throw (context-error reason
-                            (str "replay evaluator context is missing the " k " key")
-                            evaluator))))
-  evaluator)
+  (contract/validate-evaluator!
+   {:error-fn context-error
+    :label "replay evaluator context"
+    :required [[:provider/catalog :catalog-missing]
+               [:replay/cases :cases-missing]
+               [:replay/fixtures :fixtures-missing]]}
+   evaluator))
 
 (defn- program-registry
   "The candidate's program descriptor registry: the context's
