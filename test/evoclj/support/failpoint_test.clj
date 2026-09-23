@@ -23,6 +23,7 @@
             [evoclj.environment.source :as src]
             [evoclj.environment.surface :as surf]
             [evoclj.skill.adapter :as adapter]
+            [evoclj.runtime.binding-publish :as binding-publish]
             [evoclj.store.binding :as binding]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -197,8 +198,8 @@
                     sid (seed-session! db)
                     mounts (atom {})
                     b (make-skill-bundle [:skill "debugging"] "content-A")]
-                (let [res (binding/activate! db sid b (merge {:mount-registry mounts
-                                                              :cas (fresh-cas-with! "content-A")}
+                (let [res (binding/activate! db sid b (merge (merge {:mount-registry mounts
+                                                              :cas (fresh-cas-with! "content-A")} (binding-publish/publisher))
                                                              opts))]
                   {:binding (select-keys res [:logical/id :revision/id :bundle/id :state :binding/type])
                    :events (mapv :event/type (event/events-for-session db sid))
@@ -271,9 +272,9 @@
             sent (seam-ex stage)
             caught (atom nil)]
         (try
-          (binding/activate! db sid b {:mount-registry mounts
+          (binding/activate! db sid b (merge {:mount-registry mounts
                                        :cas (fresh-cas-with! "content-A")
-                                       :failpoints {stage (fn [] (throw sent))}})
+                                       :failpoints {stage (fn [] (throw sent))}} (binding-publish/publisher)))
           (catch Throwable t (reset! caught t)))
         (is (identical? sent @caught) "hook exception must propagate unchanged")
         (let [row (any-row db sid)]
@@ -328,15 +329,15 @@
         sid (seed-session! db)
         mounts (atom {})
         b (make-skill-bundle [:skill "debugging"] "content-A")]
-    (binding/activate! db sid b {:mount-registry mounts
-                                 :cas (fresh-cas-with! "content-A")})
+    (binding/activate! db sid b (merge {:mount-registry mounts
+                                 :cas (fresh-cas-with! "content-A")} (binding-publish/publisher)))
     (is (seq @mounts))
     (let [sent (seam-ex :after-unpublish)
           caught (atom nil)]
       (try
         (binding/deactivate! db sid [:skill "debugging"]
-                             {:mount-registry mounts
-                              :failpoints {:after-unpublish (fn [] (throw sent))}})
+                             (merge {:mount-registry mounts
+                              :failpoints {:after-unpublish (fn [] (throw sent))}} (binding-publish/publisher)))
         (catch Throwable t (reset! caught t)))
       (is (identical? sent @caught) "hook exception must propagate unchanged")
       (let [row (any-row db sid)]

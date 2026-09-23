@@ -145,6 +145,7 @@
             [evoclj.runtime.subagent-cancel :as subagent-cancel]
             [evoclj.runtime.work :as work]
             [evoclj.sci.boundary :as boundary]
+            [evoclj.runtime.binding-publish :as binding-publish]
             [evoclj.store.binding :as binding-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -296,11 +297,12 @@
   (let [{:keys [cas registry mount-registry context-store]} (:stores executor)]
     (try
       (binding-store/restore! (:sqlite (:stores executor)) (:session/id pin)
-                              (cond-> {}
-                                cas (assoc :cas cas)
-                                registry (assoc :registry registry)
-                                mount-registry (assoc :mount-registry mount-registry)
-                                context-store (assoc :context-store context-store)))
+                              (merge (cond-> {}
+                                       cas (assoc :cas cas)
+                                       registry (assoc :registry registry)
+                                       mount-registry (assoc :mount-registry mount-registry)
+                                       context-store (assoc :context-store context-store))
+                                     (binding-publish/publisher)))
       (catch clojure.lang.ExceptionInfo e
         (if (= :store/binding-invalid (:error/type (ex-data e)))
           (throw e)

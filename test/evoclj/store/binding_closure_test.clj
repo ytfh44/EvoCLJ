@@ -26,18 +26,29 @@
           (str "reflective resolution call sites still present: " (pr-str bad))))))
 
 (deftest collaborators-are-statically-required
-  (testing "the collaborators B2 staticized appear as top-level :require entries"
+  (testing "the store layer's collaborators appear as top-level :require entries"
     (let [txt (slurp "src/evoclj/store/binding.clj")]
       ;; The exact aliased requires whose direct references replaced the
       ;; reflective call sites; if one is removed, the corresponding
       ;; direct calls fail compilation, and this pin names the missing edge.
-      (is (re-find #"\[evoclj\.context\.binding :as context-binding\]" txt)
-          "evoclj.context.binding required statically")
+      ;;
+      ;; The persistence-side collaborators live here; the RUNTIME
+      ;; publishing collaborators (context binding, mount backend) are
+      ;; owned by evoclj.runtime.binding-publish and pinned on THAT file
+      ;; below — moving the pin with the code, not duplicating it.
       (is (re-find #"\[evoclj\.environment\.bundle :as env-bundle\]" txt)
           "evoclj.environment.bundle required statically")
+      (is (re-find #"\[evoclj\.mount\.filesystem :as mount-fs\]" txt)
+          "evoclj.mount.filesystem required statically")
+      (is (re-find #"env-bundle/get-bundle" txt) "direct registry reader reference")
+      (is (re-find #"mount-fs/verify-fs-lease!" txt) "direct fs-lease verification reference")
+      (is (not (re-find #"\[evoclj\.context\.binding :as" txt))
+          "the store layer must not REQUIRE the context layer (publishing moved out)")))
+  (testing "the runtime publisher carries the moved collaborators"
+    (let [txt (slurp "src/evoclj/runtime/binding_publish.clj")]
+      (is (re-find #"\[evoclj\.context\.binding :as context-binding\]" txt)
+          "evoclj.context.binding required statically")
       (is (re-find #"\[evoclj\.mount\.backend :as mount-backend\]" txt)
           "evoclj.mount.backend required statically")
-      ;; And the direct references actually occur (not just dead aliases):
-      (is (re-find #"env-bundle/get-bundle" txt) "direct registry reader reference")
       (is (re-find #"context-binding/activate!" txt) "direct context activation reference")
       (is (re-find #"mount-backend/cas-tree-backend" txt) "direct mount backend reference"))))

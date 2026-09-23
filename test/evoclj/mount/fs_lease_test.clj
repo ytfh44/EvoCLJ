@@ -27,6 +27,7 @@
             [evoclj.environment.registry :as reg]
             [evoclj.environment.revision :as rev]
             [evoclj.environment.surface :as surf]
+            [evoclj.runtime.binding-publish :as binding-publish]
             [evoclj.store.binding :as binding]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -276,9 +277,9 @@
                                        :mount-id [:skill "debugging"] :path ""
                                        :actions #{:read :list :stat}
                                        :issued-at now :expires-at later})]
-      (binding/activate! db sid b1 {:registry reg :mount-registry mount-reg :context-store ctx :fs-lease fs-lease})
+      (binding/activate! db sid b1 (merge {:registry reg :mount-registry mount-reg :context-store ctx :fs-lease fs-lease} (binding-publish/publisher)))
       (is (:revision/id (binding/reload! db sid [:skill "debugging"] b2
-                                          {:registry reg :mount-registry mount-reg :context-store ctx :fs-lease fs-lease})))
+                                          (merge {:registry reg :mount-registry mount-reg :context-store ctx :fs-lease fs-lease} (binding-publish/publisher)))))
       (is (= (:revision/id b2) (:revision/id (first (binding/active-bindings db sid)))))))
   (testing "reload! with an EXPIRED fs lease is rejected fail-closed (:capability/expired)"
     (let [db (fresh-db)
@@ -296,9 +297,9 @@
                                       :actions #{:read :list :stat}
                                       :issued-at (java.util.Date. 1700000000000)
                                       :expires-at (java.util.Date. 1700003600000)})]
-      (binding/activate! db sid b1 {:registry reg :mount-registry mount-reg :context-store ctx})
+      (binding/activate! db sid b1 (merge {:registry reg :mount-registry mount-reg :context-store ctx} (binding-publish/publisher)))
       (is (throws-type? #(binding/reload! db sid [:skill "debugging"] b2
-                                          {:registry reg :mount-registry mount-reg :context-store ctx :fs-lease expired})
+                                          (merge {:registry reg :mount-registry mount-reg :context-store ctx :fs-lease expired} (binding-publish/publisher)))
                         :capability/expired)))))
 
 ;; ============================================================================
@@ -319,11 +320,11 @@
                                                  :mount-id [:skill "debugging"] :path ""
                                                  :actions #{:read :list :stat}
                                                  :issued-at now :expires-at later})]
-      (binding/activate! db sid b1 {:registry reg :mount-registry mount-reg :context-store ctx :fs-lease fs-lease})
+      (binding/activate! db sid b1 (merge {:registry reg :mount-registry mount-reg :context-store ctx :fs-lease fs-lease} (binding-publish/publisher)))
       (fs/revoke-lease! lease-reg (:cap/id fs-lease))
       (is (throws-type? #(binding/restore! db sid
-                                           {:registry reg :mount-registry (backend/create-registry) :context-store (ctx-binding/create-store)
-                                            :fs-lease fs-lease :fs-lease-registry lease-reg})
+                                           (merge {:registry reg :mount-registry (backend/create-registry) :context-store (ctx-binding/create-store)
+                                            :fs-lease fs-lease :fs-lease-registry lease-reg} (binding-publish/publisher)))
                         :capability/revoked))))
   (testing "restore! with a VALID fs lease republishes the exact revision"
     (let [db (fresh-db)
@@ -338,11 +339,11 @@
                                                  :mount-id [:skill "debugging"] :path ""
                                                  :actions #{:read :list :stat}
                                                  :issued-at now :expires-at later})]
-      (binding/activate! db sid b1 {:registry reg :mount-registry mount-reg :context-store ctx :fs-lease fs-lease})
+      (binding/activate! db sid b1 (merge {:registry reg :mount-registry mount-reg :context-store ctx :fs-lease fs-lease} (binding-publish/publisher)))
       (let [restored (binding/restore! db sid
-                                       {:registry reg :mount-registry (backend/create-registry)
+                                       (merge {:registry reg :mount-registry (backend/create-registry)
                                         :context-store (ctx-binding/create-store)
-                                        :fs-lease fs-lease :fs-lease-registry lease-reg})]
+                                        :fs-lease fs-lease :fs-lease-registry lease-reg} (binding-publish/publisher)))]
         (is (= 1 (count restored)))
         (is (= (:revision/id b1) (:revision/id (first restored))))))))
 

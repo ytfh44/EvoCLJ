@@ -56,6 +56,7 @@
             [evoclj.skill.surface :as surface]
             [evoclj.context.offer :as offer]
             [evoclj.context.binding :as ctx-binding]
+            [evoclj.runtime.binding-publish :as binding-publish]
             [evoclj.store.binding :as store-binding]
             [evoclj.store.cas :as cas]
             [evoclj.support.failpoint :as fault])
@@ -470,7 +471,11 @@
    (let [bundle (get-skill-bundle registry skill-name)]
      (when-not bundle
        (throw (err/error :skill/not-found "no bundle for skill" {:skill/name skill-name :logical/id (surface/skill-name->logical-id skill-name)})))
-     (let [binding (store-binding/activate! db session-id bundle {:registry registry :cas cas :mount-registry mount-registry :context-store context-store})]
+     (let [binding (store-binding/activate! db session-id bundle
+                                            (merge {:registry registry :cas cas
+                                                    :mount-registry mount-registry
+                                                    :context-store context-store}
+                                                   (binding-publish/publisher)))]
        {:activated true
         :binding/id (:binding/id binding)
         :revision/id (:revision/id binding)
@@ -495,7 +500,11 @@
          bundle (get-skill-bundle registry skill-name)]
      (when-not bundle
        (throw (err/error :skill/not-found "no bundle for skill to reload" {:skill/name skill-name})))
-     (let [binding (store-binding/reload! db session-id logical-id bundle {:registry registry :cas cas :mount-registry mount-registry :context-store context-store})]
+     (let [binding (store-binding/reload! db session-id logical-id bundle
+                                          (merge {:registry registry :cas cas
+                                                  :mount-registry mount-registry
+                                                  :context-store context-store}
+                                                 (binding-publish/publisher)))]
        {:reloaded true
         :binding/id (:binding/id binding)
         :revision/id (:revision/id binding)
@@ -508,7 +517,10 @@
   ([db session-id skill-name] (deactivate-skill! db session-id skill-name {}))
   ([db session-id skill-name {:keys [mount-registry context-store]}]
    (let [logical-id (surface/skill-name->logical-id skill-name)]
-     (store-binding/deactivate! db session-id logical-id {:mount-registry mount-registry :context-store context-store}))))
+     (store-binding/deactivate! db session-id logical-id
+                                (merge {:mount-registry mount-registry
+                                        :context-store context-store}
+                                       (binding-publish/publisher))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers for tests: refresh flow simulation

@@ -41,6 +41,7 @@
             [evoclj.environment.revision :as rev]
             [evoclj.mount.backend :as mount-backend]
             [evoclj.store.artifact :as artifact]
+            [evoclj.runtime.binding-publish :as binding-publish]
             [evoclj.store.binding :as binding]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -181,9 +182,9 @@
         ctx (ctx-binding/create-store)
         logical [:skill "debugging"]
         b (make-skill-bundle logical "content-A")
-        res (binding/activate! db sid b {:cas cas-handle
+        res (binding/activate! db sid b (merge {:cas cas-handle
                                          :mount-registry mounts
-                                         :context-store ctx})]
+                                         :context-store ctx} (binding-publish/publisher)))]
     (testing "durable stage committed"
       (is (= logical (:logical/id res)))
       (is (= :active (:state res)))
@@ -210,10 +211,10 @@
             b (make-skill-bundle logical "content-A")
             sent (sentinel)
             thrown (capture-ex #(binding/activate! db sid b
-                                                   {:cas cas-handle
+                                                   (merge {:cas cas-handle
                                                     :mount-registry mounts
                                                     :context-store ctx
-                                                    :failpoints {stage (fn [] (throw sent))}}))]
+                                                    :failpoints {stage (fn [] (throw sent))}} (binding-publish/publisher))))]
         (testing "original exception reaches the caller unchanged"
           (is (identical? sent thrown)))
         (testing "no durable row survives"
@@ -233,10 +234,10 @@
         b (make-skill-bundle [:skill "debugging"] "content-A")
         sent (sentinel)
         thrown (capture-ex #(binding/activate! db sid b
-                                               {:cas cas-handle
+                                               (merge {:cas cas-handle
                                                 :mount-registry mounts
                                                 :context-store ctx
-                                                :failpoints {:after-event-append (fn [] (throw sent))}}))]
+                                                :failpoints {:after-event-append (fn [] (throw sent))}} (binding-publish/publisher))))]
     (testing "fault still propagates"
       (is (identical? sent thrown)))
     (testing "activation stays committed (no compensating undo past the commit point)"
@@ -253,9 +254,9 @@
         ctx (ctx-binding/create-store)
         logical [:skill "debugging"]
         a (make-skill-bundle logical "content-A")]
-    (binding/activate! db sid a {:cas cas-handle
+    (binding/activate! db sid a (merge {:cas cas-handle
                                  :mount-registry mounts
-                                 :context-store ctx})
+                                 :context-store ctx} (binding-publish/publisher)))
     ;; pre-reload snapshots: raw durable row + full runtime atom state
     (let [row-a (any-row db sid)
           mounts-a @mounts
@@ -263,10 +264,10 @@
           b (make-skill-bundle logical "content-B")
           sent (sentinel)
           thrown (capture-ex #(binding/reload! db sid logical b
-                                               {:cas cas-handle
+                                               (merge {:cas cas-handle
                                                 :mount-registry mounts
                                                 :context-store ctx
-                                                :failpoints {:after-publish-runtime (fn [] (throw sent))}}))]
+                                                :failpoints {:after-publish-runtime (fn [] (throw sent))}} (binding-publish/publisher))))]
       (testing "original exception reaches the caller unchanged"
         (is (identical? sent thrown)))
       (testing "durable row restored byte-comparable to revision A"
@@ -287,17 +288,17 @@
         ctx (ctx-binding/create-store)
         logical [:skill "debugging"]
         a (make-skill-bundle logical "content-A")]
-    (binding/activate! db sid a {:cas cas-handle
+    (binding/activate! db sid a (merge {:cas cas-handle
                                  :mount-registry mounts
-                                 :context-store ctx})
+                                 :context-store ctx} (binding-publish/publisher)))
     (let [row-active (any-row db sid)
           mounts-a @mounts
           ctx-a (ctx-binding/get-binding ctx logical)
           sent (sentinel)
           thrown (capture-ex #(binding/deactivate! db sid logical
-                                                   {:mount-registry mounts
+                                                   (merge {:mount-registry mounts
                                                     :context-store ctx
-                                                    :failpoints {:after-unpublish (fn [] (throw sent))}}))]
+                                                    :failpoints {:after-unpublish (fn [] (throw sent))}} (binding-publish/publisher))))]
       (testing "original exception reaches the caller unchanged"
         (is (identical? sent thrown)))
       (testing "row flipped back to active, byte-comparable"
@@ -319,9 +320,9 @@
           cas-handle (fresh-cas-with! "content-C")
           b (make-skill-bundle [:skill "ctx-boom"] "content-C")
           thrown (capture-ex #(binding/activate! db sid b
-                                                 {:cas cas-handle
+                                                 (merge {:cas cas-handle
                                                   :context-store {}
-                                                  :mount-registry (mount-backend/create-registry)}))]
+                                                  :mount-registry (mount-backend/create-registry)} (binding-publish/publisher))))]
       (is (instance? clojure.lang.ExceptionInfo thrown))
       (is (= :store/binding-publish-failed (:error/type (ex-data thrown)))
           "publish failure must be typed, never swallowed")
@@ -340,9 +341,9 @@
                            (deref [_] (throw (ex-info "mount registry exploded" {}))))
           b (make-skill-bundle [:skill "cross"] "content-D")
           thrown (capture-ex #(binding/activate! db sid b
-                                                 {:cas cas-handle
+                                                 (merge {:cas cas-handle
                                                   :context-store ctx
-                                                  :mount-registry hostile-mounts}))]
+                                                  :mount-registry hostile-mounts} (binding-publish/publisher))))]
       (is (= :store/binding-publish-failed (:error/type (ex-data thrown))))
       (is (= :directory (:phase (ex-data thrown)))
           "typed data names the failing branch/surface type")
@@ -378,10 +379,10 @@
           b (make-skill-bundle [:skill "rb-boom"] "content-E")
           sent (sentinel)
           thrown (capture-ex #(binding/activate! db sid b
-                                                 {:cas cas-handle
+                                                 (merge {:cas cas-handle
                                                   :context-store ctx
                                                   :mount-registry mounts
-                                                  :failpoints {:before-event-append (fn [] (throw sent))}}))
+                                                  :failpoints {:before-event-append (fn [] (throw sent))}} (binding-publish/publisher))))
           data (some-> thrown ex-data)]
       (is (= :store/binding-rollback-failed (:error/type data))
           "unrunnable compensation is surfaced as its own typed error")
@@ -510,9 +511,9 @@
     (reset! results
             (mapv deref
                   [(future (binding/activate! db sid (make-skill-bundle [:skill "alpha"] "alpha-content")
-                                             {:cas cas-handle :mount-registry mounts :context-store ctx}))
+                                             (merge {:cas cas-handle :mount-registry mounts :context-store ctx} (binding-publish/publisher))))
                    (future (binding/activate! db sid (make-skill-bundle [:skill "beta"] "beta-content")
-                                             {:cas cas-handle :mount-registry mounts :context-store ctx}))]))
+                                             (merge {:cas cas-handle :mount-registry mounts :context-store ctx} (binding-publish/publisher))))]))
     (testing "both activations committed"
       (is (= #{[:skill "alpha"] [:skill "beta"]}
              (set (map :logical/id (binding/active-bindings db sid))))))
@@ -536,9 +537,9 @@
                                  {:error (.getCause e)})
                                (catch Throwable t {:error t})))
                   [(future (binding/activate! db sid (make-skill-bundle logical "gamma-content")
-                                             {:cas cas-handle :mount-registry mounts :context-store ctx}))
+                                             (merge {:cas cas-handle :mount-registry mounts :context-store ctx} (binding-publish/publisher))))
                    (future (binding/activate! db sid (make-skill-bundle logical "gamma-content")
-                                             {:cas cas-handle :mount-registry mounts :context-store ctx}))]))
+                                             (merge {:cas cas-handle :mount-registry mounts :context-store ctx} (binding-publish/publisher))))]))
     (let [oks (filter :ok @outcomes)
           errs (filter :error @outcomes)]
       (testing "exactly one winner, one typed already-active loser"
@@ -567,9 +568,9 @@
     (let [gc-cas (fresh-cas-with! "keep-me")
           mounts (mount-backend/create-registry)
           ctx (ctx-binding/create-store)
-          thrown (capture-ex #(binding/restore! db sid {:cas gc-cas
+          thrown (capture-ex #(binding/restore! db sid (merge {:cas gc-cas
                                                         :mount-registry mounts
-                                                        :context-store ctx}))]
+                                                        :context-store ctx} (binding-publish/publisher))))]
       (testing "typed failure naming the unrestorable binding"
         (is (instance? clojure.lang.ExceptionInfo thrown))
         (is (= :store/binding-invalid (:error/type (ex-data thrown))))
@@ -587,9 +588,9 @@
         _ (binding/activate! db sid (make-skill-bundle [:skill "two"] "two") {:cas live-cas})
         mounts (mount-backend/create-registry)
         ctx (ctx-binding/create-store)
-        restored (binding/restore! db sid {:cas live-cas
+        restored (binding/restore! db sid (merge {:cas live-cas
                                            :mount-registry mounts
-                                           :context-store ctx})]
+                                           :context-store ctx} (binding-publish/publisher)))]
     (is (= 2 (count restored)))
     (is (= 2 (count (ctx-binding/list-active ctx))))
     (is (= 2 (count (mount-backend/list-mounts mounts))))))

@@ -26,13 +26,26 @@
     co-versioned (same revision_id) and published atomically; restoring
     a binding restores all siblings at the same revision.
 
+  Layer split (WO-B1 follow-up): this namespace owns the DURABLE half
+  of a binding — the session_bindings rows, the fail-closed existence /
+  sibling-surface / fs-lease validation, and the two-phase orchestration
+  (staging + compensating rollback). The RUNTIME half — publishing a
+  bundle's Context surfaces into a context-store and its Directory
+  surfaces into a mount-registry, plus the pre-state capture and
+  compensation the staged transaction needs — is owned by
+  evoclj.runtime.binding-publish and injected as four functions
+  (:publish-fn :unpublish-fn :capture-fn :compensate-fn; see
+  binding-publish/publisher). Supplying runtime registries WITHOUT the
+  publisher is a typed :store/binding-invalid (:reason
+  :publisher-required), never a silent no-publication.
+
   Runtime publishing:
   - activate!/reload! validate the bundle exists FAIL-CLOSED (registry
     hit or CAS artifact required; unverifiable bundles throw typed
     :store/binding-invalid, INV-02), validate every sibling surface via
     evoclj.environment.surface,
-    insert/update the durable row, publish mount/context state into
-    the supplied in-memory registries (if any), and append an event.
+    insert/update the durable row, publish mount/context state through
+    the injected publisher (if any), and append an event.
   - WO-B1: activation is a TWO-PHASE transaction. Phase 1 stages every
     mutation (durable row write + runtime publication); phase 2 commits
     by appending the auditable event. Any failure inside the staged
@@ -44,8 +57,9 @@
     A fault after the commit point (:after-event-append) never rolls
     back. If the rollback itself cannot run, the caller gets typed
     :store/binding-rollback-failed carrying the original error.
-  - WO-B1: publish-runtime! failures are TYPED
-    (:store/binding-publish-failed), never caught-and-continued.
+  - WO-B1: publisher failures are TYPED (:store/binding-publish-failed,
+    thrown by evoclj.runtime.binding-publish), never
+    caught-and-continued.
   - WO-B1: persisted metadata is serialized through a strict KEY
     ALLOWLIST per surface (:materializer is stripped as operational;
     backend records flatten to plain descriptors); unknown keys or
@@ -72,12 +86,10 @@
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [clojure.string :as str]
-            [evoclj.context.binding :as context-binding]
             [evoclj.environment.bundle :as env-bundle]
             [evoclj.environment.surface :as surf]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
-            [evoclj.mount.backend :as mount-backend]
             [evoclj.mount.filesystem :as mount-fs]
             [evoclj.sci.boundary :as boundary]
             [evoclj.store.cas :as cas]
@@ -147,29 +159,31 @@
     (:binding/type bundle) (str (:binding/type bundle))
     :else "skill"))
 
-(defn- bundle->logical
-  "Extract logical-id vector from a bundle or offer map."
+(defn bundle->logical
+  "Extract logical-id vector from a bundle or offer map. Public: the
+  binding data model is shared with evoclj.runtime.binding-publish (the
+  runtime publisher), which consumes the same accessors."
   [bundle]
   (or (:logical/id bundle)
       (:offer/logical-id bundle)
       (:logical-id bundle)
       (throw (err/error :store/binding-invalid "bundle/offer missing logical id" {:bundle bundle}))))
 
-(defn- bundle->revision
+(defn bundle->revision
   [bundle]
   (or (:revision/id bundle)
       (:offer/revision-id bundle)
       (:revision-id bundle)
       (throw (err/error :store/binding-invalid "bundle/offer missing revision_id" {:bundle bundle}))))
 
-(defn- bundle->bundle-id
+(defn bundle->bundle-id
   [bundle]
   (or (:bundle/id bundle)
       (:offer/bundle-id bundle)
       (:bundle-id bundle)
       (throw (err/error :store/binding-invalid "bundle/offer missing bundle_id" {:bundle bundle}))))
 
-(defn- bundle->surfaces
+(defn bundle->surfaces
   [bundle]
   (or (:surfaces bundle) []))
 
@@ -181,7 +195,7 @@
 ;; Used by publish/unpublish/publish-mount-ids/removed-mount-ids-for so
 ;; every mount registry key derives from ONE formula (INV-05).
 
-(defn- directory-mount-id
+(defn directory-mount-id
   "Canonical vector mount-id for a directory surface.
 
   Returns logical-id (a vector) extended with the surface's :revision/id
@@ -198,7 +212,7 @@
     (cond-> lid
       (and rev (not (some #{rev} lid))) (conj rev))))
 
-(defn- mount-key-for
+(defn mount-key-for
   "Given an element of surfaces-or-ids (a surface map OR an
   already-canonical mount-id), return its canonical mount registry key.
   WO-B3: surfaces are normalized via directory-mount-id; pre-computed
@@ -438,133 +452,45 @@
   fs-lease)
 
 ;; ---------------------------------------------------------------------------
-;; Runtime publishing helpers
+;; Injected runtime publisher (the store owns persistence, not publication)
 ;; ---------------------------------------------------------------------------
+;;
+;; The RUNTIME half of a binding — publishing Context surfaces into a
+;; context-store and Directory surfaces into a mount-registry, plus the
+;; pre-state capture and compensation the staged transaction needs — is
+;; owned by evoclj.runtime.binding-publish. The store receives those four
+;; operations as injected functions (see binding-publish/publisher), so
+;; this namespace requires neither the context nor the mount layer.
 
-(defn- publish-failure
-  "The typed publication failure (WO-B1): a stable :error/type, the
-  failing phase (:context | :directory | :unpublish), the offending
-  surface (sanitized), and the fully sanitized original error. Never
-  thrown-and-continued away by this namespace."
-  [phase surface ^Exception cause]
-  (err/error :store/binding-publish-failed
-             (str "binding runtime publication failed during " (name phase) " publication")
-             {:phase phase
-              :surface (err/sanitize surface)
-              :error/original (err/error-data cause)}))
+(def ^:private publisher-keys
+  [:publish-fn :unpublish-fn :capture-fn :compensate-fn])
 
-(defn- publish-runtime!
-  "Publish bundle's surfaces into mount-registry and context-store.
-   Both are optional atoms. No-op if nil.
+(defn- publisher-of
+  "The injected runtime publisher for one call: the four operations when
+  the caller supplied runtime registries, or an all-nil map when there is
+  nothing to publish.
 
-   Collaborators (evoclj.context.binding, evoclj.mount.backend) are
-   referenced statically via top-level requires (B2: resolution proven
-   acyclic) — no runtime symbol lookup.
-
-   WO-B1: the per-surface catch-and-continue swallows are GONE. A
-   failing publication throws typed :store/binding-publish-failed
-   naming the phase; the caller's staged transaction compensates back
-   to the pre-activation state."
-  [bundle {:keys [mount-registry context-store cas] :as opts}]
-  (let [surfaces (bundle->surfaces bundle)
-        logical-id (bundle->logical bundle)
-        rev (bundle->revision bundle)
-        bid (bundle->bundle-id bundle)
-        cas-handle cas]
-    (when context-store
-      (doseq [s surfaces
-              :when (= :context (:surface/type s))]
-        ;; WO-B1: no catch-and-continue. A failing publication surfaces
-        ;; typed; the caller's staged transaction compensates.
-        (let [desc (:descriptor s)
-              mat (when (map? desc) (:materializer desc))
-              offer (cond-> {:offer/logical-id logical-id
-                             :offer/revision-id rev
-                             :offer/bundle-id bid
-                             :offer/name (str logical-id)
-                             :offer/description (str "binding " logical-id)}
-                      ;; WO-S1: carry the materializer descriptor (e.g.
-                      ;; {:type :cas-tree-file :path \"SKILL.md\"}) so a
-                      ;; binding created from it routes tree->file correctly.
-                      (some? mat) (assoc :offer/descriptor mat))]
-          (try
-            (context-binding/activate! context-store offer)
-            (catch Exception e
-              (throw (publish-failure :context s e)))))))
-    (when mount-registry
-      (doseq [s surfaces
-              :when (= :directory (:surface/type s))]
-        ;; WO-B1: the OUTER boundary is typed. WO-B3: the mount-id is a
-        ;; canonical vector (directory-mount-id — logical-id + revision,
-        ;; never a bare scalar :surface/id) and registration goes through
-        ;; the single canonical register-mount! — no ad-hoc
-        ;; (swap! assoc) mutation of the registry (INV-05). The backend
-        ;; realization fallbacks below stay: a real Backend is preferred,
-        ;; else a plain descriptor mount is built (register-mount!
-        ;; accepts a descriptor backend) and the filesystem provider
-        ;; fails-closed at operation time.
-        (try
-          (let [mount-id (directory-mount-id logical-id s)]
-            (when-not (mount-backend/get-mount mount-registry mount-id)
-              (let [raw (:backend s)
-                    backend (cond
-                              (and raw
-                                   (try
-                                     (satisfies? mount-backend/Backend raw)
-                                     (catch Exception _ false))) raw
-                              (and raw (map? raw) (:tree/id raw) cas-handle)
-                              (try
-                                (mount-backend/cas-tree-backend cas-handle (:tree/id raw))
-                                (catch Exception _ raw))
-                              (and raw (map? raw) (:tree-id raw) cas-handle)
-                              (try
-                                (mount-backend/cas-tree-backend cas-handle (:tree-id raw))
-                                (catch Exception _ raw))
-                              cas-handle
-                              (try
-                                (mount-backend/cas-tree-backend cas-handle rev)
-                                (catch Exception _ nil))
-                              :else raw)
-                    backend (or backend {:type :cas-tree :tree/id rev :bundle/id bid})
-                    mount (mount-backend/make-mount {:mount-id mount-id :backend backend :access-max (:access/max s)})]
-                (mount-backend/register-mount! mount-registry mount))))
-          (catch Exception e
-            (throw (publish-failure :directory s e))))))
-    nil))
-
-(defn- unpublish-runtime!
-  "Remove binding's runtime state from mount-registry and context-store.
-  If surfaces-or-ids is provided, remove those specific mount ids; otherwise
-  remove by logical-id.
-
-  WO-B1: failures here are typed (:store/binding-publish-failed with
-  :phase :unpublish) — never caught-and-continued."
-  ([logical-id opts] (unpublish-runtime! logical-id opts nil))
-  ([logical-id {:keys [mount-registry context-store]} surfaces-or-ids]
-   (when context-store
-     (try
-       (context-binding/deactivate! context-store logical-id)
-       (catch Exception e
-         (throw (publish-failure :unpublish {:surface/type :context :logical/id logical-id} e)))))
-   (when mount-registry
-     (try
-       (if (seq surfaces-or-ids)
-         (let [ids (set (map #(mount-key-for logical-id %) surfaces-or-ids))]
-           (swap! mount-registry
-                  (fn [m]
-                    (into {} (remove (fn [[k _]] (contains? ids k)) m)))))
-         (swap! mount-registry
-                (fn [m]
-                  (into {} (remove (fn [[k _]] (= k logical-id)) m)))))
-       (catch Exception e
-         (throw (publish-failure :unpublish {:surface/type :directory :logical/id logical-id} e)))))))
+  Fail-closed: runtime registries WITHOUT the publisher is a typed
+  :store/binding-invalid — a binding must never be activated while its
+  mount/context state silently goes unpublished."
+  [opts]
+  (let [runtime? (or (:mount-registry opts) (:context-store opts))
+        missing (vec (remove #(fn? (get opts %)) publisher-keys))]
+    (if runtime?
+      (if (seq missing)
+        (throw (err/error :store/binding-invalid
+                          "runtime registries require an injected publisher"
+                          {:reason :publisher-required
+                           :missing missing}))
+        (select-keys opts publisher-keys))
+      {})))
 
 ;; ---------------------------------------------------------------------------
 ;; WO-B1 two-phase activation: staging + compensating rollback
 ;; ---------------------------------------------------------------------------
 
 (defn- publish-mount-ids
-  "The mount registry keys publish-runtime! would use for bundle's
+  "The mount registry keys the runtime publisher would use for bundle's
   directory surfaces (the exact same id formula — canonical vector
   mount-id via directory-mount-id)."
   [bundle]
@@ -574,77 +500,13 @@
            (directory-mount-id logical-id s)))))
 
 (defn- removed-mount-ids-for
-  "The mount registry keys unpublish-runtime! removes for these
+  "The mount registry keys the runtime unpublisher removes for these
   surfaces-or-ids (mirrors its id logic exactly — canonical vector
   mount-id via mount-key-for)."
   [surfaces-or-ids logical-id]
   (if (seq surfaces-or-ids)
     (set (map #(mount-key-for logical-id %) surfaces-or-ids))
     #{logical-id}))
-
-(defn- read-prestate!
-  "Best-effort pre-state read. A store we cannot even READ is marked
-  ::unreadable — compensation will SKIP it (we never claim to restore
-  state we could not observe) while publication against it will still
-  fail typed."
-  [f]
-  (try (f) (catch Exception _ ::unreadable)))
-
-(defn- capture-runtime-prestate
-  "Snapshot the runtime state a staged transaction may mutate: the
-  context binding currently pinned under logical-id and the full mount
-  registry image. Small atoms; the snapshot is what makes rollback
-  byte-comparable. Unreadable stores are marked ::unreadable rather
-  than exploding here — they fail typed at publication time instead."
-  [logical-id {:keys [mount-registry context-store]}]
-  {:ctx-prev (when context-store (read-prestate! #(context-binding/get-binding context-store logical-id)))
-   :mounts (if mount-registry (read-prestate! #(clojure.core/deref mount-registry)) {})})
-
-(defn- compensate-runtime!
-  "Undo EXACTLY this transaction's runtime deltas: every touched mount
-  key returns to its pre-transaction value (present -> restored, absent
-  -> removed); the context binding under logical-id returns to its
-  pre-transaction value. swap!-based, so concurrent activations touching
-  OTHER keys are untouched (last-writer-wins only on the same key).
-
-  Returns a status map {:mounts ... :context ...} where each entry is
-  :ok | :skipped-unreadable | :failed — callers decide whether a
-  :failed constitutes an unrunnable rollback."
-  [{:keys [prestate added-mount-ids removed-mount-ids opts logical-id]}]
-  (let [{:keys [mounts ctx-prev]} prestate
-        touched (into added-mount-ids removed-mount-ids)
-        mounts-status
-        (cond
-          (= ::unreadable mounts) :skipped-unreadable
-          (not (:mount-registry opts)) :ok
-          :else
-          (try
-            (swap! (:mount-registry opts)
-                   (fn [m]
-                     (reduce (fn [acc k]
-                               (if (contains? mounts k)
-                                 (assoc acc k (get mounts k))
-                                 (dissoc acc k)))
-                             m touched)))
-            :ok
-            (catch Exception _ :failed)))
-        context-status
-        (cond
-          (= ::unreadable ctx-prev) :skipped-unreadable
-          (not (:context-store opts)) :ok
-          :else
-          (try
-            (swap! (:context-store opts)
-                   (fn [st]
-                     (let [installed (get-in st [:by-logical logical-id])]
-                       (cond-> (if ctx-prev
-                                 (assoc-in st [:by-logical logical-id] ctx-prev)
-                                 (update st :by-logical dissoc logical-id))
-                         ctx-prev (assoc-in [:by-id (:binding/id ctx-prev)] ctx-prev)
-                         installed (update :by-id dissoc (:binding/id installed))))))
-            :ok
-            (catch Exception _ :failed)))]
-    {:mounts mounts-status :context context-status}))
 
 (defn- compensate!
   "Run the COMPENSATING actions for one failed staged transaction.
@@ -661,12 +523,15 @@
     :db :session-id :logical-id
     :inserted-row-id   (activate!: the staged row's id)
     :old-row           (reload!/deactivate!: full pre-image of the row)
-    :prestate          (capture-runtime-prestate value)
+    :prestate          (the injected :capture-fn's value)
     :added-mount-ids   (mount keys this txn published)
     :removed-mount-ids (mount keys this txn removed)
-    :opts              {:mount-registry :context-store} runtime atoms only"
+    :opts              {:mount-registry :context-store} runtime atoms only
+    :compensate-fn     the injected runtime compensation (nil when no
+                       runtime registries were supplied)"
   [{:keys [db session-id logical-id inserted-row-id old-row prestate
-           added-mount-ids removed-mount-ids opts original-throwable]}]
+           added-mount-ids removed-mount-ids opts compensate-fn
+           original-throwable]}]
   (let [durable-ok?
         (try
           (sqlite/with-db [conn db]
@@ -684,15 +549,17 @@
         ;; stores marked ::unreadable at capture time are SKIPPED, not
         ;; failures: we never promised to restore state we could not read.
         ;; An ATTEMPTED step that FAILED means the rollback could not run.
-        statuses (try
-                   (let [s (compensate-runtime!
-                            {:prestate prestate
-                             :added-mount-ids added-mount-ids
-                             :removed-mount-ids removed-mount-ids
-                             :opts opts
-                             :logical-id logical-id})]
-                     (if (map? s) s {:mounts :failed :context :failed}))
-                   (catch Exception _ {:mounts :failed :context :failed}))]
+        statuses (if compensate-fn
+                   (try
+                     (let [s (compensate-fn
+                              {:prestate prestate
+                               :added-mount-ids added-mount-ids
+                               :removed-mount-ids removed-mount-ids
+                               :opts opts
+                               :logical-id logical-id})]
+                       (if (map? s) s {:mounts :failed :context :failed}))
+                     (catch Exception _ {:mounts :failed :context :failed}))
+                   {:mounts :ok :context :ok})]
     (when (or (false? durable-ok?)
               (some #(= :failed %) (vals statuses)))
       (throw (err/error :store/binding-rollback-failed
@@ -708,11 +575,11 @@
 
   `txn` carries compensate!'s collaborators and this transaction's
   identity (:db :session-id :logical-id :mount-registry :context-store),
-  the durable-compensation pair (:inserted-row-id / :old-row), and the
-  runtime deltas it applies (:added-mount-ids / :removed-mount-ids). The
-  engine captures the runtime pre-state (capture-runtime-prestate) BEFORE
-  running `stage-fn`, so a failed transaction restores exactly what it
-  touched.
+  the durable-compensation pair (:inserted-row-id / :old-row), the
+  runtime deltas it applies (:added-mount-ids / :removed-mount-ids), and
+  the injected runtime pair (:capture-fn / :compensate-fn). The engine
+  captures the runtime pre-state (the :capture-fn) BEFORE running
+  `stage-fn`, so a failed transaction restores exactly what it touched.
 
   `stage-fn` performs the staged steps — the durable row write already
   happened in the caller — and is handed a zero-arg `commit!` it MUST call
@@ -723,10 +590,11 @@
   compensates after commit!. compensate! may itself throw
   :store/binding-rollback-failed."
   [{:keys [db session-id logical-id mount-registry context-store
-           inserted-row-id old-row added-mount-ids removed-mount-ids]}
+           inserted-row-id old-row added-mount-ids removed-mount-ids
+           capture-fn compensate-fn]}
    stage-fn]
   (let [runtime-opts {:mount-registry mount-registry :context-store context-store}
-        prestate (capture-runtime-prestate logical-id runtime-opts)
+        prestate (when capture-fn (capture-fn logical-id runtime-opts))
         committed? (atom false)]
     (try
       (stage-fn #(reset! committed? true))
@@ -736,6 +604,7 @@
                         :inserted-row-id inserted-row-id :old-row old-row
                         :prestate prestate :added-mount-ids added-mount-ids
                         :removed-mount-ids removed-mount-ids :opts runtime-opts
+                        :compensate-fn compensate-fn
                         :original-throwable t}))
         (throw t)))))
 
@@ -830,6 +699,7 @@
          cas-handle (:cas opts)
          mount-registry (:mount-registry opts)
          context-store (:context-store opts)
+         {:keys [publish-fn capture-fn compensate-fn]} (publisher-of opts)
          bundle (if (and (map? bundle) (contains? bundle :bundle))
                   (:bundle bundle)
                   bundle)
@@ -873,12 +743,15 @@
                        :inserted-row-id id
                        :old-row nil
                        :added-mount-ids added-ids
-                       :removed-mount-ids #{}}
+                       :removed-mount-ids #{}
+                       :capture-fn capture-fn
+                       :compensate-fn compensate-fn}
                       (fn [commit!]
                         ;; T2 seam: durable row inserted; sits outside every catch around
                         ;; the insert, so a hook throw propagates to the caller unchanged
                         (fault/trigger! opts :after-db-insert)
-                        (publish-runtime! bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
+                        (when publish-fn
+                          (publish-fn bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle}))
                         ;; T2 seam: runtime mount/context state published
                         (fault/trigger! opts :after-publish-runtime)
                         ;; T2 seam: last point before the auditable event append
@@ -917,6 +790,7 @@
          cas-handle (:cas opts)
          mount-registry (:mount-registry opts)
          context-store (:context-store opts)
+         {:keys [publish-fn unpublish-fn capture-fn compensate-fn]} (publisher-of opts)
          new-bundle (if (and (map? new-bundle) (contains? new-bundle :bundle))
                       (:bundle new-bundle) new-bundle)
          new-rev (bundle->revision new-bundle)
@@ -959,12 +833,16 @@
                          :inserted-row-id nil
                          :old-row old-row
                          :added-mount-ids added-ids
-                         :removed-mount-ids removed-ids}
+                         :removed-mount-ids removed-ids
+                         :capture-fn capture-fn
+                         :compensate-fn compensate-fn}
                         (fn [commit!]
                           ;; T2 seam: durable row updated (revision/bundle/metadata)
                           (fault/trigger! opts :after-db-insert)
-                          (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
-                          (publish-runtime! new-bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle})
+                          (when unpublish-fn
+                            (unpublish-fn logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces))
+                          (when publish-fn
+                            (publish-fn new-bundle {:mount-registry mount-registry :context-store context-store :cas cas-handle}))
                           ;; T2 seam: runtime state republished at the new revision
                           (fault/trigger! opts :after-publish-runtime)
                           ;; T2 seam: last point before the auditable event append
@@ -995,6 +873,7 @@
    (let [opts (if (instance? clojure.lang.Atom opts) {:mount-registry opts} opts)
          mount-registry (:mount-registry opts)
          context-store (:context-store opts)
+         {:keys [unpublish-fn capture-fn compensate-fn]} (publisher-of opts)
          sid (str (types/session-id session-id))
          lid (logical->text logical-id)
          now (sqlite/canonical-timestamp nil invalid-timestamp)
@@ -1020,9 +899,12 @@
                      :inserted-row-id nil
                      :old-row old-row
                      :added-mount-ids #{}
-                     :removed-mount-ids removed-ids}
+                     :removed-mount-ids removed-ids
+                     :capture-fn capture-fn
+                     :compensate-fn compensate-fn}
                     (fn [commit!]
-                      (unpublish-runtime! logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces)
+                      (when unpublish-fn
+                        (unpublish-fn logical-id {:mount-registry mount-registry :context-store context-store} old-surfaces))
                       ;; T2 seam: runtime state removed (row already flipped to inactive)
                       (fault/trigger! opts :after-unpublish)
                       (append-binding-event! db session-id :binding/deactivated
@@ -1084,7 +966,8 @@
     (if-not (seq bundles)
       ;; zero active bindings: nothing to republish
       bindings
-      (let [runtime-opts {:mount-registry (:mount-registry opts)
+      (let [{:keys [publish-fn capture-fn compensate-fn]} (publisher-of opts)
+            runtime-opts {:mount-registry (:mount-registry opts)
                           :context-store (:context-store opts)}
             publish-all
             (fn publish-all*
@@ -1094,12 +977,12 @@
                 bindings
                 (let [bundle (first pending)
                       logical-id (:logical/id bundle)
-                      prestate (capture-runtime-prestate logical-id runtime-opts)
+                      prestate (when capture-fn (capture-fn logical-id runtime-opts))
                       undo {:logical-id logical-id
                             :prestate prestate
                             :added-mount-ids (publish-mount-ids bundle)}
                       outcome (try
-                                (publish-runtime! bundle opts)
+                                (when publish-fn (publish-fn bundle opts))
                                 ::published
                                 (catch Throwable t {::failure t}))
                       failure (::failure outcome)]
@@ -1107,7 +990,7 @@
                     ;; unwind in reverse, then surface honestly
                     (let [unwound
                           (try
-                            (let [statuses (mapv #(compensate-runtime!
+                            (let [statuses (mapv #(compensate-fn
                                                    {:prestate (:prestate %)
                                                     :added-mount-ids (:added-mount-ids %)
                                                     :removed-mount-ids #{}

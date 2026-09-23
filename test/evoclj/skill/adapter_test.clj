@@ -18,6 +18,7 @@
             [evoclj.mount.backend :as mount-backend]
             [evoclj.mount.filesystem :as mount-fs]
             [evoclj.store.artifact :as artifact]
+            [evoclj.runtime.binding-publish :as binding-publish]
             [evoclj.store.binding :as store-binding]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -540,7 +541,9 @@
           new-mount (mount-backend/create-registry)
           new-ctx (ctx-binding/create-store)
           new-db (sqlite/spec db-path)
-          restored (store-binding/restore! new-db sid {:cas cas :mount-registry new-mount :context-store new-ctx})]
+          restored (store-binding/restore! new-db sid
+                                           (merge {:cas cas :mount-registry new-mount :context-store new-ctx}
+                                                  (binding-publish/publisher)))]
       (is (= 1 (count restored)))
       (is (= rev-b (:revision/id (first restored))) "restored exact revision B, not A or drifted")
       ;; mount/context republished

@@ -11,6 +11,7 @@
             [evoclj.environment.surface :as surf]
             [evoclj.genome.hash :as hash]
             [evoclj.mount.backend :as mount-backend]
+            [evoclj.runtime.binding-publish :as binding-publish]
             [evoclj.store.binding :as binding]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
@@ -171,7 +172,7 @@
         ;; For test, we put both so at least one matches.
         _ (cas/put-bytes! cas (.getBytes "skill content A" StandardCharsets/UTF_8) {:media-type "text/plain"})
         before-events (count (event/events-for-session db sid))
-        result (binding/activate! db sid bundle {:cas cas :mount-registry mount-reg :context-store ctx-store})
+        result (binding/activate! db sid bundle (merge (merge {:cas cas :mount-registry mount-reg :context-store ctx-store} (binding-publish/publisher)) (binding-publish/publisher)))
         after-bindings (binding/active-bindings db sid)
         after-events (event/events-for-session db sid)]
     (testing "durable row created"
@@ -214,7 +215,7 @@
           ;; put the raw payload bytes so its CAS artifact id == revision id
           _ (cas/put-bytes! cas (.getBytes payload StandardCharsets/UTF_8)
                             {:media-type "text/plain"})
-          _ (binding/activate! db sid bundle {:cas cas :mount-registry mount-reg})]
+          _ (binding/activate! db sid bundle (merge (merge {:cas cas :mount-registry mount-reg} (binding-publish/publisher)) (binding-publish/publisher)))]
       (testing "the mount is registered exactly once under the canonical vector id"
         (is (= 1 (count (mount-backend/list-mounts mount-reg))))
         (is (some? (mount-backend/get-mount mount-reg canonical)))
@@ -291,11 +292,11 @@
         bundle-b (make-skill-bundle logical "payload B")
         _ (cas/put-bytes! cas (.getBytes "payload A" StandardCharsets/UTF_8) {:media-type "text/plain"})
         _ (cas/put-bytes! cas (.getBytes "payload B" StandardCharsets/UTF_8) {:media-type "text/plain"})
-        _ (binding/activate! db sid bundle-a {:cas cas :mount-registry mount-reg :context-store ctx-store})
+        _ (binding/activate! db sid bundle-a (merge (merge {:cas cas :mount-registry mount-reg :context-store ctx-store} (binding-publish/publisher)) (binding-publish/publisher)))
         before (first (binding/active-bindings db sid))
         before-rev (:revision/id before)
         before-events (count (event/events-for-session db sid))
-        reloaded (binding/reload! db sid logical bundle-b {:cas cas :mount-registry mount-reg :context-store ctx-store})
+        reloaded (binding/reload! db sid logical bundle-b (merge (merge {:cas cas :mount-registry mount-reg :context-store ctx-store} (binding-publish/publisher)) (binding-publish/publisher)))
         after (first (binding/active-bindings db sid))
         after-rev (:revision/id after)
         after-events (event/events-for-session db sid)]
@@ -325,13 +326,13 @@
         logical [:skill "debugging"]
         bundle-a (make-skill-bundle logical "restart A")
         _ (cas/put-bytes! cas (.getBytes "restart A" StandardCharsets/UTF_8) {:media-type "text/plain"})
-        _ (binding/activate! db sid bundle-a {:cas cas :mount-registry mount-reg :context-store ctx-store})
+        _ (binding/activate! db sid bundle-a (merge (merge {:cas cas :mount-registry mount-reg :context-store ctx-store} (binding-publish/publisher)) (binding-publish/publisher)))
         before (first (binding/active-bindings db sid))
         ;; Simulate process restart: create NEW in-memory registries, new db handle (same file)
         new-mount-reg (mount-backend/create-registry)
         new-ctx-store (ctx-binding/create-store)
         new-db (sqlite/spec db-path) ;; fresh connection to same file
-        restored (binding/restore! new-db sid {:cas cas :mount-registry new-mount-reg :context-store new-ctx-store})
+        restored (binding/restore! new-db sid (merge (merge {:cas cas :mount-registry new-mount-reg :context-store new-ctx-store} (binding-publish/publisher)) (binding-publish/publisher)))
         after (first (binding/active-bindings new-db sid))]
     (testing "active binding survives restart via DB"
       (is (= 1 (count restored)))
@@ -366,7 +367,7 @@
         after (binding/active-bindings db sid)
         mount-reg (mount-backend/create-registry)
         ctx-store (ctx-binding/create-store)
-        restored (binding/restore! db sid {:cas cas :mount-registry mount-reg :context-store ctx-store})]
+        restored (binding/restore! db sid (merge (merge {:cas cas :mount-registry mount-reg :context-store ctx-store} (binding-publish/publisher)) (binding-publish/publisher)))]
     (testing "active binding still present after source deletion (CAS, not catalog)"
       (is (= 1 (count after)))
       (is (= (:revision/id before) (:revision/id (first after)))))
@@ -404,7 +405,7 @@
         dir-surf (surf/make-directory-surface {:id :skill-dir :backend {:type :memory} :access-max #{:read :list :stat} :revision/id rev})
         bundle (bundle/make-bundle {:bundle-id bid :revision-id rev :logical-id logical :surfaces [ctx-surf dir-surf]})
         _ (cas/put-bytes! cas (.getBytes payload StandardCharsets/UTF_8) {:media-type "text/plain"})
-        _ (binding/activate! db sid bundle {:cas cas :mount-registry mount-reg :context-store ctx-store})
+        _ (binding/activate! db sid bundle (merge (merge {:cas cas :mount-registry mount-reg :context-store ctx-store} (binding-publish/publisher)) (binding-publish/publisher)))
         active (first (binding/active-bindings db sid))
         ;; Verify DB metadata says siblings share revision
         meta (:metadata active)
@@ -424,7 +425,7 @@
     ;; Now simulate restart and restore, verify still atomic
     (let [new-mount (mount-backend/create-registry)
           new-ctx (ctx-binding/create-store)
-          _ (binding/restore! db sid {:cas cas :mount-registry new-mount :context-store new-ctx})
+          _ (binding/restore! db sid (merge (merge {:cas cas :mount-registry new-mount :context-store new-ctx} (binding-publish/publisher)) (binding-publish/publisher)))
           after-ctx (first (ctx-binding/list-active new-ctx))
           after-mount (first (mount-backend/list-mounts new-mount))]
       (testing "after restart, siblings still same revision"
@@ -446,10 +447,10 @@
         logical [:skill "to-remove"]
         bundle (make-skill-bundle logical "to be deactivated")
         _ (cas/put-bytes! cas (.getBytes "to be deactivated" StandardCharsets/UTF_8) {:media-type "text/plain"})
-        _ (binding/activate! db sid bundle {:cas cas :mount-registry mount-reg :context-store ctx-store})
+        _ (binding/activate! db sid bundle (merge (merge {:cas cas :mount-registry mount-reg :context-store ctx-store} (binding-publish/publisher)) (binding-publish/publisher)))
         before-count (count (binding/active-bindings db sid))
         before-events (count (event/events-for-session db sid))
-        _ (binding/deactivate! db sid logical {:mount-registry mount-reg :context-store ctx-store})
+        _ (binding/deactivate! db sid logical (merge (merge {:mount-registry mount-reg :context-store ctx-store} (binding-publish/publisher)) (binding-publish/publisher)))
         after (binding/active-bindings db sid)
         after-events (event/events-for-session db sid)]
     (is (= 1 before-count))
@@ -695,14 +696,15 @@
         mount-reg (mount-backend/create-registry)
         ctx-store (ctx-binding/create-store)]
     (testing "restore against GC'd CAS throws typed and republishes nothing"
-      (let [{:keys [error/type data]} (b2-capture #(binding/restore! db sid {:cas gc-cas :mount-registry mount-reg :context-store ctx-store}))]
+      (let [{:keys [error/type data]} (b2-capture #(binding/restore! db sid (merge {:cas gc-cas :mount-registry mount-reg :context-store ctx-store} (binding-publish/publisher))))]
         (is (= :store/binding-invalid type))
         (is (= (:bundle/id b) (:bundle/id data)) "typed data names the unrestorable binding")
         (is (= 0 (count (mount-backend/list-mounts mount-reg))) "no partial mount state")
         (is (= 0 (count (ctx-binding/list-active ctx-store))) "no context republished")))
     (testing "restore against intact CAS still succeeds (behavior preserved)"
-      (let [restored (binding/restore! db sid {:cas live-cas
-                                               :mount-registry (mount-backend/create-registry)
-                                               :context-store (ctx-binding/create-store)})]
+      (let [restored (binding/restore! db sid (merge {:cas live-cas
+                                                      :mount-registry (mount-backend/create-registry)
+                                                      :context-store (ctx-binding/create-store)}
+                                                     (binding-publish/publisher)))]
         (is (= 1 (count restored)))
         (is (= (:revision/id b) (:revision/id (first restored))))))))

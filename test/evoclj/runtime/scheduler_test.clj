@@ -592,7 +592,19 @@
         events (event/events-for-session db sid)]
     (is (= 1 (count (filter #(= :completed (:status %)) results)))
         (str "exactly one caller completes: " results))
-    (is (= 1 (count (filter #(= :scheduler/work-claim-lost (:error/type %)) results)))
+    ;; The loser fails closed in ONE of two windows, and both are correct:
+    ;;   - it read the Work while it was still :queued and lost the
+    ;;     dispatch CAS      -> :scheduler/work-claim-lost
+    ;;   - it read the Work after the winner claimed it
+    ;;                        -> :scheduler/work-invalid
+    ;;     (:reason :already-claimed-or-terminal)
+    ;; Which window it hits is thread timing; the contract is that it
+    ;; fails closed with a typed scheduler error and never starts a
+    ;; second execution (asserted below by the single :session/started).
+    (is (= 1 (count (filter #(contains? #{:scheduler/work-claim-lost
+                                          :scheduler/work-invalid}
+                                        (:error/type %))
+                            results)))
         (str "exactly one caller loses the Work claim: " results))
     (is (= :succeeded (:work/state (work-store/fetch-work db work-id))))
     (is (= 1 (count (filter #(= :session/started (:event/type %)) events))))
