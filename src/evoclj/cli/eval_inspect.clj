@@ -5,11 +5,12 @@
   Reads the complete persisted record of ONE evaluation: the eval_runs
   row (candidate, profile, gates, summary, eligibility, status) plus
   every eval_results row (per-case gate verdicts joined to the hidden
-  case refs). READ-ONLY — the CLI layer never writes the eval tables."
-  (:require [clojure.edn :as edn]
-            [clojure.java.jdbc :as jdbc]
-            [evoclj.cli.session :as session]
-            [evoclj.kernel.error :as err])
+  case refs). READ-ONLY — the CLI layer never writes the eval tables,
+  and it decodes no eval column itself: the row decode belongs to
+  evoclj.store.eval-read."
+  (:require [evoclj.cli.session :as session]
+            [evoclj.kernel.error :as err]
+            [evoclj.store.eval-read :as eval-read])
   (:import (java.util UUID)))
 
 (defn- positional
@@ -37,33 +38,16 @@
   (let [eid (uuid-arg (positional opts 0))
         system (session/build-system opts)
         db (session/db-of system)
-        run (first (jdbc/query db
-                               ["SELECT * FROM eval_runs WHERE id = ?"
-                                (str eid)]))]
-    (if-not run
+        row (eval-read/find-evaluation-row db eid)]
+    (if-not row
       {:evaluation/id eid :found false}
-      (let [rows (jdbc/query db
-                            ["SELECT ec.case_ref AS case_ref, er.gate AS gate,
-                              er.passed AS passed, er.metric AS metric,
-                              er.detail AS detail
-                              FROM eval_results er
-                              JOIN eval_cases ec ON ec.id = er.case_id
-                              WHERE er.eval_run_id = ?
-                              ORDER BY er.id ASC"
-                             (str eid)])
-            results (mapv (fn [r]
-                            {:case/ref (:case_ref r)
-                             :gate (keyword (:gate r))
-                             :passed (= 1 (:passed r))
-                             :metric (some-> (:metric r) edn/read-string)
-                             :detail (some-> (:detail r) edn/read-string)})
-                           rows)]
+      (let [evaluation (eval-read/row->evaluation row)]
         {:evaluation/id eid
          :found true
-         :candidate/id (uuid-arg (:candidate_id run))
-         :profile-id (:profile_id run)
-         :status (keyword (:status run))
-         :gates (edn/read-string (:gates run))
-         :summary (edn/read-string (:summary run))
-         :eligibility (edn/read-string (:eligibility run))
-         :case-results results}))))
+         :candidate/id (:candidate/id evaluation)
+         :profile-id (str (:profile/id evaluation))
+         :status (keyword (:status row))
+         :gates (:gates evaluation)
+         :summary (:summary evaluation)
+         :eligibility (:eligibility evaluation)
+         :case-results (eval-read/case-results db eid)}))))

@@ -218,6 +218,7 @@
             [evoclj.kernel.error :as err]
             [evoclj.metrics.core :as f2-metrics]
             [evoclj.store.cas :as cas]
+            [evoclj.store.eval-read :as eval-read]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file FileVisitOption Files LinkOption Paths)
@@ -821,28 +822,14 @@
 
 ;; --- reads -------------------------------------------------------------------------------
 
-(defn- row->evaluation
-  "Convert an eval_runs row into the public Evaluation record."
-  [row]
-  {:evaluation/id (UUID/fromString (:id row))
-   :candidate/id (UUID/fromString (:candidate_id row))
-   :parent/generation-id (:parent_generation_id row)
-   :profile/id (keyword (subs (:profile_id row) 1))
-   :gates (edn/read-string (:gates row))
-   :paired-results-ref (:paired_results_ref row)
-   :summary (edn/read-string (:summary row))
-   :eligibility (edn/read-string (:eligibility row))
-   :created-at (Date/from (Instant/parse (:created_at row)))})
-
 (defn find-evaluation
   "The immutable Evaluation record for `evaluation-id`, or nil when no
-  evaluation has that id. Read-only."
+  evaluation has that id. Read-only. The row decode lives in
+  evoclj.store.eval-read (the single decoder); this fn keeps the
+  evaluator-context validation and the Evaluation contract check."
   [evaluator evaluation-id]
   (validate-evaluator! evaluator)
-  (some-> (first (sqlite/query (:sqlite (:store evaluator))
-                               ["SELECT * FROM eval_runs WHERE id = ?"
-                                (str evaluation-id)]))
-          row->evaluation
+  (some-> (eval-read/find-evaluation (:sqlite (:store evaluator)) evaluation-id)
           validate-evaluation!))
 
 (defn find-evaluations-by-candidate
@@ -850,11 +837,9 @@
   order. Read-only."
   [evaluator candidate-id]
   (validate-evaluator! evaluator)
-  (->> (sqlite/query (:sqlite (:store evaluator))
-                     ["SELECT * FROM eval_runs WHERE candidate_id = ?
-                       ORDER BY created_at ASC, id ASC"
-                      (str candidate-id)])
-       (mapv (fn [row] (validate-evaluation! (row->evaluation row))))))
+  (mapv validate-evaluation!
+        (eval-read/find-evaluations-by-candidate (:sqlite (:store evaluator))
+                                                 candidate-id)))
 
 ;; --- component — F2 metric records during evaluation ----------------------------------------
 
