@@ -48,6 +48,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.eval.compare :as compare]
             [evoclj.eval.core :as eval-core]
+            [evoclj.eval.harness-registry :as reg]
             [evoclj.eval.metrics :as eval-metrics]
             [evoclj.eval.replay :as replay]
             [evoclj.eval.static :as static]
@@ -656,6 +657,80 @@
       (is (= :below-min-pairs (get-in evaluation [:eligibility :reasons 0 :rule])))
       (is (= {:n 1 :min-pairs 5}
              (get-in evaluation [:eligibility :reasons 0 :detail]))))))
+
+;; ============================================================================
+;; Step 5 — registered hidden harness sets join the selection cases
+;; ============================================================================
+
+(defn- harness-set-dir!
+  "Write `case-maps` as EDN files in a fresh temp dir and return its path."
+  [case-maps]
+  (let [dir (temp-path! "harness-set-")]
+    (doseq [[i case-map] (map-indexed vector case-maps)]
+      (write-file! (str dir "/case-" i ".edn") (pr-str case-map)))
+    dir))
+
+(deftest registered-harness-sets-join-the-selection-cases
+  (let [store (fresh-store)
+        pending (materialized-pending! store)
+        harness-case (assoc (selection-case) :case/id :harness/c1)
+        stable-dir (harness-set-dir! [harness-case])
+        scoped-case (assoc (selection-case) :case/id :harness/scoped)
+        scoped-dir (harness-set-dir! [scoped-case])
+        registry (-> []
+                     (reg/register-set {:set/id :harness/stable
+                                        :set/source :fixture
+                                        :set/version "1"
+                                        :set/path stable-dir
+                                        :set/generation-scoped? false})
+                     (reg/register-set {:set/id :harness/scoped
+                                        :set/source :fixture
+                                        :set/version "1"
+                                        :set/path scoped-dir
+                                        :set/generation-scoped? true}))
+        ev (orchestrator-evaluator store pending
+                                   (bundle! "(str text \"-parent\")")
+                                   (bundle! "text")
+                                   {:harness/registry registry})
+        evaluation (eval-core/evaluate-candidate! ev (:candidate/id pending)
+                                                  :test/v1)
+        g5 (some #(when (= :G5-paired-selection (:gate/id %)) %) (:gates evaluation))
+        report (edn/read-string
+                (String. ^bytes (cas/get-bytes (:cas store) (:details-ref g5))
+                         StandardCharsets/UTF_8))
+        pair-ids (mapv :case/id (:pairs report))]
+    (testing "the cross-generation-stable set's case ran in the paired selection"
+      (is (contains? (set pair-ids) :harness/c1))
+      (is (contains? (set pair-ids) :sel/c1) "the evaluator's own case still runs"))
+    (testing "a generation-scoped set stays out of the case set"
+      (is (not (contains? (set pair-ids) :harness/scoped))))
+    (testing "the run still decides eligibility over the merged case set"
+      (is (true? (:eligible? (:eligibility evaluation))))
+      (is (= 2 (:n (:sample (:summary evaluation))))))))
+
+(deftest harness-case-id-conflicts-fail-closed
+  (let [store (fresh-store)
+        pending (materialized-pending! store)
+        clash-dir (harness-set-dir! [(selection-case)])
+        registry (reg/register-set [] {:set/id :harness/clash
+                                       :set/source :fixture
+                                       :set/version "1"
+                                       :set/path clash-dir
+                                       :set/generation-scoped? false})
+        ev (orchestrator-evaluator store pending
+                                   (bundle! "text") (bundle! "text")
+                                   {:harness/registry registry})
+        failure (try
+                  (eval-core/evaluate-candidate! ev (:candidate/id pending)
+                                                 :test/v1)
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    {:error/type (:error/type (ex-data e))
+                     :data (ex-data e)}))]
+    (testing "two sources carrying the same :case/id is a typed conflict, never a silent shadow"
+      (is (= :eval/selection-case-conflict (:error/type failure)))
+      (is (= :sel/c1 (get-in failure [:data :case/id])))
+      (is (= :harness/clash (get-in failure [:data :set/id]))))))
 
 ;; ============================================================================
 ;; G6 derives its reasons through the ONE compare rule implementation

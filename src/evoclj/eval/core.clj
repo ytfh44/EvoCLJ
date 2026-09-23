@@ -49,6 +49,13 @@
        :selection/fixtures {<tool-id> <fn | provider>} ; REQUIRED
        :selection/cases {<case-id> <selection case>}   ; OPTIONAL —
        ;   falls back to dataset/selection-loader over :dataset/roots
+       :harness/registry [<set record> ...]            ; OPTIONAL —
+       ;   registered hidden harness sets
+       ;   (evoclj.eval.harness-registry); the ACTIVE
+       ;   (cross-generation-stable) sets' case bodies are
+       ;   merged over the selection cases, and a duplicate
+       ;   :case/id fails closed with
+       ;   :eval/selection-case-conflict
        :dataset/roots {<source> <root>}                ; OPTIONAL —
        ;   the physical dataset separation contract (Global Constraint
        ;   11): carried and validated, never mounted into any
@@ -203,6 +210,7 @@
             [evoclj.eval.dataset :as dataset]
             [evoclj.eval.evaluator-contract :as contract]
             [evoclj.eval.gates :as gates]
+            [evoclj.eval.harness-registry :as reg]
             [evoclj.eval.metrics :as metrics]
             [evoclj.eval.paired :as paired]
             [evoclj.eval.profile :as profile]
@@ -303,9 +311,10 @@
                               ":dataset/roots must be a source -> root map"
                               roots))))
   (when (and (not (contains? evaluator :selection/cases))
-             (not (contains? evaluator :dataset/roots)))
+             (not (contains? evaluator :dataset/roots))
+             (not (contains? evaluator :harness/registry)))
     (throw (evaluator-error :selection-cases-missing
-                            "evaluator must carry :selection/cases or :dataset/roots"
+                            "evaluator must carry :selection/cases, :dataset/roots, or :harness/registry"
                             evaluator)))
   evaluator)
 
@@ -395,17 +404,46 @@
   [parent-root]
   (set (:capabilities/requested (:manifest (load/load-genome parent-root)))))
 
+(defn- harness-cases
+  "The registered hidden harness sets' cases, merged over `cases` when the
+  evaluator carries a :harness/registry (a vector of set records — the
+  pure evoclj.eval.harness-registry). Each ACTIVE set (the
+  cross-generation-stable ones) contributes its loaded case bodies; a
+  :case/id carried by two sources fails closed with
+  :eval/selection-case-conflict — a hidden set never silently shadows
+  another case."
+  [evaluator cases]
+  (if-let [registry (:harness/registry evaluator)]
+    (reduce (fn [acc set-record]
+              (reduce (fn [acc' case-map]
+                        (let [case-id (:case/id case-map)]
+                          (when (contains? acc' case-id)
+                            (throw (err/error :eval/selection-case-conflict
+                                              "two selection sources carry the same :case/id"
+                                              {:case/id case-id
+                                               :set/id (:set/id set-record)})))
+                          (assoc acc' case-id case-map)))
+                      acc
+                      (dataset/harness-cases set-record)))
+            cases
+            (reg/active-sets registry))
+    cases))
+
 (defn- selection-cases
   "The G5 selection cases: the evaluator's :selection/cases map, or —
   when absent — freshly loaded from the profile's selection source
   through the evaluator-only dataset/selection-loader (Global
-  Constraint 11: selection bodies load only in evaluator code)."
+  Constraint 11: selection bodies load only in evaluator code). The
+  evaluator's registered hidden harness sets are merged on top (see
+  harness-cases)."
   [evaluator profile]
-  (if-let [cases (:selection/cases evaluator)]
-    cases
-    (let [roots (or (:dataset/roots evaluator) dataset/dataset-roots)]
-      (into {} (map (fn [c] [(:case/id c) c]))
-            ((dataset/selection-loader profile roots))))))
+  (harness-cases
+   evaluator
+   (if-let [cases (:selection/cases evaluator)]
+     cases
+     (let [roots (or (:dataset/roots evaluator) dataset/dataset-roots)]
+       (into {} (map (fn [c] [(:case/id c) c]))
+             ((dataset/selection-loader profile roots)))))))
 
 ;; --- the gate / phase contexts -----------------------------------------------------
 
@@ -531,13 +569,15 @@
   "G5 paired hidden selection (component): re-evaluate the parent NOW
   against the candidate on the same selection cases, same derived
   seeds, same repetitions. The gate fails when a critical paired case
-  was lost."
-  [evaluator c profile case-set]
+  was lost. `cases` is the MERGED case map (evaluator cases / profile
+  selection source plus the registered hidden harness sets) the runner
+  resolves bodies from — the same map `case-set` was taken from."
+  [evaluator c profile case-set cases]
   (phase-gate (details-store evaluator) :G5-paired-selection
               #(if (seq (paired-critical-violations %)) :fail :pass)
               (fn []
                 (paired/run-paired-selection!
-                 (paired-context evaluator)
+                 (assoc (paired-context evaluator) :selection/cases cases)
                  {:parent-generation (:parent/generation-id c)
                   :candidate-id (str (:candidate/id c))
                   :case-set case-set
@@ -876,7 +916,12 @@
         profile (resolve-profile! evaluator profile-id)
         parent-root (resolve-root! evaluator (:parent/generation-id c))
         candidate-root (resolve-root! evaluator (str candidate-id))
-        case-set (vec (sort (keys (selection-cases evaluator profile))))
+        ;; ONE merged case map (evaluator cases / profile selection source
+        ;; PLUS the registered hidden harness sets) — the case set and the
+        ;; G5 runner resolve bodies from the same map, so a registered set
+        ;; can never be listed and then fail to resolve.
+        cases (selection-cases evaluator profile)
+        case-set (vec (sort (keys cases)))
         _ (when (empty? case-set)
             (throw (err/error :eval/evaluator-invalid
                               "the profile's selection set resolves to no cases"
@@ -898,7 +943,7 @@
                                          (conj front-gates (:gate g4))))
                                 (:report g4) nil nil
                                 parent-root candidate-root)
-          (let [g5 (run-g5-phase! evaluator c profile case-set)]
+          (let [g5 (run-g5-phase! evaluator c profile case-set cases)]
             (if (not= :pass (:status (:gate g5)))
               (finalize-evaluation! evaluator c profile
                                     (concat front-gates [(:gate g4) (:gate g5)]

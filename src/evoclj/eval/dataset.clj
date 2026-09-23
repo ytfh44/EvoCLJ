@@ -218,6 +218,29 @@
      (fn []
        (ensure-nonempty! source root (load-cases root))))))
 
+;; --- Step 3b: registered hidden harness sets load only in evaluator code -----
+
+(defn harness-cases
+  "EVALUATOR-ONLY: the case bodies of ONE registered hidden harness set
+  (evoclj.eval.harness-registry), loaded from the set record's :set/path
+  through the SAME controlled read as selection-loader (ensure-nonempty!
+  + load-cases: every file must be a :case/id-keyed EDN map, and an empty
+  set is rejected).
+
+  Like selection-loader this is a body-revealing surface: it is invoked by
+  evaluator code only (Global Constraint 11) — the evolution boundary
+  never sees it, and the set records the registry carries stay paths and
+  metadata."
+  [set-record]
+  (let [source (:set/source set-record)
+        root (:set/path set-record)]
+    (when-not (and (string? root) (seq root))
+      (throw (err/error :eval/harness-set-invalid
+                        "a harness set record must carry a non-empty :set/path"
+                        {:set/id (:set/id set-record)
+                         :set/path root})))
+    (ensure-nonempty! source root (load-cases root))))
+
 ;; --- Step 4: the audit set is operator-only ----------------------------------
 
 (defn audit-cases

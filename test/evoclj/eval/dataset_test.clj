@@ -34,6 +34,7 @@
   by the profile-shape assertions. All temp dirs live under the
   system temp dir and are deleted after every test."
   (:require [clojure.edn :as edn]
+            [clojure.set :as set]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.eval.dataset :as dataset]
@@ -271,7 +272,7 @@
                             :selection-set-loader :audit-set-loader
                             :selection-loader-fn :audit-loader-fn}]
           (is (map? system))
-          (is (empty? (clojure.set/intersection loader-keys (set (keys system))))
+          (is (empty? (set/intersection loader-keys (set (keys system))))
               "the evolution system carries no selection/audit loader")))
       (testing "the evolution input is pure data — no loader handles anywhere"
         (is (not (has-fn-value? input)))
@@ -306,6 +307,36 @@
           "no selection body leaks into the evolution input"))
     (testing "selection bodies are absent from the evolution refs"
       (is (not-any? #(= :case/selection-1 (:case/id %)) refs)))))
+
+;; --- Step 3b: registered harness sets load only in evaluator code ------------
+
+(deftest harness-cases-load-from-a-set-record
+  (let [root (str (temp-dir "evoclj-harness-set-"))]
+    (write-file! (str root java.io.File/separator "c1.edn")
+                 (pr-str {:case/id :harness/c1
+                          :task-input {:op :echo :text "hi"}
+                          :expected-output []
+                          :tools #{:fixture/echo}}))
+    (testing "the set's case bodies load through the controlled read"
+      (let [cases (dataset/harness-cases {:set/id :harness/stable
+                                          :set/source :fixture
+                                          :set/version "1"
+                                          :set/path root
+                                          :set/generation-scoped? false})]
+        (is (= [:harness/c1] (mapv :case/id cases)))
+        (is (= {:op :echo :text "hi"} (:task-input (first cases))))))
+    (testing "an empty set is rejected (never a silent empty exam hall)"
+      (let [empty-root (str (temp-dir "evoclj-harness-empty-"))
+            data (thrown-ex-data #(dataset/harness-cases
+                                   {:set/id :harness/empty
+                                    :set/source :fixture
+                                    :set/version "1"
+                                    :set/path empty-root
+                                    :set/generation-scoped? false}))]
+        (is (= :dataset/empty (:error/type data)))))
+    (testing "a set record without a usable :set/path fails closed typed"
+      (let [data (thrown-ex-data #(dataset/harness-cases {:set/id :harness/broken}))]
+        (is (= :eval/harness-set-invalid (:error/type data)))))))
 
 ;; --- Step 4: audit set absent from ordinary evolution execution -------------
 
