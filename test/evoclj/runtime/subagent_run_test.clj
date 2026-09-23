@@ -4,23 +4,28 @@
             [clojure.java.jdbc :as jdbc]
             [evoclj.capability.mint :as mint]
             [evoclj.runtime.subagent :as subagent]
+            [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
             [evoclj.store.work :as work-store]
-            [evoclj.store.sqlite :as sqlite])
+            [evoclj.store.sqlite :as sqlite]
+            [evoclj.support.genome-fixtures :as fx])
   (:import (java.util Date UUID)))
 
 ;; --- fixtures --------------------------------------------------------------
+;;
+;; Hydration is fail-closed: the child executor is built from a REGISTERED
+;; genome bundle, so every fixture registers the shared echo bundle
+;; (:tool :fixture/echo → :emit) plus its I1 identity rows and hands the
+;; executor stores map (with the CAS) to run-subagent!.
 
-(def ^:private genome (str "sha256:" (apply str (repeat 64 "a"))))
-(def ^:private resolution (str "sha256:" (apply str (repeat 64 "c"))))
-(def ^:private phenotype (str "sha256:" (apply str (repeat 64 "b"))))
 (def ^:private gen "generation-1")
 (def ^:private issued-at (Date. 1700000000000))
 (def ^:private expires-at (Date. 4102444800000))
 
 (def ^:private db-paths (atom []))
+(def ^:private temp-dirs (atom []))
 
 (defn- temp-db-path []
   (let [p (str (java.nio.file.Files/createTempFile "evoclj-s3-" ".db"
@@ -28,28 +33,44 @@
     (swap! db-paths conj p)
     p))
 
+(defn- temp-dir [prefix]
+  (let [d (str (java.nio.file.Files/createTempDirectory prefix
+                                                        (make-array java.nio.file.attribute.FileAttribute 0)))]
+    (swap! temp-dirs conj d)
+    d))
+
 (defn- cleanup! []
   (doseq [p @db-paths]
     (try (java.nio.file.Files/deleteIfExists (java.nio.file.Paths/get p (into-array String [])))
          (catch Exception _)))
-  (reset! db-paths []))
+  (doseq [d @temp-dirs]
+    (try (fx/delete-tree! d) (catch Exception _)))
+  (reset! db-paths [])
+  (reset! temp-dirs []))
 
 (use-fixtures :each (fn [f] (f) (cleanup!)))
 
-(defn- fresh-db []
+(defn- fresh-fixture
+  "A migrated temp db plus a registered echo genome bundle and its
+  identity rows. Returns {:db <path> :stores {:sqlite :cas} :identity {...}}."
+  []
   (let [path (temp-db-path)
         _ (migrate/migrate! path)
-        db path]
-    (sqlite/with-db [conn db]
+        cas-store (cas/->cas (temp-dir "evoclj-s3-cas-"))
+        fixture (fx/echo-fixture)
+        _ (fx/register-echo-genome! path cas-store fixture)
+        identity (select-keys fixture [:genome/id :resolution/id :code/id])]
+    (sqlite/with-db [conn path]
       (let [now "2025-01-01T00:00:00Z"]
-        (doseq [h [genome resolution phenotype]]
-          (try (jdbc/insert! conn :artifacts {:hash h :media_type "application/octet-stream" :size 0 :created_at now})
-               (catch Exception _)))
-        (try (jdbc/insert! conn :genomes {:id genome :created_at now})
-             (catch Exception _))
-        (try (jdbc/insert! conn :generations {:id gen :genome_id genome :resolution_id resolution :parent_id nil :state "active" :current 1 :created_at now})
+        (try (jdbc/insert! conn :generations {:id gen
+                                              :genome_id (:genome/id identity)
+                                              :resolution_id (:resolution/id identity)
+                                              :parent_id nil
+                                              :state "active"
+                                              :current 1
+                                              :created_at now})
              (catch Exception _))))
-    db))
+    {:db path :stores {:sqlite path :cas cas-store} :identity identity}))
 
 (defn- parent-lease [session-id phenotype-id actions]
   (mint/mint-lease! nil {:principal {:principal/type :session :session/id session-id}
@@ -59,12 +80,15 @@
                          :issued-at issued-at
                          :expires-at expires-at}))
 
-(defn- create-parent-session! [db]
-  (let [sess (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen})
+(defn- create-parent-session! [db identity]
+  (let [sess (session/create-session! db {:genome/id (:genome/id identity)
+                                          :resolution/id (:resolution/id identity)
+                                          :phenotype/id (:code/id identity)
+                                          :generation/id gen})
         sid (:session/id sess)]
     (event/append-event! db {:session/id sid
                              :generation/id gen
-                             :phenotype/id phenotype
+                             :phenotype/id (:code/id identity)
                              :event/type :session/created
                              :prev/event-id nil
                              :payload-ref nil
@@ -82,12 +106,12 @@
 
 (deftest run-subagent-executes-echo-and-returns-succeeded
   (testing "run-subagent! runs the child session's echo task and returns :completed"
-    (let [db (fresh-db)
-          parent (create-parent-session! db)
+    (let [{:keys [db stores identity]} (fresh-fixture)
+          parent (create-parent-session! db identity)
           parent-id (:session/id parent)
-          pl (parent-lease parent-id phenotype #{:invoke})
+          pl (parent-lease parent-id (:code/id identity) #{:invoke})
           {:keys [child/session-id]} (subagent/spawn-subagent! db parent-id {:task "hello"} [pl])
-          result (subagent/run-subagent! db parent-id session-id {:text "hello-echo"})]
+          result (subagent/run-subagent! stores parent-id session-id {:text "hello-echo"})]
       (is (= :completed (:status result)) "child run should complete")
       (is (= session-id (:session/id result)) "result session id matches child")
       (let [child-work-state (some-> (last (work-store/list-works db session-id)) :work/state)]
@@ -97,11 +121,11 @@
 
 (deftest run-subagent-throws-not-found-for-missing-child
   (testing "run-subagent! throws :subagent/not-found when child session does not exist"
-    (let [db (fresh-db)
-          parent (create-parent-session! db)
+    (let [{:keys [db stores identity]} (fresh-fixture)
+          parent (create-parent-session! db identity)
           parent-id (:session/id parent)
           fake-child (UUID/randomUUID)]
-      (let [ex (try (subagent/run-subagent! db parent-id fake-child {:text "hi"})
+      (let [ex (try (subagent/run-subagent! stores parent-id fake-child {:text "hi"})
                     nil
                     (catch clojure.lang.ExceptionInfo e e))]
         (is (some? ex) "should throw")
@@ -114,13 +138,13 @@
 
 (deftest child-event-chain-has-correct-seq-and-cause-links
   (testing "child chain seq is 1..M, each cause links to previous event, and parent spawn links to child"
-    (let [db (fresh-db)
-          parent (create-parent-session! db)
+    (let [{:keys [db stores identity]} (fresh-fixture)
+          parent (create-parent-session! db identity)
           parent-id (:session/id parent)
-          pl (parent-lease parent-id phenotype #{:invoke})
+          pl (parent-lease parent-id (:code/id identity) #{:invoke})
           {:keys [child/session-id]} (subagent/spawn-subagent! db parent-id {:task "child-task"} [pl])
           child-id session-id
-          _ (subagent/run-subagent! db parent-id child-id {:text "seq-check"})
+          _ (subagent/run-subagent! stores parent-id child-id {:text "seq-check"})
           child-events (event/events-for-session db child-id)
           parent-events (event/events-for-session db parent-id)]
       ;; seq 1..M
@@ -148,10 +172,10 @@
 
 (deftest parallel-parent-and-child-have-no-cross-leakage
   (testing "child and parent event chains are independent; no child events in parent and vice versa"
-    (let [db (fresh-db)
-          parent (create-parent-session! db)
+    (let [{:keys [db stores identity]} (fresh-fixture)
+          parent (create-parent-session! db identity)
           parent-id (:session/id parent)
-          pl (parent-lease parent-id phenotype #{:invoke})
+          pl (parent-lease parent-id (:code/id identity) #{:invoke})
           ;; spawn two children
           {:keys [child/session-id]} (subagent/spawn-subagent! db parent-id {:task "child1"} [pl])
           child1-id session-id
@@ -161,8 +185,8 @@
           parent-before (event/events-for-session db parent-id)
           parent-before-count (count parent-before)
           ;; run children (sequentially, but chains must remain independent like parallel)
-          res1 (subagent/run-subagent! db parent-id child1-id {:text "hello-child1"})
-          res2 (subagent/run-subagent! db parent-id child2-id {:text "hello-child2"})
+          res1 (subagent/run-subagent! stores parent-id child1-id {:text "hello-child1"})
+          res2 (subagent/run-subagent! stores parent-id child2-id {:text "hello-child2"})
           parent-after (event/events-for-session db parent-id)
           child1-events (event/events-for-session db child1-id)
           child2-events (event/events-for-session db child2-id)]

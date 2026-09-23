@@ -10,6 +10,7 @@
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.genome :as store-genome]
+            [evoclj.store.identity :as identity]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite])
@@ -67,7 +68,8 @@
     (try (jdbc/insert! conn :generations {:id generation-id :genome_id genome-id :resolution_id resolution-id :parent_id nil :state "active" :current 1 :created_at now})
          (catch Exception _))))
 
-(defn- create-pinned-session! [db genome-id resolution-id phenotype-id generation-id]
+(defn- create-pinned-session!
+  [db genome-id resolution-id phenotype-id generation-id]
   (seed-identity! db genome-id resolution-id phenotype-id generation-id)
   (let [sess (session/create-session! db
                                       {:genome/id genome-id
@@ -83,6 +85,14 @@
                           :payload-ref nil
                           :metadata {}})
     sess))
+
+(defn- register-code-image!
+  "Register the code_images row the fail-closed pin check requires."
+  [db code-id genome-id resolution-id]
+  (identity/record-code-image! db {:code/id code-id
+                                   :code/genome-id genome-id
+                                   :code/resolution-id resolution-id
+                                   :abi {:kernel 1 :genome 1 :intent 1 :tool 1}}))
 
 (defn- fresh-cas []
   (cas/->cas (str (java.nio.file.Files/createTempDirectory "evoclj-hydrate-cas-"
@@ -108,6 +118,7 @@
         rid (:code/resolution-id compiled)
         cid (:code/id compiled)]
     (store-genome/register-loaded-genome! cas-store db loaded fixture-catalog)
+    (register-code-image! db cid gid rid)
     (let [sess (create-pinned-session! db gid rid cid "generation-real")
           handle (hydrate/hydrate {:sqlite db :cas cas-store} (:session/id sess))
           hc (:compiled handle)]
@@ -126,22 +137,39 @@
         (is (string? (get-in hc [:programs :program/route :file])))))))
 
 ;; ============================================================================
-;; 2 — fake-id (no registered bundle) still succeeds via fallback
+;; 2 — an unregistered identity FAILS CLOSED (no synthetic fallback)
 ;; ============================================================================
 
-(deftest fake-id-uses-fallback-topology
+(deftest unregistered-identity-fails-closed
   (let [db (fresh-db)
         cas-store (fresh-cas)
         sess (create-pinned-session! db fake-genome fake-resolution fake-phenotype fake-gen)
-        handle (hydrate/hydrate {:sqlite db :cas cas-store} (:session/id sess))
-        hc (:compiled handle)]
-    (testing "fallback topology is used"
-      (is (= :graph/subagent-echo (:graph/id (:topology hc))))
-      (is (= :node/tool (:entry (:topology hc)))))
-    (testing "pinned ids are preserved in fallback"
-      (is (= fake-genome (:compiled/genome-id hc)))
-      (is (= fake-resolution (:compiled/resolution-id hc)))
-      (is (= fake-phenotype (:code/id hc))))))
+        result (try
+                 (hydrate/hydrate {:sqlite db :cas cas-store} (:session/id sess))
+                 {:ok true}
+                 (catch clojure.lang.ExceptionInfo e
+                   {:error/type (:error/type (ex-data e))
+                    :reason (:reason (ex-data e))}))]
+    (testing "a pin with no identity row is a typed pin mismatch"
+      (is (= :hydrate/pin-mismatch (:error/type result)))
+      (is (= :code-image-row-missing (:reason result))))
+    (testing "verify-pin! applies the same rule without building an executor"
+      (let [vresult (try
+                      (hydrate/verify-pin! {:sqlite db :cas cas-store}
+                                           (:session/id sess))
+                      {:ok true}
+                      (catch clojure.lang.ExceptionInfo e
+                        {:error/type (:error/type (ex-data e))
+                         :reason (:reason (ex-data e))}))]
+        (is (= :hydrate/pin-mismatch (:error/type vresult)))
+        (is (= :code-image-row-missing (:reason vresult)))))
+    (testing "a registered code image without a bundle is a bundle failure"
+      (register-code-image! db fake-phenotype fake-genome fake-resolution)
+      (is (= :hydrate/genome-bundle-missing
+             (try (hydrate/hydrate {:sqlite db :cas cas-store} (:session/id sess))
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    (:error/type (ex-data e)))))))))
 
 ;; ============================================================================
 ;; 3 — a registered bundle whose pin code-id disagrees throws :hydrate/pin-mismatch
@@ -156,6 +184,9 @@
         rid (:code/resolution-id compiled)
         wrong-cid (str "sha256:" (apply str (repeat 64 "d")))]
     (store-genome/register-loaded-genome! cas-store db loaded fixture-catalog)
+    ;; the WRONG code id has its own row, so authentication passes and the
+    ;; re-compiled bundle identity is what disagrees
+    (register-code-image! db wrong-cid gid rid)
     (let [sess (create-pinned-session! db gid rid wrong-cid "generation-mismatch")
           result (try
                    (hydrate/hydrate {:sqlite db :cas cas-store} (:session/id sess))
@@ -166,12 +197,90 @@
         (is (= :hydrate/pin-mismatch (:error/type result)))))))
 
 ;; ============================================================================
-;; 4 — bare sqlite db (call-site convention, no :cas) still falls back
+;; 4 — a bare sqlite db carries no CAS, so no bundle can be loaded
 ;; ============================================================================
 
-(deftest bare-sqlite-db-uses-fallback
+(deftest bare-sqlite-db-fails-closed-without-a-bundle
   (let [db (fresh-db)
+        _ (register-code-image! db fake-phenotype fake-genome fake-resolution)
         sess (create-pinned-session! db fake-genome fake-resolution fake-phenotype fake-gen)
-        handle (hydrate/hydrate db (:session/id sess))
-        hc (:compiled handle)]
-    (is (= :graph/subagent-echo (:graph/id (:topology hc))))))
+        result (try
+                 (hydrate/hydrate db (:session/id sess))
+                 {:ok true}
+                 (catch clojure.lang.ExceptionInfo e
+                   {:error/type (:error/type (ex-data e))}))]
+    (is (= :hydrate/genome-bundle-missing (:error/type result)))))
+
+;; ============================================================================
+;; 5 — a pin naming a deployment/execution whose row is missing fails closed
+;; ============================================================================
+
+(deftest missing-deployment-and-execution-rows-fail-closed
+  (let [db (fresh-db)
+        cas-store (fresh-cas)
+        _ (register-code-image! db fake-phenotype fake-genome fake-resolution)
+        _ (seed-identity! db fake-genome fake-resolution fake-phenotype fake-gen)
+        failure-of (fn [sess]
+                     (try
+                       (hydrate/verify-pin! {:sqlite db :cas cas-store}
+                                            (:session/id sess))
+                       nil
+                       (catch clojure.lang.ExceptionInfo e
+                         {:error/type (:error/type (ex-data e))
+                          :reason (:reason (ex-data e))})))
+        pin-session (fn [code-id deployment-id execution-id]
+                      (session/create-session!
+                       db
+                       (cond-> {:genome/id fake-genome
+                                :resolution/id fake-resolution
+                                :phenotype/id fake-phenotype
+                                :code/id code-id
+                                :generation/id fake-gen}
+                         deployment-id (assoc :deployment/id deployment-id)
+                         execution-id (assoc :execution/id execution-id))))]
+    (testing "an execution row that was never registered fails closed"
+      (let [f (failure-of (pin-session fake-phenotype
+                                       (str "sha256:" (apply str (repeat 64 "e")))
+                                       (java.util.UUID/randomUUID)))]
+        (is (= :hydrate/pin-mismatch (:error/type f)))
+        (is (= :execution-row-missing (:reason f)))))
+    (testing "with the execution row present the deployment row is checked"
+      (let [did (str "sha256:" (apply str (repeat 64 "e")))
+            eid (java.util.UUID/randomUUID)]
+        (identity/record-deployment! db {:deployment/id did
+                                         :code/id fake-phenotype
+                                         :bindings []
+                                         :authority []})
+        (identity/record-execution! db {:execution/id eid
+                                        :deployment/id did
+                                        :code/id fake-phenotype})
+        (let [f (failure-of (pin-session fake-phenotype
+                                         (str "sha256:" (apply str (repeat 64 "a")))
+                                         eid))]
+          (is (= :hydrate/pin-mismatch (:error/type f)))
+          (is (= :deployment-row-missing (:reason f))))))
+    (testing "rows present but naming another code image is a code-image mismatch"
+      (let [other-code (str "sha256:" (apply str (repeat 64 "f")))
+            did (str "sha256:" (apply str (repeat 64 "b")))
+            eid (java.util.UUID/randomUUID)]
+        (register-code-image! db other-code fake-genome fake-resolution)
+        (identity/record-deployment! db {:deployment/id did
+                                         :code/id other-code
+                                         :bindings []
+                                         :authority []})
+        (identity/record-execution! db {:execution/id eid
+                                        :deployment/id did
+                                        :code/id other-code})
+        (let [f (failure-of (pin-session fake-phenotype did eid))]
+          (is (= :hydrate/pin-mismatch (:error/type f)))
+          (is (= :code-image-mismatch (:reason f))))))
+    (testing "a code image row naming another genome is a code-image mismatch"
+      (let [pin-code (str "sha256:" (apply str (repeat 64 "7")))
+            other-genome (str "sha256:" (apply str (repeat 64 "9")))]
+        (identity/record-code-image! db {:code/id pin-code
+                                         :code/genome-id other-genome
+                                         :code/resolution-id fake-resolution
+                                         :abi {}})
+        (let [f (failure-of (pin-session pin-code nil nil))]
+          (is (= :hydrate/pin-mismatch (:error/type f)))
+          (is (= :code-image-mismatch (:reason f))))))))

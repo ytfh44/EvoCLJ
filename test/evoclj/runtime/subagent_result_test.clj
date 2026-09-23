@@ -11,48 +11,69 @@
             [evoclj.store.recovery :as recovery]
             [evoclj.store.session :as session]
             [evoclj.store.work :as work-store]
-            [evoclj.store.sqlite :as sqlite])
+            [evoclj.store.sqlite :as sqlite]
+            [evoclj.support.genome-fixtures :as fx])
   (:import (java.util Date UUID)
            (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
 
-(def ^:private genome (str "sha256:" (apply str (repeat 64 "a"))))
-(def ^:private resolution (str "sha256:" (apply str (repeat 64 "c"))))
-(def ^:private phenotype (str "sha256:" (apply str (repeat 64 "b"))))
+;; --- fixtures --------------------------------------------------------------
+;;
+;; Hydration is fail-closed: the child executor is built from a REGISTERED
+;; genome bundle, so the fixture registers the shared echo bundle
+;; (:tool :fixture/echo → :emit) plus its I1 identity rows and the executor
+;; stores map (with the CAS) is handed to run-subagent!.
+
 (def ^:private gen "generation-1")
 (def ^:private issued-at (Date. 1700000000000))
 (def ^:private expires-at (Date. 4102444800000))
 (def ^:private cas-ref-good (str "sha256:" (apply str (repeat 64 "f"))))
 
 (def ^:private db-paths (atom []))
+(def ^:private temp-dirs (atom []))
 
 (defn- temp-db-path []
   (let [p (str (Files/createTempFile "evoclj-s5-" ".db" (make-array FileAttribute 0)))]
     (swap! db-paths conj p)
     p))
 
+(defn- temp-dir [prefix]
+  (let [d (str (Files/createTempDirectory prefix (make-array FileAttribute 0)))]
+    (swap! temp-dirs conj d)
+    d))
+
 (defn- cleanup! []
   (doseq [p @db-paths]
     (try (Files/deleteIfExists (.toPath (java.io.File. p))) (catch Exception _)))
+  (doseq [d @temp-dirs]
+    (try (fx/delete-tree! d) (catch Exception _)))
   (reset! db-paths [])
+  (reset! temp-dirs [])
   (try (subagent/clear-subagent-lease-state!) (catch Exception _)))
 
 (use-fixtures :each (fn [f] (f) (cleanup!)))
 
-(defn- fresh-db []
+(defn- fresh-fixture
+  "A migrated temp db plus a registered echo genome bundle and its
+  identity rows. Returns {:db <path> :stores {:sqlite :cas} :identity {...}}."
+  []
   (let [path (temp-db-path)
         _ (migrate/migrate! path)
-        db path]
-    (sqlite/with-db [conn db]
+        cas-store (cas/->cas (temp-dir "evoclj-s5-cas-"))
+        fixture (fx/echo-fixture)
+        _ (fx/register-echo-genome! path cas-store fixture)
+        identity (select-keys fixture [:genome/id :resolution/id :code/id])]
+    (sqlite/with-db [conn path]
       (let [now "2025-01-01T00:00:00Z"]
-        (doseq [h [genome resolution phenotype]]
-          (try (jdbc/insert! conn :artifacts {:hash h :media_type "application/octet-stream" :size 0 :created_at now})
-               (catch Exception _)))
-        (try (jdbc/insert! conn :genomes {:id genome :created_at now})
-             (catch Exception _))
-        (try (jdbc/insert! conn :generations {:id gen :genome_id genome :resolution_id resolution :parent_id nil :state "active" :current 1 :created_at now})
+        (try (jdbc/insert! conn :generations {:id gen
+                                              :genome_id (:genome/id identity)
+                                              :resolution_id (:resolution/id identity)
+                                              :parent_id nil
+                                              :state "active"
+                                              :current 1
+                                              :created_at now})
              (catch Exception _))))
-    db))
+    {:db path :stores {:sqlite path :cas cas-store} :identity identity}))
 
 (defn- parent-lease [session-id phenotype-id actions]
   (mint/mint-lease! nil {:principal {:principal/type :session :session/id session-id}
@@ -62,12 +83,15 @@
                          :issued-at issued-at
                          :expires-at expires-at}))
 
-(defn- create-parent-session! [db]
-  (let [sess (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen})
+(defn- create-parent-session! [db identity]
+  (let [sess (session/create-session! db {:genome/id (:genome/id identity)
+                                          :resolution/id (:resolution/id identity)
+                                          :phenotype/id (:code/id identity)
+                                          :generation/id gen})
         sid (:session/id sess)]
     (event/append-event! db {:session/id sid
                              :generation/id gen
-                             :phenotype/id phenotype
+                             :phenotype/id (:code/id identity)
                              :event/type :session/created
                              :prev/event-id nil
                              :payload-ref nil
@@ -85,12 +109,12 @@
 
 (deftest deliver-result-appends-subagent-result-to-parent
   (testing "run auto-delivers the child terminal; manual deliver is an idempotent no-op returning the recorded event"
-    (let [db (fresh-db)
-          parent (create-parent-session! db)
+    (let [{:keys [db stores identity]} (fresh-fixture)
+          parent (create-parent-session! db identity)
           parent-id (:session/id parent)
-          pl (parent-lease parent-id phenotype #{:invoke})
+          pl (parent-lease parent-id (:code/id identity) #{:invoke})
           {:keys [child/session-id child/work-id]} (subagent/spawn-subagent! db parent-id {:task "child-task"} [pl])
-          run-res (subagent/run-subagent! db parent-id session-id {:text "hello-echo"})
+          run-res (subagent/run-subagent! stores parent-id session-id {:text "hello-echo"})
           ;; W1/W2: Work owns the lifecycle — the session row stays :created
           ;; (immutable identity); completion truth is the child Work :succeeded.
           child-work-state (some-> (work-store/fetch-work db work-id) :work/state)
@@ -123,14 +147,14 @@
 
 (deftest deliver-result-cas-mismatch-fails
   (testing "deliver-result! with a cas-ref that differs from the child Work payload_ref throws :store/cas-mismatch and appends nothing"
-    (let [db (fresh-db)
-          parent (create-parent-session! db)
+    (let [{:keys [db stores identity]} (fresh-fixture)
+          parent (create-parent-session! db identity)
           parent-id (:session/id parent)
-          pl (parent-lease parent-id phenotype #{:invoke})
+          pl (parent-lease parent-id (:code/id identity) #{:invoke})
           {:keys [child/session-id child/work-id]} (subagent/spawn-subagent! db parent-id {:task "mismatch"} [pl])
           ;; undo the auto-delivery's recorded event count baseline: run first,
           ;; then attempt a conflicting manual delivery
-          _ (subagent/run-subagent! db parent-id session-id {:text "hello"})
+          _ (subagent/run-subagent! stores parent-id session-id {:text "hello"})
           bound (:work/payload-ref (work-store/fetch-work db work-id))
           bad-ref (str "sha256:" (apply str (repeat 64 "0")))
           _ (is (not= bound bad-ref) "test ref really differs")
@@ -154,10 +178,10 @@
 
 (deftest deliver-on-running-child-fails-not-completed
   (testing "deliver-result! on non-completed (running/created) child throws :subagent/not-completed"
-    (let [db (fresh-db)
-          parent (create-parent-session! db)
+    (let [{:keys [db stores identity]} (fresh-fixture)
+          parent (create-parent-session! db identity)
           parent-id (:session/id parent)
-          pl (parent-lease parent-id phenotype #{:invoke})
+          pl (parent-lease parent-id (:code/id identity) #{:invoke})
           {:keys [child/session-id]} (subagent/spawn-subagent! db parent-id {:task "child2"} [pl])]
       ;; child is still :created, not completed
       (let [ex (try (subagent/deliver-result! db parent-id session-id cas-ref-good)
@@ -172,10 +196,10 @@
         (is (empty? result-events) "no result event appended on failure")))))
 (deftest orphaned-child-found-by-recovery-helper
   (testing "orphaned child (parent Work terminal, child Work live) is found by Work-only find-orphaned-subagents"
-    (let [db (fresh-db)
-          parent (create-parent-session! db)
+    (let [{:keys [db stores identity]} (fresh-fixture)
+          parent (create-parent-session! db identity)
           parent-id (:session/id parent)
-          pl (parent-lease parent-id phenotype #{:invoke})
+          pl (parent-lease parent-id (:code/id identity) #{:invoke})
           parent-work-id (random-uuid)
           _ (work-store/create-work! db {:work/id parent-work-id
                                          :work/type :session/run
@@ -209,35 +233,35 @@
             "orphaned child work is :cancelled after recovery")
         (is (empty? (recovery/find-orphaned-subagents db)) "re-running finds no orphans"))))
   (testing "no orphan when the parent Work is still live"
-    (let [db2 (fresh-db)
-          parent2 (create-parent-session! db2)
+    (let [{:keys [db stores identity]} (fresh-fixture)
+          parent2 (create-parent-session! db identity)
           pid2 (:session/id parent2)
-          pl2 (parent-lease pid2 phenotype #{:invoke})
+          pl2 (parent-lease pid2 (:code/id identity) #{:invoke})
           pwid2 (random-uuid)
-          _ (work-store/create-work! db2 {:work/id pwid2
+          _ (work-store/create-work! db {:work/id pwid2
                                           :work/type :session/run
                                           :work/state :queued
                                           :work/session-id pid2
                                           :work/created-at (Date. 1700000000000)})
-          {:keys [child/session-id]} (subagent/spawn-subagent! db2 pid2 {:task "live"} [pl2]
+          {:keys [child/session-id]} (subagent/spawn-subagent! db pid2 {:task "live"} [pl2]
                                                                 {:parent/work-id pwid2})
-          _ (work-store/dispatch-work! db2 pwid2)]
-      (is (empty? (recovery/find-orphaned-subagents db2))
+          _ (work-store/dispatch-work! db pwid2)]
+      (is (empty? (recovery/find-orphaned-subagents db))
           "no orphan when parent work still :running"))))
 
 (deftest deliver-failure-derives-error-from-work-record
   (testing "deliver-failure! records the canonical terminal error, not the caller-supplied value"
-    (let [db (fresh-db)
-          parent (create-parent-session! db)
+    (let [{:keys [db stores identity]} (fresh-fixture)
+          parent (create-parent-session! db identity)
           parent-id (:session/id parent)
-          pl (parent-lease parent-id phenotype #{:invoke})
+          pl (parent-lease parent-id (:code/id identity) #{:invoke})
           {:keys [child/session-id child/work-id]} (subagent/spawn-subagent! db parent-id {:task "doomed"} [pl])
           child-id session-id
           _ (work-store/dispatch-work! db work-id)
           prev-id (:event/id (last (event/events-for-session db child-id)))
           terminal (event/append-event! db {:session/id child-id
                                             :generation/id gen
-                                            :phenotype/id phenotype
+                                            :phenotype/id (:code/id identity)
                                             :event/type :session/failed
                                             :prev/event-id prev-id
                                             :payload-ref nil

@@ -15,6 +15,7 @@
             [evoclj.store.genome :as genome-store]
             [evoclj.store.identity :as identity]
             [evoclj.store.migrate :as migrate]
+            [evoclj.store.recovery :as recovery]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite]))
 
@@ -234,6 +235,45 @@
         (is (= :graph/main (:graph/id (:topology hc)))
             "the real compiled topology, not the fallback echo")
         (is (not= :graph/subagent-echo (:graph/id (:topology hc))))))))
+
+(deftest recovery-scan-reports-identity-failures
+  ;; The startup scan classifies unauthenticated pins by reason (read-only;
+  ;; it never repairs) so an operator can tell a never-registered identity
+  ;; from a real mismatch.
+  (let [db (fresh-db)
+        _ (seed-generation! db)
+        cas-store (cas/->cas (str (java.nio.file.Files/createTempDirectory
+                                   "evoclj-identity-cas-"
+                                   (make-array java.nio.file.attribute.FileAttribute 0))))
+        unregistered-code (str "sha256:" (apply str (repeat 64 "7")))
+        bad (session/create-session! db {:generation/id gen
+                                         :genome/id genome
+                                         :resolution/id resolution
+                                         :phenotype/id phenotype
+                                         :code/id unregistered-code})
+        _ (identity/record-code-image! db (code-identity))
+        _ (identity/record-deployment! db (deployment-identity))
+        _ (identity/record-execution! db (execution-identity))
+        good (session/create-session! db {:generation/id gen
+                                          :genome/id genome
+                                          :resolution/id resolution
+                                          :phenotype/id phenotype
+                                          :code/id code-id
+                                          :deployment/id deployment-id
+                                          :execution/id execution-id})
+        report (recovery/scan-recovery-state db cas-store)
+        failures (:identity-failures report)]
+    (testing "the unauthenticated session is reported with its reason"
+      (is (= [{:session/id (str (:session/id bad))
+               :session/code-id unregistered-code
+               :reason :code-image-row-missing}]
+             failures)))
+    (testing "the authenticated session is not reported"
+      (is (not-any? #(= (str (:session/id good)) (:session/id %)) failures)))
+    (testing "the scan stays read-only (the historical categories survive)"
+      (is (contains? report :missing-artifacts))
+      (is (contains? report :invalid-event-chains))
+      (is (contains? report :stale-candidates)))))
 
 (deftest session-row-carries-the-identity-triple
   (let [db (fresh-db)

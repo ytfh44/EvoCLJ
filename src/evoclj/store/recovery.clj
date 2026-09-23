@@ -31,6 +31,13 @@
     them — promotion is exclusively the component compare-and-set path and
     this scan performs no writes at all (Step 3).
 
+  * :identity-failures — sessions whose pinned I1 identity cannot be
+    authenticated against the code_images/deployments/executions rows
+    (evoclj.store.identity/pin-failure): a missing row or a row naming
+    another code image. Reported with the failing :reason so the operator
+    can tell a never-registered identity from a real mismatch; the
+    execution path fails closed on the same rule (evoclj.runtime.hydrate).
+
   W2 Work recovery (sole durable lifecycle) follows the same discipline — report, not
   fabricate completion. `find-orphaned-works` classifies Works left
   in :queued (submitted, never dispatched), :running or :waiting (dispatched,
@@ -54,6 +61,7 @@
             [evoclj.kernel.error :as err]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
+            [evoclj.store.identity :as identity]
             [evoclj.store.invariant :as invariant-store]
             [evoclj.store.work :as work-store]
             [evoclj.store.session :as session]
@@ -346,12 +354,35 @@
      :terminal-evidence-missing terminal}))
 
 (declare ambiguous-provider-effects)
+
+(defn- identity-failures
+  "Every session whose pinned identity cannot be authenticated, as the
+  finding evoclj.store.identity/pin-failure returns (carrying :reason
+  :execution-row-missing / :deployment-row-missing /
+  :code-image-row-missing / :code-image-mismatch). Read-only: the scan
+  reports, it never repairs."
+  [store]
+  (try
+    (->> (sqlite/query store ["SELECT id, code_image_id, phenotype_id,
+                                      deployment_id, execution_id
+                                 FROM sessions"])
+         (keep (fn [row]
+                 (identity/pin-failure
+                  store
+                  {:session/id (:id row)
+                   :code/id (or (:code_image_id row) (:phenotype_id row))
+                   :deployment/id (:deployment_id row)
+                   :execution/id (:execution_id row)})))
+         vec)
+    (catch java.sql.SQLException _ [])))
+
 (defn scan-recovery-state
   "The normative recovery scan (component interface). Read-only: it
   classifies crash residue and reports corruption; it never appends,
   rewrites, promotes, or otherwise mutates durable state.
 
-  Returns the historical categories plus :invariant-state."
+  Returns the historical categories plus :invariant-state and
+  :identity-failures."
   [store cas]
   (let [inv (try (invariant-integrity store cas)
                  (catch java.sql.SQLException _
@@ -360,6 +391,7 @@
     {:missing-artifacts (missing-artifacts store cas)
      :invalid-event-chains (invalid-event-chains store)
      :stale-candidates (stale-candidates store)
+     :identity-failures (identity-failures store)
      :invariant-state inv
      :generated-invariants inv
      :ambiguous-effects (ambiguous-provider-effects store)}))

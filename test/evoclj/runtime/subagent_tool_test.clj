@@ -5,11 +5,13 @@
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.provider.registry :as registry]
             [evoclj.runtime.subagent :as subagent]
+            [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite]
             [evoclj.store.work :as work-store]
+            [evoclj.support.genome-fixtures :as fx]
             [evoclj.tool.specs :as specs]
             [malli.core :as m])
   (:import (java.util Date UUID)))
@@ -22,6 +24,7 @@
 (def ^:private expires-at (Date. 4102444800000))
 
 (def ^:private db-paths (atom []))
+(def ^:private temp-dirs (atom []))
 
 (defn- temp-db-path []
   (let [p (str (java.nio.file.Files/createTempFile "evoclj-s6-" ".db"
@@ -29,11 +32,20 @@
     (swap! db-paths conj p)
     p))
 
+(defn- temp-dir [prefix]
+  (let [d (str (java.nio.file.Files/createTempDirectory prefix
+                                                        (make-array java.nio.file.attribute.FileAttribute 0)))]
+    (swap! temp-dirs conj d)
+    d))
+
 (defn- cleanup! []
   (doseq [p @db-paths]
     (try (java.nio.file.Files/deleteIfExists (java.nio.file.Paths/get p (into-array String [])))
          (catch Exception _)))
-  (reset! db-paths []))
+  (doseq [d @temp-dirs]
+    (try (fx/delete-tree! d) (catch Exception _)))
+  (reset! db-paths [])
+  (reset! temp-dirs []))
 
 (use-fixtures :each (fn [f] (f) (cleanup!) (subagent/clear-subagent-lease-state!)))
 
@@ -83,22 +95,53 @@
     wid))
 
 
-(defn- create-parent-session! [db]
-  (let [sess (session/create-session! db {:genome/id genome :resolution/id resolution :phenotype/id phenotype :generation/id gen})
-        sid (:session/id sess)]
-    (event/append-event! db {:session/id sid
-                             :generation/id gen
-                             :phenotype/id phenotype
-                             :event/type :session/created
-                             :prev/event-id nil
-                             :payload-ref nil
-                             :metadata {}})
-    (work-store/create-work! db {:work/id (UUID/randomUUID)
-                                 :work/type :session/run
-                                 :work/state :queued
-                                 :work/session-id sid
-                                 :work/created-at (Date. 1700000000000)})
-    sess))
+(defn- create-parent-session!
+  ([db] (create-parent-session! db {:genome/id genome
+                                    :resolution/id resolution
+                                    :code/id phenotype}))
+  ([db identity]
+   (let [sess (session/create-session! db {:genome/id (:genome/id identity)
+                                           :resolution/id (:resolution/id identity)
+                                           :phenotype/id (:code/id identity)
+                                           :generation/id gen})
+         sid (:session/id sess)]
+     (event/append-event! db {:session/id sid
+                              :generation/id gen
+                              :phenotype/id (:code/id identity)
+                              :event/type :session/created
+                              :prev/event-id nil
+                              :payload-ref nil
+                              :metadata {}})
+     (work-store/create-work! db {:work/id (UUID/randomUUID)
+                                  :work/type :session/run
+                                  :work/state :queued
+                                  :work/session-id sid
+                                  :work/created-at (Date. 1700000000000)})
+     sess)))
+
+(defn- fresh-hydration-fixture
+  "A migrated temp db plus a REGISTERED echo genome bundle and its I1
+  identity rows — the state the fail-closed hydration path requires for a
+  child run. Returns {:db <path> :stores {:sqlite :cas} :identity {...}}."
+  []
+  (let [path (temp-db-path)
+        _ (migrate/migrate! path)
+        cas-store (cas/->cas (temp-dir "evoclj-s6-cas-"))
+        fixture (fx/echo-fixture)
+        _ (fx/register-echo-genome! path cas-store fixture)
+        identity (select-keys fixture [:genome/id :resolution/id :code/id])]
+    (sqlite/with-db [conn path]
+      (let [now "2025-01-01T00:00:00Z"]
+        (try (clojure.java.jdbc/insert! conn :generations
+                                        {:id gen
+                                         :genome_id (:genome/id identity)
+                                         :resolution_id (:resolution/id identity)
+                                         :parent_id nil
+                                         :state "active"
+                                         :current 1
+                                         :created_at now})
+             (catch Exception _))))
+    {:db path :stores {:sqlite path :cas cas-store} :identity identity}))
 
 ;; ===========================================================================
 ;; 1 — :agent/spawn tool descriptor is valid and has correct schema
@@ -470,12 +513,12 @@
 
 (deftest result-and-cancel-intents-execute
   (testing "subagent-result delivers after the child completes (idempotent with run-time auto-delivery)"
-    (let [db (fresh-db)
-          parent (create-parent-session! db)
+    (let [{:keys [db stores identity]} (fresh-hydration-fixture)
+          parent (create-parent-session! db identity)
           parent-id (:session/id parent)
-          pl (parent-lease parent-id phenotype #{:invoke})
+          pl (parent-lease parent-id (:code/id identity) #{:invoke})
           {:keys [child/session-id child/work-id]} (subagent/spawn-subagent! db parent-id {:task "child-task"} [pl])
-          _ (subagent/run-subagent! db parent-id session-id {:text "hello-echo"})
+          _ (subagent/run-subagent! stores parent-id session-id {:text "hello-echo"})
           ;; the supplied CAS must equal the child Work's payload_ref
           cas-ref (:work/payload-ref (work-store/fetch-work db work-id))
           _ (is (string? cas-ref) "child work carries the output CAS ref")

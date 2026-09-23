@@ -135,3 +135,64 @@
        :deployment/id (:deployment_id row)
        :code/id (:code_image_id row)
        :created-at (:created_at row)})))
+
+;; --- the fail-closed pin rule -------------------------------------------------
+
+(defn pin-failure
+  "The FAIL-CLOSED identity check for one session pin: nil when every
+  identity id the pin carries has its row and each row names the pin's
+  :code/id; otherwise the FIRST finding:
+
+    {:reason :execution-row-missing | :deployment-row-missing
+             | :code-image-row-missing | :code-image-mismatch
+     :session/id <uuid> ... }
+
+  A missing row is a finding, never a silent pass: a session whose
+  identity was never registered cannot be executed. Read-only — the
+  caller owns the error type (hydrate throws :hydrate/pin-mismatch) and
+  the response (the startup scan reports)."
+  [db pin]
+  (let [pin-code (:code/id pin)]
+    (or
+     (when-let [eid (:execution/id pin)]
+       (let [row (execution-for-pin db pin)]
+         (cond
+           (nil? row)
+           {:reason :execution-row-missing
+            :session/id (:session/id pin)
+            :execution/id eid}
+           (and pin-code (not= (:code/id row) pin-code))
+           {:reason :code-image-mismatch
+            :session/id (:session/id pin)
+            :session/code-id pin-code
+            :execution/id eid
+            :execution/code-image-id (:code/id row)})))
+     (when-let [did (:deployment/id pin)]
+       (let [row (deployment-for-pin db pin)]
+         (cond
+           (nil? row)
+           {:reason :deployment-row-missing
+            :session/id (:session/id pin)
+            :deployment/id did}
+           (and pin-code (not= (:code/id row) pin-code))
+           {:reason :code-image-mismatch
+            :session/id (:session/id pin)
+            :session/code-id pin-code
+            :deployment/id did
+            :deployment/code-image-id (:code/id row)})))
+     (when pin-code
+       (let [row (code-image-for-pin db pin)]
+         (cond
+           (nil? row)
+           {:reason :code-image-row-missing
+            :session/id (:session/id pin)
+            :session/code-id pin-code}
+           (and (:genome/id pin) (not= (:code/genome-id row) (:genome/id pin)))
+           {:reason :code-image-mismatch
+            :session/id (:session/id pin)
+            :pin pin :row row}
+           (and (:resolution/id pin)
+                (not= (:code/resolution-id row) (:resolution/id pin)))
+           {:reason :code-image-mismatch
+            :session/id (:session/id pin)
+            :pin pin :row row}))))))

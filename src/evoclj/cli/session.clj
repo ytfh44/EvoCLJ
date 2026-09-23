@@ -871,11 +871,12 @@
                    :deployment/id (:deployment/id compiled)
                    :execution/id (:execution/id compiled)
                    :generation/id (:generation/id generation)}))
-            ;; H1 Hydration factory — verify pinned identity via the
-            ;; single hydration path (execution.code_image_id ==
-            ;; pin.code_image_id else throw). The factory is the
-            ;; canonical owner of id authentication.
-            _ (try (hydrate/hydrate db sid) (catch Exception _ nil))
+            ;; H1 Hydration factory — authenticate the pinned identity via
+            ;; the single hydration path (fail-closed: every identity id
+            ;; the pin carries must have its row and the row must name
+            ;; this code image). verify-pin! is the authentication WITHOUT
+            ;; building a second executor.
+            _ (hydrate/verify-pin! db sid)
             lease-registry (cap-mint/create-lease-registry)
             leases (concat (mapv #(tool-lease sid phenotype-id % lease-registry) tools)
                              (mapv #(model-lease sid phenotype-id % lease-registry) models))

@@ -12,30 +12,34 @@
   created.
 
   Id authentication (Global Constraint 2 / I1):
-    execution.code_image_id == pin.code_image_id else throw
-    (typed :hydrate/pin-mismatch). The same check covers the Deployment
-    binding when a deployment row is present.
+    every identity id the pin carries must have its row in the I1
+    identity tables and the row's code image must equal the pin's
+    :code/id, else throw (typed :hydrate/pin-mismatch). A missing row is
+    a mismatch, never a silent pass — a session whose identity was never
+    registered cannot be executed.
 
   Bindings are materialized through the scheduler's durable store
   (evoclj.store.binding/restore!) — a missing table degrades to [] and
   is recorded as a degradation event, never a silent swallow.
 
   Real-genome load path (H1):
-    When the store carries a registered genome bundle (evoclj.store.genome/
-    register-loaded-genome!), hydrate loads the persisted :manifest,
-    :files, and :programs, re-compiles via evoclj.compiler.core/
-    compile-genome, and produces a real CompiledGenome with real topology
-    (not the fallback echo). The resulting :code/id must equal the pin's
-    :code/id, and :compiled/genome-id/:compiled/resolution-id must match
-    the pin. A mismatch throws :hydrate/pin-mismatch.
-    For fake-id scenarios (no bundle registered), hydrate falls back to
-    the synthetic topology/programs so existing tests continue to work.
+    hydrate loads the persisted bundle registered by the host
+    (evoclj.store.genome/register-loaded-genome! — written by the CLI and
+    eval identity-registration points), re-compiles via
+    evoclj.compiler.core/compile-genome, and produces a real
+    CompiledGenome with real topology. The resulting :code/id must equal
+    the pin's :code/id, and :compiled/genome-id/:compiled/resolution-id
+    must match the pin. A mismatch throws :hydrate/pin-mismatch; a
+    session with NO registered bundle fails closed with
+    :hydrate/genome-bundle-missing (there is no synthetic fallback).
+
+  verify-pin! is the same authentication WITHOUT building an executor:
+  the host's pre-flight for a session it is about to run.
 
   The factory owns no global mutable state; every call creates fresh
   SCI, fresh usage atom, fresh CAS temp dir, and a fresh broker context."
   (:require [clojure.string :as str]
             [evoclj.compiler.core :as compiler]
-            [evoclj.compiler.topology :as topology]
             [evoclj.genome.types :as types]
             [evoclj.intent.dispatch :as dispatch]
             [evoclj.kernel.error :as err]
@@ -44,6 +48,7 @@
             [evoclj.runtime.phenotype :as phenotype]
             [evoclj.store.cas :as cas]
             [evoclj.store.genome :as store-genome]
+            [evoclj.store.identity :as identity]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
@@ -119,99 +124,33 @@
 ;; Id authentication
 ;; ---------------------------------------------------------------------------
 
+(defn- pin-mismatch-message
+  "The human message for one pin-failure reason (the typed error's
+  :error/type and the finding data are the contract; the message is
+  descriptive)."
+  [reason]
+  (case reason
+    :execution-row-missing "the pinned execution row is missing"
+    :deployment-row-missing "the pinned deployment row is missing"
+    :code-image-row-missing "the pinned code image row is missing"
+    "the pinned identity disagrees with the persisted identity rows"))
+
 (defn- authenticate!
-  "Verify pinned identity against persisted CodeImage/Deployment/Execution
-  rows. Throws :hydrate/pin-mismatch when execution.code_image_id !=
-  pin.code_image_id (or deployment.code_image_id != pin). Missing rows
-  are tolerated for backward compat (tests with fake ids where the
-  CodeImage table is empty) — only a present row that disagrees fails."
+  "Verify the pinned identity against the persisted I1 identity rows —
+  FAIL-CLOSED. The rule lives with the rows (evoclj.store.identity/
+  pin-failure); this namespace owns the error TYPE (:hydrate/pin-mismatch)
+  and throws the finding as its data."
   [db pin]
-  (let [pin-code (:code/id pin)
-        spec (sqlite/db-spec db)]
-    ;; execution check — the normative id authentication
-    (when-let [eid (:execution/id pin)]
-      (when (and eid pin-code)
-        (try
-          (let [row (first (sqlite/query spec ["SELECT code_image_id FROM executions WHERE id = ?" (str eid)]))]
-            (when (and row (:code_image_id row) (not= (:code_image_id row) pin-code))
-              (throw (err/error :hydrate/pin-mismatch
-                                "execution.code_image_id disagrees with session pin"
-                                {:reason :code-image-mismatch
-                                 :session/id (:session/id pin)
-                                 :session/code-id pin-code
-                                 :execution/id eid
-                                 :execution/code-image-id (:code_image_id row)}))))
-          (catch clojure.lang.ExceptionInfo e (throw e))
-          (catch Exception _ nil))))
-    ;; deployment check
-    (when-let [did (:deployment/id pin)]
-      (when (and did pin-code)
-        (try
-          (let [row (first (sqlite/query spec ["SELECT code_image_id FROM deployments WHERE id = ?" (str did)]))]
-            (when (and row (:code_image_id row) (not= (:code_image_id row) pin-code))
-              (throw (err/error :hydrate/pin-mismatch
-                                "deployment.code_image_id disagrees with session pin"
-                                {:reason :code-image-mismatch
-                                 :session/id (:session/id pin)
-                                 :session/code-id pin-code
-                                 :deployment/id did
-                                 :deployment/code-image-id (:code_image_id row)}))))
-          (catch clojure.lang.ExceptionInfo e (throw e))
-          (catch Exception _ nil))))
-    ;; code_image existence — fail only when a row is present and disagrees on genome/resolution
-    (when pin-code
-      (try
-        (let [row (first (sqlite/query spec ["SELECT genome_id, resolution_id FROM code_images WHERE id = ?" pin-code]))]
-          (when row
-            (when (and (:genome/id pin) (:genome_id row) (not= (:genome_id row) (:genome/id pin)))
-              (throw (err/error :hydrate/pin-mismatch "code_image genome mismatch" {:pin pin :row row})))
-            (when (and (:resolution/id pin) (:resolution_id row) (not= (:resolution_id row) (:resolution/id pin)))
-              (throw (err/error :hydrate/pin-mismatch "code_image resolution mismatch" {:pin pin :row row})))))
-        (catch clojure.lang.ExceptionInfo e (throw e))
-        (catch Exception _ nil)))
-    pin))
+  (when-let [failure (identity/pin-failure db pin)]
+    (throw (err/error :hydrate/pin-mismatch
+                      (pin-mismatch-message (:reason failure))
+                      failure)))
+  pin)
 
 ;; ---------------------------------------------------------------------------
 ;; Program sources / compiled genome
 ;; ---------------------------------------------------------------------------
 
-(defn- fallback-topology
-  []
-  {:graph/id :graph/subagent-echo
-   :entry :node/tool
-   :nodes {:node/tool {:node/type :tool :tool :fixture/echo :next :node/emit}
-           :node/emit {:node/type :emit}}
-   :limits {:max-steps 64}})
-
-(defn- fallback-compiled
-  "Synthetic CompiledGenome used when the store has no real CodeImage
-  bundle (tests with fake sha). Preserves the pinned ids so the
-  scheduler pin check still passes."
-  [pin]
-  (let [gid (:genome/id pin)
-        rid (:resolution/id pin)
-        cid (:code/id pin)
-        topo (topology/compile-topology (fallback-topology))]
-    {:compiled/genome-id gid
-     :compiled/resolution-id rid
-     :compiled/code-id cid
-     :compiled/phenotype-id cid
-     :code/id cid
-     :code/genome-id gid
-     :code/resolution-id rid
-     :abi {}
-     :manifest {:capabilities/requested #{:tool/call}}
-     :requested-capabilities #{:tool/call}
-     :effects #{:tool/call}
-     :topology topo
-     :programs {:program/route {:program/id :program/route :entry 'test.route/run}
-                :program/boom {:program/id :program/boom :entry 'test.boom/run}}
-     :resolution {:resolution/id rid}}))
-
-(defn- fallback-program-sources
-  []
-  {:program/route "(ns test.route) (defn run [x] x)"
-   :program/boom  "(ns test.boom) (defn run [x] (throw (ex-info \"boom\" {:error/type :test/boom})))"})
 ;; ---------------------------------------------------------------------------
 ;; Leases
 ;; ---------------------------------------------------------------------------
@@ -290,6 +229,56 @@
 ;; ---------------------------------------------------------------------------
 ;; Public factory
 ;; ---------------------------------------------------------------------------
+
+(defn- resolve-pin
+  "The normalized pin for `pin` (a session id or a pin map), merged with
+  the persisted session row when one exists. Throws :hydrate/invalid-pin
+  for an unusable input."
+  [db pin]
+  (let [norm (or (normalize-pin db pin)
+                 (when (map? pin)
+                   {:session/id (or (:session/id pin) (UUID/randomUUID))
+                    :genome/id (:genome/id pin)
+                    :resolution/id (:resolution/id pin)
+                    :code/id (or (:code/id pin) (:phenotype/id pin) (:code_image_id pin))
+                    :deployment/id (:deployment/id pin)
+                    :execution/id (:execution/id pin)
+                    :generation/id (:generation/id pin)}))]
+    (when-not norm
+      (throw (err/error :hydrate/invalid-pin
+                        "hydrate requires a session pin or id" {:pin pin})))
+    (when-not (:session/id norm)
+      (throw (err/error :hydrate/invalid-pin "pin missing :session/id" {:pin pin})))
+    (let [sid (:session/id norm)
+          sess (try (session/get-session (sqlite/db-spec db) sid)
+                    (catch Exception _ nil))]
+      (if sess
+        (merge norm
+               {:genome/id (or (:genome/id norm) (:genome/id sess))
+                :resolution/id (or (:resolution/id norm) (:resolution/id sess))
+                :code/id (or (:code/id norm) (:code/id sess) (:phenotype/id sess))
+                :generation/id (or (:generation/id norm) (:generation/id sess))})
+        norm))))
+
+(defn verify-pin!
+  "Authenticate the pinned identity WITHOUT building an executor: resolve
+  the pin and run the fail-closed identity check (every id the pin
+  carries must have its row, and every row must name the pinned code
+  image). Returns the normalized pin.
+
+  This is the host's pre-flight for a session it is about to run (the CLI
+  run path and the eval side runner) — it costs one indexed read per
+  identity id and creates no SCI runtime, no CAS, and no broker context.
+  Throws :hydrate/pin-mismatch (see authenticate!) or
+  :hydrate/invalid-pin."
+  [db pin]
+  (when (nil? db)
+    (throw (err/error :hydrate/invalid-store
+                      "verify-pin! requires a db/store handle" {})))
+  (let [pin' (resolve-pin db pin)]
+    (authenticate! db pin')
+    pin'))
+
 (defn hydrate
   "Build a fresh ExecutionHandle for the pinned session `pin`.
 
@@ -309,57 +298,49 @@
      :cas/dir <temp dir>}
 
   The handle owns a fresh SCI runtime and broker; it is isolated from
-  any other handle (new phenotype instance, not shared)."
+  any other handle (new phenotype instance, not shared).
+
+  The compiled genome is ALWAYS the real one re-compiled from the
+  persisted bundle: a session whose bundle was never registered fails
+  closed with :hydrate/genome-bundle-missing — there is no synthetic
+  fallback to silently execute."
   [db pin]
   (when (nil? db)
     (throw (err/error :hydrate/invalid-store "hydrate requires a db/store handle" {})))
-  (let [norm (or (normalize-pin db pin)
-                 (when (map? pin)
-                   {:session/id (or (:session/id pin) (UUID/randomUUID))
-                    :genome/id (:genome/id pin)
-                    :resolution/id (:resolution/id pin)
-                    :code/id (or (:code/id pin) (:phenotype/id pin) (:code_image_id pin))
-                    :deployment/id (:deployment/id pin)
-                    :execution/id (:execution/id pin)
-                    :generation/id (:generation/id pin)}))]
-    (when-not norm
-      (throw (err/error :hydrate/invalid-pin "hydrate requires a session pin or id" {:pin pin})))
-    (when-not (:session/id norm)
-      (throw (err/error :hydrate/invalid-pin "pin missing :session/id" {:pin pin})))
-    ;; verify existence of session row
-    (let [sid (:session/id norm)
-          sess (try (session/get-session (sqlite/db-spec db) sid) (catch Exception _ nil))
-          pin' (if sess
-                 (merge norm
-                        {:genome/id (or (:genome/id norm) (:genome/id sess))
-                         :resolution/id (or (:resolution/id norm) (:resolution/id sess))
-                         :code/id (or (:code/id norm) (:code/id sess) (:phenotype/id sess))
-                         :generation/id (or (:generation/id norm) (:generation/id sess))})
-                 norm)]
-      (authenticate! db pin')
-      ;; Attempt real genome load (H1): if a bundle is registered, load and
-      ;; re-compile. If not, fall back to synthetic topology/programs.
-      (let [cas-store (cas-of db)
-            real (load-real-compiled cas-store db pin')
-            compiled (or (:compiled real) (fallback-compiled pin'))
-            program-sources (or (:program-sources real) (fallback-program-sources))
-            reg (registry/create-registry)
-            _ (registry/register! reg (fixture/echo-provider {}))
-            persisted (load-persisted-leases db sid)
-            ;; P1: no synthetic fallback — DB miss means deny (empty leases). Restart hydrates from DB.
-            leases (or persisted [])
-            usage (atom {})
-            ph (phenotype/instantiate compiled
-                                      {:stores {:sqlite :poison :cas {:root :poison}}
-                                       :providers {:registry reg}
-                                       :capabilities {:leases leases :usage usage}
-                                       :program-sources program-sources})
-            cas-dir (str (Files/createTempDirectory "evoclj-cas-hydrate-" (make-array FileAttribute 0)))
-            cas-store (cas/->cas cas-dir)
-            dispatch-ctx (dispatch/make-broker-context {:registry reg :leases leases :usage usage :db db})]
-        {:phenotype ph
-         :stores {:sqlite db :cas cas-store}
-         :dispatch dispatch-ctx
-         :cas/dir cas-dir
-         :pin pin'
-         :compiled compiled}))))
+  ;; the CAS handle (when the caller passes the executor :stores map) must be
+  ;; read BEFORE the db is normalized; the returned handle always carries a
+  ;; plain sqlite spec under :stores/:sqlite so consumers never see the map.
+  (let [cas-store (cas-of db)
+        db (sqlite/db-spec db)
+        pin' (resolve-pin db pin)
+        sid (:session/id pin')]
+    (authenticate! db pin')
+    (let [real (load-real-compiled cas-store db pin')
+          compiled (:compiled real)
+          program-sources (:program-sources real)
+          _ (when-not compiled
+              (throw (err/error :hydrate/genome-bundle-missing
+                                "no registered genome bundle for the pinned genome id"
+                                {:session/id sid
+                                 :genome/id (:genome/id pin')
+                                 :code/id (:code/id pin')})))
+          reg (registry/create-registry)
+          _ (registry/register! reg (fixture/echo-provider {}))
+          persisted (load-persisted-leases db sid)
+          ;; P1: no synthetic fallback — DB miss means deny (empty leases). Restart hydrates from DB.
+          leases (or persisted [])
+          usage (atom {})
+          ph (phenotype/instantiate compiled
+                                    {:stores {:sqlite :poison :cas {:root :poison}}
+                                     :providers {:registry reg}
+                                     :capabilities {:leases leases :usage usage}
+                                     :program-sources program-sources})
+          cas-dir (str (Files/createTempDirectory "evoclj-cas-hydrate-" (make-array FileAttribute 0)))
+          cas-store (cas/->cas cas-dir)
+          dispatch-ctx (dispatch/make-broker-context {:registry reg :leases leases :usage usage :db db})]
+      {:phenotype ph
+       :stores {:sqlite db :cas cas-store}
+       :dispatch dispatch-ctx
+       :cas/dir cas-dir
+       :pin pin'
+       :compiled compiled})))

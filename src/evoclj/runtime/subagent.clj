@@ -452,7 +452,14 @@
   ([db parent-session-id child-session-id task work-id]
   (when (nil? db)
     (throw (ex-info "run-subagent! requires a db/store handle" {:error/type :store/session-invalid})))
-  (let [child-id (types/session-id child-session-id)
+  ;; `db` may be the executor :stores map {:sqlite ... :cas ...}: the child
+  ;; executor is built by the hydration factory, which needs the CAS to load
+  ;; the child's registered Genome bundle. A bare db handle (no CAS) is
+  ;; accepted for the store reads but fails closed at hydration — a child
+  ;; without its bundle is never executed.
+  (let [stores (when (and (map? db) (contains? db :sqlite)) db)
+        db (or (:sqlite stores) db)
+        child-id (types/session-id child-session-id)
         parent-id (when parent-session-id
                     (try (types/session-id parent-session-id)
                          (catch Exception _ parent-session-id)))
@@ -464,7 +471,7 @@
                        :parent/session-id parent-id})))
     (let [child-work-id (delivery/resolve-child-work-id! db child-id work-id)]
       (enforce-child-deadline! db child-work-id)
-      (let [executor (build-child-executor db child)
+      (let [executor (build-child-executor (or stores db) child)
             run-session! (or (resolve 'evoclj.runtime.scheduler/run-session!)
                              @(requiring-resolve 'evoclj.runtime.scheduler/run-session!))
             ;; W2: reuse the Work the spawn created — never mint a second one.

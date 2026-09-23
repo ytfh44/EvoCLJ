@@ -488,12 +488,12 @@
             _ (register-compiled-artifacts! evaluator stores loaded compiled)
             runtime-env (runtime-identity compiled case-map seed)
             sid (create-pinned-session! stores compiled generation-id runtime-env)
-            ;; H1 Hydration factory — verify pinned identity via the
-            ;; single hydration path (Genome/Resolution/CodeImage via
-            ;; store, Deployment check, fresh SCI/broker). The factory
-            ;; owns the canonical id authentication
-            ;; (execution.code_image_id == pin.code_image_id else throw).
-            _ (try (hydrate/hydrate (:sqlite stores) sid) (catch Exception _ nil))
+            ;; H1 Hydration factory — authenticate the pinned identity via
+            ;; the single hydration path (fail-closed: every identity id
+            ;; the pin carries must have its row and the row must name
+            ;; this code image). verify-pin! is the authentication WITHOUT
+            ;; building a second executor.
+            _ (hydrate/verify-pin! (:sqlite stores) sid)
             usage (atom {})
             leases (leases-for tool-ids sid)
             model-registry (when (contains? evaluator :model/registry)
