@@ -60,6 +60,7 @@
             [malli.error :as me]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err]
+            [evoclj.kernel.store-contract :as store-contract]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.session :as session]
@@ -103,21 +104,15 @@
 (defn- validate-store!
   "Validate the store trust boundary: the executor :stores map
   {:sqlite <db> :cas <CAS root>} exactly as the component scheduler
-  defines it."
+  defines it — the shared rule lives in evoclj.kernel.store-contract;
+  this namespace owns its error type."
   [store]
-  (when-not (map? store)
-    (throw (episode-error :episode/store-invalid
-                          "store must be the executor :stores map {:sqlite ... :cas ...}"
-                          {:reason :not-a-map :value (err/sanitize store)})))
-  (when-not (contains? store :sqlite)
-    (throw (episode-error :episode/store-invalid
-                          "store must carry the :sqlite handle"
-                          {:reason :sqlite-missing})))
-  (when-not (contains? store :cas)
-    (throw (episode-error :episode/store-invalid
-                          "store must carry the :cas handle"
-                          {:reason :cas-missing})))
-  store)
+  (store-contract/validate-executor-stores!
+   (fn [reason store]
+     (throw (episode-error :episode/store-invalid
+                           (store-contract/messages reason)
+                           (store-contract/error-data reason store))))
+   store))
 
 ;; --- row mapping --------------------------------------------------------------
 

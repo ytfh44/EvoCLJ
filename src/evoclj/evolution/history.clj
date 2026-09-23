@@ -112,6 +112,7 @@
             [evoclj.evolution.mutation-schema :as ms]
             [evoclj.genome.hash :as hash]
             [evoclj.kernel.error :as err]
+            [evoclj.kernel.store-contract :as store-contract]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.time Instant)
            (java.util Date UUID)))
@@ -132,23 +133,17 @@
 
 (defn- validate-store!
   "Validate the store trust boundary: the executor :stores map
-  {:sqlite <db> :cas <CAS root>} — the same shape every evolution
-  namespace validates. History reads only rows; :cas is required for
-  boundary-shape consistency so callers pass the same map everywhere."
+  {:sqlite <db> :cas <CAS root>} — the shared rule lives in
+  evoclj.kernel.store-contract; this namespace owns its error type.
+  History reads only rows; :cas is required for boundary-shape
+  consistency so callers pass the same map everywhere."
   [store]
-  (when-not (map? store)
-    (throw (err/error :history/store-invalid
-                      "store must be the executor :stores map {:sqlite ... :cas ...}"
-                      {:reason :not-a-map :value (err/sanitize store)})))
-  (when-not (contains? store :sqlite)
-    (throw (err/error :history/store-invalid
-                      "store must carry the :sqlite handle"
-                      {:reason :sqlite-missing})))
-  (when-not (contains? store :cas)
-    (throw (err/error :history/store-invalid
-                      "store must carry the :cas handle"
-                      {:reason :cas-missing})))
-  store)
+  (store-contract/validate-executor-stores!
+   (fn [reason store]
+     (throw (err/error :history/store-invalid
+                       (store-contract/messages reason)
+                       (store-contract/error-data reason store))))
+   store))
 
 ;; --- request validation ----------------------------------------------------------
 

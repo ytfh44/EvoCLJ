@@ -132,6 +132,7 @@
             [evoclj.genome.load :as load]
             [evoclj.genome.patch :as patch]
             [evoclj.kernel.error :as err]
+            [evoclj.kernel.store-contract :as store-contract]
             [evoclj.store.cas :as cas]
             [evoclj.store.existence :as existence]
             [evoclj.store.sqlite :as sqlite]
@@ -214,15 +215,14 @@
 
 (defn- validate-store!
   [store]
-  (when-not (map? store)
-    (system-error! :store-invalid
-                   "store must be the executor :stores map {:sqlite ... :cas ...}"
-                   {:value (err/sanitize store)}))
-  (when-not (contains? store :sqlite)
-    (system-error! :sqlite-missing "store must carry the :sqlite handle" {}))
-  (when-not (contains? store :cas)
-    (system-error! :cas-missing "store must carry the :cas handle" {}))
-  store)
+  (store-contract/validate-executor-stores!
+   (fn [reason store]
+     (system-error! (if (= :not-a-map reason) :store-invalid reason)
+                    (store-contract/messages reason)
+                    (if (= :not-a-map reason)
+                      {:value (err/sanitize store)}
+                      {})))
+   store))
 
 (defn- validate-system!
   "Validate the evolution-system map (see the namespace docstring for

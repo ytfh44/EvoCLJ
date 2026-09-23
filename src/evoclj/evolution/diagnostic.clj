@@ -8,6 +8,7 @@
             [evoclj.evolution.evidence-schema :as evidence]
             [evoclj.genome.hash :as hash]
             [evoclj.kernel.error :as err]
+            [evoclj.kernel.store-contract :as store-contract]
             [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas])
   (:import (java.nio.charset StandardCharsets)))
@@ -43,13 +44,12 @@
 
 (defn- validate-store!
   [store]
-  (when-not (and (map? store)
-                 (contains? store :sqlite)
-                 (contains? store :cas))
-    (throw (err/error :diagnostic/store-invalid
-                      "store must carry :sqlite and :cas handles"
-                      {:store/keys (when (map? store) (keys store))})))
-  store)
+  (store-contract/validate-executor-stores!
+   (fn [_reason store]
+     (throw (err/error :diagnostic/store-invalid
+                       "store must carry :sqlite and :cas handles"
+                       {:store/keys (when (map? store) (keys store))})))
+   store))
 
 (defn persist-bundle!
   "Persist a validated bundle as one content-addressed EDN artifact.
