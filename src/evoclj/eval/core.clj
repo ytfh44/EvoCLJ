@@ -620,42 +620,24 @@
                 :graph-nodes {:parent (topology-nodes parent-root)
                               :candidate (topology-nodes candidate-root)}}})
 
-(defn- guard-reasons
-  "The G6 guardrail reasons over one numeric section: every metric
-  whose candidate/parent ratio exceeds the profile's max. The
-  complexity guard applies ONLY when the profile declares
-  :max-complexity-regression (complexity is informational otherwise —
-  the same rule as evoclj.eval.compare)."
-  [dimension rule max-key section-max section]
-  (into []
-        (keep (fn [[metric entry]]
-                (let [ratio (metrics/ratio entry)]
-                  (when (> ratio section-max)
-                    {:dimension dimension
-                     :rule rule
-                     :metric metric
-                     :detail {:parent (:parent entry)
-                              :candidate (:candidate entry)
-                              :ratio ratio
-                              max-key (double section-max)}}))))
-        section))
-
 (defn- g6-reasons
   "The combined cost/complexity guardrail reasons (the G6 gate status
-  and the eligibility decision agree by construction — compare derives
-  the SAME reasons from the SAME summary)."
+  and the eligibility decision agree by construction — both derive the
+  SAME reasons from the SAME summary through compare/thresholds-for +
+  compare/guard-reason over the metrics regression records)."
   [profile cost complexity]
-  (let [p (or (:promotion profile) {})
-        d profile/default-promotion-thresholds
-        max-cost (or (:max-cost-regression p) (:max-cost-regression d))
-        max-cx (:max-complexity-regression p)
-        cost-reasons (guard-reasons :cost :max-cost-regression
-                                    :max-cost-regression max-cost
-                                    (:cost cost))
-        cx-reasons (when max-cx
-                     (guard-reasons :complexity :max-complexity-regression
-                                    :max-complexity-regression max-cx
-                                    (:complexity complexity)))]
+  (let [ths (compare/thresholds-for profile)
+        cost-reasons (compare/guard-reason :cost :max-cost-regression
+                                           :max-cost-regression
+                                           (:max-cost-regression ths)
+                                           (metrics/cost-regressions cost))
+        cx-reasons (when-let [max-cx (:max-complexity-regression ths)]
+                     (compare/guard-reason :complexity
+                                           :max-complexity-regression
+                                           :max-complexity-regression
+                                           max-cx
+                                           (metrics/complexity-regressions
+                                            complexity)))]
     (vec (concat cost-reasons cx-reasons))))
 
 (defn- run-g6-phase!

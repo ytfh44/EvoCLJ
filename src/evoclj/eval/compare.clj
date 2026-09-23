@@ -39,12 +39,15 @@
 
 ;; --- thresholds ---------------------------------------------------------------
 
-(defn- thresholds-for
+(defn thresholds-for
   "The effective promotion thresholds for a profile: the profile's own
   values when declared, the canonical defaults otherwise
   (evoclj.eval.profile/default-promotion-thresholds). The complexity
   guard is special: it applies ONLY when the profile declares it —
-  complexity is informational otherwise."
+  complexity is informational otherwise.
+
+  Public: the G6 gate in evoclj.eval.core derives its reasons through
+  this fn and guard-reason — the ONE rule implementation."
   [profile]
   (let [p (:promotion profile)
         d profile/default-promotion-thresholds]
@@ -68,11 +71,16 @@
         :metric :utility/total
         :detail {:delta delta :min-delta min-delta}}])))
 
-(defn- guard-reason
+(defn guard-reason
   "The cost/complexity decision for one section: every candidate/parent
   ratio must be <= the profile's max; a ratio beyond it is a
   :max-cost-regression / :max-complexity-regression reason. `max-key`
-  names the threshold key carried in the :detail evidence."
+  names the threshold key carried in the :detail evidence.
+
+  Public: the G6 gate in evoclj.eval.core consumes the same fn over the
+  same metrics/cost-regressions / metrics/complexity-regressions
+  records, so the gate status and the eligibility decision agree by
+  construction."
   [dimension rule max-key section-max regressions]
   (into []
         (keep (fn [reg]

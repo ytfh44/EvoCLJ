@@ -46,7 +46,9 @@
             [clojure.java.jdbc :as jdbc]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.eval.compare :as compare]
             [evoclj.eval.core :as eval-core]
+            [evoclj.eval.metrics :as eval-metrics]
             [evoclj.eval.replay :as replay]
             [evoclj.eval.static :as static]
             [evoclj.evolution.candidate :as candidate]
@@ -628,6 +630,77 @@
                                                   :test/v1)]
     (testing "a fixture-only run with no :measure/cost never fabricates cost"
       (is (= {} (get-in evaluation [:summary :cost]))))))
+
+;; ============================================================================
+;; G6 derives its reasons through the ONE compare rule implementation
+;; ============================================================================
+
+(deftest g6-gate-reasons-are-the-compare-rule-single-source
+  ;; The G6 gate consumes compare/thresholds-for + compare/guard-reason
+  ;; over metrics/cost-regressions — the SAME rule implementation
+  ;; compare/eligibility applies. A candidate whose measured cost ratio
+  ;; exceeds the profile's :max-cost-regression must fail G6 with
+  ;; reasons item-identical to the rule applied to the summary, and the
+  ;; eligibility decision reports the same reasons.
+  (let [store (fresh-store)
+        pending (materialized-pending! store)
+        parent-bundle (bundle! "(str text \"-parent\")")
+        candidate-bundle (bundle! "text")
+        ev (orchestrator-evaluator
+            store pending parent-bundle candidate-bundle
+            {:measure/cost (fn [root] (if (= root parent-bundle) 1000.0 2000.0))})
+        evaluation (eval-core/evaluate-candidate! ev (:candidate/id pending)
+                                                  :test/v1)
+        profile (test-profile)
+        summary (:summary evaluation)
+        g6 (last (:gates evaluation))
+        gate-report (edn/read-string
+                     (String. ^bytes (cas/get-bytes (:cas store)
+                                                    (:details-ref g6))
+                              StandardCharsets/UTF_8))
+        ths (compare/thresholds-for profile)
+        expected (vec (concat
+                       (compare/guard-reason :cost :max-cost-regression
+                                             :max-cost-regression
+                                             (:max-cost-regression ths)
+                                             (eval-metrics/cost-regressions
+                                              summary))
+                       (when-let [max-cx (:max-complexity-regression ths)]
+                         (compare/guard-reason
+                          :complexity :max-complexity-regression
+                          :max-complexity-regression max-cx
+                          (eval-metrics/complexity-regressions summary)))))]
+    (testing "the measured cost regression fails the G6 gate"
+      (is (= :G6-cost-complexity (:gate/id g6)))
+      (is (= :fail (:status g6)))
+      (is (seq (:reasons gate-report))))
+    (testing "the gate reasons ARE the compare rule's reasons (one implementation)"
+      (is (= expected (:reasons gate-report)))
+      (is (= :cost (get-in gate-report [:reasons 0 :dimension])))
+      (is (= :max-cost-regression (get-in gate-report [:reasons 0 :rule])))
+      (is (= 2.0 (get-in gate-report [:reasons 0 :detail :ratio])))
+      (is (= 1.10 (get-in gate-report [:reasons 0 :detail :max-cost-regression]))))
+    (testing "the eligibility decision reports the same reasons (no second rule)"
+      (is (false? (:eligible? (:eligibility evaluation))))
+      (let [hard (first (:reasons (:eligibility evaluation)))]
+        (is (= :hard (:dimension hard)))
+        (is (= :gates (:metric hard)))
+        (is (= [{:gate/id :G6-cost-complexity :status :fail}]
+               (mapv #(select-keys % [:gate/id :status])
+                     (:violations (:detail hard))))))
+      (testing "and the compare rule over the same summary returns them verbatim"
+        ;; Neutralize ONLY the hard section (the failed gate itself) so the
+        ;; lexicographic pipeline reaches the cost dimension: compare then
+        ;; returns exactly the reasons the gate published.
+        (let [neutral (assoc summary
+                             :hard {:gates {:parent :pass :candidate :pass
+                                            :violations []}
+                                    :replay {:parent :pass :candidate :pass
+                                             :violations []}
+                                    :paired {:parent :pass :candidate :pass
+                                             :violations []}})]
+          (is (= (:reasons gate-report)
+                 (:reasons (compare/eligibility neutral profile)))))))))
 
 ;; ============================================================================
 ;; component — F2 metric records during evaluation (injectable collector)
