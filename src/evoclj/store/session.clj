@@ -50,12 +50,20 @@
   content-addressed ids; :generation/id is required because the
   sessions.generation_id column is NOT NULL and references
   generations; :routing and :created-at are optional. Unknown keys are
-  rejected: trust boundaries use closed maps."
+  rejected: trust boundaries use closed maps.
+
+  The I1 identity triple :code/id / :deployment/id / :execution/id is
+  OPTIONAL here (the executor's compiled genome carries it and every
+  host caller passes it); a session without them pins only the legacy
+  :phenotype/id column."
   [:map {:closed true}
    [:session/id {:optional true} uuid?]
    [:genome/id [:fn types/genome-id?]]
    [:resolution/id [:fn types/resolution-id?]]
    [:phenotype/id [:fn types/artifact-id?]]
+   [:code/id {:optional true} [:fn types/code-id?]]
+   [:deployment/id {:optional true} [:fn types/deployment-id?]]
+   [:execution/id {:optional true} [:fn types/execution-id?]]
    [:generation/id string?]
    [:routing {:optional true} routing-schema]
    [:created-at {:optional true} [:fn inst?]]
@@ -65,13 +73,18 @@
 
 (def SessionSchema
   "The public Session contract map returned by create-session! and
-  get-session. Immutable pin - no state machine."
+  get-session. Immutable pin - no state machine. The I1 identity triple
+  is optional: rows written before the identity tables existed carry
+  only the legacy :phenotype/id column."
   [:map {:closed true}
    [:session/id uuid?]
    [:generation/id string?]
    [:genome/id [:fn types/genome-id?]]
    [:resolution/id [:fn types/resolution-id?]]
    [:phenotype/id [:fn types/artifact-id?]]
+   [:code/id {:optional true} [:fn types/code-id?]]
+   [:deployment/id {:optional true} [:fn types/deployment-id?]]
+   [:execution/id {:optional true} [:fn types/execution-id?]]
    [:created-at [:fn inst?]]
    [:routing [:maybe routing-schema]]])
 

@@ -71,17 +71,25 @@
              {:timestamp ts}))
 
 (defn- row->session
-  "Convert a sessions DB row into the public Session contract map."
+  "Convert a sessions DB row into the public Session contract map. The
+  I1 identity triple is emitted only when the row carries it; :code/id
+  falls back to the legacy phenotype_id column (migration 014 backfilled
+  it), so the code identity is always readable."
   [row]
-  {:session/id (UUID/fromString (:id row))
-   :generation/id (:generation_id row)
-   :genome/id (:genome_id row)
-   :resolution/id (:resolution_id row)
-   :phenotype/id (:phenotype_id row)
-   :created-at (Date/from (Instant/parse (:created_at row)))
-   :routing (when (some? (:routing_deployment_version row))
-              {:deployment-version (:routing_deployment_version row)
-               :bucket (:routing_bucket row)})})
+  (let [code-id (or (:code_image_id row) (:phenotype_id row))
+        execution-id (:execution_id row)]
+    (cond-> {:session/id (UUID/fromString (:id row))
+             :generation/id (:generation_id row)
+             :genome/id (:genome_id row)
+             :resolution/id (:resolution_id row)
+             :phenotype/id (:phenotype_id row)
+             :created-at (Date/from (Instant/parse (:created_at row)))
+             :routing (when (some? (:routing_deployment_version row))
+                        {:deployment-version (:routing_deployment_version row)
+                         :bucket (:routing_bucket row)})}
+      code-id (assoc :code/id code-id)
+      (:deployment_id row) (assoc :deployment/id (:deployment_id row))
+      execution-id (assoc :execution/id (UUID/fromString execution-id)))))
 
 (defn- proof->digest
   [x]
@@ -125,6 +133,14 @@
                      :genome_id (or genome-digest (:genome/id request))
                      :resolution_id (or resolution-digest (:resolution/id request))
                      :phenotype_id (or phenotype-digest (:phenotype/id request))
+                     ;; I1 identity columns: the code image falls back to
+                     ;; the pinned :phenotype/id (same CodeImageId), the
+                     ;; deployment/execution ids come from the compiled
+                     ;; identity the caller registered.
+                     :code_image_id (or (:code/id request)
+                                        (:phenotype/id request))
+                     :deployment_id (:deployment/id request)
+                     :execution_id (some-> (:execution/id request) str)
                      :routing_deployment_version (:deployment-version (:routing request))
                      :routing_bucket (:bucket (:routing request))
                      :created_at ts}))

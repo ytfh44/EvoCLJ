@@ -258,10 +258,20 @@
           parent-leases (or parent-leases [])
           ;; S6 — enforce depth/budget caps before creating the child
           _ (check-depth-and-budget! db parent-id)
-          child-request {:genome/id (:genome/id parent)
-                         :resolution/id (:resolution/id parent)
-                         :phenotype/id (:phenotype/id parent)
-                         :generation/id (:generation/id parent)}
+          child-request (cond-> {:genome/id (:genome/id parent)
+                                 :resolution/id (:resolution/id parent)
+                                 :phenotype/id (:phenotype/id parent)
+                                 :generation/id (:generation/id parent)}
+                          ;; A child session is a sub-activation INSIDE the
+                          ;; parent's execution: when the parent pin carries
+                          ;; the I1 identity triple the child inherits it (no
+                          ;; new identity rows are written here — the identity
+                          ;; registration points own them).
+                          (:code/id parent) (assoc :code/id (:code/id parent))
+                          (:deployment/id parent)
+                          (assoc :deployment/id (:deployment/id parent))
+                          (:execution/id parent)
+                          (assoc :execution/id (:execution/id parent)))
           child-session (session/create-session! db child-request)
           child-id (:session/id child-session)
           child-principal {:principal/type :session :session/id child-id}

@@ -84,6 +84,8 @@
             [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
+            [evoclj.store.genome :as genome-store]
+            [evoclj.store.identity :as identity]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite])
@@ -277,11 +279,21 @@
 
 (defn- register-compiled-artifacts!
   "Seed the fresh side store with the compiled identity rows required by
-  the post-009/post-011 foreign keys before creating its session."
-  [stores loaded compiled]
+  the post-009/post-011 foreign keys before creating its session, persist
+  the loaded bundle (the H1 hydration precondition: hydrate re-compiles
+  the REAL program instead of the synthetic fallback), and register the
+  I1 identity rows (code_images / deployments / executions) the session
+  pin authenticates against.
+
+  Written ONCE per side, before the session exists — never inside the
+  step loop. The persisted bundle carries the SAME program registry and
+  provider catalog this side compiled with, so hydrate's re-compilation
+  resolves the same models."
+  [evaluator stores loaded compiled]
   (let [db (:sqlite stores)
         cas-store (:cas stores)
-        genome-id (:genome/id (program-identity compiled))
+        program (program-identity compiled)
+        genome-id (:genome/id program)
         genome-body (.getBytes (load/index-body loaded) StandardCharsets/UTF_8)
         stored (:artifact/id (cas/put-bytes! cas-store genome-body {}))
         _ (when-not (= stored genome-id)
@@ -291,11 +303,29 @@
                                :stored-artifact-id stored})))]
     (artifact/ensure-artifact! db genome-id "application/octet-stream"
                                 (alength genome-body))
-    (artifact/ensure-artifact! db (:resolution/id (program-identity compiled))
+    (artifact/ensure-artifact! db (:resolution/id program)
                                 "application/edn" 0)
-    (artifact/ensure-artifact! db (:code/id (program-identity compiled))
+    (artifact/ensure-artifact! db (:code/id program)
                                 "application/edn" 0)
     (artifact/ensure-genome! db genome-id)
+    (genome-store/register-loaded-genome! cas-store db
+                                         (assoc loaded
+                                                :programs (program-registry
+                                                           evaluator loaded)
+                                                :resolution/id (:resolution/id program)
+                                                :code/id (:code/id program))
+                                         (:provider/catalog evaluator))
+    (identity/record-code-image! db {:code/id (:code/id program)
+                                     :code/genome-id genome-id
+                                     :code/resolution-id (:resolution/id program)
+                                     :abi (:abi compiled)})
+    (identity/record-deployment! db {:deployment/id (:deployment/id compiled)
+                                     :code/id (:code/id program)
+                                     :bindings []
+                                     :authority []})
+    (identity/record-execution! db {:execution/id (:execution/id compiled)
+                                    :deployment/id (:deployment/id compiled)
+                                    :code/id (:code/id program)})
     stores))
 
 
@@ -315,6 +345,9 @@
               {:genome/id (:genome/id program)
                :resolution/id (:resolution/id program)
                :phenotype/id (:code/id program)
+               :code/id (:code/id program)
+               :deployment/id (:deployment/id compiled)
+               :execution/id (:execution/id compiled)
                :generation/id generation-id}))]
     (event/append-event! db
                          {:session/id sid
@@ -452,7 +485,7 @@
             _ (doseq [tool-id tool-ids]
                 (registry/register! registry (fixture-for evaluator tool-id seed)))
             ;; create session FIRST so leases can bind SessionPrincipal(sid) (I2)
-            _ (register-compiled-artifacts! stores loaded compiled)
+            _ (register-compiled-artifacts! evaluator stores loaded compiled)
             runtime-env (runtime-identity compiled case-map seed)
             sid (create-pinned-session! stores compiled generation-id runtime-env)
             ;; H1 Hydration factory — verify pinned identity via the

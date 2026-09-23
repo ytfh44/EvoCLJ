@@ -66,6 +66,8 @@
             [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.event :as event]
             [evoclj.store.existence :as existence]
+            [evoclj.store.genome :as genome-store]
+            [evoclj.store.identity :as identity]
             [evoclj.store.recovery :as recovery]
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite]
@@ -540,12 +542,25 @@
   index body has been stored and verified in CAS. When `loaded` is
   supplied, it is the filesystem bundle just loaded by the caller and
   becomes the source of that canonical body; without it, an existing CAS
-  proof is required and no placeholder Genome row is fabricated."
+  proof is required and no placeholder Genome row is fabricated.
+
+  Two further durable registrations happen here, both ONCE per
+  instantiation:
+
+    - the loaded bundle + provider catalog (evoclj.store.genome) so
+      hydrate can re-compile the REAL program instead of the synthetic
+      fallback;
+    - the I1 identity rows (code_images / deployments / executions) the
+      session pin and the hydrate pin check authenticate against.
+
+  `identity` carries :code/id (or the legacy :phenotype/id), :deployment/id,
+  :execution/id, and the :abi when the caller compiled the genome."
   ([system identity]
    (ensure-identity-artifacts! system identity nil))
   ([system identity loaded]
    (let [db (db-of system)
-         genome-id (:genome/id identity)]
+         genome-id (:genome/id identity)
+         code-id (or (:code/id identity) (:phenotype/id identity))]
      (if loaded
        (let [body (.getBytes (load/index-body loaded)
                              StandardCharsets/UTF_8)
@@ -562,8 +577,27 @@
        (existence/verified-digest (cas-of system) genome-id))
      (artifact/ensure-artifact! db (:resolution/id identity)
                                  "application/edn" 0)
-     (artifact/ensure-artifact! db (:phenotype/id identity)
+     (artifact/ensure-artifact! db code-id
                                  "application/edn" 0)
+     (when loaded
+       (genome-store/register-loaded-genome! (cas-of system) db
+                                             (assoc loaded
+                                                    :resolution/id (:resolution/id identity)
+                                                    :code/id code-id)
+                                             provider-catalog))
+     (identity/record-code-image! db {:code/id code-id
+                                      :code/genome-id genome-id
+                                      :code/resolution-id (:resolution/id identity)
+                                      :abi (:abi identity)})
+     (when (:deployment/id identity)
+       (identity/record-deployment! db {:deployment/id (:deployment/id identity)
+                                        :code/id code-id
+                                        :bindings []
+                                        :authority []}))
+     (when (:execution/id identity)
+       (identity/record-execution! db {:execution/id (:execution/id identity)
+                                       :deployment/id (:deployment/id identity)
+                                       :code/id code-id}))
      identity)))
 
 (defn- program-identity
@@ -578,9 +612,10 @@
 
 (defn generation-identity
   "The compiled identity of `generation-id`'s Genome:
-  {:generation/id :genome/id :resolution/id :phenotype/id}, the
-  genome id verified against the generation row (:cli/genome-mismatch
-  when the stored bundle compiles to a different address)."
+  {:generation/id :genome/id :resolution/id :phenotype/id :code/id
+   :deployment/id :execution/id :abi}, the genome id verified against
+  the generation row (:cli/genome-mismatch when the stored bundle
+  compiles to a different address)."
   [opts system generation-id]
   (let [row (generation-row system generation-id)]
     (when-not row
@@ -600,7 +635,11 @@
             identity {:generation/id generation-id
                       :genome/id (:genome/id program)
                       :resolution/id (:resolution/id program)
-                      :phenotype/id (:code/id program)}]
+                      :phenotype/id (:code/id program)
+                      :code/id (:code/id program)
+                      :deployment/id (:deployment/id compiled)
+                      :execution/id (:execution/id compiled)
+                      :abi (:abi compiled)}]
         (ensure-identity-artifacts! system identity loaded)
         identity)))
 )
@@ -620,6 +659,9 @@
               {:genome/id (:genome/id identity)
                :resolution/id (:resolution/id identity)
                :phenotype/id (:phenotype/id identity)
+               :code/id (:code/id identity)
+               :deployment/id (:deployment/id identity)
+               :execution/id (:execution/id identity)
                :generation/id generation-id}))]
     (event/append-event! db
                          {:session/id sid
@@ -808,7 +850,11 @@
                 system
                 {:genome/id (:genome/id program)
                  :resolution/id (:resolution/id program)
-                 :phenotype/id (:code/id program)}
+                 :phenotype/id (:code/id program)
+                 :code/id (:code/id program)
+                 :deployment/id (:deployment/id compiled)
+                 :execution/id (:execution/id compiled)
+                 :abi (:abi compiled)}
                 loaded)
             db (db-of system)
             cas-store (cas-of system)
@@ -821,6 +867,9 @@
                   {:genome/id (:genome/id program)
                    :resolution/id (:resolution/id program)
                    :phenotype/id phenotype-id
+                   :code/id (:code/id program)
+                   :deployment/id (:deployment/id compiled)
+                   :execution/id (:execution/id compiled)
                    :generation/id (:generation/id generation)}))
             ;; H1 Hydration factory — verify pinned identity via the
             ;; single hydration path (execution.code_image_id ==
