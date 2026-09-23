@@ -92,6 +92,7 @@
   :eval/paired-equiv-unknown, :eval/paired-result-contaminated."
   (:require [evoclj.eval.runner :as runner]
              [evoclj.eval.leakage :as leakage]
+            [evoclj.eval.equivalence :as equivalence]
             [evoclj.genome.hash :as hash]
             [evoclj.kernel.error :as err]
             [evoclj.runtime.usage :as usage])
@@ -291,32 +292,9 @@
   case-map)
 
 ;; --- output equivalence (default byte-identical) -----------------------------
-
-(def default-equivalences
-  "The kernel-side equivalence registry. :equivalence/byte-identical is
-  the default oracle; evaluator contexts may extend the registry via
-  :equivalence/by-keyword."
-  {:equivalence/byte-identical =})
-
-(defn- resolve-equiv
-  "Resolve the case's :output/equiv? to a predicate fn: a declared fn
-  is used as-is, a keyword is looked up in the evaluator's
-  :equivalence/by-keyword merged over default-equivalences, and nil
-  means byte-identical output."
-  [evaluator case-map]
-  (let [e (:output/equiv? case-map)]
-    (cond
-      (nil? e) =
-      (fn? e) e
-      (keyword? e) (or (get (merge default-equivalences
-                                   (:equivalence/by-keyword evaluator))
-                            e)
-                       (throw (err/error :eval/paired-equiv-unknown
-                                         "no equivalence predicate registered under this keyword"
-                                         {:equivalence/keyword e})))
-      :else (throw (err/error :eval/paired-equiv-unknown
-                              ":output/equiv? must be a fn, a keyword, or nil"
-                              {:value (err/sanitize e)})))))
+;; The registry and its resolution rule live in evoclj.eval.equivalence —
+;; the ONE implementation shared with the replay (G4) evaluator; the
+;; paired error type :eval/paired-equiv-unknown is passed at the call site.
 
 ;; --- scoring and case-level outcomes -----------------------------------------
 
@@ -648,7 +626,9 @@
         pairs (mapv (fn [[case-map r] pair-index]
                       (let [seed (derive-seed seed-base (:case/id case-map) r)
                             order (execution-order pair-index)
-                            equiv-fn (resolve-equiv evaluator case-map)
+                            equiv-fn (equivalence/resolve-equiv
+                                      :eval/paired-equiv-unknown
+                                      evaluator case-map)
                             pair (build-pair evaluator request case-map r
                                              pair-index seed order equiv-fn)]
                         (persist-case-result! evaluator pair)))

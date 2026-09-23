@@ -109,6 +109,7 @@
   :bad-critical, :bad-equiv), :eval/replay-case-not-found,
   :eval/replay-fixture-missing, :eval/replay-equiv-unknown."
   (:require [evoclj.compiler.core :as compiler]
+            [evoclj.eval.equivalence :as equivalence]
             [evoclj.genome.hash :as genome-hash]
             [evoclj.genome.load :as load]
             [evoclj.intent.dispatch :as dispatch]
@@ -359,32 +360,9 @@
               (get responses key))))))))
 
 ;; --- Step 4: output equivalence --------------------------------------------
-
-(def default-equivalences
-  "The kernel-side equivalence registry. :equivalence/byte-identical is
-  the default oracle; evaluator contexts may extend the registry via
-  :equivalence/by-keyword (Step 4)."
-  {:equivalence/byte-identical =})
-
-(defn- resolve-equiv
-  "Resolve the case's :output/equiv? to a predicate fn: a declared fn
-  is used as-is, a keyword is looked up in the evaluator's
-  :equivalence/by-keyword merged over default-equivalences, and nil
-  means byte-identical output."
-  [evaluator case]
-  (let [e (:output/equiv? case)]
-    (cond
-      (nil? e) =
-      (fn? e) e
-      (keyword? e) (or (get (merge default-equivalences
-                                   (:equivalence/by-keyword evaluator))
-                            e)
-                       (throw (err/error :eval/replay-equiv-unknown
-                                         "no equivalence predicate registered under this keyword"
-                                         {:equivalence/keyword e})))
-      :else (throw (err/error :eval/replay-equiv-unknown
-                              ":output/equiv? must be a fn, a keyword, or nil"
-                              {:value (err/sanitize e)})))))
+;; The registry and its resolution rule live in evoclj.eval.equivalence —
+;; the ONE implementation shared with the paired (G5) evaluator; the
+;; replay error type :eval/replay-equiv-unknown is passed at the call site.
 
 ;; --- evaluator context -----------------------------------------------------
 
@@ -766,7 +744,9 @@
                                                  :profile profile
                                                  :candidate candidate
                                                  :output/equiv?
-                                                 (resolve-equiv evaluator case-map))]
+                                                 (equivalence/resolve-equiv
+                                                  :eval/replay-equiv-unknown
+                                                  evaluator case-map))]
                             (run-case! evaluator compiled loaded case-map)))
                         replay-case-ids)
          summary (aggregate outcomes)
