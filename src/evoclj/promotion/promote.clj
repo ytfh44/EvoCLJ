@@ -164,6 +164,7 @@
             [evoclj.promotion.state :as state]
             [evoclj.promotion.activation :as activation]
             [evoclj.security.sci-recheck :as recheck]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.generation-store :as generation-store]
@@ -545,10 +546,8 @@
   candidate state and the :promotion/stale event."
   [conn candidate-row]
   (let [key (:id candidate-row)
-        n (raw-update! conn
-                       "UPDATE candidates SET state = 'stale'
-                        WHERE id = ? AND state = 'eligible'"
-                       [key])]
+        n (candidate-store/transition-candidate-state-on-conn!
+           conn key :evaluated :stale)]
     (when-not (= 1 n)
       (throw (err/error :promotion/candidate-state-invalid
                         "the losing candidate is not :evaluated anymore"
@@ -699,10 +698,8 @@
   "The component machine edge :evaluated → :promoted at the row
   boundary, via compare-and-set on 'eligible'."
   [conn candidate-row]
-  (let [n (raw-update! conn
-                       "UPDATE candidates SET state = 'promoted'
-                        WHERE id = ? AND state = 'eligible'"
-                       [(:id candidate-row)])]
+  (let [n (candidate-store/transition-candidate-state-on-conn!
+           conn (:id candidate-row) :evaluated :promoted)]
     (when-not (= 1 n)
       (throw (err/error :promotion/candidate-state-invalid
                         "candidate is not :evaluated anymore"

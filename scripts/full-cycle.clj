@@ -64,6 +64,7 @@
             [evoclj.compiler.core :as compiler]
             [evoclj.eval.core :as eval-core]
             [evoclj.eval.replay :as replay]
+            [evoclj.evolution.candidate-states :as cstates]
             [evoclj.evolution.core :as evolution]
             [evoclj.genome.load :as load]
             [evoclj.intent.dispatch :as dispatch]
@@ -446,19 +447,11 @@
     {:error/type (or (:error/type ed) :error/unknown)
      :message (.getMessage t)}))
 
-(def ^:private db-state->state
-  "The candidates.state vocabulary -> the machine states (the same
-  mapping evoclj.evolution.candidate documents; replicated here for
-  the harness's read-only candidate SELECT — the harness NEVER writes
-  SQL, exactly like the cli layer)."
-  {"materialized" :materialized
-   "evaluating" :evaluation-pending
-   "eligible" :evaluated
-   "promoted" :promoted
-   "rejected" :rejected
-   "stale" :stale})
-
 (defn- row->candidate [row]
+  "The harness's read-only candidate row decode: the state vocabulary
+  comes from evoclj.evolution.candidate-states (the single mapping), the
+  shape from the harness's own read-only SELECT."
+  [row]
   {:candidate/id (UUID/fromString (:id row))
    :parent/generation-id (:parent_generation_id row)
    :parent/genome-id (:parent_genome_id row)
@@ -466,7 +459,7 @@
    :mutation/id (UUID/fromString (:mutation_id row))
    :evidence/id (:evidence_id row)
    :risk (keyword (:risk row))
-   :state (get db-state->state (:state row))
+   :state (cstates/db-state->kw (:state row))
    :created-at (Date/from (Instant/parse (:created_at row)))})
 
 (defn- candidate-shape [c]

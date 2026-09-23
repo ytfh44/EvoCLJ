@@ -790,11 +790,8 @@
       ;; candidate state is untouched
       (when-let [hook (:finalize/before-candidate-update evaluator)]
         (hook evaluation))
-      (let [n (first (jdbc/execute!
-                      conn
-                      ["UPDATE candidates SET state = 'eligible'
-                        WHERE id = ? AND state = 'evaluating'"
-                       cid]))]
+      (let [n (candidate-store/transition-candidate-state-on-conn!
+               (:connection conn) cid :evaluation-pending :evaluated)]
         (when-not (= 1 n)
           (throw (err/error :eval/candidate-state-invalid
                             "candidate is not :evaluation-pending (persisted as 'evaluating')"

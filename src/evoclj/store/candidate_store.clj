@@ -105,13 +105,14 @@
    :ops (edn/read-string ops)
    :expected-effect (edn/read-string expected_effect)})
 
-(defn- row->candidate
+(defn row->candidate
   "Construct Candidate map from a row. When the row is the result of a
   JOIN with mutations (candidates_normalized view or explicit JOIN),
   derived fields (parent_genome_id, evidence_id, risk) are taken from
   the mutation columns (m_parent_genome_id etc.) — definition > validation.
   Falls back to the physical candidates columns for backward compat
-  reads (e.g. legacy SELECT *)."
+  reads (e.g. legacy SELECT *). Public: the ONE candidate-row decoder
+  (the CLI's candidate reads go through this namespace)."
   [row]
   (let [state (get db-state->state (:state row))]
     (when-not state
@@ -255,6 +256,30 @@
                                 WHERE c.id = ?"
                                (str (:candidate/id candidate))])))))))))
 
+(defn transition-candidate-state-on-conn!
+  "The candidate state compare-and-set on an EXISTING raw
+  java.sql.Connection (the transaction-internal form used by the
+  evaluation finalization, the promotion transaction, and
+  `transition!`): `expected-state` -> `new-state`, returning the affected
+  row count (0 means the row was not in the expected state; the caller
+  owns the typed error and the actual-state report). Rejects a target
+  state with no DB mapping (:candidate/invalid-transition) before the DB
+  CHECK can fail on NULL."
+  [conn candidate-id expected-state new-state]
+  (when-not (state->db-state new-state)
+    (throw (err/error :candidate/invalid-transition
+                      "target state has no DB mapping (not persistable in 5.1)"
+                      {:candidate/id candidate-id
+                       :expected-state expected-state
+                       :new-state new-state})))
+  (sqlite/insert-raw! conn
+                      "UPDATE candidates
+                        SET state = ?
+                        WHERE id = ? AND state = ?"
+                      [(state->db-state new-state)
+                       (str candidate-id)
+                       (state->db-state expected-state)]))
+
 (defn transition!
   "CAS state transition via CandidateStore. Returns updated candidate.
   S3: returns JOIN-derived candidate."
@@ -275,13 +300,8 @@
         db (db-of store)]
     (sqlite/with-db [conn db]
       (sqlite/set-busy-timeout! conn 10000)
-      (let [count (first (jdbc/execute! conn
-                                        ["UPDATE candidates
-                                          SET state = ?
-                                          WHERE id = ? AND state = ?"
-                                         (state->db-state new-state)
-                                         key
-                                         (state->db-state expected-state)]))]
+      (let [count (transition-candidate-state-on-conn!
+                   (:connection conn) cid expected-state new-state)]
         (when-not (= 1 count)
           (let [row (first (jdbc/query conn
                                        ["SELECT state FROM candidates WHERE id = ?"
@@ -301,6 +321,30 @@
                                      FROM candidates c JOIN mutations m ON c.mutation_id = m.id
                                      WHERE c.id = ?" key]))
                 row->candidate)))))
+
+(defn list-candidates
+  "Every persisted Candidate record in creation order (the JOIN read, so
+  the derived fields are the authoritative ones). Read-only."
+  [db]
+  (->> (sqlite/query (sqlite/db-spec db)
+                     ["SELECT c.*, m.parent_genome_id AS m_parent_genome_id,
+                              m.evidence_id AS m_evidence_id, m.risk AS m_risk
+                       FROM candidates c JOIN mutations m ON c.mutation_id = m.id
+                       ORDER BY c.created_at ASC, c.id ASC"])
+       (mapv row->candidate)))
+
+(defn candidates-for-generation
+  "Every persisted Candidate record whose parent generation is
+  `generation-id`, in creation order. Read-only."
+  [db generation-id]
+  (->> (sqlite/query (sqlite/db-spec db)
+                     ["SELECT c.*, m.parent_genome_id AS m_parent_genome_id,
+                              m.evidence_id AS m_evidence_id, m.risk AS m_risk
+                       FROM candidates c JOIN mutations m ON c.mutation_id = m.id
+                       WHERE c.parent_generation_id = ?
+                       ORDER BY c.created_at ASC, c.id ASC"
+                      (str generation-id)])
+       (mapv row->candidate)))
 
 (defn find-candidate
   "Find candidate by id via CandidateStore, or nil.

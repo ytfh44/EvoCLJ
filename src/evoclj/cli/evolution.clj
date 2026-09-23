@@ -23,6 +23,7 @@
             [evoclj.config :as config]
              [evoclj.evolution.scheduler :as scheduler]
              [evoclj.promotion.promote :as promote]
+            [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
            (java.time Instant)
@@ -209,30 +210,11 @@
      :diff/files files}))
 
 ;; --- candidate record mapping (component vocabulary → public states) ----------
-
-(def ^:private db-state->state
-  "The candidates.state vocabulary → the machine states (the same
-  mapping evoclj.evolution.candidate documents; replicated here so
-  `candidate list` can present the public Candidate contract)."
-  {"materialized" :materialized
-   "evaluating" :evaluation-pending
-   "eligible" :evaluated
-   "promoted" :promoted
-   "rejected" :rejected
-   "stale" :stale})
-
-(defn- row->candidate
-  "A candidates row as the public Candidate contract map."
-  [row]
-  {:candidate/id (UUID/fromString (:id row))
-   :parent/generation-id (:parent_generation_id row)
-   :parent/genome-id (:parent_genome_id row)
-   :candidate/genome-id (:genome_id row)
-   :mutation/id (UUID/fromString (:mutation_id row))
-   :evidence/id (:evidence_id row)
-   :risk (keyword (:risk row))
-   :state (get db-state->state (:state row))
-   :created-at (Date/from (Instant/parse (:created_at row)))})
+;;
+;; The candidate-row decode and the state vocabulary live in
+;; evoclj.store.candidate-store (the row decoder) and
+;; evoclj.evolution.candidate-states (the vocabulary); this layer only
+;; SHAPES the records for display.
 
 (defn- candidate-shape
   "The concise Candidate record returned by the CLI commands (no
@@ -296,10 +278,8 @@
   layer's only candidates-table read (see the namespace docstring)."
   [opts]
   (let [system (session/build-system opts)
-        rows (sqlite/query (session/db-of system)
-                           ["SELECT * FROM candidates
-                             ORDER BY created_at ASC, id ASC"])]
-    {:candidates (mapv (comp candidate-shape row->candidate) rows)}))
+        candidates (candidate-store/list-candidates (session/db-of system))]
+    {:candidates (mapv candidate-shape candidates)}))
 
 (defn candidate-inspect!
   "evoclj candidate inspect <id> [--diff]
@@ -368,12 +348,7 @@
   order (the cli layer's read-only candidates SELECT by parent
   generation). Read-only."
   [system generation-id]
-  (->> (sqlite/query (session/db-of system)
-                     ["SELECT * FROM candidates
-                       WHERE parent_generation_id = ?
-                       ORDER BY created_at ASC, id ASC"
-                      generation-id])
-       (mapv row->candidate)))
+  (candidate-store/candidates-for-generation (session/db-of system) generation-id))
 
 (defn- evaluation-pending-for-generation
   "The Candidate records of `generation-id` still in
