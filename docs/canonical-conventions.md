@@ -34,27 +34,6 @@ Carries an extra `existence/verified-digest?` branch that the owner has no
 reason to know about. The owner's docstring calls this out by name. This
 is a *superset* of the owner's behaviour, not a divergence in ordering.
 
-### `evoclj.evolution.dag` — provenance-stripping
-
-`canonicalize` (`src/evoclj/evolution/dag.clj:23-34`) differs from the
-owner in two ways, **both required by its contract**:
-
-1. **It strips `provenance-keys`** (17 keys: `:mutation/id`, `:candidate/id`,
-   `:hypothesis/id`, `:evidence/id`, `:created-at`, `:provenance`, `:source`,
-   `:source/id`, `:parent/source`, `:branch/id`, `:edge/id`, `:metadata`,
-   `:reason`, `:risk`, …). `canonical-merge-plan`'s documented contract is
-   *"provenance-free and stable across map/set/input ordering"* — two merge
-   plans that differ only in evidence/provenance must digest **identically**,
-   because they describe the same merge. The owner must never do this: silently
-   dropping keys is exactly the behaviour a general canonicalizer must not have.
-2. **It orders by raw UTF-8 `str` bytes** (`bytes-key`), not `pr-str`. This
-   is a genuinely different total order, and it is part of the merge-plan
-   digest's frozen definition (`parent-edge-key`, `merge-plan-digest`).
-
-Evidence this is not accidental drift: `merge-plan-digest` and
-`parent-edge-key` are persisted dedupe keys for merge plans, and the
-namespace docstring states the provenance-free guarantee as the contract.
-
 ### `evoclj.genome.patch_edn` — canonical EDN **text**
 
 `canonical-str` (`src/evoclj/genome/patch_edn.clj:45-63`) is not a value
@@ -62,7 +41,7 @@ normalizer at all — it is a **writer**. It produces EDN *source text*
 (hand-rolled `{...}`, `#{...}`, `[...]`, `(...)` with single-space joins)
 rather than a normalized value, because its output is written into Genome
 files whose bytes are then content-addressed by `hash/text-digest`
-(`canonical-edn-text`, `evolution/mutation.clj:579`). It differs from `pr-str` in
+(`canonical-edn-text`, `src/evoclj/genome/patch_edn.clj:104`). It differs from `pr-str` in
 whitespace and in preserving vector-vs-list print shape.
 
 This is why `patch-edn` cannot delegate to `hash/canonical`: the owner

@@ -65,26 +65,15 @@
   (with :reason), :mutation/undeclared-mutable-class (with :class and
   :declared).
 
-  component adds the dual-parent crossover mutation (host opt-in):
-  `crossover` recombines TWO parent Genomes into one child by
-  topology-aware recombination — split parent A's topology at a node,
-  take that node's subtree from parent B, re-resolve dependencies, and
-  gate the child through the topology compiler. The op is pure and
-  deterministic, and is NOT part of the default mutation distribution
-  (see `default-op-distribution`) — a host opts in by calling
-  `crossover` directly; a :crossover op never appears in a Mutation
-  IR's :ops."
-  (:require [clojure.edn :as edn]
-            [clojure.string :as str]
-            [evoclj.compiler.topology :as topology]
+  v0 scope: single-parent Mutation IR only. Dual-parent crossover and
+  population/breeding algorithms are excluded by the v0 Non-Goals
+  (docs/implementation-plan.md) and are not part of this namespace."
+  (:require [clojure.string :as str]
             [evoclj.evolution.mutation-schema :as ms]
-            [evoclj.genome.hash :as hash]
             [evoclj.genome.path :as path]
-            [evoclj.genome.patch-edn :as patch-edn]
             [evoclj.genome.types :as types]
             [evoclj.kernel.error :as err])
-  (:import (java.nio.charset StandardCharsets)
-           (java.nio.file Paths)))
+  (:import (java.nio.file Paths)))
 
 ;; ----------------------------------------------------------------------
 ;; S4 — RawMutation vs ValidatedMutation (definition > validation)
@@ -372,219 +361,10 @@
   "The default mutation op distribution — the closed thirteen-op
   language of component that default mutators may propose from
   (identical to the OpSchema :multi dispatch of
-  evoclj.evolution.mutation-schema). :crossover is DELIBERATELY
-  ABSENT: dual-parent recombination (component) is a host-opt-in
-  operation reachable ONLY through the explicit `crossover` entry
-  point below. It is never part of a single-parent Mutation IR and no
-  default mutator ever proposes it."
+  evoclj.evolution.mutation-schema). Dual-parent recombination is
+  DELIBERATELY ABSENT: it is never part of a single-parent Mutation IR
+  and no default mutator ever proposes it (the v0 Non-Goals exclude
+  genetic crossover/population algorithms)."
   #{:set-edn :delete-edn :insert-text :replace-text :delete-text
     :replace-form :insert-form :delete-form :add-node :remove-node
     :add-edge :remove-edge :update-node})
-
-(defn- crossover-error!
-  "Throw the stable component typed error (Global Constraint 22:
-  plain serializable data)."
-  [reason data]
-  (throw (err/error :evolution/crossover-invalid
-                    "crossover rejected the parent combination"
-                    (assoc data :reason reason))))
-
-(defn- next-and-body
-  "The node ids `node` reaches directly: a sequential :next successor,
-  a Loop's :exit successor, and a Loop's :body region root. :until is a
-  program id, not a node id, and never participates in graph closure."
-  [node]
-  (cond-> []
-    (:next node) (conj (:next node))
-    (and (= :loop (:node/type node)) (:exit node)) (conj (:exit node))
-    (:body node) (conj (:body node))))
-
-(defn- subtree-ids
-  "The ids of every node in `topology` reachable from `root` following
-  sequential :next plus Loop :body/:exit edges — the node's downstream
-  Region closure. A Loop body can close back to the loop, so traversal is
-  guarded by a seen-set and terminates. `root` must be declared; callers
-  validate both parents through compile-topology first."
-  [topology root]
-  (loop [todo [root]
-         seen #{}]
-    (if-let [id (first todo)]
-      (if (contains? seen id)
-        (recur (rest todo) seen)
-        (recur (into (rest todo) (next-and-body (get (:nodes topology) id)))
-               (conj seen id)))
-      seen)))
-
-(defn- resolve-retained-edges
-  "Re-resolve retained parent-A nodes after the splice: any :next, :exit,
-  or :body edge that pointed into parent A's removed subtree is re-pointed
-  at `cut`, the graft root always present in the child. Nodes without the
-  key are untouched (nil is never a set member)."
-  [retained a-subtree cut]
-  (into {}
-        (map (fn [[id node]]
-               [id (cond-> node
-                     (contains? a-subtree (:next node)) (assoc :next cut)
-                     (and (= :loop (:node/type node))
-                          (contains? a-subtree (:exit node)))
-                     (assoc :exit cut)
-                     (contains? a-subtree (:body node)) (assoc :body cut))]))
-        retained))
-
-(defn crossover-topologies
-  "Recombine two parent topology values into one child topology value
-  (component).
-
-  Semantics: split parent A's topology at `cut` (a declared node id),
-  remove A's Region closure at `cut` (everything reachable from `cut` via
-  sequential :next and Loop :body/:exit edges), and graft parent B's
-  Region closure at `cut` in its place. Dependencies are re-resolved
-  deterministically:
-
-  - retained A nodes whose :next/:exit/:body pointed into A's removed
-    closure are re-pointed at `cut` (the graft root, always present);
-  - B's Region closure is taken wholesale (edges inside it stay inside);
-  - the entry is kept unless it was inside A's removed closure, in which
-    case it becomes `cut` (in a valid topology the entry can only be
-    downstream of `cut` when it is `cut`).
-
-  The child MUST satisfy compiler topology validity: it is gated
-  through evoclj.compiler.topology/compile-topology and, on failure,
-  the combination is rejected with :evolution/crossover-invalid
-  :reason :child-invalid (defense-in-depth — the gate never assumes
-  the splice is safe).
-
-  Pure and deterministic (Global Constraints 1 and 6): the child is a
-  pure function of the two parent values and `cut`; identical inputs
-  yield the identical child topology.
-
-  Throws :evolution/crossover-invalid with :reason :parent-invalid (a
-  parent fails compile-topology; :parent names :a/:b and :cause
-  carries the wrapped topology error data), :cut-node-invalid,
-  :cut-node-missing-a, :cut-node-missing-b, or :child-invalid."
-  [topology-a topology-b cut]
-  (when-not (keyword? cut)
-    (crossover-error! :cut-node-invalid {:cut (err/sanitize cut)}))
-  (letfn [(validated [label t]
-            (try
-              (topology/compile-topology t)
-              t
-              (catch clojure.lang.ExceptionInfo e
-                (crossover-error! :parent-invalid
-                                  {:parent label
-                                   :cause (ex-data e)}))))]
-    (let [a (validated :a topology-a)
-          b (validated :b topology-b)
-          nodes-a (:nodes a)
-          nodes-b (:nodes b)]
-      (when-not (contains? nodes-a cut)
-        (crossover-error! :cut-node-missing-a {:cut cut}))
-      (when-not (contains? nodes-b cut)
-        (crossover-error! :cut-node-missing-b {:cut cut}))
-      (let [a-subtree (subtree-ids a cut)
-            b-subtree (subtree-ids b cut)
-            retained (into {}
-                           (remove (fn [[id _]] (contains? a-subtree id)))
-                           nodes-a)
-            retained' (resolve-retained-edges retained a-subtree cut)
-            grafted (select-keys nodes-b b-subtree)
-            entry (if (contains? a-subtree (:entry a))
-                    cut
-                    (:entry a))
-            child (-> a
-                      (assoc :nodes (merge retained' grafted))
-                      (assoc :entry entry))]
-        (try
-          (topology/compile-topology child)
-          (catch clojure.lang.ExceptionInfo e
-            (crossover-error! :child-invalid
-                              {:cut cut :cause (ex-data e)})))
-        child))))
-
-(defn- topology-file-of
-  "The declared topology module path of a parent context, or nil."
-  [ctx]
-  (some-> ctx :manifest :modules :topology))
-
-(defn- topology-value-of
-  "Parse a parent context's topology module value from its :files
-  payload (clojure.edn/read-string — never clojure.core read-string,
-  Global Constraint 22). Throws the component typed error for a
-  malformed context, a missing topology file, or an unparseable
-  topology."
-  [ctx label]
-  (when-not (and (map? ctx) (map? (:manifest ctx)) (map? (:files ctx)))
-    (crossover-error! :parent-context-invalid {:parent label}))
-  (let [file (topology-file-of ctx)]
-    (when-not file
-      (crossover-error! :parent-context-invalid
-                        {:parent label :reason :no-topology-module}))
-    (let [entry (get-in ctx [:files file])]
-      (when-not (and entry (= :edn (:kind entry)))
-        (crossover-error! :topology-file-missing
-                          {:parent label :file file}))
-      (try
-        (let [v (edn/read-string
-                 (String. (byte-array (:bytes entry)) StandardCharsets/UTF_8))]
-          (when-not (map? v)
-            (crossover-error! :topology-unparseable
-                              {:parent label :file file}))
-          v)
-        (catch Exception e
-          (crossover-error! :topology-unparseable
-                            {:parent label :file file
-                             :message (.getMessage e)}))))))
-
-(defn crossover
-  "Dual-parent crossover mutation (component, host opt-in).
-
-  Produces a valid child Genome from two parent Genome contexts by
-  topology-aware recombination: split parent A's topology at the
-  option's :cut/node, take that node's subtree from parent B, and
-  re-resolve dependencies (see `crossover-topologies` for the exact
-  rules). The child MUST satisfy compiler topology validity — enforced
-  by the same gate.
-
-  `parent-a` and `parent-b` are loaded-Genome-shaped contexts
-  ({:manifest ... :files {...}} — the shape produced by
-  evoclj.genome.load/load-genome and consumed by
-  evoclj.genome.patch/apply-mutation). Each parent's topology module
-  is read from its OWN manifest's :modules :topology.
-
-  Returns the child as an immutable in-memory Genome map {:genome/id
-  :manifest :files}: parent A's manifest and non-topology files are
-  kept; the topology module is re-serialized in the patch pipeline's
-  canonical EDN form with its digest recomputed, and :genome/id is
-  recomputed as the canonical tree digest over the child's files
-  (identical to load-genome's address). Pure: no store, no filesystem;
-  identical inputs yield the identical child (Global Constraints 1 and
-  6).
-
-  NOT part of the default mutation distribution (see
-  `default-op-distribution`): :crossover is absent from the Mutation
-  IR op language and only reachable through this explicit entry point
-  — a host opts in by calling it directly.
-
-  Throws :evolution/crossover-invalid (the :reason set of
-  `crossover-topologies` plus :options-invalid, :parent-context-invalid,
-  :topology-file-missing, :topology-unparseable)."
-  [parent-a parent-b opts]
-  (when-not (and (map? opts) (keyword? (:cut/node opts)))
-    (crossover-error! :options-invalid {:opts (err/sanitize opts)}))
-  (let [cut (:cut/node opts)
-        topo-a (topology-value-of parent-a :a)
-        topo-b (topology-value-of parent-b :b)
-        child-topology (crossover-topologies topo-a topo-b cut)
-        file (topology-file-of parent-a)
-        text (str (patch-edn/canonical-str child-topology) "\n")
-        digest (hash/text-digest text)
-        files (assoc (:files parent-a) file
-                     {:digest digest
-                      :bytes (vec (.getBytes text StandardCharsets/UTF_8))
-                      :kind :edn})
-        id (hash/tree-digest (mapv (fn [[p {:keys [digest]}]]
-                                     {:path p :digest digest})
-                                   files))]
-    {:genome/id id
-     :manifest (:manifest parent-a)
-     :files files}))

@@ -4,9 +4,9 @@
   Turns an event-log sequence into a structured BehaviorProfile: a
   closed Malli-validated map summarizing how a session actually
   behaved, plus a deterministic fingerprint and failure/summary
-  projections. This is the pure analytics substrate for speciation,
-  novelty search, anomaly detection, curriculum difficulty, and
-  worst-case profiling — it never reads a store or a live session, it
+  projections. This is the pure analytics substrate for novelty search,
+  anomaly detection, curriculum difficulty, and worst-case profiling —
+  it never reads a store or a live session, it
   only folds over the events it is handed. It is deliberately
   store-agnostic: the profile accepts any sequential collection of
   maps carrying the three required keys (:event/seq int?, :event/type
