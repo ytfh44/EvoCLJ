@@ -157,9 +157,11 @@
 (defn- min-pairs-reason
   "The :min-pairs check: the sample must contain at least the profile's
   declared minimum number of paired observations (Step 5 — high-risk
-  mutations need enough repetitions before any signal is read)."
+  mutations need enough repetitions before any signal is read). A
+  summary WITHOUT a sample descriptor counts as zero pairs: a declared
+  floor is evidence the run must meet, never a check to skip."
   [summary min-pairs]
-  (let [n (:n summary)]
+  (let [n (or (:n summary) 0)]
     (when (< n min-pairs)
       [{:dimension :paired
         :rule :below-min-pairs
@@ -195,14 +197,19 @@
       ;; => [{:dimension :paired :rule :below-min-pairs
       ;;       :metric :pairs/n :detail {:n 3 :min-pairs 10}} ...]
 
+  `summary` is the SAMPLE descriptor — {:n <paired observations>
+  :losses <pairs the candidate lost>} (evoclj.eval.metrics'
+  :sample section; a bare statistics summary works too). A map without
+  :n counts as zero pairs, so a declared :min-pairs floor fails closed
+  rather than being skipped when no sample exists.
+
   The profile's :promotion block MAY declare :min-pairs (the minimum
   number of paired observations) and :max-candidate-failure-rate (the
   maximum fraction of pairs the candidate may lose). A check applies
   ONLY when the profile declares it. Returns a vector of failing
   reason maps — empty exactly when every declared check passes. The
-  reasons carry complete evidence (:detail), so wiring them into
-  evoclj.eval.compare's lexicographic pipeline (component) is
-  trivially additive."
+  reasons carry complete evidence (:detail); evoclj.eval.compare's
+  lexicographic pipeline runs them as its final step."
   [summary profile]
   (let [p (or (:promotion profile) {})]
     (into []

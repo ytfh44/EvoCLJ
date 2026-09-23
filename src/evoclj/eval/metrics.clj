@@ -52,14 +52,28 @@
    [:parent number?]
    [:candidate number?]])
 
+(def SampleSectionSchema
+  "The OPTIONAL :sample section: the paired sample descriptor a profile's
+  Step-5 sample requirements are checked against — :n the number of paired
+  observations, :losses the pairs the candidate LOST. It carries no score
+  (Global Constraint 14 is untouched: this is evidence about the sample,
+  never a compensating metric). A summary without it means the run
+  produced no paired sample."
+  [:map {:closed true}
+   [:n nat-int?]
+   [:losses nat-int?]])
+
 (def EvalSummarySchema
   "The NORMATIVE component evaluation summary contract (closed). Every
-  section stays separate; no section is ever folded into another."
+  section stays separate; no section is ever folded into another. The
+  :sample section is OPTIONAL and carries the paired sample descriptor
+  the profile-declared Step-5 checks read."
   [:map {:closed true}
    [:hard [:map-of keyword? MetricEntrySchema]]
    [:utility [:map-of keyword? NumericMetricEntrySchema]]
    [:cost [:map-of keyword? NumericMetricEntrySchema]]
-   [:complexity [:map-of keyword? NumericMetricEntrySchema]]])
+   [:complexity [:map-of keyword? NumericMetricEntrySchema]]
+   [:sample {:optional true} SampleSectionSchema]])
 
 (defn summary?
   "True when `x` satisfies the normative EvalSummarySchema (closed-map

@@ -632,6 +632,32 @@
       (is (= {} (get-in evaluation [:summary :cost]))))))
 
 ;; ============================================================================
+;; Step 5 — the profile's sample requirements bind end-to-end
+;; ============================================================================
+
+(deftest declared-min-pairs-makes-a-short-sample-ineligible
+  ;; The summary carries the paired sample descriptor (:sample) and the
+  ;; profile-declared floor binds as the FINAL eligibility step: an
+  ;; otherwise-passing candidate with too few pairs is ineligible.
+  (let [store (fresh-store)
+        pending (materialized-pending! store)
+        ev (orchestrator-evaluator
+            store pending (bundle! "(str text \"-parent\")") (bundle! "text")
+            {:profiles {:test/v1 (assoc-in (test-profile)
+                                           [:promotion :min-pairs] 5)}})
+        evaluation (eval-core/evaluate-candidate! ev (:candidate/id pending)
+                                                  :test/v1)]
+    (testing "the summary records the sample the profile's checks read"
+      (is (= {:n 1 :losses 0} (:sample (:summary evaluation)))))
+    (testing "every gate passed — the sample floor is what makes it ineligible"
+      (is (= :pass (get-in (last (:gates evaluation)) [:status]))))
+    (testing "the eligibility decision reports the sample reason"
+      (is (false? (:eligible? (:eligibility evaluation))))
+      (is (= :below-min-pairs (get-in evaluation [:eligibility :reasons 0 :rule])))
+      (is (= {:n 1 :min-pairs 5}
+             (get-in evaluation [:eligibility :reasons 0 :detail]))))))
+
+;; ============================================================================
 ;; G6 derives its reasons through the ONE compare rule implementation
 ;; ============================================================================
 

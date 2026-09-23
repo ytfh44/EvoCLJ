@@ -210,6 +210,68 @@
                    (promotion-profile {:promotion {:strategy :paired-comparison}}))]
       (is (true? (:eligible? outcome))))))
 
+;; --- Step 5: profile-declared sample requirements --------------------------------
+
+(deftest declared-sample-requirements-bind-after-the-guards
+  (testing "a declared :min-pairs below the sample size makes the candidate ineligible"
+    (let [p (promotion-profile {:promotion {:strategy :paired-comparison
+                                            :min-delta 0.05
+                                            :max-cost-regression 1.10
+                                            :min-pairs 12}})
+          summary (-> base-summary
+                      (assoc-in [:utility :task/success]
+                                {:parent 0.72 :candidate 0.90})
+                      (assoc :sample {:n 8 :losses 1}))
+          outcome (compare/eligibility summary p)]
+      (is (false? (:eligible? outcome)))
+      (is (= [{:dimension :paired
+               :rule :below-min-pairs
+               :metric :pairs/n
+               :detail {:n 8 :min-pairs 12}}]
+             (:reasons outcome)))))
+  (testing "a sample at or above :min-pairs stays eligible"
+    (let [p (promotion-profile {:promotion {:strategy :paired-comparison
+                                            :min-delta 0.05
+                                            :max-cost-regression 1.10
+                                            :min-pairs 8}})
+          summary (-> base-summary
+                      (assoc-in [:utility :task/success]
+                                {:parent 0.72 :candidate 0.90})
+                      (assoc :sample {:n 8 :losses 1}))]
+      (is (true? (:eligible? (compare/eligibility summary p))))))
+  (testing "a declared floor with NO sample in the summary fails closed"
+    (let [p (promotion-profile {:promotion {:strategy :paired-comparison
+                                            :min-delta 0.05
+                                            :max-cost-regression 1.10
+                                            :min-pairs 1}})
+          outcome (compare/eligibility base-summary p)]
+      (is (false? (:eligible? outcome)))
+      (is (= {:n 0 :min-pairs 1} (get-in outcome [:reasons 0 :detail])))))
+  (testing "a declared :max-candidate-failure-rate above the observed rate is ineligible"
+    (let [p (promotion-profile {:promotion {:strategy :paired-comparison
+                                            :min-delta 0.05
+                                            :max-cost-regression 1.10
+                                            :max-candidate-failure-rate 0.1}})
+          summary (-> base-summary
+                      (assoc-in [:utility :task/success]
+                                {:parent 0.72 :candidate 0.90})
+                      (assoc :sample {:n 8 :losses 2}))
+          outcome (compare/eligibility summary p)]
+      (is (false? (:eligible? outcome)))
+      (is (= :above-max-candidate-failure-rate (get-in outcome [:reasons 0 :rule])))
+      (is (= {:losses 2 :n 8 :failure-rate 0.25
+              :max-candidate-failure-rate 0.1}
+             (get-in outcome [:reasons 0 :detail])))))
+  (testing "an undeclared sample requirement changes nothing (identical outcome)"
+    (let [plain (promotion-profile)
+          declared (promotion-profile {:promotion {:strategy :paired-comparison
+                                                   :min-delta 0.05
+                                                   :max-cost-regression 1.10
+                                                   :min-pairs 1}})
+          summary (assoc base-summary :sample {:n 8 :losses 1})]
+      (is (= (compare/eligibility summary plain)
+             (compare/eligibility summary declared))))))
+
 ;; --- Step 5: no Promotion coupling ------------------------------------------------
 
 (deftest comparison-namespace-never-calls-promotion

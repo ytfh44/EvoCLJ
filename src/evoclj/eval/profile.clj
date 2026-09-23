@@ -58,7 +58,8 @@
   are dataset registry keywords, not paths and never loader handles;
   :repetitions is the number of times each selection case runs in a
   paired comparison; :promotion names the promotion strategy this
-  profile is evaluated under."
+  profile is evaluated under and MAY declare the sample requirements
+  the Step-5 checks enforce (:min-pairs, :max-candidate-failure-rate)."
   [:map {:closed true}
    [:eval/profile-id keyword?]
    [:evolution-set DatasetSetSchema]
@@ -73,7 +74,9 @@
                 [:strategy keyword?]
                 [:min-delta {:optional true} number?]
                 [:max-cost-regression {:optional true} number?]
-                [:max-complexity-regression {:optional true} number?]]]])
+                [:max-complexity-regression {:optional true} number?]
+                [:min-pairs {:optional true} pos-int?]
+                [:max-candidate-failure-rate {:optional true} number?]]]])
 
 ;; --- canonical promotion thresholds (component) ---------------------------------
 

@@ -154,12 +154,12 @@
     (eligible or not) lands the candidate on :evaluated. Promotion
     (M9) decides :rejected/:canary/:promoted from the eligibility
     DATA.
-  - statistics/promotion-checks (component Step 5) are NOT wired into
-    eligibility: the component profile schema (closed) cannot carry
-    :min-pairs/:max-candidate-failure-rate without an edit to
-    evoclj.eval.profile, which this task must not touch. The checks
-    remain pure, available data; wiring is trivially additive in a
-    task that owns the profile schema.
+  - statistics/promotion-checks (component Step 5) ARE wired into
+    eligibility: evoclj.eval.compare/eligibility runs them as the
+    final lexicographic step, and evoclj.eval.profile's closed
+    :promotion map carries :min-pairs/:max-candidate-failure-rate, so a
+    profile that declares them makes an under-sampled or
+    failure-heavy candidate ineligible.
   - No eval event rows (:eval/started etc.) are appended: evaluations
     run in fresh isolated sessions and have no parent session row; the
     eval_runs row is the durable eval record (YAGNI, Global
@@ -685,17 +685,23 @@
   Constraint 14), built from the gates and the paired results.
   :utility comes from the G5 run (evoclj.eval.metrics/summarize-utility
   over the side pass rates); :cost/:complexity are the G6 measurements
-  (empty :cost when the evaluator carries no :measure/cost)."
+  (empty :cost when the evaluator carries no :measure/cost); :sample is
+  the paired sample descriptor (number of pairs and candidate losses)
+  the profile-declared Step-5 checks read, present only when a paired
+  run happened."
   [evaluator gate-results replay-report paired-result
    parent-root candidate-root profile]
   (metrics/validate-summary!
-   {:hard (hard-section gate-results replay-report paired-result)
-    :utility (if paired-result
-               (:utility (metrics/summarize-utility paired-result))
-               {})
-    :cost (:cost (cost-section evaluator paired-result
-                                parent-root candidate-root))
-    :complexity (:complexity (complexity-section parent-root candidate-root))}))
+   (cond-> {:hard (hard-section gate-results replay-report paired-result)
+            :utility (if paired-result
+                       (:utility (metrics/summarize-utility paired-result))
+                       {})
+            :cost (:cost (cost-section evaluator paired-result
+                                        parent-root candidate-root))
+            :complexity (:complexity (complexity-section parent-root candidate-root))}
+     paired-result
+     (assoc :sample {:n (get-in paired-result [:aggregate :pairs] 0)
+                     :losses (get-in paired-result [:aggregate :parent-wins] 0)}))))
 
 (defn- eligibility
   "The eligibility decision: compare/eligibility over the summary —

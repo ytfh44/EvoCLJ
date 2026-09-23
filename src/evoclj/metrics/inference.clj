@@ -34,10 +34,11 @@
   No production namespace calls this yet: the F2 eval envelope
   (evoclj.eval.core/record-eval-metrics!) records RAW metric values and
   never summarizes them here, and the cycle harness reports the raw
-  records. That is a disposition, not neglect, and it follows the
-  precedent set by evoclj.eval.statistics, whose promotion-checks are
-  likewise pure, complete, and documented as un-wired until the profile
-  schema can carry their thresholds (see evoclj.eval.core's Step 5 note).
+  records. That is a disposition, not neglect; the precedent it follows
+  — evoclj.eval.statistics — has since been WIRED (its promotion-checks
+  now run as the final step of evoclj.eval.compare/eligibility, and the
+  closed profile schema carries their thresholds), so this note claims
+  only what is true of THIS namespace: no production caller yet.
 
   Consequences, stated so the next reader does not re-open this:
 

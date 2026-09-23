@@ -35,7 +35,8 @@
   profile thresholds applied, the non-frozen dimensions, and the
   exact boundary sentence."
   (:require [evoclj.eval.metrics :as metrics]
-            [evoclj.eval.profile :as profile]))
+            [evoclj.eval.profile :as profile]
+            [evoclj.eval.statistics :as statistics]))
 
 ;; --- thresholds ---------------------------------------------------------------
 
@@ -106,6 +107,9 @@
     4. complexity — informational, or guarded by
                     :max-complexity-regression when the profile
                     declares it.
+    5. sample     — the profile-declared Step-5 sample requirements
+                    (statistics/promotion-checks): :min-pairs and
+                    :max-candidate-failure-rate when declared.
 
   Returns {:eligible? <bool> :reasons [<reason maps>]}; :reasons is
   empty exactly when :eligible? is true. The profile must satisfy the
@@ -142,7 +146,12 @@
                                        (metrics/complexity-regressions summary)))]
                 (if (seq cx)
                   {:eligible? false :reasons cx}
-                  {:eligible? true :reasons []})))))))))
+                  (let [sample (statistics/promotion-checks
+                                (or (:sample summary) {})
+                                profile)]
+                    (if (seq sample)
+                      {:eligible? false :reasons sample}
+                      {:eligible? true :reasons []})))))))))))
 
 ;; --- eval-report caveats (claim boundary) ----------------------------------------
 
