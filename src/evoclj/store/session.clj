@@ -192,6 +192,20 @@
                        :session/id (try (types/session-id session-id)
                                         (catch Exception _ session-id))}))))
 
+(defn any-session-id
+  "The id of ANY existing session (the first row), or nil when the
+  sessions table is empty. Read-only. This is the environment registry's
+  refresh-owner lookup: a refresh Work needs an existing session id to
+  anchor its audit trail, and the sessions table is the owner of that
+  fact. Accepts a SessionStore handle or a raw sqlite spec."
+  [db]
+  (let [spec (if (instance? evoclj.store.session_store.SessionStore db)
+               (ss/db-of db)
+               db)]
+    (when-let [row (first (sqlite/query spec
+                                        ["SELECT id FROM sessions LIMIT 1"]))]
+      (UUID/fromString (:id row)))))
+
 (defn session-exists?
   "True when a session with `session-id` exists."
   [store session-id]

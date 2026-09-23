@@ -142,3 +142,33 @@
         (let [row (evoclj.store.work/fetch-work db (:work/id ret))]
           (is (= :failed (:work/state row)) "failed refresh (no such source) marks work :failed")))
       (finally (cleanup!)))))
+
+;; ---------------------------------------------------------------------------
+;; 3 — the durable steps fail LOUDLY (no swallowed store errors)
+;; ---------------------------------------------------------------------------
+
+(deftest refresh-async-fails-loudly-when-a-durable-step-fails
+  (testing "a create/dispatch/fail step that throws raises :environment/refresh-work-failed"
+    (let [db (fresh-db)
+          _sid (seed-session! db)
+          registry (reg/create-registry {:store db})
+          src (static/make-static-source :async/loud {:loud true})]
+      (reg/register-source! registry src)
+      (try
+        (with-redefs [work/create-work! (fn [& _] (throw (ex-info "no store" {})))]
+          (let [e (try (reg/refresh-async! registry) nil
+                       (catch clojure.lang.ExceptionInfo e e))]
+            (is (= :environment/refresh-work-failed (:error/type (ex-data e))))
+            (is (= :create (:stage (ex-data e))))
+            (is (uuid? (:work/id (ex-data e))))))
+        (with-redefs [work/dispatch-work! (fn [& _] (throw (ex-info "no dispatch" {})))]
+          (let [e (try (reg/refresh-async! registry) nil
+                       (catch clojure.lang.ExceptionInfo e e))]
+            (is (= :environment/refresh-work-failed (:error/type (ex-data e))))
+            (is (= :dispatch (:stage (ex-data e))))))
+        (with-redefs [work/fail-work! (fn [& _] (throw (ex-info "no fail write" {})))]
+          (let [e (try (reg/refresh-async! registry :async/missing) nil
+                       (catch clojure.lang.ExceptionInfo e e))]
+            (is (= :environment/refresh-work-failed (:error/type (ex-data e))))
+            (is (= :fail (:stage (ex-data e))))))
+        (finally (cleanup!))))))

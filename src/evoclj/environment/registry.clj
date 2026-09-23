@@ -86,7 +86,7 @@
             [evoclj.environment.source :as src]
             [evoclj.environment.bundle :as bundle]
             [evoclj.kernel.error :as err]
-            [evoclj.store.sqlite :as sqlite]
+            [evoclj.store.session :as session]
             [evoclj.store.work :as work-store]
             [evoclj.support.failpoint :as fault]))
 
@@ -99,6 +99,25 @@
    (unbounded) behavior within the ranges the existing suites exercise."
   []
   {:max-history 128 :max-tombstones 32})
+
+(defn- store-of
+  "The durable store handle a registry/opts map carries, under any of the
+  accepted aliases. One probe point for both create-registry and
+  refresh-async! so the alias set cannot drift between them."
+  [m]
+  (or (:store m) (:db m) (:event-store m) (:work-store m)))
+
+(defn- refresh-work-failed!
+  "The typed failure of one durable refresh step. A refresh whose audit
+  trail cannot be written must not report success, so every step that
+  touches the Work store raises this (carrying the work id and the stage)
+  instead of swallowing the error."
+  [stage cause work-id]
+  (err/error :environment/refresh-work-failed
+             "the refresh Work could not be persisted or driven"
+             {:stage stage
+              :work/id work-id
+              :cause (or (ex-message cause) (str cause))}))
 
 (defn- initial-state
   "The fresh registry state shape. ONE implementation (INV-05): both
@@ -133,7 +152,7 @@
          ;; Optional durable Work-store wiring. When opts carries :store / :db,
          ;; the registry retains it so refresh-async! can persist auditable Work.
          ;; Absence preserves the in-memory behavior.
-         store (or (:store opts) (:db opts) (:event-store opts) (:work-store opts))
+         store (store-of opts)
          ;; W1: Work is the sole durable lifecycle.
          ;; Works are durable in the `works` table; registry keeps :work-queue for in-memory audit.
          with-store (assoc base :store store)
@@ -808,15 +827,14 @@
               :per-source (per-source-results plans)})))))))
 
 (defn- resolve-refresh-owner
-    "Find a valid owner-session-id for a refresh Work when a store is present.
-     Queries the DB for an existing session; falls back to nil so the caller can synth a UUID."
-    [store]
-    (try
-      (when store
-        (let [rows (sqlite/query store ["SELECT id FROM sessions LIMIT 1"])]
-          (when-let [r (first rows)]
-            (java.util.UUID/fromString (:id r)))))
-      (catch Exception _ nil)))
+  "Find a valid owner-session-id for a refresh Work when a store is
+  present. The session lookup is owned by evoclj.store.session
+  (any-session-id); nil lets the caller synthesize a UUID. A store read
+  failure propagates — a refresh that cannot establish its audit anchor
+  must not silently invent one."
+  [store]
+  (when store
+    (session/any-session-id store)))
 
 (defn refresh-async!
   "W1 — auditable refresh via the durable Work lifecycle (queued/running/succeeded/failed).
@@ -834,7 +852,7 @@
    The returned map is the Work contract (not a future)."
   ([registry] (refresh-async! registry nil))
   ([registry source-id]
-   (let [store (or (:store @registry) (:db @registry) (:work-store @registry))
+   (let [store (store-of @registry)
          owner (or (resolve-refresh-owner store) (random-uuid))
          work-id (random-uuid)
          base-work {:work/id work-id
@@ -842,25 +860,40 @@
                     :work/state :queued
                     :work/session-id owner
                     :work/created-at (java.util.Date.)}
-         work (try
-                (when store
-                  (work-store/create-work! store base-work))
-                base-work
-                (catch Exception _
-                  base-work))
+         ;; Every durable step below FAILS LOUDLY: a refresh whose audit
+         ;; trail cannot be written must not report success, and a
+         ;; dispatch/succeed/fail failure carries the work id and the
+         ;; stage it happened at (:environment/refresh-work-failed).
+         work (if store
+                (do
+                  (try
+                    (work-store/create-work! store base-work)
+                    (catch Exception e
+                      (throw (refresh-work-failed! :create e work-id))))
+                  base-work)
+                base-work)
          ;; In-memory Work audit trail.
          _ (swap! registry update :work-queue (fnil conj []) work)
          _ (swap! registry assoc :last-work work)]
      ;; drive Work lifecycle synchronously (no future)
      (when store
-       (try (work-store/dispatch-work! store work-id) (catch Exception _ nil)))
+       (try
+         (work-store/dispatch-work! store work-id)
+         (catch Exception e
+           (throw (refresh-work-failed! :dispatch e work-id)))))
      (try
        (let [res (refresh! registry source-id)]
          (when store
-           (try (work-store/succeed-work! store work-id nil) (catch Exception _ nil)))
+           (try
+             (work-store/succeed-work! store work-id nil)
+             (catch Exception e
+               (throw (refresh-work-failed! :succeed e work-id)))))
          res)
        (catch Exception e
          (when store
-           (try (work-store/fail-work! store work-id (or (ex-message e) (str e))) (catch Exception _ nil)))
+           (try
+             (work-store/fail-work! store work-id (or (ex-message e) (str e)))
+             (catch Exception e2
+               (throw (refresh-work-failed! :fail e2 work-id)))))
          nil))
      work)))
