@@ -39,8 +39,10 @@
   event/append-event!, propose-candidates!, evaluate-candidate!,
   promote!, rollback!). The cli namespaces never issue SQL writes and
   never touch the promotion CURRENT machinery (no
-  promotion.current dependency); the ONLY SQL in the cli layer is the
-  read-only SELECT helper `query-one`."
+  promotion.current dependency); they issue NO SQL AT ALL — every read
+  goes through a store-owned reader (evoclj.store.generation-store,
+  candidate-store, eval-read, event, session-store) and every write
+  through the public subsystem APIs listed above."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -67,11 +69,11 @@
             [evoclj.store.candidate-store :as candidate-store]
             [evoclj.store.event :as event]
             [evoclj.store.existence :as existence]
+            [evoclj.store.generation-store :as generation-store]
             [evoclj.store.genome :as genome-store]
             [evoclj.store.identity :as identity]
             [evoclj.store.recovery :as recovery]
             [evoclj.store.session :as session]
-            [evoclj.store.sqlite :as sqlite]
             [integrant.core :as ig])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file Files LinkOption Paths)
@@ -461,28 +463,20 @@
   (candidate-store/make-candidate-store (db-of system)))
 
 ;; ============================================================================
-;; the CLI's ONLY raw SQL — read-only SELECTs (no write path exists)
+;; generation lookups (store-owned readers — the cli issues no SQL)
 ;; ============================================================================
 
-(defn- query-one
-  "Run ONE read-only SELECT and return its first row. This is the cli
-  layer's only raw SQL surface (component Step 2's by-construction
-  guarantee: no SQL writes, no raw JDBC, no promotion.current
-  dependency)."
-  [db sql-params]
-  (first (sqlite/query db sql-params)))
-
 (defn generation-row
-  "The generations row for `generation-id`, or nil. Read-only."
+  "The generations row for `generation-id`, or nil. Read-only; the
+  SELECT is owned by evoclj.store.generation-store."
   [system generation-id]
-  (query-one (db-of system)
-             ["SELECT * FROM generations WHERE id = ?" generation-id]))
+  (generation-store/find-generation (db-of system) generation-id))
 
 (defn generation-by-genome-id
-  "The generations row whose Genome is `genome-id`, or nil. Read-only."
+  "The generations row whose Genome is `genome-id`, or nil. Read-only;
+  the SELECT is owned by evoclj.store.generation-store."
   [system genome-id]
-  (query-one (db-of system)
-             ["SELECT * FROM generations WHERE genome_id = ?" genome-id]))
+  (generation-store/find-generation-by-genome-id (db-of system) genome-id))
 
 (defn current-generation-info
   "The CURRENT generation as {:generation/id :genome/id}, via the

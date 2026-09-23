@@ -13,13 +13,12 @@
   generation's sessions) and the CAS artifacts; it writes nothing.
   Failures to read one artifact are collected, not thrown (evidence)."
   (:require [clojure.edn :as edn]
-            [clojure.java.jdbc :as jdbc]
-            [clojure.string :as str]
             [evoclj.cli.session :as session]
             [evoclj.kernel.error :as err]
             [evoclj.runtime.usage :as usage]
             [evoclj.store.cas :as cas]
-            [evoclj.store.sqlite :as sqlite]))
+            [evoclj.store.event :as event]
+            [evoclj.store.session-store :as session-store]))
 
 (defn- required-opt
   [opts k usage]
@@ -30,14 +29,9 @@
 
 (defn- generation-events
   "Every :provider/call-completed event row of the generation's
-  sessions (the join keeps the bound generation-local)."
+  sessions (the join is owned by evoclj.store.event)."
   [db generation-id]
-  (sqlite/query db
-                ["SELECT e.id AS event_id, e.payload_ref
-                  FROM events e
-                  JOIN sessions s ON s.id = e.session_id
-                  WHERE s.generation_id = ? AND e.event_type = ':provider/call-completed'
-                 " generation-id]))
+  (event/provider-call-events-for-generation db generation-id))
 
 (defn- payload-usage
   "The model usage sample from one call-completed payload artifact
@@ -93,10 +87,7 @@
                                             {})))
                         generation)
         events (generation-events db generation-id)
-        session-count (first (sqlite/query db
-                                         ["SELECT COUNT(*) AS n FROM sessions
-                                           WHERE generation_id = ?"
-                                          generation-id]))
+        session-count (session-store/count-sessions-for-generation db generation-id)
         samples (keep (fn [e]
                        (payload-usage cas-store (:payload_ref e)))
                      events)
@@ -104,7 +95,7 @@
         model-samples (remove :error samples)
         total (usage/aggregate model-samples)]
     {:generation/id generation-id
-     :sessions (or (:n session-count) 0)
+     :sessions session-count
      :model-calls (count model-samples)
      :usage {:model-input-tokens (long (or (:model-input-tokens total) 0))
              :model-output-tokens (long (or (:model-output-tokens total) 0))

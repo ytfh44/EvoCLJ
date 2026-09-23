@@ -92,3 +92,22 @@
                       "UPDATE generations SET current = 1
                         WHERE id = ?"
                       [(str new-generation-id)]))
+
+;; --- readers (the CLI's generation lookups) -----------------------------------
+
+(defn find-generation
+  "The raw generations row for `generation-id`, or nil. Read-only — the
+  CLI's generation lookups go through this reader instead of issuing
+  their own SELECT."
+  [db generation-id]
+  (first (sqlite/query (sqlite/db-spec db)
+                       ["SELECT * FROM generations WHERE id = ?"
+                        (str generation-id)])))
+
+(defn find-generation-by-genome-id
+  "The raw generations row whose Genome is `genome-id`, or nil.
+  Read-only."
+  [db genome-id]
+  (first (sqlite/query (sqlite/db-spec db)
+                       ["SELECT * FROM generations WHERE genome_id = ?"
+                        (str genome-id)])))

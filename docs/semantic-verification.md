@@ -1,6 +1,6 @@
 # Semantic Verification Report
 
-**Scope:** formal model + real-code verification of the nine core semantic
+**Scope:** formal model + real-code verification of the ten core semantic
 claims of EvoCLJ, per subsystem. Every check drives the REAL production
 namespaces (no mocks); the models are stated explicitly and the invariant
 is enumerated exhaustively where the domain is finite.
@@ -11,7 +11,7 @@ is enumerated exhaustively where the domain is finite.
 for f in scripts/verify-semantics/verify*_*.clj; do clojure -M "$f"; done
 ```
 
-**Result:** 9/9 suites, 161 assertions, 0 failures (2026-09-24).
+**Result:** 10/10 suites, 173 assertions, 0 failures (2026-09-24).
 
 ---
 
@@ -172,6 +172,32 @@ above `:max-candidate-failure-rate` are both ineligible. Structural half:
 `src/evoclj/eval/core.clj` contains no `metrics/ratio` call and no numeric
 cost threshold — it names the rule, not a second implementation of it.
 
+## 10. State-table write ownership — `verify10_ownership.clj`
+
+**Model.** Every mutable state table has exactly ONE writer module (its
+owner). Ownership is a structural claim about the source, so it is checked
+by reading the source: collect every SQL write naming table T from every
+production namespace and assert the set of files that do so is exactly the
+allowed set.
+
+**Enumerated.** Six state tables — `works`, `capabilities`, `generations`,
+`candidates`, `kernel_state`, `episodic_memory` — each checked twice: the
+writer set equals the allowed set, and it is non-empty (a state table nobody
+writes would be dead schema).
+
+**Real code.** The scan is AST-based: each file is read as Clojure forms, so
+docstring prose that mentions a statement is never mistaken for a write. A
+write is a string or table keyword passed to an SQL-executing call
+(`sqlite/insert-raw!`, `sqlite/exec!`, `jdbc/execute!`, `jdbc/insert!`,
+`jdbc/update!`, and the promotion namespaces' private `raw-update!` /
+`raw-insert!`) whose text matches `INSERT [OR …] INTO T` / `UPDATE T` /
+`DELETE FROM T`. The two documented exceptions are `kernel_state` (the
+singleton definition in `store/current-store` plus the CURRENT
+compare-and-set in `promotion/current` — Global Constraint 15 makes the
+promotion transaction the pointer authority) and `episodic_memory` (the
+store owner plus the memory provider's duplicated statement, which the
+provider-handle routing removes).
+
 ---
 
 ## Summary of findings
@@ -184,10 +210,11 @@ cost threshold — it names the rule, not a second implementation of it.
 | 4–7 | All invariants hold under exhaustive/real-code verification | — | No changes required |
 | 8 | The identity triple was written by the CLI but never read back by the pin check (a session could run against an unregistered identity) | High (correctness) | **Fixed**: the writers landed (C2.1) and `hydrate/verify-pin!` now fails closed on a missing or disagreeing row (C2.2); `verify8` pins the behavior |
 | 9 | The G6 gate and the eligibility decision could drift apart (two implementations of the same threshold rule) | Medium (integrity) | **Fixed**: the gate consumes `compare/thresholds-for` + `compare/guard-reason` (C1.1); `verify9` pins the equality and the absence of a second ratio implementation |
+| 10 | The CLI (and the harness) carried their own copies of state-table writes, reads, and decoders | Medium (integrity) | **Fixed**: the store layer owns the write statements and the row decoders (C4.1–C4.5); `verify10` pins the writer set per state table |
 
-The nine core semantic claims of the system — atomic CAS with a single
+The ten core semantic claims of the system — atomic CAS with a single
 winner, tamper-evident causal chains, deterministic proportional routing,
 hard-constraint-dominant lexicographic comparison, frozen evidence
 boundaries, canonical content identity, a closed state machine, a
-fail-closed session pin identity, and a single hard-gate rule — are
-verified against the production code.
+fail-closed session pin identity, a single hard-gate rule, and one writer
+per state table — are verified against the production code.

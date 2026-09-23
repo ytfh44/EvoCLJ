@@ -484,6 +484,24 @@
         link-map (causal-links-for-rows store rows)]
     (mapv (fn [r] (row->event r (get link-map (:id r) #{}))) rows)))
 
+(defn provider-call-events-for-generation
+  "Every :provider/call-completed event row of the sessions pinned to
+  `generation-id`, in insertion order:
+
+      [{:event_id <str> :payload_ref <artifact-id|nil>} ...]
+
+  Read-only. The join keeps the lookup generation-local (the caller
+  decodes the payload artifacts it needs)."
+  [db generation-id]
+  (mapv (fn [r] {:event_id (:event_id r) :payload_ref (:payload_ref r)})
+        (sqlite/query (sqlite/db-spec db)
+                      ["SELECT e.id AS event_id, e.payload_ref
+                        FROM events e
+                        JOIN sessions s ON s.id = e.session_id
+                        WHERE s.generation_id = ?
+                          AND e.event_type = ':provider/call-completed'"
+                       (str generation-id)])))
+
 (defn get-event-by-seq
   "The event at `seq` within `session-id`, or nil when absent."
   [store session-id seq]

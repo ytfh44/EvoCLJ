@@ -145,6 +145,15 @@
                      :created_at ts}))
     (str sid)))
 
+(defn count-sessions-for-generation
+  "The number of sessions pinned to `generation-id`. Read-only."
+  [db generation-id]
+  (long (or (:n (first (sqlite/query (sqlite/db-spec db)
+                                     ["SELECT COUNT(*) AS n FROM sessions
+                                       WHERE generation_id = ?"
+                                      (str generation-id)])))
+            0)))
+
 (defn find-session
   "Find session by id via SessionStore, or nil."
   [^SessionStore store session-id]
