@@ -5,7 +5,6 @@
             [evoclj.helpers :as h]
             [evoclj.skill.vendor :as vendor]
             [evoclj.evolution.mutation :as mutation]
-            [evoclj.evolution.guard :as guard]
             [evoclj.genome.load :as load]
             [evoclj.genome.hash :as hash]
             [evoclj.genome.patch :as patch]
@@ -98,11 +97,7 @@
           (is (instance? clojure.lang.ExceptionInfo e) "external path must be rejected")
           (is (contains? #{:mutation/undeclared-mutable-class :mutation/path-invalid :mutation/protected-path}
                          (:error/type (ex-data e)))
-              (str "expected allowlist rejection, got " (:error/type (ex-data e))))
-          ;; guard also rejects
-          (let [ge (try (guard/validate-mutation-ownership! mut parent) nil (catch clojure.lang.ExceptionInfo ex ex))]
-            (is (instance? clojure.lang.ExceptionInfo ge))
-            (is (= (:error/type (ex-data e)) (:error/type (ex-data ge))))))
+              (str "expected allowlist rejection, got " (:error/type (ex-data e)))))
         (finally
           (delete-recursively! genome-dir)
           (delete-recursively! cas-dir))))))
@@ -145,7 +140,6 @@
                        :expected-effect {:primary-metric :task/success :direction :increase}}]
               ;; allowlist should accept
               (assert-validated mut (mutation/validate-mutation mut parent))
-              (assert-validated mut (guard/validate-mutation-ownership! mut parent))
               ;; patch application should succeed with new candidate
               (let [out-dir (temp-dir!)]
                 (try

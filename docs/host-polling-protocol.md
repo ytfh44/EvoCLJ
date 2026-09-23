@@ -8,20 +8,22 @@ to observe the current canary deployment state without mutating it.
 
 ## Polling Endpoint
 
-> **Verification note (2026-09):** the endpoint and CLI below are
-> implemented and covered: `evoclj.http.api-test`
-> (`deployment-current-*`) pins the HTTP shapes and
-> `evoclj.cli.deploy-test` (`deploy-current-*`) pins the CLI shapes.
+> **Verification note (2026-09):** the CLI read path below is
+> implemented and covered: `evoclj.cli.deploy-test`
+> (`deploy-current-*`) pins the shapes. The HTTP half
+> (`evoclj.http.api`) was never wired into a host and has been deleted
+> (v0 scope — the protocol document describes the CLI read path only).
 
-The host polls the deployment state through the public read path:
-
-    GET /api/deployment/current
-
-or, in the CLI:
+The host polls the deployment state through the public read path — in
+the CLI:
 
     evoclj deploy current
 
-Both return the same shape (below). Both are read-only: one SELECT
+(The HTTP endpoint `GET /api/deployment/current` named by earlier
+revisions of this document was never wired into a host; the CLI read
+path is the shipped interface.)
+
+It returns the shape below. It is read-only: one SELECT
 against the SQLite generations table (`current = 1`), no writes, no
 locks, no promotion side effects. `deploy current` records no deploy
 decision; `deploy <generation-id>` is the separate mutating command.

@@ -118,17 +118,6 @@
      :sources sources
      :captured-at (System/currentTimeMillis)}))
 
-(defn capture-from-revisions
-  "Capture from an already resolved sources map. Useful when the caller
-  already has the revision set without a registry handle."
-  [sources]
-  (make-snapshot sources))
-
-(defn execution-id
-  "Fresh ExecutionId UUID per activation (I1)."
-  []
-  (java.util.UUID/randomUUID))
-
 ;; RuntimeImage / ExecutionEnvironment identity lives in the compiler:
 ;; `evoclj.compiler.core/runtime-image-id` (RuntimeImageId) and
 ;; `evoclj.compiler.resolution/return-fingerprint` (returned-bytes

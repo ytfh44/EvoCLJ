@@ -13,7 +13,6 @@
   Global Constraint 22: registry values are plain EDN Malli schemas round-tripping
   through pr-str / clojure.edn read-string."
   (:require [evoclj.kernel.error :as err]
-            [evoclj.store.capability-store :as cap-store]
             [malli.core :as m]))
 
 ;; --- canonical registered schemas ------------------------------------------

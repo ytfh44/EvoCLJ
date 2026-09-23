@@ -36,7 +36,6 @@
             [evoclj.genome.hash :as hash]
             [evoclj.mount.backend :as mount-backend]
             [evoclj.mount.filesystem :as mount-fs]
-            [evoclj.provenance.manifest :as provenance]
             [evoclj.runtime.assembler :as assembler]
             [evoclj.store.binding :as store-binding]
             [evoclj.store.cas :as cas]
@@ -387,13 +386,10 @@
   (testing "evolution never writes to upstream .agents/skills, only via vendor CAS snapshot"
     (let [evolution-files (filter #(.isFile %) (file-seq (io/file "src/evoclj/evolution")))
           evolution-src (str/join "\n" (map slurp evolution-files))
-          guard (slurp-src "evoclj/evolution/guard.clj")
           vendor (slurp-src "evoclj/skill/vendor.clj")]
       ;; evolution must not directly write to upstream host skill path (only vendor writes to genome/skills via CAS)
       ;; Documentation may mention upstream roots for boundary explanation, but no file write should target them.
       (is (not (re-find #"Files/write.*\\.agents|spit.*\\.agents" evolution-src)) "evolution must not directly write to .agents host path")
-      ;; guard delegates to allowlist, not explicit external-skill check
-      (is (str/includes? guard "validate-mutation") "guard must delegate to mutation allowlist")
       ;; vendor is the ONLY path that writes to genome/skills via CAS tree, not via live host
       (is (str/includes? vendor "snapshot/load-tree") "vendor must copy via CAS snapshot tree")
       (is (str/includes? vendor "cas/get-bytes") "vendor must copy via CAS artifact bytes")
@@ -540,24 +536,4 @@
       (is (str/includes? source-cli "evoclj.environment.registry") "source CLI must delegate to EnvironmentRegistry")
       (is (str/includes? skill-cli "evoclj.skill.adapter") "skill CLI must delegate to Skill adapter")
       (is (str/includes? mcp-cli "evoclj.mcp.manager") "mcp CLI must delegate to mcp manager for diagnostics"))))
-
-(deftest provenance-manifest-deterministic
-  (testing "identical immutable inputs -> deterministic manifest artifact id"
-    (let [cas-root (Files/createTempDirectory "evoclj-unified-manifest-" (make-array FileAttribute 0))
-          cas-handle (str cas-root)
-          bindings [{:binding/id #uuid "00000000-0000-0000-0000-000000000001" :logical/id [:skill "debugging"] :revision/id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-                    {:binding/id #uuid "00000000-0000-0000-0000-000000000002" :logical/id [:skill "review"] :revision/id "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]
-          tool-catalog {:binding/id #uuid "00000000-0000-0000-0000-000000000003" :revision-ids {:a "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}
-          history {:text "compressed history"}
-          manifest (provenance/make-manifest {:bindings bindings :tool-catalog tool-catalog :history history})
-          id1 (provenance/put-manifest! cas-handle manifest)
-          id2 (provenance/put-manifest! cas-handle manifest)
-          loaded (provenance/load-manifest cas-handle id1)]
-      (try
-        (is (= id1 id2) "deterministic: same inputs give same manifest id")
-        (is (= manifest loaded) "manifest round-trips via CAS")
-        (is (string? id1) "manifest id is string")
-        (finally
-          (doseq [f (reverse (file-seq (.toFile cas-root)))]
-            (Files/deleteIfExists (.toPath f))))))))
 
