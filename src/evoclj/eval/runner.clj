@@ -84,6 +84,7 @@
             [evoclj.store.artifact :as artifact]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
+            [evoclj.store.generation-store :as generation-store]
             [evoclj.store.genome :as genome-store]
             [evoclj.store.identity :as identity]
             [evoclj.store.migrate :as migrate]
@@ -123,14 +124,10 @@
       (jdbc/insert! conn :artifacts {:hash gid :media_type "application/octet-stream" :size 64 :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :artifacts {:hash rid :media_type "application/edn" :size 64 :created_at "2025-01-01T00:00:00Z"})
       (jdbc/insert! conn :genomes {:id gid :created_at "2025-01-01T00:00:00Z"})
-      (jdbc/insert! conn :generations
-                    {:id generation-id
-                     :genome_id gid
-                     :resolution_id rid
-                     :parent_id nil
-                     :state "active"
-                     :current 0
-                     :created_at "2025-01-01T00:00:00Z"}))
+      (generation-store/insert-generation-on-conn!
+       (:connection conn)
+       {:id generation-id :genome-id gid :resolution-id rid
+        :parent-id nil :created-at "2025-01-01T00:00:00Z"}))
     {:sqlite db :cas (cas/->cas cas-path) :paths [db-path cas-path]}))
 
 (defn dispose-stores!

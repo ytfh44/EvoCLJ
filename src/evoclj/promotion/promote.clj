@@ -166,6 +166,7 @@
             [evoclj.security.sci-recheck :as recheck]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
+            [evoclj.store.generation-store :as generation-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
            (java.util UUID)))
@@ -713,10 +714,7 @@
   deviation). The current=1 flag is NOT touched here: the CURRENT
   pointer is moved exclusively by current/cas-current!."
   [conn generation-id]
-  (let [n (raw-update! conn
-                       "UPDATE generations SET state = 'retired'
-                        WHERE id = ? AND state = 'active'"
-                       [generation-id])]
+  (let [n (generation-store/retire-generation-on-conn! conn generation-id)]
     (when-not (= 1 n)
       (throw (err/error :promotion/cas-invalid
                         "the parent generation is not :active anymore"
@@ -729,15 +727,12 @@
   Lineage: parent_id links to the superseded generation, genome_id is
   the candidate's content address (Global Constraint 17)."
   [conn candidate-row resolution-id parent-gen new-gen ts]
-  (raw-update! conn
-               "INSERT INTO generations
-                  (id, genome_id, resolution_id, parent_id, state, current, created_at)
-                VALUES (?, ?, ?, ?, 'active', 0, ?)"
-               [new-gen
-                (:genome_id candidate-row)
-                resolution-id
-                parent-gen
-                ts]))
+  (generation-store/insert-generation-on-conn!
+   conn {:id new-gen
+         :genome-id (:genome_id candidate-row)
+         :resolution-id resolution-id
+         :parent-id parent-gen
+         :created-at ts}))
 
 
 (defn- insert-generation-parent-edges!

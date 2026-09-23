@@ -54,6 +54,7 @@
   needs to read CURRENT outside a transaction must use
   current-store/current-generation via the handle."
   (:require [evoclj.kernel.error :as err]
+            [evoclj.store.generation-store :as generation-store]
             [evoclj.store.sqlite :as sqlite]))
 
 (defn- raw-query
@@ -134,16 +135,15 @@
                              [new-generation-id expected-generation-id])]
     (if (= 1 updated)
       :ok
-      (let [cleared (raw-update! conn
-                                 "UPDATE generations SET current = 0
-                              WHERE current = 1 AND id = ?"
-                                 [expected-generation-id])]
+      ;; the predicate fallback's two generations statements are owned by
+      ;; evoclj.store.generation-store (the single writer of the derived
+      ;; current flag).
+      (let [cleared (generation-store/clear-current-on-conn!
+                     conn expected-generation-id)]
         (if (zero? cleared)
           :stale
-          (let [activated (raw-update! conn
-                                       "UPDATE generations SET current = 1
-                                    WHERE id = ?"
-                                       [new-generation-id])]
+          (let [activated (generation-store/set-current-on-conn!
+                           conn new-generation-id)]
             (when-not (= 1 activated)
               (throw (err/error :promotion/cas-invalid
                                 "CAS activated an unknown new generation"

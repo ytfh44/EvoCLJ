@@ -125,6 +125,7 @@
             [evoclj.promotion.current :as current]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
+            [evoclj.store.generation-store :as generation-store]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.util UUID)))
 
@@ -206,15 +207,6 @@
             (recur (conj rows (zipmap labels
                                       (mapv #(.getObject rs (inc %)) (range n)))))
             rows))))))
-
-(defn- raw-update!
-  "Execute a parameterized UPDATE on `conn`; returns the affected-row
-  count."
-  [^java.sql.Connection conn sql params]
-  (with-open [stmt (.prepareStatement conn sql)]
-    (doseq [[i v] (map-indexed vector params)]
-      (.setObject stmt (inc i) v))
-    (.executeUpdate stmt)))
 
 (defmacro ^:private with-rollback-tx
   "Open a connection, enable FK enforcement and a busy timeout, begin
@@ -303,10 +295,8 @@
   may be marked rolled back (the pointer itself is moved afterwards by
   current/cas-current!)."
   [conn from]
-  (let [n (raw-update! conn
-                       "UPDATE generations SET state = 'rolled-back'
-                        WHERE id = ? AND state = 'active' AND current = 1"
-                       [from])]
+  (let [n (generation-store/set-generation-state-on-conn!
+           conn from :active :rolled-back true)]
     (when-not (= 1 n)
       (throw (err/error :promotion/cas-invalid
                         "the from-generation is not the CURRENT :active generation"
@@ -319,10 +309,8 @@
   namespace docstring). The current=1 flag is NOT touched here: the
   CURRENT pointer is moved exclusively by current/cas-current!."
   [conn to]
-  (let [n (raw-update! conn
-                       "UPDATE generations SET state = 'active'
-                        WHERE id = ? AND state = 'retired'"
-                       [to])]
+  (let [n (generation-store/set-generation-state-on-conn!
+           conn to :retired :active false)]
     (when-not (= 1 n)
       (throw (err/error :promotion/rollback-target-invalid
                         "the rollback target is not :superseded anymore"
