@@ -67,6 +67,11 @@
    [:work/session-id uuid?]
    [:work/parent-work-id {:optional true} [:maybe uuid?]]
    [:work/payload-ref {:optional true} [:maybe string?]]
+   ;; the OUTPUT ref, written by succeed-work!. Distinct from
+   ;; :work/payload-ref, which is the spawn-time INPUT binding that
+   ;; audit-child-task compares against: one column serving both made
+   ;; the audit unable to tell a wrong task from a right one.
+   [:work/result-ref {:optional true} [:maybe string?]]
    [:work/created-at [:fn inst?]]
    [:work/deadline {:optional true} [:maybe [:fn inst?]]]
    [:work/continuation-edn {:optional true} :any]])
@@ -82,6 +87,7 @@
            :work/created-at (Date/from (Instant/parse (:created_at row)))}
     (:parent_work_id row) (assoc :work/parent-work-id (UUID/fromString (:parent_work_id row)))
     (contains? row :payload_ref) (assoc :work/payload-ref (:payload_ref row))
+    (contains? row :result_ref) (assoc :work/result-ref (:result_ref row))
     (:deadline row) (assoc :work/deadline (Date/from (Instant/parse (:deadline row))))
     (:continuation_edn row) (assoc :work/continuation-edn (try (edn/read-string (:continuation_edn row)) (catch Exception _ (:continuation_edn row))))))
 
@@ -335,7 +341,13 @@
 
 (defn succeed-work!
   "running|waiting -> succeeded (CAS). Atomic: succeeds only if the row is
-  still in :running or :waiting at UPDATE time. Returns the updated Work.
+  still in :running or :waiting at UPDATE time. `result-ref` is written to
+  the OUTPUT column :work/result-ref and never touches
+  :work/payload-ref, which holds the spawn-time input binding that
+  runtime.subagent/audit-child-task compares against — overwriting it
+  here destroyed the spawn digest and made that audit unable to tell
+  \"ran the wrong task\" from \"ran the right one\".
+  Returns the updated Work.
   Idempotent on already-succeeded: if the row is already :succeeded, returns
   it without error. Otherwise throws :work/invalid-transition when the row
   is not in an expected pre-state."
@@ -350,7 +362,7 @@
   (let [id-str (str work-id)
         updated-at (canonical-timestamp nil)]
     (sqlite/with-db [conn db]
-      (let [cnt (first (jdbc/execute! conn ["UPDATE works SET state = ?, updated_at = ?, payload_ref = COALESCE(?, payload_ref) WHERE id = ? AND state IN ('running','waiting')" "succeeded" updated-at (some-> result-ref str) id-str]))]
+      (let [cnt (first (jdbc/execute! conn ["UPDATE works SET state = ?, updated_at = ?, result_ref = COALESCE(?, result_ref) WHERE id = ? AND state IN ('running','waiting')" "succeeded" updated-at (some-> result-ref str) id-str]))]
         (when-not (= 1 cnt)
           (let [row (first (jdbc/query conn ["SELECT state FROM works WHERE id = ?" id-str]))]
             (if row

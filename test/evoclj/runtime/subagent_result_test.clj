@@ -119,8 +119,8 @@
           ;; (immutable identity); completion truth is the child Work :succeeded.
           child-work-state (some-> (work-store/fetch-work db work-id) :work/state)
           _ (is (= :succeeded child-work-state) "child Work should be :succeeded after run")
-          cas-ref (:work/payload-ref (work-store/fetch-work db work-id))
-          _ (is (string? cas-ref) "child Work carries the scheduler's output CAS ref as payload_ref")
+          cas-ref (:work/result-ref (work-store/fetch-work db work-id))
+          _ (is (string? cas-ref) "child Work carries the scheduler's output CAS ref as result_ref")
           _ (is (true? (get-in run-res [:delivery :delivered])) "auto-delivery closed the loop on run")
           auto-id (get-in run-res [:delivery :event/id])
           _ (is (some? auto-id) "auto-delivery recorded an event id")
@@ -146,7 +146,7 @@
       (is (:valid? (event/verify-event-chain db session-id)) "child chain hash valid"))))
 
 (deftest deliver-result-cas-mismatch-fails
-  (testing "deliver-result! with a cas-ref that differs from the child Work payload_ref throws :store/cas-mismatch and appends nothing"
+  (testing "deliver-result! with a cas-ref that differs from the child Work result_ref throws :store/cas-mismatch and appends nothing"
     (let [{:keys [db stores identity]} (fresh-fixture)
           parent (create-parent-session! db identity)
           parent-id (:session/id parent)
@@ -155,7 +155,7 @@
           ;; undo the auto-delivery's recorded event count baseline: run first,
           ;; then attempt a conflicting manual delivery
           _ (subagent/run-subagent! stores parent-id session-id {:text "hello"})
-          bound (:work/payload-ref (work-store/fetch-work db work-id))
+          bound (:work/result-ref (work-store/fetch-work db work-id))
           bad-ref (str "sha256:" (apply str (repeat 64 "0")))
           _ (is (not= bound bad-ref) "test ref really differs")
           before (count (filter #(= :subagent/result (:event/type %))
@@ -167,7 +167,7 @@
                   (catch clojure.lang.ExceptionInfo e e))]
       (is (some? ex) "should throw")
       (is (= :store/cas-mismatch (:error/type (ex-data ex))) "error type is :store/cas-mismatch")
-      (is (= bound (:work/payload-ref (ex-data ex))) "error carries the canonical bound")
+      (is (= bound (:work/result-ref (ex-data ex))) "error carries the canonical bound")
       (let [after (count (filter #(= :subagent/result (:event/type %))
                                  (event/events-for-session db parent-id)))]
         (is (= before after) "no result event appended on mismatch")))))
@@ -279,3 +279,48 @@
       (is (= work-id (:child/work-id (:metadata res))) "child work id carried")
       (is (= (:event/id terminal) (:terminal/event-id (:metadata res))) "terminal event named")
       (is (:valid? (event/verify-event-chain db parent-id)) "parent chain hash valid"))))
+
+;; ============================================================================
+;; audit-child-task — the spawn-time bind must SURVIVE completion
+;; ============================================================================
+
+(deftest audit-child-task-compares-the-spawn-bind-not-the-output-artifact
+  (testing "running the spawned task to completion keeps :spawn/digest equal
+            to the spawn-time task digest and reports :match? true"
+    (let [{:keys [db stores identity]} (fresh-fixture)
+          parent (create-parent-session! db identity)
+          parent-id (:session/id parent)
+          pl (parent-lease parent-id (:code/id identity) #{:invoke})
+          task {:text "hello-echo"}
+          {:child/keys [session-id work-id]} (subagent/spawn-subagent!
+                                               db parent-id {:task task} [pl])
+          spawn-digest (subagent/task-digest task)
+          _ (subagent/run-subagent! stores parent-id session-id task)
+          audit (subagent/audit-child-task db work-id task)
+          work (work-store/fetch-work db work-id)]
+      ;; the child actually produced an output artifact...
+      (is (string? (:work/result-ref work))
+          "the run wrote an output CAS ref")
+      (is (not= spawn-digest (:work/result-ref work))
+          "and that output ref is NOT the task digest")
+      ;; ...yet the audit still reports the spawn bind and a match
+      (is (= spawn-digest (:spawn/digest audit))
+          ":spawn/digest is the spawn-time bind, not the output artifact id")
+      (is (= spawn-digest (:executed/digest audit)))
+      (is (true? (:match? audit))
+          "a child that ran exactly the spawned task matches"))))
+
+(deftest audit-child-task-reports-a-divergent-task
+  (testing "executing a different task than the one spawned is observable"
+    (let [{:keys [db identity]} (fresh-fixture)
+          parent (create-parent-session! db identity)
+          parent-id (:session/id parent)
+          pl (parent-lease parent-id (:code/id identity) #{:invoke})
+          {:keys [child/work-id]} (subagent/spawn-subagent!
+                                    db parent-id {:task {:text "spawned"}} [pl])
+          audit (subagent/audit-child-task db work-id {:text "something-else"})]
+      (is (= (subagent/task-digest {:text "spawned"}) (:spawn/digest audit)))
+      (is (= (subagent/task-digest {:text "something-else"})
+             (:executed/digest audit)))
+      (is (false? (:match? audit))
+          "divergence is distinguishable from a completed correct run"))))

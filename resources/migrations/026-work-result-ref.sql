@@ -1,0 +1,34 @@
+-- 026-work-result-ref.sql — separate a Work's OUTPUT ref from its INPUT bind
+--
+-- `works.payload_ref` was doing three mutually exclusive jobs:
+--   1. at spawn, the input binding (subagent.clj:325 writes :task-bind);
+--   2. at completion, succeed-work! overwrote it with the output CAS id
+--      via COALESCE(?, payload_ref);
+--   3. readers 2 and 3 (subagent_delivery.clj) then read it as the
+--      TERMINAL OUTPUT ref.
+-- So the spawn digest was destroyed on success, and audit-child-task —
+-- which compares the persisted spawn bind against the executed task —
+-- compared the output artifact id with a task digest and could only
+-- ever report :match? false: it could not distinguish "ran the wrong
+-- task" from "ran the right task".
+--
+-- Fix: give the output its own column. payload_ref keeps the spawn-time
+-- input binding (never overwritten); result_ref carries the output CAS
+-- ref written by succeed-work!. Readers 2/3 move to result_ref;
+-- audit-child-task keeps reading payload_ref and becomes meaningful.
+--
+-- Compatibility: existing rows keep their payload_ref value. A row that
+-- was already succeeded under the old code has an output id in
+-- payload_ref, which after this migration is read as the input bind
+-- rather than the result — a pre-existing row's delivery falls back to
+-- the :no-payload-ref path on result_ref instead of reporting a
+-- mismatched ref. No persisted identity bytes change; this is a
+-- column addition, matching the repo's append-only schema convention
+-- (003-routing.sql:16 does the same).
+--
+-- Bare ADD COLUMN is the established convention in this tree
+-- (003-routing.sql:16, 014-code-image-deployment-execution.sql:45-56).
+-- The runner applies this file once and records it in the applied set;
+-- re-running migrate! is a no-op.
+
+ALTER TABLE works ADD COLUMN result_ref TEXT;

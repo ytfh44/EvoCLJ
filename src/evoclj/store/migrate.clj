@@ -28,7 +28,7 @@
 
 (def latest-version
   "The schema version this codebase knows how to migrate to."
-  25)
+  26)
 (def ^:private version-key "schema_version")
 (def ^:private applied-key "applied_migrations")
 (def ^:private migrations-dir "migrations")
