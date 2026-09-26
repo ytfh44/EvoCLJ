@@ -155,27 +155,47 @@
 
 (defn- load-persisted-leases
   "P1: load active (revoked=0) leases from DB via capability-store.
-  DB is truth; no synthetic fallback. Returns vector (empty when none) or nil on error."
+  DB is truth; no synthetic fallback. Returns vector (empty when none) or nil on error.
+
+  FAIL-CLOSED PER ROW. A lease is an authorization grant, so every field
+  is parsed strictly: a row whose id is not a UUID, or whose timestamps
+  do not parse, is DROPPED, never repaired. This used to invent a random
+  UUID and, worse, an `now` .. `now+1h` window — which
+  validate-lease accepts, policy/authorize then returns :allow for, and
+  the session runs with a live grant nobody ever issued. Reachable
+  because 019-p1-authority backfilled every pre-019 row's lease_edn to
+  NULL and 013-capabilities' id column is TEXT with no UUID CHECK.
+
+  Granularity is per ROW, not per collection: one unreadable row must not
+  erase every other valid lease for the session."
   [db sid]
   (try
     (let [cap-store (requiring-resolve 'evoclj.store.capability-store/list-active-capabilities)
           rows (@cap-store (sqlite/db-spec db) {:principal-type "session" :principal-id (str sid)})]
       (when (seq rows)
-        (mapv (fn [row]
-                (or (:lease row)
-                    (let [actions-raw (:actions row)
-                          actions (set (map keyword actions-raw))
-                          constraints (or (:constraints-parsed row) {})
-                          principal {:principal/type :session :session/id (types/session-id (:principal-id row))}
-                          resource (:resource row)]
-                      {:cap/id (try (UUID/fromString (:id row)) (catch Exception _ (UUID/randomUUID)))
-                       :principal principal
-                       :resource resource
-                       :actions actions
-                       :constraints constraints
-                       :issued-at (try (Date/from (java.time.Instant/parse (:issued-at row))) (catch Exception _ (Date.)))
-                       :expires-at (try (Date/from (java.time.Instant/parse (:expires-at row))) (catch Exception _ (Date. (+ (System/currentTimeMillis) 3600000))))})))
-              rows)))
+        (->> rows
+             (keep (fn [row]
+                     (or (:lease row)
+                         ;; strict: any unparseable field drops THIS row
+                         (try
+                           (let [actions-raw (:actions row)
+                                 actions (set (map keyword actions-raw))
+                                 constraints (or (:constraints-parsed row) {})
+                                 principal {:principal/type :session
+                                            :session/id (types/session-id (:principal-id row))}
+                                 resource (:resource row)]
+                             {:cap/id (UUID/fromString (:id row))
+                              :principal principal
+                              :resource resource
+                              :actions actions
+                              :constraints constraints
+                              :issued-at (Date/from
+                                          (java.time.Instant/parse (:issued-at row)))
+                              :expires-at (Date/from
+                                           (java.time.Instant/parse (:expires-at row)))})
+                           (catch Exception _
+                             nil)))))
+             vec)))
     (catch Exception _ nil)))
 
 ;; ---------------------------------------------------------------------------
