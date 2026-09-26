@@ -204,3 +204,63 @@
         (let [ds (md/lookup-model index "deepseek/deepseek-v4-flash")]
           (is (= :web-search-tool (get-in ds [:model/dialect :server-side-search]))))
         (finally (.stop (:server srv) 0))))))
+
+(defn- start-counting-fixture-server
+  "Like start-fixture-server, but records every request in the returned
+  :hits atom, so a test can assert that no fetch was attempted."
+  []
+  (let [server (HttpServer/create (InetSocketAddress. 0) 0)
+        hits (atom 0)]
+    (.createContext server "/api.json"
+                    (reify HttpHandler
+                      (handle [_ exchange]
+                        (swap! hits inc)
+                        (let [bytes (.getBytes fixture-body "UTF-8")]
+                          (.sendResponseHeaders exchange 200 (count bytes))
+                          (with-open [os (.getResponseBody exchange)]
+                            (.write os bytes))))))
+    (.start server)
+    {:server server
+     :hits hits
+     :port (.getPort (.getAddress server))
+     :base-url (str "http://127.0.0.1:" (.getPort (.getAddress server)))}))
+
+(defn- hours-ago
+  "A java.util.Date `n` hours before now."
+  [n]
+  (java.util.Date. (- (System/currentTimeMillis) (* 3600000 n))))
+
+(deftest ttl-short-circuits-the-fetch
+  (testing "a cache younger than :catalog/ttl-hours is served without a fetch"
+    (let [srv (start-counting-fixture-server)
+          dir (tmp-cache-dir)
+          _ (swap! cleanup-paths conj dir)
+          _ (md/write-cache! dir fixture-body (java.util.Date.) "http://x/api.json")
+          result (md/refresh-catalog!
+                   (catalog-config (:base-url srv) :extra {:catalog/cache-dir dir}))]
+      (try
+        (is (= :catalog/cached (:catalog/status result))
+            "a fresh-enough cache short-circuits: status is cached, not fresh")
+        (is (zero? @(:hits srv))
+            "and no HTTP request was made at all")
+        (is (nil? (:catalog/error result)))
+        (is (= 4 (count (index-of result))))
+        (finally (.stop (:server srv) 0)))))
+  (testing "a cache older than :catalog/ttl-hours is refetched"
+    (let [srv (start-counting-fixture-server)
+          dir (tmp-cache-dir)
+          _ (swap! cleanup-paths conj dir)
+          _ (md/write-cache! dir fixture-body (hours-ago 25) "http://x/api.json")
+          result (md/refresh-catalog!
+                   (catalog-config (:base-url srv) :extra {:catalog/cache-dir dir}))]
+      (try
+        (is (= :catalog/fresh (:catalog/status result)))
+        (is (= 1 @(:hits srv)))
+        (finally (.stop (:server srv) 0)))))
+  (testing "no cache at all still fetches"
+    (let [srv (start-counting-fixture-server)
+          result (md/refresh-catalog! (catalog-config (:base-url srv)))]
+      (try
+        (is (= :catalog/fresh (:catalog/status result)))
+        (is (= 1 @(:hits srv)))
+        (finally (.stop (:server srv) 0))))))
