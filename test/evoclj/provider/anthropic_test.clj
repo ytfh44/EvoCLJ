@@ -72,6 +72,15 @@
    :budget {:wall-ms 5000}
    :metadata {}})
 
+(def ^:private echo-tool
+  "One tool declaration in the payload :tools shape openai.clj accepts."
+  {:tool/id :fixture/echo
+   :name "echo"
+   :description "echo the text"
+   :parameters {:type "object"
+                :properties {:text {:type "string"}}
+                :required ["text"]}})
+
 (deftest describe-and-normalize
   (let [fx (make-server (fn [_] [200 success-response]))
         p (provider-for fx)
@@ -181,3 +190,68 @@
             false
             (catch clojure.lang.ExceptionInfo e
               (= :provider/model-error (:error/type (ex-data e)))))))))
+
+;; ---------------------------------------------------------------------------
+;; Tool support. The adapter previously had NO tools at all: normalize-request
+;; dropped :tools, build-params had no tools builder, and a :tool-role turn —
+;; which the orchestrator appends after any tool result — was refused with
+;; :unsupported-role. The response side already parsed tool_use blocks; only
+;; the request side was missing.
+;; ---------------------------------------------------------------------------
+
+(defn- last-request-body
+  "The JSON body the fake endpoint actually received, parsed."
+  [fixture]
+  (-> @(:requests fixture) last (json/parse-string true)))
+
+(deftest tool-declarations-reach-the-wire
+  (let [fx (make-server (fn [_] [200 success-response]))
+        p (provider-for fx)
+        n (proto/normalize-request
+           p
+           (update (model-intent) :payload assoc :tools [echo-tool]))
+        _ (proto/execute-request! p n)
+        body (last-request-body fx)]
+    (testing "the declared tool appears in the request the endpoint received"
+      (is (vector? (:tools body)) "the request carries a tools array")
+      (is (= 1 (count (:tools body))))
+      (is (= "echo" (get-in body [:tools 0 :name])))
+      (is (= "echo the text" (get-in body [:tools 0 :description])))
+      (is (= "object" (get-in body [:tools 0 :input_schema :type]))
+          "Anthropic takes a raw JSON Schema under input_schema, not an
+           OpenAI `parameters` wrapper")
+      (is (get-in body [:tools 0 :input_schema :properties :text])
+          "the parameter schema survives the translation")
+      (is (not (get-in body [:tools 0 :tool]))
+          "the internal :tool id is stripped before serialization"))))
+
+(deftest a-tool-result-turn-is-accepted
+  (let [fx (make-server (fn [_] [200 success-response]))
+        p (provider-for fx)
+        messages [{:role :user :content "hi"}
+                  {:role :assistant :content "calling"}
+                  {:role :tool :tool-call-id "t1" :content "tool said hi"}]
+        n (proto/normalize-request p (model-intent :messages messages))]
+    (testing "a :tool role no longer throws :unsupported-role"
+      (is (some? n) "normalize-request accepted the tool turn"))
+    (proto/execute-request! p n)
+    (let [body (last-request-body fx)
+          tool-result (->> (:messages body)
+                           (filter #(re-find #"tool_result" (pr-str %)))
+                          first)]
+      (is (some? tool-result)
+          "Anthropic expresses a tool result as a user turn whose content
+           blocks are tool_result")
+      (is (re-find #"t1" (pr-str tool-result))
+          "the block names the tool_use id it answers"))))
+
+(deftest a-non-vector-tools-payload-is-refused
+  (let [fx (make-server (fn [_] [200 success-response]))
+        p (provider-for fx)
+        bad (assoc (model-intent) :payload
+                   (assoc (:payload (model-intent)) :tools {:name "echo"}))]
+    (is (= :provider/input-invalid
+           (:error/type (ex-data
+                         (try (proto/normalize-request p bad) nil
+                              (catch clojure.lang.ExceptionInfo e e)))))
+        ":tools must be a vector of maps, same rule as the openai adapter")))
