@@ -26,7 +26,22 @@
 (def ^:private secret-keys
   "Keywords whose values are treated as secrets during sanitization.
    Used by `sanitize-map` to redact transport-config and similar maps
-   before they cross serialization boundaries."
+   before they cross serialization boundaries.
+
+   :env and :headers are SECRET CHANNELS, not secret NAMES. The names
+   inside them are arbitrary vendor strings — \"GITHUB_TOKEN\",
+   \"X-Custom-Credential\", a UUID — so no fixed name set can enumerate
+   them (secret-key? lowercases a string key and looks it up here, and
+   \"GITHUB_TOKEN\" lowercases to :github_token, which is not a member).
+   The whole value is therefore treated as secret: whatever a channel
+   carries is a credential in transit.
+
+   This is also why `sanitize-map` RECURSES while
+   evoclj.mcp.manager/redact-transport stays SHALLOW: a transport config
+   nested one level down (opts -> :transport-config -> :env) is reached
+   by recursion alone, and redaction is the only thing that closes that
+   path. redact-transport is the display/audit-derived view of INV-01
+   semantics on a TOP-LEVEL transport config, not the general guard."
   #{:api-key :apiKey :api_secret :apikey
     :token :access-token :accessToken :refresh-token :refreshToken
     :password :passwd :pwd :secret
@@ -34,7 +49,8 @@
     :cookie
     :private-key :privateKey :private_key
     :client-secret :clientSecret
-    :x-api-key :x-api-secret})
+    :x-api-key :x-api-secret
+    :env :headers})
 
 (defn- secret-key?
   [k]

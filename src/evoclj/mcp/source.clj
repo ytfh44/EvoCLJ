@@ -250,7 +250,7 @@
           ;; pooled: the manager owns the client's lifetime; never closed here
           (let [client (:client (manager/get-or-open! manager ck open-fn))]
             (when-not client
-              (throw (err/error :mcp/discover-failed "no MCP client available" {:transport-config (err/sanitize transport-config)})))
+              (throw (err/error :mcp/discover-failed "no MCP client available" {:transport-config (err/sanitize (manager/redact-transport transport-config))})))
             (let [raw-tools (adapter/discover a {:client client})]
               (mapv (comp stamp #(stable-descriptor % opts)) raw-tools)))
           ;; WO-M4: non-pooled discovery is call-scoped — the freshly opened
@@ -259,7 +259,7 @@
             (try
               (let [client (:client managed)]
                 (when-not client
-                  (throw (err/error :mcp/discover-failed "no MCP client available" {:transport-config (err/sanitize transport-config)})))
+                  (throw (err/error :mcp/discover-failed "no MCP client available" {:transport-config (err/sanitize (manager/redact-transport transport-config))})))
                 (let [raw-tools (adapter/discover a {:client client})]
                   (mapv (comp stamp #(stable-descriptor % opts)) raw-tools)))
               (finally
@@ -613,6 +613,13 @@
     :connection/id    - shared connection id keyword
     :mcp/server-id    - server namespace string
   "
+  ;; NOTE: manager/redact-transport is deliberately NOT applied here. It
+  ;; is shallow — it replaces top-level :env/:headers only — and the
+  ;; transport config here is one level down at
+  ;; [:opts :transport-config :env], so wrapping would be dead code.
+  ;; kernel.error/secret-keys lists :env/:headers as SECRET CHANNELS and
+  ;; sanitize-map RECURSES, so the nested credential is redacted here
+  ;; (see kernel/error.clj secret-keys).
   [{:keys [source/id transport-config manager discover-fn] :as opts}]
   (when-not id
     (throw (err/error :mcp/config-invalid "McpSource requires :source/id" {:opts (err/sanitize opts)})))

@@ -6,6 +6,7 @@
   no Throwable objects, class objects, lazy seqs, or functions
   (Global Constraint 22)."
   (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [evoclj.kernel.error :as err]))
 
@@ -80,17 +81,44 @@
       (is (= "localhost" (get-in result [:nested :host]))))))
 
 (deftest sanitize-redacts-transport-config-secrets
-  (testing "MCP transport-config secrets in maps are redacted"
+  (testing "the whole :env channel is redacted, whatever the vendor keys"
+    ;; Real stdio transports carry STRING keys (mcp/transport.clj transmits
+    ;; them as strings), and no fixed name set can enumerate arbitrary
+    ;; vendor names — "GITHUB_TOKEN" lower-cases to :github_token, which is
+    ;; not a member of any list. The channel itself is the secret.
     (let [cfg {:type :stdio
                :command "server"
-               :env {:api-key "sk-123"
-                     :password "hunter2"
-                     :normal "ok"}}
-          result (err/sanitize cfg)]
+               :env {"GITHUB_TOKEN" "ghp_x"
+                     "X-Custom-Credential" "s"
+                     "PATH" "/usr/bin"}}
+          result (err/sanitize cfg)
+          serialized (pr-str result)]
       (is (= "server" (:command result)))
-      (is (= "[REDACTED]" (get-in result [:env :api-key])))
-      (is (= "[REDACTED]" (get-in result [:env :password])))
-      (is (= "ok" (get-in result [:env :normal]))))))
+      (is (not (str/includes? serialized "ghp_x"))
+          "a real string-keyed token never survives sanitization")
+      (is (not (str/includes? serialized "X-Custom-Credential"))
+          "an unguessable vendor header name is covered too")
+      (is (= "[REDACTED]" (:env result))))
+  (testing ":headers is redacted on the same reasoning"
+    (let [result (err/sanitize {:type :http
+                                :headers {"X-Custom-Credential" "s"}})]
+      (is (not (str/includes? (pr-str result) "X-Custom-Credential")))))
+  (testing "a NESTED transport config is redacted — the recursion is what
+            makes sanitize-map the real guard"
+    ;; mcp/source.clj:618 hands err/sanitize the whole opts map, with the
+    ;; transport config one level down. manager/redact-transport is shallow
+    ;; and cannot reach this; only the recursive :env rule does.
+    (let [opts {:source/id :mcp/x
+                :transport-config {:type :stdio
+                                   :command "server"
+                                   :env {"GITHUB_TOKEN" "ghp_x"}}}
+          result (err/sanitize opts)
+          serialized (pr-str result)]
+      (is (= :mcp/x (:source/id result)))
+      (is (not (str/includes? serialized "ghp_x"))
+          "a nested transport secret never reaches the terminal")
+      (is (= "[REDACTED]"
+             (get-in result [:transport-config :env])))))))
 
 (deftest sanitize-redacts-string-key-secrets
   (testing "string-key headers like \"Authorization\" are also redacted"
