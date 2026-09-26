@@ -1102,29 +1102,97 @@
                 "journal_mode"))
           "the component schema issues no journal-mode pragma — the
           default applies, and 'delete' (not WAL) is therefore the
-          operating mode of every store")))
-  (testing "busy_timeout: promotion/rollback set it explicitly, the
-            shared write helper (store/sqlite.clj) sets it before BEGIN
-            IMMEDIATE, and the event append routes through that shared
-            helper -- so contended writers wait for SQLite's write lock
-            instead of failing SQLITE_BUSY"
-    (doseq [path ["src/evoclj/promotion/promote.clj"
-                  "src/evoclj/promotion/rollback.clj"
-                  "src/evoclj/store/sqlite.clj"]]
-      (is (str/includes? (slurp path) "PRAGMA busy_timeout = 10000")
-          (str path " sets busy_timeout = 10000 before BEGIN IMMEDIATE")))
-    (testing "the event append delegates to the shared writer"
-      (is (str/includes? (slurp "src/evoclj/store/event.clj")
-                         "sqlite/with-write-tx")
-          "src/evoclj/store/event.clj must append through
-          sqlite/with-write-tx -- the shared writer that sets busy_timeout
-          before BEGIN IMMEDIATE; a private event.clj transaction would
-          reintroduce the SQLITE_BUSY race this test guards against"))
-    (testing "the evaluation finalization transaction relies on the
-              sqlite-jdbc driver default (documented finding, not a
-              defect: its write window is one INSERT + one UPDATE)"
-      (let [src (slurp "src/evoclj/eval/core.clj")]
-        (is (not (str/includes? src "busy_timeout"))
-            "eval/core.clj sets no busy_timeout — the driver default
-            (3000 ms in sqlite-jdbc) applies to its finalization
-            transaction")))))
+          operating mode of every store"))))
+  ;; busy_timeout is NOT asserted here. The behavior it produces is
+  ;; observed in a-contended-writer-waits-for-the-lock-instead-of-failing
+  ;; below, against a real lock and a real second connection. The
+  ;; assertions this block used to hold — that three source FILES
+  ;; contain the literal "PRAGMA busy_timeout = 10000", that event.clj
+  ;; mentions with-write-tx, and that eval/core.clj does NOT — were
+  ;; statements about source text: a comment satisfied the first, an
+  ;; equivalent spelling would have failed it, and the third asserted
+  ;; the absence of a string, which is not a property of behavior at
+  ;; all. docs/scheduler.md records the wait-don't-fail rule as
+  ;; normative, and nothing could observe it.
+
+;; ============================================================================
+;; STEP 3b — the busy_timeout GUARD, observed as behavior
+;;
+;; The assertions this replaces asserted that three source FILES contain
+;; the literal text "PRAGMA busy_timeout = 10000" and that a fourth does
+;; not. That is a statement about source text, not about the system: a
+;; comment or a dead branch satisfied it, any equivalent spelling failed
+;; it, and the "eval/core.clj does not set it" line asserted the ABSENCE
+;; of a string, which is not a property of behavior at all.
+;; docs/scheduler.md:53 records the wait-don't-fail rule as normative
+;; while no test could observe it.
+;;
+;; The test below observes it. A real connection takes SQLite's write
+;; lock and holds it; a second connection then attempts a write through
+;; the PRODUCTION helper (evoclj.store.sqlite/with-write-tx — the one
+;; event.clj, promote.clj and rollback.clj all use). With busy_timeout in
+;; force the second writer blocks until the lock is released and then
+;; commits; without it SQLite raises SQLITE_BUSY at once.
+;; ============================================================================
+
+
+(defn- insert-artifact-sql
+  "An artifacts INSERT for the content address `n`."
+  [n]
+  (str "INSERT INTO artifacts (hash, media_type, size, created_at) VALUES ('sha256:"
+       (apply str (repeat 64 n))
+       "','application/octet-stream',0,datetime('now'))"))
+
+(defn- contended-write-outcome
+  "Hold the write lock on one connection for `hold-ms`, and meanwhile try
+  one write through sqlite/with-write-tx on a second connection.
+  Returns {:status :committed|:failed :error <Throwable|nil>}."
+  [db-path hold-ms]
+  (let [holder-hash (insert-artifact-sql "9")
+        writer-hash (insert-artifact-sql "8")
+        result (atom ::pending)
+        worker
+        (fn []
+          (try
+            (sqlite/with-write-tx
+              [conn db-path]
+              (sqlite/insert-raw! conn writer-hash []))
+            (reset! result {:status :committed})
+            (catch Throwable e (reset! result {:status :failed :error e}))))
+        t (Thread. ^Runnable worker)]
+    (with-open [holder (jdbc/get-connection (sqlite/spec db-path))]
+      (sqlite/exec-raw! holder "PRAGMA foreign_keys = ON")
+      ;; take SQLite's write lock and hold it
+      (sqlite/exec-raw! holder "BEGIN IMMEDIATE")
+      (sqlite/exec-raw! holder holder-hash)
+      (.start t)
+      ;; hold the lock past the sqlite-jdbc default busy window (3000 ms
+      ;; would be longer; 2500 ms still proves the writer did not fail
+      ;; fast, and keeps the test quick)
+      (Thread/sleep hold-ms)
+      (sqlite/exec-raw! holder "COMMIT")
+      ;; bounded: a writer that never returns must not hang the suite
+      (.join t 60000)
+      (if (= ::pending @result)
+        {:status :timeout}
+        @result))))
+
+(deftest a-contended-writer-waits-for-the-lock-instead-of-failing
+  (let [world (fresh-world)
+        db (:db world)
+        hold-ms 2500
+        started (System/nanoTime)
+        outcome (contended-write-outcome (:db-path world) hold-ms)
+        elapsed-ms (long (/ (- (System/nanoTime) started) 1000000))]
+    (testing "the second writer COMMITS — it never sees SQLITE_BUSY"
+      (is (= :committed (:status outcome))
+          (str "contended write failed instead of waiting: "
+               (pr-str (some-> (:error outcome) .getMessage)))))
+    (testing "and it genuinely WAITED for the lock rather than failing fast"
+      (is (>= elapsed-ms hold-ms)
+          (str "returned in " elapsed-ms " ms while the lock was held for "
+               hold-ms " ms — that is an immediate SQLITE_BUSY, not a wait")))
+    (testing "the waiting writer's row is durably present"
+      (is (= 1 (count (sqlite/query db ["SELECT hash FROM artifacts
+                                         WHERE hash = ?"
+                                        (str "sha256:" (apply str (repeat 64 "8")))])))))))
