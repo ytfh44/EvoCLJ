@@ -76,7 +76,20 @@
   Arity [registry opts] with map containing :db — also durable when :db present.
 
   opts keys: :principal (I2 tagged union, required), :resource, :actions,
-  :constraints, optional finite :budget, :issued-at, :expires-at, :cap-id/:cap/id.
+  :constraints, :issued-at, :expires-at, :cap-id/:cap/id, and an optional
+  finite :budget.
+
+  :budget IS DELIBERATELY UN-WIRED IN PRODUCTION TODAY. The key is honoured
+  here — a lease carrying it is sealed with a budget and, given a durable
+  DB, gets a capability_budgets row — but NO production call site passes
+  it: evolution_tools.clj:363, cli/session.clj:718/742,
+  mount/filesystem.clj:164 and subagent_capability.clj:101/112 all omit it.
+  So intent.pipeline/budget-attempt's `opted?` is currently false for
+  every real lease, and its two fail-closed guards
+  (:capability/budget-authority-unavailable, :capability/budget-missing)
+  are pre-wired for a future host that supplies budgets rather than dead
+  by accident. Wiring the limit itself is a product decision (what is the
+  ceiling), not a bug fix, so it is deliberately left to that decision.
 
   When registry supplied, the sealed lease is stored as {:lease lease :revoked? false}
   and version is bumped. If durable insert fails, cache is NOT updated and the
