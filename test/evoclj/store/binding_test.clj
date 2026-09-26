@@ -708,3 +708,30 @@
                                                      (binding-publish/publisher)))]
         (is (= 1 (count restored)))
         (is (= (:revision/id b) (:revision/id (first restored))))))))
+
+;; ---------------------------------------------------------------------------
+;; opts normalization: an Atom is the legacy bare registry form, and a map
+;; is NEVER rewritten.
+;;
+;; activate! used to replace any opts map carrying none of
+;; :registry/:cas/:mount-registry/:context-store/:failpoints with {} — which
+;; silently discarded a documented :fs-lease (GC-08/B4) — and its
+;; `(instance? Atom ...)` branch was unreachable, because the enclosing test
+;; already required `(map? opts)` and an Atom is not an IPersistentMap.
+;; ---------------------------------------------------------------------------
+
+(deftest a-bare-registry-atom-is-accepted-as-opts
+  (testing "the legacy bare form is honoured as the registry: the bundle
+            verifies and the binding activates, instead of being flattened
+            to {} and refused as unverifiable"
+    (let [db (fresh-db)
+          sid (seed-session! db)
+          registry (reg/create-registry)
+          b (make-skill-bundle [:skill "bare"] "bare payload")
+          _ (bundle/publish-bundle! registry b)
+          result (binding/activate! db sid b registry)
+          active (binding/active-bindings db sid)]
+      (is (some? result) "activation returned normally")
+      (is (seq active) "the durable binding row exists — the atom was honoured")
+      (is (some #(= (:revision/id b) (:revision/id %)) active)
+          "and it names the revision of the bundle the atom pointed at"))))

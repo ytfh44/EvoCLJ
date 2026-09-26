@@ -654,6 +654,23 @@
                      :metadata_edn metadata-edn}))
     id))
 
+(defn- normalize-opts
+  "`opts` is either a map, or the legacy bare form: an environment-registry
+  atom, which reload!/deactivate! have always honoured. An atom becomes
+  {registry atom}; EVERY map is passed through UNCHANGED.
+
+  This used to replace the whole map with {} when it carried none of
+  :registry/:cas/:mount-registry/:context-store/:failpoints, which silently
+  discarded a documented :fs-lease (GC-08/B4), and its
+  `(instance? Atom ...)` branch was unreachable — the enclosing test
+  already required `(map? opts)`, and an Atom is not an IPersistentMap.
+  There is no allowlist to keep in sync: a map either carries documented
+  keys (and is kept) or reads as nil for every key the transaction reads,
+  which is exactly what {} did. Fail-closed is unaffected: INV-02
+  existence checks still reject an unverifiable bundle."
+  [opts]
+  (if (instance? clojure.lang.Atom opts) {:registry opts} opts))
+
 (defn activate!
   "Activate a bundle for session-id.
 
@@ -688,13 +705,7 @@
   ([db session-id bundle opts]
    (when-not bundle
      (throw (err/error :store/binding-invalid "bundle/offer required" {:bundle bundle})))
-   (let [opts (if (and (map? opts) (not (contains? opts :registry)) (not (contains? opts :cas))
-                       (not (contains? opts :mount-registry)) (not (contains? opts :context-store))
-                       ;; T2: an opts map carrying failpoint seams is a
-                       ;; legitimate opts map — do not normalize it away
-                       (not (contains? opts :failpoints)))
-                (if (instance? clojure.lang.Atom opts) {:registry opts} {})
-                opts)
+   (let [opts (normalize-opts opts)
          registry (:registry opts)
          cas-handle (:cas opts)
          mount-registry (:mount-registry opts)
