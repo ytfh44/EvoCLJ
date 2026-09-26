@@ -523,24 +523,57 @@
 ;; cannot directly update SQL current-pointer rows
 ;; ============================================================================
 
+(def ^:private cli-files
+  "Every file under src/evoclj/cli. This check used to name five of the
+  fourteen, so `context cost deploy eval-inspect mcp model recovery
+  skill source` were never examined at all."
+  ["main.clj" "context.clj" "cost.clj" "deploy.clj" "eval_inspect.clj"
+   "evolution.clj" "genome.clj" "mcp.clj" "model.clj" "promotion.clj"
+   "recovery.clj" "session.clj" "skill.clj" "source.clj"])
+
+(def ^:private cli-namespaces
+  "The namespace symbol for each file above."
+  (mapv #(symbol (str "evoclj.cli."
+                     (str/replace (str/replace % #"\.clj$" "") #"_" "-")))
+        cli-files))
+
+;; GC-15. A STATIC check, and it says so: it proves the cli sources
+;; contain no SQL write statement, no raw JDBC reference, and no
+;; dependency on the promotion CURRENT machinery. It does NOT observe
+;; runtime behavior — that the CLI cannot move the CURRENT pointer is
+;; covered BEHAVIORALLY by cli-evolve-promote-call-the-public-apis below
+;; and by the promotion suites, which drive the real commands and assert
+;; the pointer moves only inside promote!'s transaction.
+;;
+;; The version this replaces named only 5 of the 14 files, and its alias
+;; check could not fail on a fully-qualified call like
+;; (evoclj.promotion.current/cas-current! conn …) because that creates
+;; no :as alias. Scanning the source text closes that hole.
+;;
+;; Scope note: requiring a store-owned READER is allowed and is the
+;; documented design (session.clj:42-45 — every read goes through a
+;; store-owned reader, every write through a public subsystem API).
+;; What is forbidden is the CURRENT machinery, not the store layer.
 (deftest cli-namespaces-never-write-sql
-  (testing "by construction: the cli namespaces contain no SQL writes,
-            no raw JDBC, and no dependency on the CURRENT machinery"
-    (doseq [file ["evoclj/cli/main.clj" "evoclj/cli/genome.clj"
-                  "evoclj/cli/session.clj" "evoclj/cli/evolution.clj"
-                  "evoclj/cli/promotion.clj"]]
-      (let [src (slurp (io/resource file))]
+  (testing "no cli source writes SQL or references raw JDBC"
+    (doseq [f cli-files]
+      (let [src (slurp (io/resource (str "evoclj/cli/" f)))]
         (is (not (re-find #"(?i)(?:insert|update|delete)\s+(?:into|set|from)\b" src))
-            (str file " contains no SQL write statements"))
+            (str f " contains no SQL write statements"))
         (is (not (re-find #"clojure\.java\.jdbc|java\.sql" src))
-            (str file " uses no raw JDBC"))))
-    (doseq [sym '[evoclj.cli.main evoclj.cli.genome evoclj.cli.session
-                  evoclj.cli.evolution evoclj.cli.promotion]]
+            (str f " uses no raw JDBC"))))
+  (testing "no cli source names the CURRENT machinery, by ANY route"
+    (doseq [f cli-files]
+      (let [src (slurp (io/resource (str "evoclj/cli/" f)))]
+        (is (nil? (re-find #"evoclj\.promotion\.current" src))
+            (str f " never references the promotion CURRENT machinery")))))
+  (testing "no loaded cli namespace holds a forbidden alias"
+    (doseq [sym cli-namespaces]
       (require sym)
       (is (nil? (get (ns-aliases sym) 'current))
-          (str sym " never depends on the promotion CURRENT machinery"))
+          (str sym " has no 'current alias"))
       (is (nil? (get (ns-aliases sym) 'promotion-current))
-          (str sym " never depends on the promotion CURRENT machinery")))))
+          (str sym " has no 'promotion-current alias"))))))
 
 (deftest cli-evolve-promote-call-the-public-apis
   (let [ctx (provision!)
