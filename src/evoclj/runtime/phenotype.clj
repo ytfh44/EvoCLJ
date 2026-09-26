@@ -26,9 +26,15 @@
   ;;     :capabilities ...
   ;;     :stores ...}
 
-  PhenotypeId legacy alias is removed (I1 break compat). The old
-  :code/id and :compiled/code-id keys are no longer emitted
-  or accepted.
+  PhenotypeId legacy alias is removed (I1 break compat): nothing is
+  emitted under :compiled/code-id. The READ side is deliberately
+  tolerant of it, though — validate-compiled! and instantiate still
+  `or`-in :compiled/code-id, because a compiled genome persisted or
+  hand-built before the I1 rename may still carry it, and rejecting it
+  here would break every such value at the trust boundary. That
+  tolerance is the reason program-identity in evoclj.compiler.core is
+  the documented single resolver for the :code/* vs :compiled/*
+  shapes.
 
   THE PHENOTYPE OWNS ONE THING: its isolated SCI runtime. instantiate
   builds a fresh closed SCI context (evoclj.sci.context/make-context)
@@ -254,7 +260,9 @@
   code data while owning independent SCI contexts and distinct
   DeploymentIds when configured with different leases or bindings.
   Constraints 3, 22, 23.
-  PhenotypeId legacy alias (:code/id, :compiled/code-id) is removed.
+  PhenotypeId legacy alias (:code/id, :compiled/code-id) is removed:
+  :code/id is the only key emitted. The legacy key is still READ as a
+  fallback (see validate-compiled!).
 
   Throws ExceptionInfo with a stable :error/type:
   :runtime/invalid-compiled, :runtime/deps-invalid, or

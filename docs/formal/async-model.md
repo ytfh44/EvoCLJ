@@ -135,7 +135,7 @@ Code witness: `runtime/work work-states-count =7`, `session-x-command-product =4
 
 * **Single construction path:** `runtime/hydrate.clj` is the only factory that builds an execution context (fresh SCI namespace, fresh usage atom, fresh CAS temp dir, fresh broker context + leases Durably loaded via P1 DB truth). Direct constructor calls are banned (grep shows no second path).
 * **Pin stability:** `hydrate` with the same pin yields handles with equal `code-image`/`deployment` but distinct `execution/id` (per-activation UUID). The pin's `code_image_id` is the content hash `H(kernel ABI, Genome, Resolution)` (I1).
-* **Fail-closed:** unknown pin throws `:hydrate/pin-not-found`; hydration never synthesizes leases — DB miss hydrates to `[]` and broker denies (P1).
+* **Fail-closed:** an unregistered identity row throws `:hydrate/pin-mismatch`, and a pin with no registered genome bundle throws `:hydrate/genome-bundle-missing`; hydration never synthesizes leases — DB miss hydrates to `[]` and broker denies (P1).
 
 ### Wolfram checks [W-26..W-27] — Hydration (H1, 2 checks)
 
@@ -179,14 +179,19 @@ This mirrors the subagent orphan discipline (subagent-model §2.4) — `find-orp
 
 The same chain that the permission and subagent models ride. `store/event` owns append, sequence allocation, and verification; H1 and Work reuse its pin. E1 refines `cause` into `prev` (linear) + `causal-links` (graph).
 
-### 5.1 `seq` continuity [heritage W-25 refined, now W-28]
+### 5.1 `seq` allocation [heritage W-25 refined, now W-28]
 
 ```text
-Invariant: events_for_session ordered by seq satisfy  events[i].seq = i+1
-           (positionally continuous 1..M, not merely "multiset is {1..M}")
+append-event! allocates the next seq per session inside with-append-tx
+(BEGIN IMMEDIATE), as max(seq)+1 among the rows present.
 ```
 
-`append-event!` allocates `max(seq)+1` per session inside `with-append-tx` (`BEGIN IMMEDIATE`). The earlier phrasing `"values are {1..M} as set"` was shown by Wolfram to accept `{1,3,2}` — three events whose set equals `{1,2,3}` yet the third claims seq 2 out of order. The positional form rejects that. `store/event` test locks the invariant.
+Allocation is therefore gap-free *for the writers that ran*, but the stored
+`seq` is not re-derived from position when the chain is verified: deleting a
+middle row, or truncating the tail, leaves a set that `verify-event-chain`
+still accepts. The positional form (`events[i].seq = i+1`) is what the
+Wolfram refinement argued for, but it is NOT what the shipped verifier
+checks — see INV-13 in invariants.md.
 
 ### 5.2 `prev/event-id` linear predecessor [W-29] (E1)
 

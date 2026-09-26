@@ -28,7 +28,7 @@
     eval identity-registration points), re-compiles via
     evoclj.compiler.core/compile-genome, and produces a real
     CompiledGenome with real topology. The resulting :code/id must equal
-    the pin's :code/id, and :compiled/genome-id/:compiled/resolution-id
+    the pin's :code/id, and :code/genome-id/:code/resolution-id
     must match the pin. A mismatch throws :hydrate/pin-mismatch; a
     session with NO registered bundle fails closed with
     :hydrate/genome-bundle-missing (there is no synthetic fallback).

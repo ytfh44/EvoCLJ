@@ -619,7 +619,7 @@
                           "the stored bundle does not compile to the generation's genome id"
                           {:generation/id generation-id
                            :generation/genome-id (:genome_id row)
-                           :compiled/genome-id (:genome/id (compiler/program-identity compiled))})))
+                           :genome/id (:genome/id (compiler/program-identity compiled))})))
       (let [program (compiler/program-identity compiled)
             identity {:generation/id generation-id
                       :genome/id (:genome/id program)
@@ -844,7 +844,7 @@
                           "the resolved bundle does not compile to the generation's genome id"
                           {:generation/id (:generation/id generation)
                            :generation/genome-id (:genome/id generation)
-                           :compiled/genome-id (:genome/id (compiler/program-identity compiled))})))
+                           :genome/id (:genome/id (compiler/program-identity compiled))})))
       (let [program (compiler/program-identity compiled)
             _ (ensure-identity-artifacts!
                 system

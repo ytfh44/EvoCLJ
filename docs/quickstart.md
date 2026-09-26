@@ -40,6 +40,7 @@ clojure -M -e "
          '[evoclj.compiler.core :as compiler]
          '[evoclj.genome.load :as load]
          '[evoclj.genome.path :as gpath]
+         '[evoclj.store.artifact :as artifact]
          '[evoclj.store.cas :as cas]
          '[evoclj.store.migrate :as migrate]
          '[evoclj.store.sqlite :as sqlite])
@@ -55,23 +56,38 @@ clojure -M -e "
       loaded (assoc (load/load-genome \"genomes/seed\")
                     :programs [session/route-descriptor])
       compiled (compiler/compile-genome loaded session/provider-catalog)
-      genome-id (:compiled/genome-id compiled)
+      identity (compiler/program-identity compiled)
+      genome-id (:genome/id identity)
+      resolution-id (:resolution/id identity)
       body (apply str (map (fn [[p {:keys [digest]}]]
-                             (str p \"\\u0000\" digest \"\\n\"))
-                           (sort-by (fn [[p _]] p)
-                                    gpath/bytewise-compare (:files loaded))))]
+                            (str p \"\\u0000\" digest \"\\n\"))
+                          (sort-by (fn [[p _]] p)
+                                   gpath/bytewise-compare (:files loaded))))]
   (migrate/migrate! (sqlite/spec db-path))
-  (jdbc/insert! (sqlite/spec db-path) :generations
-                {:id \"generation-1\"
-                 :genome_id genome-id
-                 :resolution_id (:compiled/resolution-id compiled)
-                 :parent_id nil
-                 :state \"active\"
-                 :current 1
-                 :created_at \"2025-01-01T00:00:00Z\"})
+  ;; Order matters, and it is the order the production CLI uses
+  ;; (evoclj.cli.session/ensure-identity-artifacts!): the CAS body
+  ;; first, then the artifacts/genomes identity rows that the
+  ;; generations foreign keys point at, and only then the generation
+  ;; row. Inserting generations first fails with a foreign-key
+  ;; violation — there is nothing for its genome_id to reference.
   (cas/put-bytes! (cas/->cas (str state-dir \"/cas\"))
                   (.getBytes body StandardCharsets/UTF_8)
                   {})
+  (artifact/ensure-artifact! (sqlite/spec db-path) genome-id
+                             \"application/octet-stream\"
+                             (alength (.getBytes body StandardCharsets/UTF_8)))
+  (artifact/ensure-artifact! (sqlite/spec db-path) resolution-id
+                             \"application/edn\" 0)
+  (artifact/ensure-genome! (sqlite/spec db-path) genome-id)
+  (sqlite/with-db [conn (sqlite/spec db-path)]
+    (jdbc/insert! conn :generations
+                  {:id \"generation-1\"
+                   :genome_id genome-id
+                   :resolution_id resolution-id
+                   :parent_id nil
+                   :state \"active\"
+                   :current 1
+                   :created_at \"2025-01-01T00:00:00Z\"}))
   (let [from (Paths/get \"genomes/seed\" (make-array String 0))
         to (Paths/get (str state-dir \"/genomes/\" (dash genome-id))
                       (make-array String 0))]
@@ -88,10 +104,14 @@ clojure -M -e "
 "
 ```
 
-This provisions: the SQLite store (`demo-state/db/evoclj.db`) with the
-`generation-1` row pinned to the seed genome's content address
-(`current = 1`), the seed's canonical body in the CAS, and the seed
-bundle under `demo-state/genomes/<id-as-dash>`.
+This provisions: the SQLite store (`demo-state/db/evoclj.db`) carrying the
+`artifacts` and `genomes` identity rows that `generations` references by
+foreign key, the `generation-1` row pinned to the seed genome's content
+address (`current = 1`), the seed's canonical body in the CAS, and the
+seed bundle under `demo-state/genomes/<id-as-dash>`. The identity rows
+come first by necessity: the `generations` table's `genome_id` points at
+`genomes(id)`, so a generations row inserted before them fails its
+foreign key.
 
 ## Step 1 — run the whole loop headless (~2–5 minutes)
 

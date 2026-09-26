@@ -285,7 +285,7 @@
         _ (when-not (= stored genome-id)
             (throw (err/error :eval/paired-genome-mismatch
                               "loaded Genome content address differs from compiled identity"
-                              {:compiled/genome-id genome-id
+                              {:genome/id genome-id
                                :stored-artifact-id stored})))]
     (artifact/ensure-artifact! db genome-id "application/octet-stream"
                                 (alength genome-body))
