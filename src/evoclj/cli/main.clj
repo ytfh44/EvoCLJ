@@ -143,10 +143,13 @@
 
 (defn- single-value-options
   "Collapse the parser's per-option value vectors: every option keeps
-  its LAST value except :tool, which accumulates (repeatable)."
+  its LAST value except :tool and :model, which accumulate (repeatable).
+  Both are consumed by `(mapv …)` at their call sites — cli/session.clj:831
+  and :832 — which seq a String as characters, so collapsing either one
+  mints one lease per character and authorizes nothing."
   [options]
   (reduce-kv (fn [acc k vs]
-               (assoc acc k (if (= k :tool) (vec vs) (last vs))))
+               (assoc acc k (if (contains? #{:tool :model} k) (vec vs) (last vs))))
              {}
              options))
 
