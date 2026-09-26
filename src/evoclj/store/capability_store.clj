@@ -82,6 +82,40 @@
      :lease lease-edn
      :created-at (:created_at row)}))
 
+;; --- I2 principal id dispatch (single source for BOTH directions) ---------
+;;
+;; The write side and the read side used to carry SEPARATE if-chains naming
+;; the four principal arms, and they had already drifted:
+;;   * the writer knew only :session/id, :job/id and a hard-coded
+;;     "operator", so PrincipalSchema's fourth arm (:eval) fell through to
+;;     nil and (str nil) persisted principal_id = "" — NOT NULL satisfied,
+;;     value written, and that lease permanently unfindable;
+;;   * the reader DID have an :eval arm, but invented :operator/id for the
+;;     id-less operator singleton, a key its closed schema forbids.
+;; One table now drives both directions, so they cannot drift again.
+
+(def ^:private principal-id-keys
+  "I2 principal arm keyword -> the key that arm's id lives under. The
+  operator arm is nil: OperatorPrincipalSchema is the singleton
+  {:principal/type :operator} and carries no id."
+  {:session :session/id
+   :job     :job/id
+   :eval    :eval/id
+   :operator nil})
+
+(defn- principal-id
+  "The I2 principal id of `principal` for the arm named by the
+  principal-type STRING `ptype`. Nil when that arm carries no id
+  (operator), when `ptype` is not one of the four arms, or when
+  `principal` is not a map. Accepts keyword and string keys (a sealed
+  CapabilityLease answers :principal via ILookup, schema.clj:190-200)."
+  [ptype principal]
+  (when (map? principal)
+    (let [arm (principal-id-keys (keyword ptype))]
+      (when arm
+        (or (get principal arm)
+            (get principal (name arm)))))))
+
 (defn fetch-capability
   "Fetch capability by `cap-id` (TEXT PRIMARY KEY), or nil when absent.
   Returns a normalized map with parsed actions/constraints, parsed
@@ -104,8 +138,15 @@
                               (name (:principal/type p)))
                             "session")]
                 (if (keyword? raw) (name raw) (str raw)))
+        ;; The nested :principal map is consulted through the SHARED
+        ;; dispatch table, so every arm of PrincipalSchema — including
+        ;; :eval, which this chain used to miss entirely — resolves. The
+        ;; flat session/job keys and the legacy helper keys below stay:
+        ;; they are the store row shape and a documented test contract.
         pid (or (:principal-id lease)
                 (:principal_id lease)
+                (principal-id ptype (:principal lease))
+                (principal-id ptype (get lease "principal"))
                 (get-in lease [:principal :session/id])
                 (get-in lease [:principal :job/id])
                 (when (= ptype "operator") "operator")
@@ -151,7 +192,14 @@
      :principal_type (str ptype)
      :principal_id (str pid)
      :subject_session_id (str pid)
-     :subject_phenotype_id (str (or (:subject-code-id lease) (:subject_phenotype_id lease) pid))
+     ;; the PHENOTYPE column carries a phenotype/code id or nothing. The
+     ;; principal id used to be its last-resort fallback, which conflated
+     ;; the two subjects INV-10 asks to keep distinct — a principal id
+     ;; written here was read back as a code id. The column is nullable
+     ;; (015/016/019), so absent stays NULL rather than a stray "".
+     :subject_phenotype_id (some-> (or (:subject-code-id lease)
+                                       (:subject_phenotype_id lease))
+                                  str)
      :resource_kind rkind-name
      :resource_edn (or resource-edn (pr-str {:kind (keyword rkind-name) :id (str rid)}))
      :resource_id (str rid)
@@ -247,13 +295,20 @@
   (let [rows (list-active-capabilities db)
         leases (keep (fn [row]
                        (or (:lease row)
-                           (let [p {:principal/type (keyword (:principal-type row))
-                                    (if (= "session" (:principal-type row)) :session/id
-                                        (if (= "job" (:principal-type row)) :job/id
-                                            (if (= "eval" (:principal-type row)) :eval/id :operator/id)))
-                                    (try (java.util.UUID/fromString (:principal-id row))
-                                         (catch Exception _ (:principal-id row)))}
-                                 res (:resource row)
+                          ;; ONE table, both directions. An unknown
+                          ;; principal-type yields the id-less operator
+                          ;; singleton; the operator arm itself maps to
+                          ;; nil and takes the same branch. The old chain
+                          ;; invented :operator/id here — a key no closed
+                          ;; PrincipalSchema arm allows — so a hydrated
+                          ;; operator lease could never validate.
+                          (let [ptype (:principal-type row)
+                                p (if-let [arm (principal-id-keys (keyword ptype))]
+                                    {:principal/type (keyword ptype)
+                                     arm (try (java.util.UUID/fromString (:principal-id row))
+                                              (catch Exception _ (:principal-id row)))}
+                                    {:principal/type :operator})
+                                res (:resource row)
                                  actions (set (map keyword (:actions row)))
                                  constraints (or (:constraints-parsed row) {})]
                              (try
