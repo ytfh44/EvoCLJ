@@ -41,6 +41,8 @@
   from the classpath migrations and deleted after every test."
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.genome.load :as load]
+            [evoclj.genome.path :as gpath]
             [evoclj.promotion.current :as current]
             [evoclj.promotion.promote :as promote]
             [evoclj.promotion.rollback :as rollback]
@@ -51,7 +53,7 @@
             [evoclj.store.session :as session]
             [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
-           (java.nio.file Files Paths)
+           (java.nio.file Files OpenOption Paths)
            (java.nio.file.attribute FileAttribute)))
 
 ;; --- shared fixtures -------------------------------------------------------
@@ -265,6 +267,71 @@
                    :total_cost 0.0
                    :outcome "completed"
                    :created_at now})))
+(defn- write-file!
+  "Write `content` to `path`, creating parent directories."
+  [path content]
+  (let [p (Paths/get path (make-array String 0))]
+    (Files/createDirectories (.getParent p) (make-array FileAttribute 0))
+    (Files/write p (.getBytes ^String content StandardCharsets/UTF_8)
+                 (make-array OpenOption 0))))
+
+(defn- genome-index-body
+  "The canonical CAS body of a loaded Genome — path + NUL + digest + LF
+  per entry, bytewise path-sorted. Contains no Clojure source."
+  [loaded]
+  (apply str
+         (map (fn [[p {:keys [digest]}]]
+                (str p "\u0000" digest "\n"))
+              (sort-by (fn [[p _]] p) gpath/bytewise-compare (:files loaded)))))
+
+(defn- candidate-bundle!
+  "A REAL on-disk candidate Genome bundle; returns {:root <dir>
+  :genome-id <content address> :index-body <canonical CAS body>}.
+
+  promote! requires :candidate/root because the bundle is the ONLY
+  source of program bytes for the SCI red-light gate — the CAS holds
+  the Genome index body, which carries no Clojure forms."
+  []
+  (let [root (str (Files/createTempDirectory "evoclj-rollback-bundle-"
+                                            (make-array FileAttribute 0)))]
+    (swap! cas-roots conj root)
+    (write-file! (str root "/manifest.edn")
+                 (pr-str {:genome/format 1
+                          :agent/id :main
+                          :agent/entry :graph/main
+                          :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+                          :modules {:topology "topology.edn"
+                                    :models "models.edn"
+                                    :memory "memory.edn"
+                                    :evolution "evolution.edn"}
+                          :capabilities/requested #{:model/call}
+                          :evolution {:max-risk :behavioral
+                                      :mutable #{:parameters :prompts
+                                                 :skills :programs}}
+                          :metadata {:name "rollback-fixture"
+                                     :description "rollback fixture bundle"}}))
+    (write-file! (str root "/topology.edn")
+                 (pr-str {:graph/id :graph/main
+                          :entry :node/router
+                          :nodes {:node/router {:node/type :sci
+                                                :program :program/route
+                                                :next :node/emit}
+                                  :node/emit {:node/type :emit}}
+                          :limits {:max-steps 64}}))
+    (write-file! (str root "/models.edn")
+                 (str "{:models {:planner {:alias :reasoning/high}}}"))
+    (write-file! (str root "/memory.edn") (str "{:memory {}}"))
+    (write-file! (str root "/evolution.edn") (str "{:evolution {}}"))
+    (write-file! (str root "/programs/route.clj")
+                 (str "(ns agent.route)\n"
+                      "(defn run [input]\n"
+                      "  {:action {:intent/type :intent/finish\n"
+                      "             :payload {:value input}}})\n"))
+    (let [loaded (load/load-genome root)]
+      {:root root
+       :genome-id (:genome/id loaded)
+       :index-body (genome-index-body loaded)})))
+
 (defn- rollback-fixture
   "Build the full stack: G42 is CURRENT (seed, 'active'), a real
   component promotion (promote!) makes G43 CURRENT over G42 ('retired'),
@@ -287,9 +354,10 @@
         _ (seed-generation! db gen42 seed-genome)
         candidate-id (random-uuid)
         evaluation-id (random-uuid)
+        cand-bundle (candidate-bundle!)
         candidate-genome (:artifact/id
                           (cas/put-bytes! cas
-                                          (.getBytes "candidate genome body"
+                                          (.getBytes ^String (:index-body cand-bundle)
                                                      StandardCharsets/UTF_8)
                                           {}))
         _ (let [m (cas/get-meta cas candidate-genome)]
@@ -302,6 +370,7 @@
         promotion-result (promote/promote!
                           {:store {:sqlite db :cas cas}
                            :resolution/id new-resolution
+                           :candidate/root (:root cand-bundle)
                            :event/session-id sid1}
                           {:candidate-id candidate-id
                            :evaluation-id evaluation-id

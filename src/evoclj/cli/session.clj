@@ -339,11 +339,15 @@
               :promotion/system
               {:store {:sqlite (ig/ref :store/sqlite)
                        :cas (ig/ref :store/cas)}
-               ;; no :resolution/id here: the CLI builds the promotion-
-               ;; system per command with the compiled resolution of the
-               ;; candidate/current Genome (promote!/rollback! consume
-               ;; it); a :derive would try to compile the genomes dir
-               ;; as a bundle at host init
+               ;; no :resolution/id and no :genome-root here: the CLI builds
+               ;; the promotion-system per command with the compiled
+               ;; resolution AND the real candidate bundle
+               ;; (promote!/rollback! consume :candidate/root — it is the
+               ;; only source of program bytes for the SCI red-light gate,
+               ;; since the CAS holds the Genome index body, not source);
+               ;; a :derive would try to compile the genomes dir as a
+               ;; bundle at host init. This component value is a
+               ;; placeholder — no CLI command reads it.
                :event/session-id :derive}
                ;; post-v0 extension 1: the models.dev catalog
                ;; (auto-refreshed at every startup, cached under the

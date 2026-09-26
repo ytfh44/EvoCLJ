@@ -149,6 +149,29 @@
   [cas-root s]
   (:artifact/id (put! cas-root s)))
 
+;; fixture-bundle-root/copy-tree!/genome-index-bytes are defined at the
+;; bottom of this file; forward-declared so the promotion fixtures below
+;; can build a REAL candidate bundle.
+(declare fixture-bundle-root copy-tree! genome-index-bytes)
+
+(defn- real-candidate-bundle!
+  "Materialize a real on-disk Genome bundle (a copy of the minimal-valid
+  fixture), store its canonical CAS body under its own content address,
+  and return {:genome-id <address> :root <bundle dir>}.
+
+  A promotion's SCI red-light gate reads program sources from the
+  BUNDLE, not from the CAS: the CAS holds the Genome index body (path
+  NUL digest LF lines) which contains no Clojure at all, so a
+  promote! over a text-only CAS 'genome' could never be scanned."
+  [cas-root]
+  (let [root (copy-tree! (fixture-bundle-root))
+        loaded (load/load-genome root)
+        genome-id (:artifact/id (put! cas-root (genome-index-bytes loaded)))]
+    (when-not (= genome-id (:genome/id loaded))
+      (throw (ex-info "candidate genome body does not match its identity"
+                      {:stored genome-id :loaded (:genome/id loaded)})))
+    {:genome-id genome-id :root root}))
+
 (defn- proof [id]
   (#'existence/unsafe-verified-digest id))
 
@@ -621,7 +644,8 @@
         _ (seed-generation! db g1-id)
         stores {:sqlite db :cas cas}
         candidate-store-handle (candidate-store/make-candidate-store db)
-        cand-genome (put-genome! root "candidate genome body")
+        cand-bundle (real-candidate-bundle! root)
+        cand-genome (:genome-id cand-bundle)
         _ (sqlite/with-db [conn db]
             (doseq [artifact-id [cand-genome evidence-id]]
               (jdbc/execute!
@@ -679,6 +703,7 @@
             e (tx-error #(promote/promote!
                           {:store stores
                            :resolution/id new-resolution
+                           :candidate/root (:root cand-bundle)
                            :event/session-id op-sid}
                           {:candidate-id (:candidate/id c)
                            :evaluation-id (random-uuid)
@@ -714,9 +739,13 @@
   artifacts (so recovery's Invariant-7 current-generation check passes
   and promote!'s verify-genome-integrity! succeeds): a CURRENT seed
   generation, an EVALUATED candidate with a FINALIZED eligible
-  evaluation, and an operator session. Returns {:db :cas
-  :seed-genome-id :candidate/id :evaluation/id :candidate/genome-id
-  :event/session-id}."
+  evaluation, and an operator session. The candidate's Genome is a REAL
+  on-disk bundle whose canonical index body is what the CAS stores:
+  promote!'s SCI red-light gate reads program sources from the bundle
+  (:candidate/root, required by the promotion contract) because the CAS
+  body is an index of paths and digests with no Clojure in it. Returns
+  {:db :cas :seed-genome-id :candidate/id :evaluation/id
+  :candidate/genome-id :candidate/root :event/session-id}."
   []
   (let [db (fresh-db)
         root (temp-cas-root)
@@ -725,7 +754,8 @@
         _ (seed-generation! db seed-genome-id)
         candidate-id (random-uuid)
         evaluation-id (random-uuid)
-        cand-genome-id (put-genome! root "candidate genome body")
+        cand-bundle (real-candidate-bundle! root)
+        cand-genome-id (:genome-id cand-bundle)
         sid (operator-session! db seed-genome-id)]
     (sqlite/with-db [conn db]
       (doseq [artifact-id [cand-genome-id evidence-id new-resolution]]
@@ -769,12 +799,14 @@
      :candidate/id candidate-id
      :evaluation/id evaluation-id
      :candidate/genome-id cand-genome-id
+     :candidate/root (:root cand-bundle)
      :event/session-id sid}))
 
 (defn- promotion-system
   [fx]
   {:store {:sqlite (:db fx) :cas (:cas fx)}
    :resolution/id new-resolution
+   :candidate/root (:candidate/root fx)
    :event/session-id (:event/session-id fx)})
 
 (defn- promote-request

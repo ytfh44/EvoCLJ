@@ -167,7 +167,8 @@
                                 host owns that wiring).
     :evaluator                — evaluator map for `evaluate-candidate!`.
     :promotion-system         — promotion-system map for `promote!` (carries
-                                :store, :resolution/id, :event/session-id).
+                                :store, :resolution/id, :candidate/root,
+                                :event/session-id).
     :profile-id               — evaluation profile id keyword (default
                                 :default-v1).
     :current-generation-id    — (fn [] -> <gen-id str> | nil) reads the
@@ -209,6 +210,10 @@
       to its parent). promote! reads :resolution/id and :candidate/root
       from the system, so one shared value would mis-promote the second
       and later candidates; a per-candidate factory is a ctx change.
+      Since :candidate/root became REQUIRED, that mis-promotion now fails
+      LOUDLY (:promotion/genome-mismatch — the bundle's Genome id does
+      not match the candidate's) rather than silently scanning another
+      candidate's sources; the per-candidate factory is still the fix.
     - PROPOSE — the runner always proposes; cycle! proposes only under
       --evolve or when no :evaluation-pending candidate exists (no ctx
       knob models that).

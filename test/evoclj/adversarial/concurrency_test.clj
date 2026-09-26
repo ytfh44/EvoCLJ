@@ -99,6 +99,8 @@
             [evoclj.eval.static :as static]
             [evoclj.evolution.candidate :as candidate]
             [evoclj.genome.hash :as hash]
+            [evoclj.genome.load :as load]
+            [evoclj.genome.path :as gpath]
             [evoclj.provider.protocol :as proto]
             [evoclj.promotion.promote :as promote]
             [evoclj.promotion.rollback :as rollback]
@@ -314,16 +316,49 @@
    :evidence/id evidence-id
    :risk :behavioral})
 
+(defn- genome-index-body
+  "The canonical CAS body of a loaded Genome — path NUL digest LF per
+  entry, bytewise path-sorted. Contains no Clojure source."
+  [loaded]
+  (apply str
+         (map (fn [[p {:keys [digest]}]]
+                (str p "\u0000" digest "\n"))
+              (sort-by (fn [[p _]] p) gpath/bytewise-compare (:files loaded)))))
+
+(def ^:private candidate-roots
+  "atom {candidate genome-id -> on-disk bundle root} so a promotion can
+  carry the :candidate/root the promotion contract requires."
+  (atom {}))
+
+;; bundle!/route-source are defined further down with the other Genome
+;; fixture helpers; forward-declared so the CAS-body fixture below can
+;; build a real bundle.
+(declare bundle!)
+
 (defn- store-candidate-body!
-  "Store a candidate Genome body in the CAS under its own content
-  address and return that address (Database Invariant 7: activation
-  re-hashes the body against this id)."
-  [cas-store n]
-  (:artifact/id
-   (cas/put-bytes! cas-store
-                   (.getBytes (str "candidate-genome-body-" n)
-                              StandardCharsets/UTF_8)
-                   {})))
+  "Materialize a REAL candidate Genome bundle, store its canonical CAS
+  body (path NUL digest LF index lines) under its own content address,
+  and return {:genome-id <address> :root <bundle dir>}.
+
+  `label` makes each candidate's route source distinct, so siblings get
+  distinct genome ids. The bundle — not the CAS body — is the SCI gate's
+  input: the CAS holds an index of paths and digests, with no Clojure in
+  it, so scanning CAS bytes could never trip the red light."
+  [cas-store label]
+  ;; the label rides on its OWN line: bundle! emits the transform body
+  ;; inline, so a trailing ";;" comment would swallow its closing paren
+  (let [root (bundle! (str "text\n;; candidate " label "\n"))
+        loaded (load/load-genome root)
+        genome-id (:artifact/id
+                   (cas/put-bytes! cas-store
+                                   (.getBytes (genome-index-body loaded)
+                                              StandardCharsets/UTF_8)
+                                   {}))]
+    (when-not (= genome-id (:genome/id loaded))
+      (throw (ex-info "candidate genome body does not match its identity"
+                      {:stored genome-id :loaded (:genome/id loaded)})))
+    (swap! candidate-roots assoc genome-id root)
+    {:genome-id genome-id :root root}))
 
 (defn- proof
   "Create the explicit test-only proof required by the CandidateStore
@@ -338,7 +373,8 @@
   Candidate record."
   ([store n] (materialize-and-pend! store seed-generation-id parent-genome-id n))
   ([store parent-generation-id parent-genome-id n]
-   (let [candidate-genome-id (store-candidate-body! (:cas store) n)
+   (let [body (store-candidate-body! (:cas store) (str n "-" parent-generation-id))
+         candidate-genome-id (:genome-id body)
          _ (artifact/ensure-artifact! (:sqlite store) candidate-genome-id
                                       "application/octet-stream" 0)
          _ (artifact/ensure-genome! (:sqlite store) candidate-genome-id)
@@ -354,7 +390,8 @@
              (-> m
                  (update :parent/genome-id proof)
                  (update :evidence/id proof)))]
-     (candidate/mark-evaluation-pending! handle (:candidate/id m1)))))
+     (assoc (candidate/mark-evaluation-pending! handle (:candidate/id m1))
+            :candidate/root (:root body)))))
 
 (defn- finalize-eligible!
   "Finalize one candidate's evaluation (the eval/core persist-finalized!
@@ -399,7 +436,7 @@
   racing candidate is a sibling OF THE PROMOTED CHILD, not of the
   seed (the setup promotion's CURRENT pointer and the candidate's
   lineage must agree, else promote! is stale by construction).
-  Returns {:candidate-id :evaluation-id :genome-id
+  Returns {:candidate-id :evaluation-id :genome-id :candidate/root
   :expected-generation-id}."
   ([world n] (eligible-sibling! world seed-generation-id parent-genome-id n))
   ([world parent-generation-id parent-genome-id n]
@@ -409,6 +446,7 @@
      {:candidate-id (:candidate-id finalized)
       :evaluation-id (:evaluation-id finalized)
       :genome-id (:candidate/genome-id pending)
+      :candidate/root (:candidate/root pending)
       :expected-generation-id (expected-generation-id
                                (:candidate/genome-id pending))})))
 
@@ -440,12 +478,15 @@
     sid))
 
 (defn- promotion-system
-  "The component/9.5 promotion-system contract. `failpoint` is the
+  "The component/9.5 promotion-system contract. `candidate-root` is the
+  candidate's real on-disk bundle — REQUIRED, because it is the only
+  source of program bytes for the SCI red-light gate. `failpoint` is the
   optional test seam: called inside the transaction after every write,
   immediately before the CURRENT CAS."
-  [world & [failpoint]]
+  [world candidate-root & [failpoint]]
   (cond-> {:store {:sqlite (:db world) :cas (:cas world)}
            :resolution/id resolution-id
+           :candidate/root candidate-root
            :event/session-id (operator-session! (:db world))}
     failpoint (assoc :failpoint failpoint)))
 
@@ -743,15 +784,16 @@
             db (:db world)
             a (eligible-sibling! world 1)
             b (eligible-sibling! world 2)
-            sys (promotion-system world)]
+            sys-a (promotion-system world (:candidate/root a))
+            sys-b (promotion-system world (:candidate/root b))]
         (let [{:keys [winner loser]}
               (run-promote-race!
-               world sys {:candidate-id (:candidate-id a)
-                          :evaluation-id (:evaluation-id a)
-                          :expected-parent-generation seed-generation-id}
-               sys {:candidate-id (:candidate-id b)
-                    :evaluation-id (:evaluation-id b)
-                    :expected-parent-generation seed-generation-id})]
+               world sys-a {:candidate-id (:candidate-id a)
+                            :evaluation-id (:evaluation-id a)
+                            :expected-parent-generation seed-generation-id}
+               sys-b {:candidate-id (:candidate-id b)
+                      :evaluation-id (:evaluation-id b)
+                      :expected-parent-generation seed-generation-id})]
           (is (nil? (:race/error winner)) (str "winner clean at iteration " i))
           (is (nil? (:race/error loser)) (str "loser clean at iteration " i))
           (assert-one-winner db winner loser a b))))))
@@ -766,7 +808,7 @@
       (let [world (fresh-world)
             db (:db world)
             a (eligible-sibling! world 1)
-            sys (promotion-system world)
+            sys (promotion-system world (:candidate/root a))
             request {:candidate-id (:candidate-id a)
                      :evaluation-id (:evaluation-id a)
                      :expected-parent-generation seed-generation-id}
@@ -795,7 +837,7 @@
   (let [world (fresh-world)
         db (:db world)
         a (eligible-sibling! world 1)
-        sys (promotion-system world)
+        sys (promotion-system world (:candidate/root a))
         result (promote/promote! sys
                                  {:candidate-id (:candidate-id a)
                                   :evaluation-id (:evaluation-id a)
@@ -817,8 +859,9 @@
             release (CountDownLatch. 1)
             promote-sys (promotion-system
                          world
+                         (:candidate/root candidate)
                          (fn [] (.countDown parked) (.await release)))
-            rollback-sys (promotion-system world)
+            rollback-sys (promotion-system world (:candidate/root candidate))
             t-p (run-thread
                  #(promote/promote!
                    promote-sys
@@ -863,8 +906,9 @@
             release (CountDownLatch. 1)
             rollback-sys (promotion-system
                           world
+                          (:candidate/root candidate)
                           (fn [] (.countDown parked) (.await release)))
-            promote-sys (promotion-system world)
+            promote-sys (promotion-system world (:candidate/root candidate))
             t-r (run-thread
                  #(rollback/rollback!
                    rollback-sys
@@ -942,6 +986,7 @@
             read-done (CountDownLatch. 4)
             promote-sys (promotion-system
                          world
+                         (:candidate/root a)
                          (fn [] (.countDown parked) (.await release)))
             t-p (run-thread
                  #(promote/promote!
@@ -1012,7 +1057,7 @@
                   start (CountDownLatch. 1)
                   (fn []
                     (promote/promote!
-                     (promotion-system world)
+                     (promotion-system world (:candidate/root a))
                      {:candidate-id (:candidate-id a)
                       :evaluation-id (:evaluation-id a)
                       :expected-parent-generation seed-generation-id}))))

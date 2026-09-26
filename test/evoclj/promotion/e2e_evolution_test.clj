@@ -856,17 +856,21 @@
                         without corrupting the winning branch"
                 (let [op-session-a (create-pinned-session! db g1-compiled generation-id)
                       op-session-c (create-pinned-session! db g1-compiled generation-id)
+                      g2-candidate-root (candidate-bundle-root
+                                          candidates-dir
+                                          (:candidate/genome-id g2))
+                      g2c-candidate-root (candidate-bundle-root
+                                          candidates-dir
+                                          (:candidate/genome-id g2c))
                       g2-resolution (:code/resolution-id
                                      (compiler/compile-genome
-                                      (assoc (load/load-genome
-                                              (candidate-bundle-root
-                                               candidates-dir
-                                               (:candidate/genome-id g2)))
+                                      (assoc (load/load-genome g2-candidate-root)
                                              :programs [(route-descriptor)])
                                       (fixture-catalog)))
                       promote-result (promote/promote!
                                       {:store store
                                        :resolution/id g2-resolution
+                                       :candidate/root g2-candidate-root
                                        :event/session-id op-session-a}
                                       {:candidate-id (:candidate/id g2)
                                        :evaluation-id (:evaluation/id eval-a)
@@ -875,6 +879,7 @@
                       stale-result (promote/promote!
                                     {:store store
                                      :resolution/id g2-resolution
+                                     :candidate/root g2c-candidate-root
                                      :event/session-id op-session-c}
                                     {:candidate-id (:candidate/id g2c)
                                      :evaluation-id (:evaluation/id eval-c)
