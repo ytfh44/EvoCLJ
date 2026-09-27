@@ -17,7 +17,9 @@
 ;;     1  at least one check fails (missing W, refinement mismatch, invariants inconsistent)
 ;;     2  usage or environment error
 ;;
-;; Lexical rules (checked by evoclj.support.verify-forms-test):
+;; Lexical rules (all enforced by THIS script; there is no
+;; evoclj.support.verify-forms-test — an earlier version of this header
+;; claimed one, and no such namespace has ever existed under test/):
 ;;   - W tokens are `[W-##]` with two digits, 01..32 inclusive
 ;;   - Tokens are counted distinct across all formal docs (perm+subagent+async+README)
 ;;   - Refinement checks are keyword-anchored (case-insensitive) so prose changes
