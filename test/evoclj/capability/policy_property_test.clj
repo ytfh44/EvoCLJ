@@ -27,7 +27,18 @@
   mirrors evoclj.capability.schema/CapabilityLeaseSchema (closed map,
   positive window, EDN-safe values), and the request is sometimes
   coupled to a random lease so allow cases are exercised often — so
-  decide never throws :capability/schema-invalid inside a property."
+  decide never throws :capability/schema-invalid inside a property.
+
+  NOTE ON THE GENERATED LEASE MAPS: these properties feed plain lease maps
+  straight to policy/decide, and they deliberately do NOT go through
+  schema/make-lease. The per-kind action vocabulary is enforced at ISSUANCE
+  (make-lease) and at the broker's request gate (broker/authorize) — not in
+  decide, which is a pure decision over data it is handed. So action-pool /
+  actions-pool legitimately contain combinations (e.g. #{:invoke} on a
+  :memory resource) that make-lease would reject. Do not \"fix\" these
+  generators to satisfy the minting gate: doing so would narrow what decide is
+  being tested against. The minting gate has its own coverage
+  (evoclj.capability.effects-test, evoclj.capability.grant-property-test)."
   (:require [clojure.test.check :as tc]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]

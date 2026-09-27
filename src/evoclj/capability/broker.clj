@@ -65,8 +65,7 @@
   :capability/schema-invalid (or :intent/schema-invalid for a malformed
   intent), because garbage never authorizes and never hides a caller
   bug."
-  (:require [clojure.set :as set]
-            [evoclj.capability.mint :as cap-mint]
+  (:require [evoclj.capability.mint :as cap-mint]
             [evoclj.capability.policy :as policy]
             [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.semantic :as semantic]
@@ -182,10 +181,19 @@
         (if-let [t (first remaining)]
           (let [res (resolve-target-resource t normalized-request)
                 act (resolve-target-action t normalized-request intent)
-                ;; P6: fail-closed for unknown / non-allowlisted actions (C1: descriptor registry)
+                ;; P6: fail-closed for unknown / non-allowlisted actions (C1: descriptor
+                ;; registry). The allowlist is the REQUEST KIND's own vocabulary, not
+                ;; the union over all kinds: :read is a filesystem action, so a memory
+                ;; request carrying it is an unknown action for :memory, not merely an
+                ;; action some other kind happens to express. kind is bound at the call
+                ;; site and the loop body only runs for a registered kind, but the
+                ;; `or #{}` keeps the predicate fail-closed regardless.
                 unknown-action? (or (nil? act)
                                    (not (keyword? act))
-                                   (not (contains? (apply set/union (vals (rk/allowed-actions-by-kind))) act)))
+                                   (not (contains? (or (some-> (rk/get-descriptor kind)
+                                                              rk/allowed-actions)
+                                                       #{})
+                                                   act)))
                 all-leases (or leases [])
                 semantic-leases (if (:required? semantic)
                                   (semantic-compatible-leases all-leases (:spec semantic))

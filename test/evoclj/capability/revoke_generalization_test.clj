@@ -196,7 +196,7 @@
           fs-lease (fs/issue-fs-lease fs-reg {:principal subject-a :mount-id mount-id :path "" :actions #{:read} :issued-at issued-at :expires-at expires-at})
           model-id "deepseek/deepseek-v4-flash"
           model-lease (mint/mint-lease! model-reg {:principal subject-a :resource {:kind :model :id model-id} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})
-          mem-lease (mint/mint-lease! tool-reg {:principal subject-a :resource {:kind :memory :id :mem/key} :actions #{:invoke} :issued-at issued-at :expires-at expires-at})]
+          mem-lease (mint/mint-lease! tool-reg {:principal subject-a :resource {:kind :memory :id :mem/key} :actions #{:read} :issued-at issued-at :expires-at expires-at})]
       (is (= :allow (:decision (broker/authorize {:intent (tool-intent session-a phenotype-p1 :fixture/echo)
                                                   :normalized-request (tool-normalized :fixture/echo)
                                                   :leases [tool-lease]

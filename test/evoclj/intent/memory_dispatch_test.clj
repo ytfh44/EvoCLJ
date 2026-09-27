@@ -60,7 +60,7 @@
      ;; exactly — the intent below runs as session 00000000-...-0000000000dd.
      :principal {:principal/type :session :session/id #uuid "00000000-0000-0000-0000-0000000000dd"}
      :resource {:kind :memory :id :note}
-     :actions #{:invoke}
+     :actions #{:read :write}
      :constraints {:max-calls 100}
      :issued-at now
      :expires-at (Date. (+ (.getTime now) 60000))}))

@@ -159,3 +159,61 @@
       (is (= :ok (:result/status res)) (str "dispatch ok: " (pr-str res)))
       (is (= 1 (count caps)) "tool-level request narrows to one child lease")
       (is (= #{:fixture/echo} (child-tool-ids caps))))))
+
+(defn- fs-lease [session-id resource]
+  (mint/mint-lease! nil {:principal {:principal/type :session :session/id session-id}
+                         :resource resource
+                         :actions #{:read}
+                         :constraints {}
+                         :issued-at issued-at
+                         :expires-at expires-at}))
+
+(deftest filesystem-hint-narrows-in-the-parent-fiber
+  (testing "a `filesystem:<path>` hint narrows a mount-scoped parent lease and
+            keeps the parent's :mount/id (the hint is re-fibered, not dropped)"
+    (let [db (fresh-db)
+          parent (create-parent-session! db)
+          parent-id (:session/id parent)
+          pl (fs-lease parent-id {:kind :filesystem/path
+                                  :mount/id [:skill "d"] :path ""})
+          res (subagent/spawn-subagent! db parent-id
+                                        {:task "needs the references dir"
+                                         :capabilities ["filesystem:references"]}
+                                        [pl])
+          caps (:child/capabilities res)]
+      (is (= 1 (count caps))
+          "the filesystem hint yields exactly one child lease, not zero")
+      (is (= {:kind :filesystem/path :path "references" :mount/id [:skill "d"]}
+             (:resource (first caps)))
+          "the child keeps the parent's fiber and narrows to the hinted path")
+      (is (schema/lease? (first caps)))))
+  (testing "a hint outside the parent's scope meets nothing and is dropped"
+    (let [db (fresh-db)
+          parent (create-parent-session! db)
+          parent-id (:session/id parent)
+          pl (fs-lease parent-id {:kind :filesystem/path
+                                  :mount/id [:skill "d"] :path "references"})
+          res (subagent/spawn-subagent! db parent-id
+                                        {:task "sibling dir, not the granted one"
+                                         :capabilities ["filesystem:sibling"]}
+                                        [pl])]
+      (is (empty? (:child/capabilities res))
+          "a hint the parent does not cover is dropped fail-closed"))))
+
+(deftest filesystem-hint-against-non-mount-parent-does-not-mint-mount-scope
+  (testing "a host-absolute parent stays host-absolute — the hint is never
+            re-fibered into a mount scope the parent does not have"
+    (let [db (fresh-db)
+          parent (create-parent-session! db)
+          parent-id (:session/id parent)
+          pl (fs-lease parent-id {:kind :filesystem :path "/"})
+          res (subagent/spawn-subagent! db parent-id
+                                        {:task "host path"
+                                         :capabilities ["filesystem:references"]}
+                                        [pl])
+          caps (:child/capabilities res)]
+      (is (= 1 (count caps)))
+      (is (= :filesystem (:kind (:resource (first caps))))
+          "the child stays a host-absolute filesystem grant")
+      (is (not (contains? (:resource (first caps)) :mount/id))
+          "no :mount/id is invented for a parent that has none"))))

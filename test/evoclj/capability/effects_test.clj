@@ -72,7 +72,8 @@
 (deftest granted-effects-come-from-lease-resource-and-action
   (let [grants [(lease {:kind :model :id "provider/model"} #{:invoke})
                 (lease {:kind :tool :id :fixture/echo} #{:invoke})
-                (lease {:kind :memory :id :session} #{:invoke})
+               (lease {:kind :memory :id :session} #{:read})
+               (lease {:kind :memory :id :session} #{:write})
                 (lease {:kind :filesystem :path "/tmp"} #{:read})]]
     (is (= #{:model/call :tool/call :memory/read :memory/write :filesystem/read}
            (capability/granted-effects grants)))))

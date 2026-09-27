@@ -211,10 +211,28 @@
       (throw (err/error :filesystem/path-invalid
                         "host object paths must be absolute strings"
                         {})))
+    ;; Lexical containment gate. `rp`/`gp` are lexical (Paths/get + normalize),
+    ;; so this bounds the NAMESPACE the request may name and cannot see
+    ;; links — that is the symlink check's job, and object identity is the
+    ;; resolution's. It must be an explicit gate: relativize throws across
+    ;; roots, and proven-host-escape? swallows that into "no escape proven",
+    ;; leaving containment to the `..`-rejecting tail check by accident.
     (when-not (.startsWith rp gp)
       (throw (err/error :filesystem/path-outside-mount
                         "request is lexically outside the grant"
                         {})))
+    ;; Complementary to the gate above, which cannot see a link:
+    ;; anchor-real-path `toRealPath`s the GRANT, following its own links, then
+    ;; relativizes the request against the lexical grant. A lease rooted at
+    ;; <work>/link (a link to <outside>) therefore escaped unnoticed. The
+    ;; mount-path discipline already rejects any link component
+    ;; (resolve-under-root!); the absolute path now obeys the same rule. Mount
+    ;; ROOTS are unaffected: they are validated symlink-free at construction,
+    ;; and following a root's own links is correct there.
+    (when (Files/isSymbolicLink gp)
+      (throw (err/error :filesystem/symlink-rejected
+                        "grant path is a symlink; links are never followed"
+                        {:path grant-abs})))
     (let [^Path anchor (anchor-real-path gp)
           tail (mapv str (iterator-seq (.iterator (.relativize gp rp))))
           res (resolve-under-root! anchor tail)]
@@ -222,6 +240,25 @@
        :grant-real anchor
        :request-real (:real res)
        :existed? (:existed? res)})))
+
+(defn grant-root-symlink?
+  "True when the ABSOLUTE grant path itself is a symlink. Realpath knowledge
+  lives here, in the namespace that owns it, so the resource descriptors can
+  AND this into their lexical cover decision without importing LinkOption.
+
+  Needed because `authorize-host-absolute!` resolves the grant with
+  `toRealPath`, which FOLLOWS the grant's own links: a lease rooted at
+  <work>/link (a link to <outside>) silently authorizes <outside>. The
+  strict object decision rejects it; the prefilter could not, because the
+  lexical startsWith gate never sees a link. Fail-closed on garbage
+  (non-string, relative, IO error) → false, which leaves the lexical
+  decision standing exactly as before."
+  [grant-abs]
+  (try
+    (if-let [^Path p (absolute-path grant-abs)]
+      (Files/isSymbolicLink p)
+      false)
+    (catch Exception _ false)))
 
 (defn proven-host-escape?
   "True ONLY when realpath evidence PROVES `request-abs` escapes `grant-abs`

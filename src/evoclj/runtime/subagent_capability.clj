@@ -92,16 +92,41 @@
   (or keep-spawn?
       (not= spawn-tool-id (:id (:resource parent-lease)))))
 
+(defn- refiber
+  "A bare `filesystem:<path>` hint names a host-absolute path, but the only
+  filesystem issuer mints a mount-scoped resource
+  ({:kind :filesystem/path :mount/id ...}), so the two kinds never matched and
+  narrow-one-parent silently produced zero child leases. Re-express the
+  request INSIDE the parent's fiber, so the meet stays in one fiber and the
+  result keeps the parent's :mount/id. Any other cross-kind request is left
+  alone and stays unmatchable — dropped fail-closed."
+  [parent-resource request]
+  (if (and (= :filesystem/path (:kind parent-resource))
+           (contains? parent-resource :mount/id)
+           (= :filesystem (:kind request)))
+    {:kind :filesystem/path
+     :mount/id (:mount/id parent-resource)
+     :path (:path request)}
+    request))
+
 (defn- narrow-one-parent
   "Apply the child-grant = parent-grant ⊓ request algebra to one parent.
   With no requests, returns [identity child lease]. With requests, returns
-  one child lease per non-nil meet (or [] when every meet is nil)."
+  one child lease per non-nil meet (or [] when every meet is nil).
+  Candidates are re-fibered into the parent's fiber first (see `refiber`),
+  then kind-filtered, so a `filesystem:` hint narrows a mount-scoped parent
+  lease and is simply dropped when the parent is not mount-scoped."
   [db registry parent-lease child-principal requests]
   (if (empty? requests)
     [(mint/derive-lease! db registry parent-lease {:principal child-principal})]
-    (let [cands (filter #(= (:kind (:resource parent-lease))
-                            (:kind (:resource %)))
-                        requests)]
+    (let [cands (into []
+                    (comp (map (fn [req]
+                                 (assoc req :resource
+                                        (refiber (:resource parent-lease)
+                                                (:resource req)))))
+                          (filter #(= (:kind (:resource parent-lease))
+                                      (:kind (:resource %)))))
+                    requests)]
       (into []
             (keep (fn [request]
                     (when-let [g (grant/meet {:resource (:resource parent-lease)
@@ -120,6 +145,14 @@
   Algebra: child = parent ⊓ request, one lease per non-nil meet (grant/meet).
   With no parsable request, the child is the parent itself (identity).
   Disjoint parents (no non-nil meet against any request) produce nothing.
+
+  A `filesystem:<path>` hint is interpreted MOUNT-RELATIVE when the parent
+  lease is mount-scoped (:kind :filesystem/path with a :mount/id) — the hint
+  is re-fibered into the parent's mount namespace, so it narrows to
+  {:kind :filesystem/path :mount/id <parent's> :path <path>}. When the parent
+  is not mount-scoped the hint stays host-absolute and the two live in
+  different fibers, so their meet is bottom and the hint is dropped.
+
   The spawn right is denied by default unless the model explicitly requested it."
   [db registry parent-leases child-spec child-principal]
   (let [requests (capability-requests child-spec)

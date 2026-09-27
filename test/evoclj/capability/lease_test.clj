@@ -9,9 +9,13 @@
   filesystem canonical, Step 4 schema closed shape requires :principal, Step 5 model."
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
+            [evoclj.capability.broker :as broker]
+            [evoclj.capability.grant :as grant]
             [evoclj.capability.lease :as lease]
+            [evoclj.capability.mint :as mint]
             [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.schema :as schema]
+            [evoclj.intent.core :as intent]
             [evoclj.kernel.error :as err]))
 
 ;; --- shared fixtures -------------------------------------------------------
@@ -241,3 +245,166 @@
                                      {:kind :model :id "deepseek/deepseek-v4-flash"}
                                      :invoke))
         "a tool lease never covers a model resource")))
+
+;; --- sealed leases are VALUES ---------------------------------------------
+;; A sealed CapabilityLease must compare and hash by CONTENT. Without
+;; equiv/hashCode, `=` fell back to Object identity — `(= l1 l2)` threw
+;; AbstractMethodError from the abstract IPersistentMap.equiv — and a lease
+;; could not be a set member or a map key, though leases are collected in sets
+;; and compared by callers. These go through make-lease (sealed), not through
+;; the plain-map fixture above.
+(deftest sealed-leases-are-values
+  (let [sealed (fn [& kvs]
+                 (schema/make-lease
+                  (merge {:cap/id (random-uuid)
+                          :principal principal-a
+                          :resource {:kind :filesystem :path "/work"}
+                          :actions #{:read}
+                          :constraints {}
+                          :issued-at issued-at
+                          :expires-at expires-at}
+                         (apply hash-map kvs))))
+        l1 (sealed)
+        l2 (sealed)
+        narrower (sealed :resource {:kind :filesystem :path "/work/secret"})]
+    (testing "sealed leases really are sealed"
+      (is (schema/lease? l1)))
+    (testing "= on two leases answers instead of throwing"
+      (is (false? (= l1 l2)))
+      (is (false? (= l1 narrower)))
+      (is (true? (= l1 l1))))
+    (testing "distinct leases are distinct set members (not one)"
+      (is (= 2 (count #{l1 l2})))
+      (is (= 2 (count #{l1 narrower}))))
+    (testing "content-equal leases collapse to one set member and one hash"
+      (let [twin (sealed :cap/id (:cap/id l1))]
+        (is (true? (= l1 twin)))
+        (is (= (hash l1) (hash twin)))
+        (is (= 1 (count (conj #{l1} twin))))))
+    (testing "a lease works as a map key"
+      (is (= :found (get {l1 :found} l1))))
+    (testing "value semantics do not unseal the lease"
+      (is (thrown? UnsupportedOperationException (assoc l1 :x 1))))))
+
+(deftest grant-covers-accepts-a-sealed-lease
+  (testing "covers? called directly on two sealed leases answers the same as
+            on their lease->map projections — a sealed lease is neither a Grant
+            nor a map, so before ->grant learned leases it silently answered
+            false, indistinguishable from a real scope denial"
+    (let [wide (schema/make-lease {:cap/id (random-uuid)
+                                   :principal principal-a
+                                   :resource {:kind :filesystem :path "/work"}
+                                   :actions #{:read}
+                                   :constraints {}
+                                   :issued-at issued-at
+                                   :expires-at expires-at})
+          narrow (schema/make-lease {:cap/id (random-uuid)
+                                    :principal principal-a
+                                    :resource {:kind :filesystem :path "/work/secret"}
+                                    :actions #{:read}
+                                    :constraints {}
+                                    :issued-at issued-at
+                                    :expires-at expires-at})]
+      (is (true? (grant/covers? wide narrow)))
+      (is (false? (grant/covers? narrow wide)))
+      (is (= (grant/covers? wide narrow)
+             (grant/covers? (schema/lease->map wide) (schema/lease->map narrow)))))))
+
+;; --- canonicalization NORMALIZES, it does not TRUNCATE ---------------------
+;; Every resource schema is `{:closed false}` — an OPEN map — and a lease's
+;; :resource may carry authorization annotations that are not resource
+;; identity. policy/coarse-granted? reads [:resource :mcp/allow-coarse-invoke]
+;; and broker/semantic-grant reads [:resource :semantic/spec]. The descriptors
+;; used to canonicalize by `select-keys` to their identity keys, so once
+;; schema/make-lease started calling rk/canonicalize-resource (the single
+;; minting choke point, INV-05) BOTH markers were stripped at issuance: a
+;; lease that opted into the coarse MCP scope became byte-identical to one
+;; that never did, and the opt-in was dead for every minted lease. These go
+;; through the REAL minting surface (mint/mint-lease!), not schema/make-lease
+;; directly, because that is the path production takes.
+(def ^:private coarse-code-id
+  "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+
+(defn- mint-tool-lease
+  "Mint a sealed :tool lease through the production minting surface, with
+  `resource` supplied verbatim so an open-map annotation can ride along."
+  [resource]
+  (mint/mint-lease! nil {:principal principal-a
+                         :resource resource
+                         :actions #{:invoke}
+                         :constraints {:max-calls 10}
+                         :issued-at issued-at
+                         :expires-at expires-at}))
+
+(defn- fallback-authorize
+  "Authorize a coarse whole-tool :invoke-fallback request for :fixture/echo
+  against `lease`, through the real broker."
+  [lease]
+  (broker/authorize
+   {:intent (intent/tool-call session-a coarse-code-id :node/tool 42
+                               {:tool/id :fixture/echo :args {:text "hi"}}
+                               {:wall-ms 1000})
+    :normalized-request {:resource {:kind :tool
+                                    :id :fixture/echo
+                                    :action :invoke
+                                    :mcp/remote-effect :invoke
+                                    :mcp/classification :invoke-fallback}}
+    :leases [lease]
+    :now (java.util.Date. 1700001800000)}))
+
+(deftest minting-preserves-open-map-authorization-annotations
+  (testing "the coarse opt-in survives minting"
+    (let [lease (mint-tool-lease {:kind :tool
+                                  :id :fixture/echo
+                                  :mcp/allow-coarse-invoke true})]
+      (is (schema/lease? lease))
+      (is (true? (get-in lease [:resource :mcp/allow-coarse-invoke])))
+      (is (= {:kind :tool :id :fixture/echo :mcp/allow-coarse-invoke true}
+             (:resource lease)))))
+  (testing ":semantic/spec survives minting"
+    (let [spec {:semantic/effect :read :semantic/annotation :fs/read}
+          lease (mint-tool-lease {:kind :tool
+                                  :id :fixture/echo
+                                  :semantic/spec spec
+                                  :semantic/digest "sha256:deadbeef"})]
+      (is (= spec (get-in lease [:resource :semantic/spec])))
+      (is (= "sha256:deadbeef" (get-in lease [:resource :semantic/digest])))))
+  (testing "identity keys are still canonicalized, annotations are not invented"
+    (let [lease (mint-tool-lease {:kind :tool :id :fixture/echo :some/annotation :kept})]
+      (is (= {:kind :tool :id :fixture/echo :some/annotation :kept}
+             (:resource lease))))))
+
+(deftest minted-coarse-opt-in-is-live-at-the-broker
+  (testing "a fallback-classified request authorizes against a minted opted-in
+            lease and denies against a minted plain lease with the same tool id
+            — before the fix both answered :capability/coarse-invoke-denied,
+            because minting stripped the marker"
+    (let [opt-in (mint-tool-lease {:kind :tool
+                                   :id :fixture/echo
+                                   :mcp/allow-coarse-invoke true})
+          plain (mint-tool-lease {:kind :tool :id :fixture/echo})
+          allowed (fallback-authorize opt-in)
+          denied (fallback-authorize plain)]
+      (is (= :allow (:decision allowed)))
+      (is (= :invoke-fallback (:mcp/classification allowed))
+          "the allow echoes the request provenance for the effect journal")
+      (is (= :deny (:decision denied)))
+      (is (= :capability/coarse-invoke-denied (:reason denied))))))
+
+(deftest descriptor-canonicalize-carries-open-map-keys
+  (testing "each built-in descriptor normalizes identity and preserves every
+            other key of the open map, and still returns nil for a non-map"
+    (doseq [[kind annotated canonical]
+            [[:tool {:kind :tool :id :t :mcp/allow-coarse-invoke true}
+              {:kind :tool :id :t :mcp/allow-coarse-invoke true}]
+             [:memory {:kind :memory :id :m :semantic/spec {:a 1}}
+              {:kind :memory :id :m :semantic/spec {:a 1}}]
+             [:model {:kind :model :id "a/*" :semantic/spec {:a 1}}
+              {:kind :model :id "a/*" :semantic/spec {:a 1}}]
+             [:filesystem {:kind :filesystem :path "/w/../w/x" :mcp/allow-coarse-invoke true}
+              {:kind :filesystem :path "/w/x" :mcp/allow-coarse-invoke true}]
+             [:filesystem/path {:kind :filesystem/path :mount/id [:skill "d"] :path "a/./b" :semantic/spec {:a 1}}
+              {:kind :filesystem/path :mount/id [:skill "d"] :path "a/b" :semantic/spec {:a 1}}]]]
+      (testing (str kind)
+        (is (= canonical (rk/canonicalize-resource annotated)))
+        (is (nil? (rk/canonicalize (rk/get-descriptor kind) 42)))))))

@@ -127,7 +127,7 @@
           memory-lease {:cap/id (random-uuid)
                         :principal {:principal/type :session :session/id sid}
                         :resource {:kind :memory :id :note}
-                        :actions #{:invoke}
+                        :actions #{:read :write}
                         :constraints {:max-calls 100}
                         :issued-at now
                         :expires-at (Date. (+ (.getTime now) 60000))}

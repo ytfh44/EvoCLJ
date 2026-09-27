@@ -143,7 +143,9 @@ h)
 (defn lease-effects
   "The effect set a lease grants (derived from resource kind + action).
   Tool leases grant :tool/call; model leases grant :model/call; filesystem
-  leases grant filesystem effects per action."
+  leases grant filesystem effects per action. Memory leases split per action
+  (INV-07): a :read lease grants only :memory/read, a :write lease only
+  :memory/write — a read capability never implies the destructive write."
   [lease]
   (lease-schema/validate-lease lease)
   (let [kind (get-in lease [:resource :kind])
@@ -153,7 +155,11 @@ h)
       :model (when (contains? actions :invoke) #{:model/call})
       :filesystem (set (map (fn [a] (keyword "filesystem" (name a))) actions))
       :filesystem/path (set (map (fn [a] (keyword "filesystem" (name a))) actions))
-      :memory (when (contains? actions :invoke) #{:memory/read :memory/write})
+      :memory (set (keep (fn [a] (case a
+                                   :read :memory/read
+                                   :write :memory/write
+                                   nil))
+                        actions))
       :else #{})))
 (defn granted-effects
   "Union of effects granted by a collection of leases."

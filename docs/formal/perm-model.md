@@ -58,7 +58,7 @@ The on-wire projection is a closed EDN map (seven keys, no extension) validated 
 ```
 
 * **Open kind:** `resource.kind` is any keyword with a registered descriptor; the DB `CHECK IN (…)` was removed (`016-resource-edn.sql` stores `resource_edn TEXT` as `pr-str` of the canonical resource). Unknown kinds persist but the broker denies with `:capability/unknown-resource-kind` (fail-closed); the store never rejects an open kind.
-* **Per-kind semantics:** `tool` → `#{:invoke}`, `model` → `#{:invoke}`, `memory` → `#{:read :write}`, `filesystem` → `#{:read :list :stat :write :create :delete}`, `filesystem/path` → same with path-inside narrowing. New kinds register via `resource-kind/register!`; builtins are installed at load time.
+* **Per-kind semantics:** `tool` → `#{:invoke :read :write}`, `model` → `#{:invoke}`, `memory` → `#{:read :write}`, `filesystem` → `#{:invoke :read :list :stat :write :create :delete}`, `filesystem/path` → same with path-inside narrowing. New kinds register via `resource-kind/register!`; builtins are installed at load time. The vocabulary is enforced twice: at issuance, where `schema/make-lease` rejects a lease whose `:actions` is not a subset of its kind's `allowed-actions`, and at authorization, where the broker denies with `:capability/unknown-action` an action the request kind's own vocabulary cannot express.
 * **Canonicalize / covers? / meet:** each descriptor defines how a granted scope covers a requested scope (e.g. `filesystem/path` canonicalizes mounts and checks `path-inside?`) and how two scopes meet (greatest lower bound, e.g. path intersection). This is the Resource half of Grant meet.
 
 ### 1.4 Constraints — closed ConstraintDescriptor registry (C3)
@@ -132,8 +132,8 @@ P1 refinement: **DB is source of truth, memory LeaseRegistry is versioned cache*
 ```clojure
 (defrecord Grant [resource actions])
 ;; Grant = ResourceScope × ActionSet
-;; covers?    : Grant × Request → boolean  (resource-covers? ∧ action-set-covers?)
-;; attenuates?: Grant × Grant → boolean   (resource-attenuates? ∧ action-set-attenuates?)
+;; covers?    : Grant × Request → boolean  (rk/covers-resource? ∧ action-set-covers?)
+;; attenuates?: Grant × Grant → boolean   (resource-attenuates? ∧ requested actions ⊆ granted actions)
 ;; meet       : Grant × Grant → Grant?    (resource-meet × action-set-meet, fails when empty meet)
 ```
 
@@ -211,10 +211,10 @@ Authorization is intersection of two gates — both must pass. A read-only surfa
 
 Before P6 every capability folded to `:invoke`. After P6 each `resource.kind` has an explicit vocabulary via its descriptor:
 
-* `tool`        → `#{:invoke}`
+* `tool`        → `#{:invoke :read :write}`
 * `model`       → `#{:invoke}`
 * `memory`      → `#{:read :write}`
-* `filesystem`  → `#{:read :list :stat :write :create :delete}`
+* `filesystem`  → `#{:invoke :read :list :stat :write :create :delete}`
 * `filesystem/path` → same as filesystem (path-scoped narrowing via `path-inside?`)
 
 The broker decision (`broker.clj`) now dispatches via `ResourceKindDescriptor.allowed-actions`; an intent with wrong action for its resource is denied before lease lookup. An explicit `:intent` fallback remains for intents without a resource. New kinds register via `resource-kind/register!` (closed installation, modular definition — C1).

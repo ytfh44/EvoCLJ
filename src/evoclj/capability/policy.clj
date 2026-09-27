@@ -86,6 +86,7 @@
   (:require [evoclj.capability.constraint :as cstr]
             [evoclj.capability.grant :as grant]
             [evoclj.capability.lease :as lease]
+            [evoclj.capability.resource-kind :as rk]
             [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err]
             [malli.core :as m]))
@@ -104,22 +105,13 @@
 (def ^:private v0-actions
   {:intent/tool-call :invoke
    :intent/model-call :invoke
-   :intent/memory-read :invoke
-   :intent/memory-write :invoke})
+   ;; INV-07: memory read and write are distinct ResourceActions.
+   :intent/memory-read :read
+   :intent/memory-write :write})
 
 (defn intent-action
   [intent]
   (get v0-actions (:intent/type intent)))
-
-(defn resolve-target-action
-  [target normalized-request intent]
-  (let [kind (:kind (:resource normalized-request))]
-    (case (:source target)
-      :request (or (:action (:resource normalized-request))
-                   (:action normalized-request)
-                   (intent-action intent))
-      :tool (:action normalized-request)
-      :intent (intent-action intent))))
 
 ;; --- input gate ------------------------------------------------------------
 
@@ -210,15 +202,7 @@
     (not (grant/action-set-covers? (:actions lease) #{action}))
     [3 {:decision :deny :reason :capability/action-denied}]
 
-    (not (grant/resource-covers? (:resource lease) resource))
-    [4 {:decision :deny :reason :capability/scope-denied}]
-
-    ;; Fallback: full Grant covers? as single predicate (kept for completeness;
-    ;; the two checks above already partition its failure modes).
-    ;; If either dimension failed we already returned; this branch is unreachable
-    ;; but guards against future ActionSet/ResourceScope changes.
-    (not (grant/covers? {:resource (:resource lease) :actions (:actions lease)}
-                         {:resource resource :actions #{action}}))
+    (not (rk/covers-resource? (:resource lease) resource action))
     [4 {:decision :deny :reason :capability/scope-denied}]
 
     ;; Coarse whole-tool fallback (audit item 4): a fallback-classified

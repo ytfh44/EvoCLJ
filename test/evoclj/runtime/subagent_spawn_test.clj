@@ -145,7 +145,7 @@
     (let [db (fresh-db)
           parent (create-parent-session! db)
           parent-id (:session/id parent)
-          pl1 (parent-lease parent-id phenotype #{:invoke :read :list})
+          pl1 (parent-lease parent-id phenotype #{:invoke :read :write})
           pl2 (parent-lease parent-id phenotype #{:invoke})
           res (subagent/spawn-subagent! db parent-id {} [pl1 pl2])
           child-id (:child/session-id res)

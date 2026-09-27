@@ -12,7 +12,9 @@
             [evoclj.helpers :as h]
             [evoclj.mount.backend :as backend]
             [evoclj.mount.filesystem :as fs]
+            [evoclj.capability.grant :as grant]
             [evoclj.capability.resource-kind :as rk]
+            [evoclj.fs.resolve :as fsr]
             [evoclj.store.cas :as cas]
             [evoclj.fs.snapshot :as snap])
   (:import (java.nio.file Files LinkOption Path)
@@ -263,3 +265,106 @@
             (is (not (rk/covers-host-object? grant (str grant "/not/there-yet.txt"))))))))
       (finally
         (cleanup-link-tree! (.resolve grant-dir "link") grant-dir outside-dir)))))
+
+(deftest symlinked-grant-root-is-denied
+  (testing "a lease whose GRANT ROOT is itself a symlink never covers anything
+            under it — the root's own links are followed by toRealPath, so
+            checking only the request chain silently authorized the link target"
+    (let [work (h/temp-dir!)
+          outside (h/temp-dir!)]
+      (try
+        (h/write-text! outside "inside.txt" "secret")
+        (h/write-text! work "real.txt" "real")
+        (let [link (.resolve work "link")
+              kind (make-escape-link! outside link)]
+          (if (nil? kind)
+            (testing "link creation unavailable on this host; skipped" (is true))
+            (do
+              (testing "the symlinked grant root is recognized as a link"
+                (is (fsr/grant-root-symlink? (.toString link))))
+              (testing "a real directory grant root is not"
+                (is (not (fsr/grant-root-symlink? (.toString work)))))
+              (testing "covers? is FALSE for a request under a symlinked grant root"
+                (is (not (rk/covers-resource? {:kind :filesystem :path (.toString link)}
+                                              {:kind :filesystem :path (str link "/inside.txt")}
+                                              :read))))
+              (testing "grant/covers? (the production path) is FALSE as well"
+                (is (not (grant/covers?
+                          {:resource {:kind :filesystem :path (.toString link)} :actions #{:read}}
+                          {:resource {:kind :filesystem :path (str link "/inside.txt")}
+                           :actions #{:read}}))))
+              (testing "the bare :filesystem/path kind denies it as well"
+                (is (not (rk/covers-resource? {:kind :filesystem/path :path (.toString link)}
+                                              {:kind :filesystem/path :path (str link "/inside.txt")}
+                                              :read))))
+              (testing "the strict host-object decision denies it too"
+                (is (not (rk/covers-host-object? (.toString link) (str link "/inside.txt")))))
+              (testing "authorize-host-absolute! fails closed on a symlinked grant"
+                (is (= :filesystem/symlink-rejected
+                       (err-type #(fsr/authorize-host-absolute! (.toString link)
+                                                            (str link "/inside.txt"))))))
+              (testing "control: a real grant root still covers a real nested file
+                        and still denies a link in the request chain"
+                (is (rk/covers-resource? {:kind :filesystem :path (.toString work)}
+                                         {:kind :filesystem :path (str work "/real.txt")}
+                                         :read))
+                (is (not (rk/covers-resource? {:kind :filesystem :path (.toString work)}
+                                              {:kind :filesystem :path (str work "/link/inside.txt")}
+                                              :read)))))))
+        (finally
+          (cleanup-link-tree! (.resolve work "link") work outside)
+          (h/delete-recursively! work)
+          (h/delete-recursively! outside))))))
+
+(deftest lexically-outside-request-is-rejected-by-the-lexical-gate
+  (testing "authorize-host-absolute! bounds the namespace lexically BEFORE any
+            realpath work: a request sharing no path prefix with the grant is
+            denied outright. Containment must not be left to relativize +
+            canonical-segments! alone — a cross-drive request makes relativize
+            throw IllegalArgumentException, which proven-host-escape? catches
+            into \"no escape proven\" and falls through to the lexical answer"
+    (let [work (h/temp-dir!)
+          elsewhere (h/temp-dir!)]
+      (try
+        (h/write-text! work "real.txt" "real")
+        (h/write-text! elsewhere "secret.txt" "top-secret")
+        (let [grant-abs (str (.resolve work "grant"))]
+          (Files/createDirectories (.resolve work "grant")
+                                   (make-array FileAttribute 0))
+          (testing "a request outside the grant prefix is denied as path-outside-mount"
+            (is (= :filesystem/path-outside-mount
+                   (err-type #(fsr/authorize-host-absolute!
+                              grant-abs
+                              (str elsewhere "/secret.txt"))))))
+          (testing "and so is a request that walks out of it with .."
+            (is (= :filesystem/path-outside-mount
+                   (err-type #(fsr/authorize-host-absolute!
+                              grant-abs
+                              (str grant-abs "/../elsewhere/secret.txt"))))))
+          (testing "control: a lexically-inside request still resolves"
+            (is (some? (fsr/authorize-host-absolute! grant-abs
+                                                  (str grant-abs "/real.txt")))))
+          (testing "a CROSS-ROOT request is denied by the gate itself. This is the
+                    case that cannot be left to relativize: across roots
+                    Path.relativize throws, and proven-host-escape? swallows
+                    that into \"no escape proven\", so without the gate the
+                    decision falls through to the lexical answer instead of
+                    an explicit deny"
+            (let [roots (mapv str (.getRootDirectories
+                                    (java.nio.file.FileSystems/getDefault)))
+                  same-root (subs (str work) 0 2)
+                  other-root (first (remove #(str/starts-with? % same-root) roots))]
+              (if (nil? other-root)
+                (testing "single-root host; cross-root case skipped" (is true))
+                (is (= :filesystem/path-outside-mount
+                       (err-type #(fsr/authorize-host-absolute!
+                                  (str same-root "\\grant")
+                                  (str other-root "\\elsewhere\\secret.txt"))))))))
+          (testing "control: the gate denies the descriptor cover too, without
+                    any symlink planted anywhere"
+            (is (not (rk/covers-resource? {:kind :filesystem :path grant-abs}
+                                          {:kind :filesystem :path (str elsewhere "/secret.txt")}
+                                          :read)))))
+        (finally
+          (h/delete-recursively! work)
+          (h/delete-recursively! elsewhere))))))

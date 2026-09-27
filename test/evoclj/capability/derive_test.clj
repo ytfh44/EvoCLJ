@@ -22,7 +22,11 @@
   []
   {:cap-id (UUID/fromString "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
    :principal {:principal/type :session :session/id session-a}
-   :resource {:kind :tool :id :fixture/echo}
+   ;; The :tool vocabulary is #{:invoke :read :write}. The tests below need a
+   ;; parent whose action set EXCLUDES :write and :invoke (so widening into
+   ;; them is rejected) yet INCLUDES :read and :list (so children can narrow to
+   ;; #{:read} and #{:read :list}), which only the filesystem vocabulary has.
+   :resource {:kind :filesystem :path "/work"}
    :actions #{:read :list :stat}
    :constraints {:max-calls 10}
    :issued-at issued-at

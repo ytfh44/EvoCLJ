@@ -147,6 +147,23 @@
         p (canonicalize-mount-path (or req-path ""))]
     (or (= g "") (= g p) (str/starts-with? p (str g "/")))))
 
+(defn- canonical-open-resource
+  "Canonicalize an OPEN resource map: `identity` supplies the canonical
+  :kind/:id/:path/:mount/id, and every other key is carried through unchanged.
+
+  Resource schemas are `{:closed false}` — an open map. A lease's :resource may
+  carry authorization annotations that are not part of resource identity
+  (policy reads :mcp/allow-coarse-invoke and :semantic/spec off the lease).
+  Truncating to the identity keys strips those at the minting surface, so a
+  lease that opted into the coarse MCP scope becomes indistinguishable from one
+  that did not."
+  [r identity]
+  (when (map? r)
+    (let [canon (identity r)]
+      (if (map? canon)
+        (merge (apply dissoc r (keys canon)) canon)
+        canon))))
+
 ;; ---------------------------------------------------------------------------
 ;; Built-in descriptors
 ;; ---------------------------------------------------------------------------
@@ -155,7 +172,7 @@
   ResourceKindDescriptor
   (kind [_] :tool)
   (resource-schema [_] [:map {:closed false} [:kind [:= :tool]] [:id keyword?]])
-  (canonicalize [_ r] (when (map? r) (select-keys r [:kind :id])))
+  (canonicalize [_ r] (canonical-open-resource r #(select-keys % [:kind :id])))
   (covers? [_ granted requested _action]
     (and (keyword? (:id granted))
          (= (:id granted) (:id requested))))
@@ -174,20 +191,22 @@
   ResourceKindDescriptor
   (kind [_] :memory)
   (resource-schema [_] [:map {:closed false} [:kind [:= :memory]] [:id keyword?]])
-  (canonicalize [_ r] (when (map? r) (select-keys r [:kind :id])))
+  (canonicalize [_ r] (canonical-open-resource r #(select-keys % [:kind :id])))
   (covers? [_ granted requested _] (and (keyword? (:id granted)) (= (:id granted) (:id requested))))
   (attenuates? [this parent child] (and (covers? this parent child nil) (covers? this child parent nil)))
   (meet [_ a b] (when (= (:id a) (:id b)) a))
   (serialize [_ r] (pr-str (select-keys r [:kind :id])))
   (deserialize [_ s] (try (edn/read-string s) (catch Exception _ nil)))
-  (allowed-actions [_] #{:invoke})
+  ;; INV-07: a memory read and a memory write are distinct ResourceActions;
+  ;; collapsing them into one grant lets a read-only capability destroy state.
+  (allowed-actions [_] #{:read :write})
   (authorization-targets [_] [{:source :request :action-from :request}]))
 
 (defrecord ModelDescriptor []
   ResourceKindDescriptor
   (kind [_] :model)
   (resource-schema [_] [:map {:closed false} [:kind [:= :model]] [:id some?]])
-  (canonicalize [_ r] (when (map? r) (select-keys r [:kind :id])))
+  (canonicalize [_ r] (canonical-open-resource r #(select-keys % [:kind :id])))
   (covers? [_ granted requested _]
     (and (:id granted)
          (let [g (str (:id granted)) n (str (:id requested))]
@@ -214,13 +233,18 @@
   (kind [_] :filesystem)
   (resource-schema [_] [:map {:closed false} [:kind [:= :filesystem]] [:path string?]])
   (canonicalize [_ r]
-    (when (map? r)
-      {:kind :filesystem :path (canonicalize-path (:path r))}))
+    (canonical-open-resource r (fn [m] {:kind :filesystem :path (canonicalize-path (:path m))})))
   (covers? [_ granted requested _]
     ;; HostFilesystemObject: lexical allow is necessary-not-sufficient; deny
     ;; outright when realpath evidence PROVES escape (unverifiable cases keep
     ;; the lexical decision — the effect layer decides authoritatively).
+    ;; The GRANT ROOT is additionally denied when it is itself a symlink: the
+    ;; request chain is checked, but a lease rooted at a link had its root
+    ;; silently followed, so <work>/link authorized <outside>. proven-host-escape?
+    ;; cannot see this (it answers false once the throw is swallowed), so it is
+    ;; a separate NOFOLLOW probe on the granted path.
     (and (path-inside? (:path granted) (:path requested))
+         (not (fs-resolve/grant-root-symlink? (:path granted)))
          (not (proven-host-escape? (:path granted) (:path requested)))))
   (attenuates? [this parent child] (covers? this parent child nil))
   (meet [_ a b]
@@ -240,11 +264,10 @@
   (kind [_] :filesystem/path)
   (resource-schema [_] [:map {:closed false} [:kind [:= :filesystem/path]] [:path string?]])
   (canonicalize [_ r]
-    (when (map? r)
-      (cond-> {:kind :filesystem/path :path (if (contains? r :mount/id)
-                                              (canonicalize-mount-path (:path r))
-                                              (canonicalize-path (:path r)))}
-        (contains? r :mount/id) (assoc :mount/id (:mount/id r)))))
+    (canonical-open-resource r #(cond-> {:kind :filesystem/path :path (if (contains? % :mount/id)
+                                                                        (canonicalize-mount-path (:path %))
+                                                                        (canonicalize-path (:path %)))}
+                                         (contains? % :mount/id) (assoc :mount/id (:mount/id %)))))
   (covers? [_ granted requested _]
     (if (contains? granted :mount/id)
       ;; Mount namespace (LogicalPath): mount-id equality plus lexical scope.
@@ -253,16 +276,24 @@
       (and (= (:mount/id granted) (:mount/id requested))
            (mount-path-inside? (:path granted) (:path requested)))
       ;; Bare host paths: lexical allow is necessary-not-sufficient; deny on
-      ;; proven realpath escape (unverifiable cases keep the lexical answer).
+      ;; proven realpath escape, and deny a symlinked grant root outright
+      ;; (unverifiable cases keep the lexical answer).
       (and (path-inside? (:path granted) (:path requested))
+           (not (fs-resolve/grant-root-symlink? (:path granted)))
            (not (proven-host-escape? (:path granted) (:path requested))))))
   (attenuates? [this parent child] (covers? this parent child nil))
   (meet [_ a b]
     (let [ma? (contains? a :mount/id) mb? (contains? b :mount/id)]
       (cond
-        (and ma? mb? (not= (:mount/id a) (:mount/id b))) nil
+        ;; A mount-scoped scope and a namespace-less scope live in DIFFERENT
+        ;; fibers: one is relative to a mount namespace, the other is a
+        ;; host-absolute path. Their meet is bottom, never a value with
+        ;; :mount/id silently dropped. (The old mb? arm produced exactly that
+        ;; — an in-fiber request meeting a host-absolute parent returned the
+        ;; host-absolute parent, discarding the mount binding.)
+        (not= ma? mb?) nil
+        (and ma? (not= (:mount/id a) (:mount/id b))) nil
         ma? (when (mount-path-inside? (:path a) (:path b)) b)
-        mb? (when (mount-path-inside? (:path b) (:path a)) a)
         :else (let [ca (canonicalize-path (:path a)) cb (canonicalize-path (:path b))]
                 (cond
                   (path-inside? ca cb) b

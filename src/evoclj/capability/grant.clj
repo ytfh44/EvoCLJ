@@ -19,6 +19,7 @@
   strict and throws :capability/schema-invalid on malformed grants."
   (:require [clojure.set :as set]
             [evoclj.capability.resource-kind :as rk]
+            [evoclj.capability.schema :as schema]
             [evoclj.kernel.error :as err]))
 
 ;; ---------------------------------------------------------------------------
@@ -33,11 +34,18 @@
   (instance? Grant x))
 
 (defn ->grant
-  "Coerce a plain map {:resource _ :actions _} or Grant to a Grant. Returns nil when
-  the shape is missing."
+  "Coerce a Grant, a plain map {:resource _ :actions _}, or a SEALED
+  CapabilityLease to a Grant. Returns nil when the shape is missing.
+
+  A sealed lease is neither a Grant nor a map, so without the third arm
+  ->grant returns nil and covers?/attenuates? answer false — indistinguishable
+  from a genuine scope denial. Accepting the lease keeps 'this is not a grant
+  shape' distinguishable from 'this grant does not cover that'."
   [m]
   (cond
     (instance? Grant m) m
+    (schema/lease? m) (let [{:keys [resource actions]} (schema/lease->map m)]
+                        (->Grant resource actions))
     (and (map? m) (:resource m) (:actions m)) (->Grant (:resource m) (:actions m))
     :else nil))
 
@@ -76,11 +84,6 @@
   (and (set? granted) (set? requested)
        (set/subset? requested granted)))
 
-(defn action-set-attenuates?
-  "True when child ActionSet is subset of parent (attenuation = narrowing)."
-  [parent child]
-  (action-set-covers? parent child))
-
 (defn action-set-meet
   "Greatest lower bound of two ActionSets — intersection. Returns nil when
   intersection is empty (no common action)."
@@ -92,14 +95,6 @@
 ;; ---------------------------------------------------------------------------
 ;; ResourceScope helpers (via descriptor)
 ;; ---------------------------------------------------------------------------
-
-(defn resource-covers?
-  "True when granted resource covers requested resource (via descriptor covers?)."
-  [granted requested]
-  (and (map? granted) (map? requested)
-       (= (:kind granted) (:kind requested))
-       (boolean (when-let [d (rk/get-descriptor (:kind granted))]
-                  (rk/covers? d granted requested nil)))))
 
 (defn resource-attenuates?
   "True when parent resource attenuates child resource (via descriptor attenuates?)."
@@ -123,9 +118,13 @@
 (defn covers?
   "True when granted Grant covers requested Grant.
 
-  Product order: resource covers? AND actions superset.
-  Both grants may be Grant records or plain maps {:resource _ :actions _}.
-  Fail-closed: mismatched kinds, unknown kinds, or malformed inputs → false."
+  Product order: resource covers? AND actions superset (requested ⊆ granted).
+
+  The resource half is rk/covers-resource? — the ONE cover decision. An
+  earlier near-duplicate lived here (grant/resource-covers?) and the GC-08
+  filesystem-escape tests exercised the resource-kind twin, so the tested
+  function was not the one that authorized. Forwarding nil as the action
+  preserves the previous behavior: every built-in descriptor ignores it."
   [granted requested]
   (let [g (->grant granted)
         r (->grant requested)]
@@ -135,7 +134,7 @@
                 (set? (:actions g)) (set? (:actions r)))
        (and (= (:kind (:resource g)) (:kind (:resource r)))
             (set/subset? (:actions r) (:actions g))
-            (resource-covers? (:resource g) (:resource r)))))))
+            (rk/covers-resource? (:resource g) (:resource r) nil))))))
 
 (defn attenuates?
   "True when parent Grant attenuates child Grant (child ≤ parent).
@@ -170,22 +169,12 @@
                (set? (:actions ga)) (set? (:actions gb)))
       (when-let [rm (resource-meet (:resource ga) (:resource gb))]
         (when-let [am (action-set-meet (:actions ga) (:actions gb))]
-          (->Grant rm am))))))
+          ;; The descriptor meet returns whichever PARENT it found more specific,
+          ;; so the result is a non-canonical value exactly when the parent was.
+          ;; Re-canonicalize: a meet is a value crossing the minting surface
+          ;; (derive-lease! seals it), and a non-canonical scope would let two
+          ;; mutually-covering unequal meets exist, so the order would be a
+          ;; preorder again. The action-vocabulary half needs no separate fix —
+          ;; make-lease now rejects a meet whose actions its kind cannot express.
+          (->Grant (rk/canonicalize-resource rm) am))))))
 
-;; ---------------------------------------------------------------------------
-;; Convenience: single-action request helpers (for policy/lease)
-;; ---------------------------------------------------------------------------
-
-(defn covers-request?
-  "True when a Grant (or lease-like map with :resource/:actions) covers a
-  single request {:resource _ :action _}.  Shorthand for
-  (covers? grant {:resource resource :actions #{action}})."
-  [grant resource action]
-  (covers? (if (instance? Grant grant) grant {:resource (:resource grant) :actions (:actions grant)})
-           {:resource resource :actions #{action}}))
-
-(defn attenuates-request?
-  "True when parent Grant attenuates a single-request child."
-  [parent resource action]
-  (attenuates? (if (instance? Grant parent) parent {:resource (:resource parent) :actions (:actions parent)})
-               {:resource resource :actions #{action}}))

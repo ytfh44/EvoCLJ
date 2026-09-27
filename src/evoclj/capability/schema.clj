@@ -44,6 +44,7 @@
   fully serializable Malli explanation (safe for pr-str /
   clojure.edn read-string round-tripping)."
   (:require [evoclj.capability.budget :as budget]
+            [evoclj.capability.resource-kind :as rk]
             [evoclj.kernel.error :as err]
             [evoclj.sci.boundary :as boundary]
             [malli.core :as m]))
@@ -184,6 +185,21 @@
 
 (def ^:private lease-secret (Object.))
 
+(def ^:private lease-value-keys
+  "The content identity of a sealed lease, in a FIXED order so hashCode and
+  equals agree. `secret` is deliberately absent: it is the file-private
+  type-identity token, identical for every lease, so it carries no content.
+  A nil :budget sits at its own slot, so a budget-less lease and one whose
+  budget was nil hash the same — which is correct, they are the same value."
+  [:cap/id :principal :resource :actions :constraints :budget
+   :issued-at :expires-at])
+
+(defn- lease-value
+  "Content projection of a sealed lease, read through ILookup so it works
+  inside the deftype's own equals/hashCode."
+  [l]
+  (mapv #(get l %) lease-value-keys))
+
 (deftype CapabilityLease [capId principal resource actions constraints budget issued expires ^:private secret]
   clojure.lang.ILookup
   (valAt [this k] (.valAt this k nil))
@@ -225,6 +241,16 @@
                              :expires-at expires}
                       (some? budget) (assoc :budget budget)))))
   Object
+  ;; Value semantics: a sealed lease is a VALUE. Without these, `=` falls back
+  ;; to Object identity and a lease cannot be a set member or a map key — yet
+  ;; leases are collected in sets and compared by callers. The method is
+  ;; `equiv`, not `equals`: IPersistentMap (which this type implements) declares
+  ;; `equiv(Object)`, and that is what clojure.core/= dispatches to for it.
+  ;; Identity is the degenerate case of content equality.
+  (equiv [this o] (or (identical? this o)
+                      (and (instance? CapabilityLease o)
+                           (= (lease-value this) (lease-value ^CapabilityLease o)))))
+  (hashCode [this] (hash (lease-value this)))
   (toString [this] (str "CapabilityLease[" capId "]")))
 (alter-meta! #'->CapabilityLease assoc :private true)
 
@@ -314,9 +340,24 @@
   and asserts issued < expires (positive window); on failure throws
   :capability/schema-invalid (never :capability/not-edn-safe for window
   or allowlist violations). Returns a sealed CapabilityLease instance
-  on success — construct-time validated."
+  on success — construct-time validated.
+
+  This is the SINGLE choke point every lease reaches (INV-05: mint-lease! and
+  derive-lease! both seal here), so it carries the two admission gates:
+
+    * :resource is canonicalized via rk/canonicalize-resource, so every value
+      crossing the minting surface is canonical and the Grant order is a real
+      partial order on the values that exist. Deliberately NOT in
+      validate-lease, whose contract is that validation never coerces or
+      rewrites values and which runs per-lease on every policy decision.
+    * :actions must be a subset of the resource kind's allowed-actions, so
+      the per-kind vocabulary declared by the descriptor is enforced at
+      ISSUANCE and not only at authorization. An unregistered kind yields no
+      vocabulary here and already fails closed at the broker with
+      :capability/unknown-resource-kind."
   [m]
-  (let [m (canonicalize-lease-map m)
+  (let [m (cond-> (canonicalize-lease-map m)
+            (map? m) (update :resource rk/canonicalize-resource))
         validated (validate-lease m)]
     ;; validate-lease already enforces positive-window? via schema and
     ;; rejects non-EDN; extra assert keeps window failure typed as
@@ -327,7 +368,15 @@
                         "capability lease must span positive window: :expires-at after :issued-at"
                         {:value (err/sanitize m)
                          :explanation (err/sanitize (m/explain CapabilityLeaseSchema m))})))
-    (let [p (:principal validated)]
+    (let [p (:principal validated)
+          allowed (some-> (rk/get-descriptor (get-in m [:resource :kind]))
+                          rk/allowed-actions)]
+      (when (and allowed (not (every? allowed (:actions m))))
+        (throw (err/error :capability/schema-invalid
+                          "lease actions must be a subset of the resource kind's allowed-actions"
+                          {:kind (get-in m [:resource :kind])
+                           :actions (err/sanitize (:actions m))
+                           :allowed allowed})))
       (CapabilityLease. (:cap/id validated)
                         p
                         (:resource validated)
@@ -337,3 +386,4 @@
                         (:issued-at validated)
                         (:expires-at validated)
                         lease-secret))))
+
