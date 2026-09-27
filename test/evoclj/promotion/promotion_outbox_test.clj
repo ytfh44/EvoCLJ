@@ -19,6 +19,8 @@
   and operator session (same pattern as promote-test)."
   (:require [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [evoclj.genome.load :as load]
+            [evoclj.genome.path :as gpath]
             [evoclj.promotion.current :as current]
             [evoclj.promotion.promote :as promote]
             [evoclj.store.cas :as cas]
@@ -114,6 +116,69 @@
     (event/append-event! db {:session/id sid :generation/id seed-gen :code/id phenotype :event/type :session/created :prev/event-id nil :payload-ref nil :metadata {}})
     sid))
 
+(def ^:private snapshot-limits
+  {:max-depth 20 :max-files 2000 :max-total-bytes (* 20 1024 1024)
+   :max-file-bytes (* 5 1024 1024)})
+
+(defn- genome-index-body
+  "The canonical CAS body of a loaded Genome — path + NUL + digest + LF
+  per entry, bytewise path-sorted. Contains no Clojure source, which is
+  why promote!'s SCI gate reads the BUNDLE, not the CAS."
+  [loaded]
+  (apply str
+         (map (fn [[p {:keys [digest]}]]
+                (str p "\u0000" digest "\n"))
+              (sort-by (fn [[p _]] p) gpath/bytewise-compare (:files loaded)))))
+
+(defn- candidate-bundle!
+  "Materialize a real on-disk Genome bundle and store its canonical CAS
+  body under its own content address; returns {:genome-id :root}.
+  The promotion contract REQUIRES :candidate/root — it is the only
+  source of program bytes for the SCI red-light gate."
+  [cas i]
+  (let [root (str (Files/createTempDirectory
+                   (str "evoclj-outbox-bundle-" i "-")
+                   (make-array FileAttribute 0)))
+        write (fn [rel content]
+                (let [p (Paths/get (str root "/" rel) (make-array String 0))]
+                  (Files/createDirectories (.getParent p) (make-array FileAttribute 0))
+                  (Files/write p (.getBytes ^String content StandardCharsets/UTF_8)
+                               (make-array java.nio.file.OpenOption 0))))]
+    (swap! cas-roots conj root)
+    (write "manifest.edn"
+           (pr-str {:genome/format 1 :agent/id :main :agent/entry :graph/main
+                     :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+                     :modules {:topology "topology.edn" :models "models.edn"
+                               :memory "memory.edn" :evolution "evolution.edn"}
+                     :capabilities/requested #{:model/call}
+                     :evolution {:max-risk :behavioral
+                                 :mutable #{:parameters :prompts :skills :programs}}
+                     :metadata {:name "outbox-fixture"
+                                :description "outbox fixture bundle"}}))
+    (write "topology.edn"
+           (pr-str {:graph/id :graph/main :entry :node/router
+                     :nodes {:node/router {:node/type :sci :program :program/route
+                                           :next :node/emit}
+                             :node/emit {:node/type :emit}}
+                     :limits {:max-steps 64}}))
+    (write "models.edn" "{:models {:planner {:alias :reasoning/high}}}")
+    (write "memory.edn" "{:memory {}}")
+    (write "evolution.edn" "{:evolution {}}")
+    (write "programs/route.clj"
+           (str "(ns agent.route)\n(defn run [input]\n  "
+                ";; outbox candidate " i "\n"
+                "  {:action {:intent/type :intent/finish :payload {:value input}}})\n"))
+    (let [loaded (load/load-genome root)
+          genome-id (:artifact/id
+                     (cas/put-bytes! cas
+                                     (.getBytes ^String (genome-index-body loaded)
+                                                StandardCharsets/UTF_8)
+                                     {}))]
+      (when-not (= genome-id (:genome/id loaded))
+        (throw (ex-info "candidate genome body does not match its identity"
+                        {:stored genome-id :loaded (:genome/id loaded)})))
+      {:genome-id genome-id :root root})))
+
 (defn- promotion-fixture
   ([] (promotion-fixture {}))
   ([{:keys [n-candidates eligibility parent-generation genome-body]}]
@@ -123,12 +188,25 @@
          _ (when (and parent-generation (not= parent-generation seed-gen)) (add-retired-generation! db))
          parent-gen-id (or parent-generation seed-gen)
          elig (or eligibility {:eligible? true :reasons []})
-         candidates (mapv (fn [i] (let [candidate-id (random-uuid) evaluation-id (random-uuid) genome-id (:artifact/id (cas/put-bytes! cas (.getBytes (or genome-body (str "candidate genome body " i)) StandardCharsets/UTF_8) {})) sid (operator-session! db)] (add-candidate! db candidate-id parent-gen-id genome-id) (add-evaluation! db evaluation-id candidate-id parent-gen-id elig) {:candidate/id candidate-id :evaluation/id evaluation-id :candidate/genome-id genome-id :event/session-id sid})) (range (or n-candidates 1)))
-         first-c (first candidates)]
-     {:db db :cas cas :generation/id seed-gen :resolution/id new-resolution :candidate/id (:candidate/id first-c) :evaluation/id (:evaluation/id first-c) :candidate/genome-id (:candidate/genome-id first-c) :event/session-id (:event/session-id first-c) :candidates candidates})))
+        candidates (mapv (fn [i]
+                           (let [candidate-id (random-uuid)
+                                 evaluation-id (random-uuid)
+                                 bundle (candidate-bundle! cas i)
+                                 sid (operator-session! db)]
+                             (add-candidate! db candidate-id parent-gen-id (:genome-id bundle))
+                             (add-evaluation! db evaluation-id candidate-id parent-gen-id elig)
+                             {:candidate/id candidate-id
+                              :evaluation/id evaluation-id
+                              :candidate/genome-id (:genome-id bundle)
+                              :candidate/root (:root bundle)
+                              :event/session-id sid}))
+                         (range (or n-candidates 1)))
+        first-c (first candidates)]
+    {:db db :cas cas :generation/id seed-gen :resolution/id new-resolution :candidate/id (:candidate/id first-c) :evaluation/id (:evaluation/id first-c) :candidate/genome-id (:candidate/genome-id first-c) :candidate/root (:candidate/root first-c) :event/session-id (:event/session-id first-c) :candidates candidates})))
 
-(defn- promotion-system [fx] {:store {:sqlite (:db fx) :cas (:cas fx)} :resolution/id (:resolution/id fx) :event/session-id (:event/session-id fx)})
-(defn- system-for [fx c] {:store {:sqlite (:db fx) :cas (:cas fx)} :resolution/id (:resolution/id fx) :event/session-id (:event/session-id c)})
+(defn- promotion-system [fx] {:store {:sqlite (:db fx) :cas (:cas fx)} :resolution/id (:resolution/id fx) :candidate/root (:candidate/root fx) :event/session-id (:event/session-id fx)})
+(defn- system-for [fx c] {:store {:sqlite (:db fx) :cas (:cas fx)} :resolution/id (:resolution/id fx) :candidate/root (:candidate/root c) :event/session-id (:event/session-id c)})
+
 (defn- promote-request [fx] {:candidate-id (:candidate/id fx) :evaluation-id (:evaluation/id fx) :expected-parent-generation (:generation/id fx)})
 
 (defn- current-rows [db] (sqlite/query db ["SELECT * FROM generations WHERE current = 1"]))
