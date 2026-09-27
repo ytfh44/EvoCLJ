@@ -10,12 +10,14 @@
   and which dialect quirks a model has.
 
   THE CATALOG IS FETCHED AT STARTUP, NOT EMBEDDED: refresh-catalog!
-  pulls the current api.json over HTTPS, validates its shape, writes
-  it atomically into the state directory, and builds a normalized
-  index. On a network failure the previously cached copy is used
-  (status :catalog/cached); with neither network nor cache the
-  catalog is unavailable (:catalog/unavailable) and real model
-  resolution fails closed — fixture providers keep working.
+  serves a cached copy younger than :catalog/ttl-hours without any
+  network round trip, and otherwise pulls the current api.json over
+  HTTPS, validates its shape, writes it atomically into the state
+  directory, and builds a normalized index. On a network failure the
+  previously cached copy is used (status :catalog/cached); with
+  neither network nor cache the catalog is unavailable
+  (:catalog/unavailable) and real model resolution fails closed —
+  fixture providers keep working.
 
   CLASSIFICATION (the JVM answer to Vercel AI SDK): models.dev
   labels every provider with the AI SDK provider package it is
@@ -390,11 +392,6 @@
                    :model/knowledge (:knowledge model)
                    :model/release-date (:release_date model)})])))
 
-;; --- caching ------------------------------------------------------------------
-
-(defn- cache-meta-path
-  [cache-dir]
-  (java.nio.file.Paths/get cache-dir (make-array String 0)))
 
 (defn write-cache!
   "Atomically persist a fetched catalog under cache-dir:
@@ -450,6 +447,38 @@
                             (str "catalog cache is corrupt: " (.getMessage e))
                             {:cache-dir cache-dir})))))))
 
+(defn- read-cache-meta
+  "The cache's freshness record — {:catalog/fetched-at <inst>
+  :catalog/source-url <str>} — or nil when there is none.
+
+  Reads ONLY meta.edn, never api.json: deciding whether to fetch must
+  not pull the multi-megabyte catalog body into memory. An unreadable
+  or malformed meta is not an error, it is simply nil — freshness
+  cannot be proven, so the caller asks the source."
+  [cache-dir]
+  (let [meta-file (.resolve (java.nio.file.Paths/get cache-dir (make-array String 0))
+                            "meta.edn")]
+    (when (Files/exists meta-file (make-array java.nio.file.LinkOption 0))
+      (try
+        (let [m (read-string (Files/readString meta-file StandardCharsets/UTF_8))]
+          (when (map? m) m))
+        (catch Exception _ nil)))))
+
+(defn- cache-fresh?
+  "True when the cache recorded in `meta` is younger than
+  :catalog/ttl-hours. Absent meta, an unparseable :catalog/fetched-at,
+  and a non-positive ttl are all NOT fresh: the only safe reading of
+  \"cannot prove it is fresh\" is to go ask the source."
+  [config meta]
+  (boolean
+   (when-let [at (:catalog/fetched-at meta)]
+     (when-let [ttl (:catalog/ttl-hours config)]
+       (when (pos? ttl)
+         (try
+           (< (- (.getTime (java.util.Date.)) (.getTime at))
+              (* 3600000 (long ttl)))
+           (catch Exception _ false)))))))
+
 ;; --- the startup entry point ---------------------------------------------------
 
 (defn- cache-result
@@ -489,22 +518,32 @@
 
   :catalog/fresh  — fetched, parsed, and validated from
                     :catalog/url; the cache is updated.
-  :catalog/cached — the fetch failed (network, timeout, or a body
-                    that failed validation); the cached copy was
-                    used (its fetched-at is reported).
+  :catalog/cached — the cache is younger than :catalog/ttl-hours and
+                    the source was not asked; OR the fetch failed
+                    (network, timeout, or a body that failed
+                    validation) and the cached copy was used (its
+                    fetched-at is reported).
   :catalog/unavailable — no network and no cache: model resolution
-                    must fail closed."
+                    must fail closed.
+
+  The ttl is a real budget, not documentation: a startup whose cache
+  is fresh pays no network round trip at all."
   [config]
   (validate-config! config)
   (let [url (:catalog/url config)
         timeout-ms (or (:catalog/timeout-ms config) 30000)
-        cache-dir (:catalog/cache-dir config)
-        attempt (try
-                  {:status :fresh
-                   :body (http-get url timeout-ms)}
-                  (catch Exception e
-                    {:status :fetch-failed
-                     :error (err/error-data e)}))]
+        cache-dir (:catalog/cache-dir config)]
+    (if (cache-fresh? config (read-cache-meta cache-dir))
+      ;; Fresh enough: serve the cache. No fetch attempted, so
+      ;; :catalog/error is nil and the result carries the cache's own
+      ;; :catalog/fetched-at.
+      (cache-result config cache-dir nil)
+      (let [attempt (try
+                      {:status :fresh
+                       :body (http-get url timeout-ms)}
+                      (catch Exception e
+                        {:status :fetch-failed
+                         :error (err/error-data e)}))]
     (if (= :fresh (:status attempt))
       (let [fetched-at (java.util.Date.)
             parsed (try
@@ -521,7 +560,7 @@
           ;; fetched but unparseable — fall back to the cache rather
           ;; than failing startup on a transient upstream glitch
           (cache-result config cache-dir (:error parsed))))
-      (cache-result config cache-dir (:error attempt)))))
+      (cache-result config cache-dir (:error attempt)))))))
 
 ;; --- lookup --------------------------------------------------------------------
 

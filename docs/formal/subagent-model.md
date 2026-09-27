@@ -202,7 +202,7 @@ A session's pin `{:code_image/id :deployment/id :execution/id :generation/id}` i
 Hydration invariants (async-model [W-25..W-26]):
 
 * `hydrate` with a valid pin always yields an `ExecutionHandle` whose `code-image.id` equals the pin's `code_image/id` (closed, no fallback to synthetic leases).
-* `hydrate` with an unknown pin throws `:hydrate/pin-not-found` (fail-closed, P1 DB truth — no synthetic lease).
+* `hydrate` with an unknown pin throws `:hydrate/pin-mismatch` (fail-closed, P1 DB truth — no synthetic lease); a pin whose identity rows were never registered is the same failure, and a pin with no registered genome bundle throws `:hydrate/genome-bundle-missing`.
 * `hydrate` never mutates the DB; publication belongs to the downstream `Projector→Bundle` transaction (INV-06).
 
 ---

@@ -287,3 +287,60 @@
         (let [f (failure-of (pin-session pin-code nil nil))]
           (is (= :hydrate/pin-mismatch (:error/type f)))
           (is (= :code-image-mismatch (:reason f))))))))
+
+;; ============================================================================
+;; lease hydration — an unparseable row must be DROPPED, never repaired
+;; ============================================================================
+
+(defn- insert-raw-capability!
+  "Insert a `capabilities` row verbatim, bypassing insert-capability! so a
+  legacy-shaped row (non-UUID id, NULL lease_edn, junk timestamps) can be
+  reproduced exactly."
+  [db row]
+  (sqlite/with-db [conn db]
+    (jdbc/insert! conn :capabilities (merge
+                                      {:principal_type "session"
+                                       :revoked 0
+                                       :created_at now
+                                       :resource_kind "tool"
+                                       :resource_edn (pr-str {:kind :tool :id "fixture/echo"})
+                                       :resource_id "fixture/echo"
+                                       :actions "[\"invoke\"]"
+                                       :constraints "{}"}
+                                      row)))
+  row)
+
+(defn- load-leases
+  "The private lease loader, reached by name (it is internal to
+  hydrate and has no public entry point)."
+  [db sid]
+  ((deref (resolve 'evoclj.runtime.hydrate/load-persisted-leases)) db sid))
+
+(deftest unparseable-lease-rows-are-dropped-not-repaired
+  (let [db (fresh-db)
+        sid (str (UUID/randomUUID))
+        good-id (str (UUID/randomUUID))]
+    (insert-raw-capability! db {:id good-id
+                                :principal_id sid
+                                :issued_at "2025-01-01T00:00:00Z"
+                                :expires_at "2099-01-01T00:00:00Z"})
+    (testing "a well-formed row still hydrates"
+      (is (= 1 (count (load-leases db sid)))))
+    (testing "a legacy row (non-UUID id, NULL lease_edn, unparseable
+              timestamps) is dropped, NOT repaired into a live grant"
+      (insert-raw-capability! db {:id "cap-legacy"
+                                  :principal_id sid
+                                  :lease_edn nil
+                                  ;; lexically ordered so the table's
+                                  ;; CHECK (expires_at > issued_at) passes,
+                                  ;; yet neither parses as an Instant
+                                  :issued_at "0000-not-a-timestamp"
+                                  :expires_at "9999-not-a-timestamp"})
+      (let [leases (load-leases db sid)]
+        (is (= 1 (count leases))
+            "exactly the good lease survives — the bad row is dropped, and
+             the whole collection is NOT discarded either")
+        (is (= good-id (str (:cap/id (first leases))))
+            "the surviving lease is the real one, not a fabricated id")
+        (is (every? #(not= "cap-legacy" (str (:cap/id %))) leases)
+            "no lease was minted for the unreadable row")))))

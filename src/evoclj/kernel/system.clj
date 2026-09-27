@@ -68,6 +68,7 @@
                          :replay/cases {} :replay/fixtures {}}
     :promotion/system   {:store {...}
                          :resolution/id <sha256 id> | :derive
+                         :candidate/root <bundle dir>
                          :event/session-id <uuid> | :derive}
 
   Genome graph nodes are NEVER Integrant components (Global
@@ -741,9 +742,12 @@
   "Build the :promotion/system component: a promotion-system map (component contract, see evoclj.promotion.promote) with the injected store.
   :resolution/id names the current generation's compiled Resolution
   (config value or :derive — derived by compiling the seed Genome);
-  :event/session-id anchors :promotion/* events (config value or a
-  fresh host operator session uuid; the component CLI overrides it
-  with the real operator session)."
+  :candidate/root is the seed bundle (:genome-root) and is REQUIRED by
+  the promotion contract: it is the only source of program bytes for
+  the SCI red-light gate, since the CAS holds the Genome index body
+  rather than source text; :event/session-id anchors :promotion/* events
+  (config value or a fresh host operator session uuid; the component CLI
+  overrides it with the real operator session)."
   {:store {:sqlite (:sqlite (:store config))
            :cas (:cas (:store config))}
    :resolution/id (if (= :derive (:resolution/id config))
@@ -751,7 +755,12 @@
                     (:resolution/id config))
    :event/session-id (if (= :derive (:event/session-id config))
                        (str (UUID/randomUUID))
-                       (:event/session-id config))})
+                       (:event/session-id config))
+   ;; :candidate/root is the seed bundle: the promotion contract requires
+   ;; it, and the CLI's per-command promotion-system overrides it with
+   ;; the real candidate bundle. Nothing reads this component value
+   ;; today (the CLI builds its own), but it must satisfy the schema.
+   :candidate/root (:genome-root config)})
 
 (defmethod ig/halt-key! :promotion/system
   [_ _component]

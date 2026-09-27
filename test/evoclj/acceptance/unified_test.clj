@@ -41,8 +41,10 @@
             [evoclj.store.cas :as cas]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite]
-            [evoclj.store.session :as session]
-            [evoclj.store.event :as event]
+           [evoclj.store.session :as session]
+           [evoclj.store.event :as event]
+           [evoclj.fs.snapshot :as fs-snapshot]
+           [evoclj.skill.vendor :as vendor]
             [rewrite-clj.node :as rewrite-node]
             [rewrite-clj.parser :as rewrite-parser])
   (:import (java.nio.charset StandardCharsets)
@@ -120,6 +122,59 @@
               (when (empty? (filter ignore parts))
                 (str/includes? (try (slurp f) (catch Exception _ "")) substr))))
           (all-clj-files))))
+
+(def ^:private snapshot-limits
+  {:max-depth 20 :max-files 2000 :max-total-bytes (* 20 1024 1024)
+   :max-file-bytes (* 5 1024 1024)})
+
+(defn- temp-root!
+  "A fresh temp directory for one test."
+  ^java.nio.file.Path []
+  (Files/createTempDirectory "evoclj-unified-" (make-array FileAttribute 0)))
+
+(defn- delete-tree!
+  "Recursively delete a directory tree (Windows-safe: walk first)."
+  [^java.nio.file.Path root]
+  (when (and root (Files/exists root (make-array java.nio.file.LinkOption 0)))
+    (doseq [f (reverse (file-seq (.toFile root)))]
+      (try (Files/deleteIfExists (.toPath ^java.io.File f)) (catch Exception _ nil)))))
+
+(defn- snapshot-tree!
+  "Snapshot a live skill dir into CAS; returns the snapshot map."
+  [ext-dir cas]
+  (fs-snapshot/snapshot-tree! ext-dir cas snapshot-limits))
+
+(defn- write-minimal-genome!
+  "A minimal loadable Genome bundle at `dir`."
+  [^java.nio.file.Path dir]
+  (let [w (fn [rel content]
+            (let [p (.resolve dir rel)]
+              (Files/createDirectories (.getParent p) (make-array FileAttribute 0))
+              (Files/write p (.getBytes ^String content StandardCharsets/UTF_8)
+                           (make-array java.nio.file.OpenOption 0))))]
+    (w "manifest.edn"
+       (pr-str {:genome/format 1
+                :agent/id :main
+                :agent/entry :graph/main
+                :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+                :modules {:topology "topology.edn" :models "models.edn"
+                          :memory "memory.edn" :evolution "evolution.edn"}
+                :capabilities/requested #{:model/call}
+                :evolution {:max-risk :behavioral
+                            :mutable #{:parameters :prompts :skills :programs}}
+                :metadata {:name "unified-fixture" :description "unified"}}))
+    (w "topology.edn"
+       (pr-str {:graph/id :graph/main :entry :node/router
+                 :nodes {:node/router {:node/type :sci :program :program/route
+                                       :next :node/emit}
+                         :node/emit {:node/type :emit}}
+                 :limits {:max-steps 64}}))
+    (w "models.edn" "{:models {:planner {:alias :reasoning/high}}}")
+    (w "memory.edn" "{:memory {}}")
+    (w "evolution.edn" "{:evolution {}}")
+    (w "programs/route.clj"
+       "(ns agent.route)\n(defn run [input] {:action {:intent/type :intent/finish :payload {:value input}}})\n")
+    dir))
 
 ;; ---------------------------------------------------------------------------
 ;; Invariant 1: Generic intent.dispatch contains no MCP-specific freshness
@@ -383,18 +438,92 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest self-evolution-no-direct-upstream-write
-  (testing "evolution never writes to upstream .agents/skills, only via vendor CAS snapshot"
-    (let [evolution-files (filter #(.isFile %) (file-seq (io/file "src/evoclj/evolution")))
-          evolution-src (str/join "\n" (map slurp evolution-files))
-          vendor (slurp-src "evoclj/skill/vendor.clj")]
-      ;; evolution must not directly write to upstream host skill path (only vendor writes to genome/skills via CAS)
-      ;; Documentation may mention upstream roots for boundary explanation, but no file write should target them.
-      (is (not (re-find #"Files/write.*\\.agents|spit.*\\.agents" evolution-src)) "evolution must not directly write to .agents host path")
-      ;; vendor is the ONLY path that writes to genome/skills via CAS tree, not via live host
-      (is (str/includes? vendor "snapshot/load-tree") "vendor must copy via CAS snapshot tree")
-      (is (str/includes? vendor "cas/get-bytes") "vendor must copy via CAS artifact bytes")
-      (is (str/includes? vendor "genome/root") "vendor target must be genome root, not upstream")
-      (is (str/includes? vendor "skills/") "vendor target must be genome skills/ dir"))))
+  ;; BEHAVIORAL. The version this replaces regex-scanned every file under
+  ;; src/evoclj/evolution for "Files/write.*\.agents|spit.*\.agents" and
+  ;; then asserted four substrings inside vendor.clj. That is a statement
+  ;; about source text: it is satisfied by a docstring (which is exactly
+  ;; how D2-closure-report.md:119 recorded a security acceptance test
+  ;; going red on a prose edit), it fails on any equivalent spelling, and
+  ;; it cannot observe a single byte written or refused.
+  ;;
+  ;; The property is that vendoring — the ONE component that installs
+  ;; skills — writes only under the Genome root, and refuses a target
+  ;; that escapes it. That is asserted here against the real filesystem,
+  ;; with a real .agents directory sitting next to the Genome root as the
+  ;; thing that must NOT be touched, and with the escape attempt
+  ;; producing a TYPED error.
+  (testing "vendor installs into the Genome root, never into a sibling .agents"
+    (let [tmp (temp-root!)
+          genome-root (.resolve ^java.nio.file.Path tmp "genome")
+          cas-dir (.resolve ^java.nio.file.Path tmp "cas")
+          agents-skills (.resolve ^java.nio.file.Path tmp ".agents/skills/upstream-skill")
+          _ (write-minimal-genome! genome-root)
+          _ (Files/createDirectories agents-skills (make-array FileAttribute 0))
+          marker (.resolve agents-skills "SKILL.md")
+          _ (spit (str marker) "ORIGINAL UPSTREAM CONTENT")
+          cas (cas/->cas (str cas-dir))
+          ext (.resolve ^java.nio.file.Path tmp "ext/my-skill")]
+      (try
+        (Files/createDirectories ext (make-array FileAttribute 0))
+        (spit (str (.resolve ext "SKILL.md"))
+              "---\nname: my-skill\ndescription: vendored copy\n---\n# Body\nVENDORED\n")
+        (let [tree-id (:tree/id (snapshot-tree! ext cas))
+              result (vendor/vendor-skill! {:genome/root genome-root
+                                            :cas cas
+                                            :skill/name "my-skill"
+                                            :tree/id tree-id})
+              ;; :genome/path is a STRING on the result
+              dest-file (io/file (str (:genome/path result)) "SKILL.md")
+              genome-path-str (str (:genome/path result))]
+          (testing "the install landed under <genome-root>/skills/"
+            (is (Files/exists (.toPath dest-file) (make-array java.nio.file.LinkOption 0))
+                "the vendored copy exists inside the Genome")
+            (is (str/starts-with? genome-path-str (str genome-root))
+                "and the reported path is inside the Genome root")
+            (is (str/includes? genome-path-str "skills")
+                "under the Genome's skills/ directory"))
+          (testing "the upstream .agents skill was NOT written"
+            (is (= "ORIGINAL UPSTREAM CONTENT" (slurp (str marker)))
+                "the upstream .agents copy is byte-for-byte untouched")
+            (is (not (Files/exists (.resolve agents-skills "references")
+                                    (make-array java.nio.file.LinkOption 0)))
+                "nothing new appeared under the upstream skill dir")))
+        (finally
+          (delete-tree! tmp)))))
+  (testing "a vendored target that escapes the Genome root is refused typed
+            (fail-closed) rather than written"
+    ;; a symlinked skills/ pointing outside the Genome root is the escape
+    ;; the vendor's containment guard exists to stop
+    (let [tmp (temp-root!)
+          genome-root (.resolve ^java.nio.file.Path tmp "genome")
+          outside (.resolve ^java.nio.file.Path tmp "outside")
+          cas-dir (.resolve ^java.nio.file.Path tmp "cas")]
+      (try
+        (write-minimal-genome! genome-root)
+        (Files/createDirectories outside (make-array FileAttribute 0))
+        (Files/createSymbolicLink (.resolve ^java.nio.file.Path genome-root "skills")
+                                 (.toAbsolutePath outside)
+                                 (make-array java.nio.file.attribute.FileAttribute 0))
+        (let [cas (cas/->cas (str cas-dir))
+              ext (.resolve ^java.nio.file.Path tmp "ext/my-skill")]
+          (Files/createDirectories ext (make-array FileAttribute 0))
+          (spit (str (.resolve ext "SKILL.md"))
+                "---\nname: my-skill\ndescription: escape attempt\n---\n# Body\nESCAPE\n")
+          (let [tree-id (:tree/id (snapshot-tree! ext cas))
+                e (try (vendor/vendor-skill! {:genome/root genome-root
+                                              :cas cas
+                                              :skill/name "my-skill"
+                                              :tree/id tree-id})
+                       nil
+                      (catch clojure.lang.ExceptionInfo x x))]
+            (is (some? e) "the escaping install is refused")
+            (is (= :skill/vendor-path-escape (:error/type (ex-data e)))
+                "with the typed containment error")
+            (is (empty? (filter #(= "SKILL.md" (.getName ^java.io.File %))
+                                (file-seq (.toFile outside))))
+                "and nothing was written outside the Genome root")))
+        (finally
+          (delete-tree! tmp))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Invariant 9: Paired evaluation uses same EnvironmentSnapshot

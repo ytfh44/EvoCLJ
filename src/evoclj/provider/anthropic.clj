@@ -14,13 +14,20 @@
   :retry {:safe? true}; normalize-request validates the model id and
   messages and returns the canonical {:kind :model :id ...} resource
   BEFORE authorization; execute-request! builds the SDK request
-  (model, max_tokens, system prompt, user/assistant messages, vendor
-  additionalProperties), calls the endpoint, parses the raw JSON via
+  (model, max_tokens, system prompt, user/assistant messages, and the
+  tool declaration), calls the endpoint, parses the raw JSON via
   provider.request/parse-response (single dispatch point), and returns
   the canonical provider result with usage and cost.
 
-  Anthropic content blocks: text blocks concatenate into :text;
-  tool_use blocks become :tool-calls entries."
+  TOOLS. A :tools vector on the payload is declared to the endpoint the
+  same way evoclj.provider.openai declares it — provider.request/wire-tools
+  is the single EDN->wire shape — and the SDK's own builder carries it
+  (MessageCreateParams$Body.Builder.tools(List<ToolUnion>)), rather than
+  the putAdditionalProperty escape hatch. Tool RESULTS come back as a
+  user-role turn carrying tool_result content blocks, which is how
+  Anthropic expresses them: there is no \"tool\" role. A :tool-role
+  message that arrives without that shape is still refused with
+  :unsupported-role rather than silently dropped."
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [evoclj.kernel.error :as err]
@@ -32,15 +39,19 @@
   (:import (com.anthropic.client.okhttp AnthropicOkHttpClient)
            (com.anthropic.core JsonValue)
            (com.anthropic.errors AnthropicServiceException AnthropicIoException)
-           (com.anthropic.models.messages MessageCreateParams
-                                          MessageCreateParams$Body)))
+           (com.anthropic.models.messages ContentBlockParam MessageCreateParams
+                                          MessageCreateParams$Body
+                                          Tool Tool$InputSchema ToolUnion
+                                          ToolUnion$Companion
+                                          ToolResultBlockParam)))
 
 (def ModelCallInputSchema
   "The model-call input contract (same shape as the OpenAI adapter)."
   [:map {:closed false}
    [:model/id keyword?]
-   [:messages [:vector :map]]
-   [:options {:optional true} :map]])
+   [:options {:optional true} :map]
+   ;; the tool declarations to offer; same shape openai.clj accepts
+   [:tools {:optional true} [:vector :map]]])
 
 (def ModelCallOutputSchema
   "The model-call output contract: text output, optional tool-calls,
@@ -74,12 +85,59 @@
   [model-id]
   (second (str/split model-id #"/")))
 
+(defn- tool-union
+  "One wire tool declaration as the SDK's ToolUnion.
+
+  provider.request/wire-tools is the single EDN->wire definition, shared
+  with openai.clj, and it emits the OpenAI function shape
+  {:type \"function\" :function {:name … :description … :parameters …}};
+  the internal :tool id is stripped there, as it must never reach the
+  wire. Only the SDK wrapper is provider-specific: Anthropic takes a raw
+  JSON Schema under :input_schema, so :parameters is attached as the
+  schema's own members (with the required `type: object`) rather than
+  being reshaped."
+  [wire]
+  (let [{:keys [name description parameters]} (:function wire)
+        schema (-> (Tool$InputSchema/builder)
+                   (.type (JsonValue/from "object"))
+                   (.putAllAdditionalProperties
+                    (into {}
+                          (map (fn [[k v]]
+                                 [(request/edn->json k)
+                                  (JsonValue/from (request/edn->json v))]))
+                          (or parameters {})))
+                   (.build))
+        tool (-> (Tool/builder)
+                 (.name name)
+                 (.description (or description ""))
+                 (.inputSchema schema)
+                 (.build))]
+    (.ofTool ^ToolUnion$Companion ToolUnion/Companion tool)))
+
+(defn- tool-result-blocks
+  "The tool_result content blocks for one :tool turn. Anthropic has no
+  \"tool\" role: a tool result is a USER-role turn whose content blocks
+  are tool_result, each naming the tool_use id it answers. A turn may
+  carry either one {:tool-call-id … :content …} or a vector of them."
+  [m]
+  (let [content (:content m)
+        results (if (and (sequential? content) (not (map? (first content))))
+                  content
+                  [{:tool-call-id (:tool-call-id m) :content content}])]
+    (mapv (fn [{:keys [tool-call-id content]}]
+            (-> (ToolResultBlockParam/builder)
+                (.toolUseId (str tool-call-id))
+                (.content (str content))
+                (.build)))
+          results)))
+
+
 (defn- build-params
   "Build the SDK MessageCreateParams: system messages become the
-  system prompt, user/assistant messages become message params,
-  supported options map to builder methods, and any dialect extra
-  params merge via additionalProperties. Delegates edn->json to
-  provider.request."
+  system prompt, user/assistant/tool messages become message params (a
+  tool result is a user turn of tool_result content blocks), and
+  :tools is declared through the SDK's own tools builder.
+  Delegates edn->json and wire-tools to provider.request."
   [request]
   (let [opts (or (:options request) {})
         messages (:messages request)
@@ -96,18 +154,18 @@
         b (if-let [t (:temperature opts)]
             (.temperature b (double t))
             b)
+        b (if (seq (:tools request))
+            (.tools b (mapv tool-union (request/wire-tools (:tools request))))
+            b)
         b (reduce (fn [b m]
                     (case (:role m)
                       :user (.addUserMessage b (str (:content m)))
                       :assistant (.addAssistantMessage b (str (:content m)))
+                      :tool (.addUserMessageOfBlockParams b (tool-result-blocks m))
                       (throw (err/error :provider/input-invalid
                                         (str "unsupported message role " (:role m))
                                         {:reason :unsupported-role :role (:role m)}))))
                   b turns)
-        b (reduce (fn [b [k v]]
-                    (.putAdditionalProperty b (str/replace (name k) "-" "_")
-                                            (JsonValue/from (request/edn->json v))))
-                  b (get-in request [:options :extra-params] {}))
         params (.build (.body (MessageCreateParams/builder) (.build b)))]
     params))
 
@@ -212,11 +270,19 @@
               (throw (err/error :provider/input-invalid
                                 (str "unsupported model-call option " k)
                                 {:reason :unknown-option :option k}))))
+          (when (and (:tools payload)
+                     (not (and (vector? (:tools payload))
+                               (every? map? (:tools payload)))))
+            (throw (err/error :provider/input-invalid
+                              "model-call payload :tools must be a vector of maps"
+                              {:reason :tools-invalid
+                               :value (err/sanitize (:tools payload))})))
           {:model/id full-id
            :resource {:kind :model :id full-id :provider provider-id}
            :request {:model/id full-id
                      :messages (:messages payload)
-                     :options (:options payload)}}))
+                     :options (:options payload)
+                     :tools (:tools payload)}}))
       (execute-request! [_ authorized-request]
         (when-not (and (map? authorized-request) (:request authorized-request))
           (throw (err/error :provider/request-invalid

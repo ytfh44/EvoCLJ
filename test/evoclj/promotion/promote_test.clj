@@ -28,20 +28,33 @@
 
   Fresh temp databases are migrated from the classpath migrations and
   deleted after every test; each fixture candidate gets its own CAS
-  genome body, finalized evaluation, and operator session."
+  genome body, finalized evaluation, and operator session.
+
+  THE CANDIDATE BUNDLE IS REAL. promote!'s SCI red-light gate reads
+  program sources from the candidate bundle (:candidate/root, required
+  by the promotion contract) because the CAS holds the Genome INDEX
+  body — path NUL digest LF lines containing no Clojure forms at all,
+  so a text scan of CAS content can only ever match a filename. The
+  fixture therefore writes a real on-disk bundle, loads it to get its
+  true content address, and stores THAT bundle's real index body in
+  the CAS. An earlier version of this fixture put raw Clojure SOURCE
+  text at the genome CAS address, so the gate test proved a shape
+  that production can never produce."
   (:require [clojure.edn :as edn]
             [clojure.java.jdbc :as jdbc]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [evoclj.eval.compare :as compare]
+            [evoclj.genome.load :as load]
+            [evoclj.genome.path :as gpath]
             [evoclj.promotion.current :as current]
             [evoclj.promotion.promote :as promote]
             [evoclj.store.cas :as cas]
             [evoclj.store.event :as event]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.session :as session]
-            [evoclj.store.sqlite :as sqlite])
+           [evoclj.store.sqlite :as sqlite])
   (:import (java.nio.charset StandardCharsets)
-           (java.nio.file Files Paths)
+           (java.nio.file Files OpenOption Paths)
            (java.nio.file.attribute FileAttribute)
            (java.util.concurrent CountDownLatch)))
 
@@ -97,6 +110,69 @@
   (reset! cas-roots []))
 
 (use-fixtures :each (fn [f] (f) (cleanup!)))
+
+(defn- write-file!
+  "Write `content` to `path`, creating parent directories."
+  [path content]
+  (let [p (Paths/get path (make-array String 0))]
+    (Files/createDirectories (.getParent p) (make-array FileAttribute 0))
+    (Files/write p (.getBytes ^String content StandardCharsets/UTF_8)
+                 (make-array OpenOption 0))))
+
+(defn- genome-index-body
+  "The canonical CAS body of a loaded Genome — path + NUL + digest + LF
+  per entry, bytewise path-sorted (the exact serialization whose SHA-256
+  is the genome's content address). Contains NO Clojure source."
+  [loaded]
+  (apply str
+         (map (fn [[p {:keys [digest]}]]
+                (str p "\u0000" digest "\n"))
+              (sort-by first gpath/bytewise-compare (:files loaded)))))
+
+(defn- candidate-bundle!
+  "Materialize a real on-disk Genome bundle whose programs/route.clj is
+  `route-source`, and return {:root <path> :genome-id <content
+  address> :index-body <canonical CAS body>}. Each distinct route-source
+  yields a distinct content address, so a multi-candidate fixture gets
+  a distinct genome per candidate."
+  [route-source i]
+  (let [root (str (Files/createTempDirectory
+                   (str "evoclj-promote-bundle-" i "-")
+                   (make-array FileAttribute 0)))]
+    (swap! cas-roots conj root)
+    (write-file! (str root "/manifest.edn")
+                 (pr-str {:genome/format 1
+                          :agent/id :main
+                          :agent/entry :graph/main
+                          :abi {:kernel 1 :genome 1 :intent 1 :tool 1}
+                          :modules {:topology "topology.edn"
+                                    :models "models.edn"
+                                    :memory "memory.edn"
+                                    :evolution "evolution.edn"}
+                          :capabilities/requested #{:model/call}
+                          :evolution {:max-risk :behavioral
+                                      :mutable #{:parameters :prompts
+                                                 :skills :programs}}
+                          :metadata {:name "promote-fixture"
+                                     :description "promotion fixture bundle"}}))
+    (write-file! (str root "/topology.edn")
+                 (pr-str {:graph/id :graph/main
+                          :entry :node/router
+                          :nodes {:node/router {:node/type :sci
+                                                :program :program/route
+                                                :next :node/emit}
+                                  :node/emit {:node/type :emit}}
+                          :limits {:max-steps 64}}))
+    (write-file! (str root "/models.edn")
+                 (str "{:models {:planner {:alias :reasoning/high}}}"))
+    (write-file! (str root "/memory.edn") (str "{:memory {}}"))
+    (write-file! (str root "/evolution.edn")
+                 (str "{:evolution {:max-rounds 1}}"))
+    (write-file! (str root "/programs/route.clj") route-source)
+    (let [loaded (load/load-genome root)]
+      {:root root
+       :genome-id (:genome/id loaded)
+       :index-body (genome-index-body loaded)})))
 
 (defn- fresh-db
   "A migrated database spec backed by a fresh temp file."
@@ -235,15 +311,18 @@
   "Build the full promotion stack and return a map of every id the
   tests need. `opts` keys:
 
-      :n-candidates     n        ; each candidate gets its own CAS genome,
-                                  ; finalized evaluation, and operator session
+      :n-candidates     n        ; each candidate gets its own real bundle,
+                                  ; CAS genome, evaluation, and operator session
+      :genome-body    <source>  ; the candidate bundle's programs/route.clj
+                                 ; source text — the SCI gate's real input
       :eligibility      <map>    ; overrides the stored final judgment
       :summary          <map>    ; overrides the stored summary (paired
       ;   counts fixtures for evidence-basis tests)
       :parent-generation <id>    ; a RETIRED non-current generation the
 
   The single-candidate convenience keys (:candidate/id :evaluation/id
-  :candidate/genome-id :event/session-id) point at the first candidate."
+  :candidate/genome-id :candidate/root :event/session-id) point at the
+  first candidate."
   ([] (promotion-fixture {}))
   ([{:keys [n-candidates eligibility parent-generation genome-body summary]}]
    (let [db (fresh-db)
@@ -260,12 +339,23 @@
                      (fn [i]
                        (let [candidate-id (random-uuid)
                              evaluation-id (random-uuid)
+                             route (or genome-body
+                                       (str "(ns agent.route)\n"
+                                            "(defn run [input]\n"
+                                            "  {:action {:intent/type :intent/finish\n"
+                                            "             :payload {:value input}}})\n"
+                                            ";; fixture candidate " i))
+                             bundle (candidate-bundle! route i)
                              genome-id (:artifact/id
                                         (cas/put-bytes!
                                          cas
-                                         (.getBytes (or genome-body (str "candidate genome body " i))
+                                         (.getBytes ^String (:index-body bundle)
                                                     StandardCharsets/UTF_8)
                                          {}))
+                             _ (when-not (= genome-id (:genome-id bundle))
+                                 (throw (ex-info "fixture genome body does not match its identity"
+                                                 {:stored genome-id
+                                                  :loaded (:genome-id bundle)})))
                              sid (operator-session! db)]
                          (add-candidate! db candidate-id parent-gen-id genome-id)
                          (if summary
@@ -274,6 +364,7 @@
                          {:candidate/id candidate-id
                           :evaluation/id evaluation-id
                           :candidate/genome-id genome-id
+                          :candidate/root (:root bundle)
                           :event/session-id sid}))
                      (range (or n-candidates 1)))
          first-c (first candidates)]
@@ -284,6 +375,7 @@
       :candidate/id (:candidate/id first-c)
       :evaluation/id (:evaluation/id first-c)
       :candidate/genome-id (:candidate/genome-id first-c)
+     :candidate/root (:candidate/root first-c)
       :event/session-id (:event/session-id first-c)
       :candidates candidates})))
 
@@ -292,6 +384,7 @@
   [fx]
   {:store {:sqlite (:db fx) :cas (:cas fx)}
    :resolution/id (:resolution/id fx)
+   :candidate/root (:candidate/root fx)
    :event/session-id (:event/session-id fx)})
 
 (defn- system-for
@@ -299,6 +392,7 @@
   [fx candidate]
   {:store {:sqlite (:db fx) :cas (:cas fx)}
    :resolution/id (:resolution/id fx)
+   :candidate/root (:candidate/root candidate)
    :event/session-id (:event/session-id candidate)})
 
 (defn- promote-request
@@ -583,6 +677,15 @@
       (is (= :promotion/system-invalid
              (-> (tx-error #(promote/promote! (dissoc (promotion-system fx) :store)
                                               (promote-request fx)))
+                 ex-data :error/type))))
+    (testing "a system WITHOUT :candidate/root is rejected: the bundle is
+              the only source of program bytes for the SCI gate (the CAS
+              holds the Genome index body, which has no Clojure forms), so
+              promotion cannot proceed without it"
+      (is (= :promotion/system-invalid
+             (-> (tx-error #(promote/promote!
+                             (dissoc (promotion-system fx) :candidate/root)
+                             (promote-request fx)))
                  ex-data :error/type))))))
 
 ;; ============================================================================
@@ -607,8 +710,22 @@
       (is (true? (:passed? r)))
       (is (empty? (:violations r))))))
 
+(defn- dangerous-route
+  "A candidate programs/route.clj that trips the red-light gate
+  (host/Java interop — the first pattern recheck-candidate denies)."
+  []
+  "(ns agent.route)\n(defn run [input]\n  (System/exit 0))\n")
+
+(defn- safe-route
+  "A candidate programs/route.clj with no red-light surface."
+  []
+  (str "(ns agent.route)\n"
+       "(defn run [input]\n"
+       "  {:action {:intent/type :intent/finish\n"
+       "             :payload {:value input}}})\n"))
+
 (deftest sci-sandbox-gate-blocks-promotion-of-dangerous-candidate
-  (let [fx (promotion-fixture {:genome-body "(System/exit 0)"})
+  (let [fx (promotion-fixture {:genome-body (dangerous-route)})
         db (:db fx)
         e (tx-error #(promote/promote! (promotion-system fx) (promote-request fx)))]
     (testing "the promotion is rejected with a typed sci-sandbox error"
@@ -623,12 +740,32 @@
       (is (= "eligible" (:state (candidate-row db (:candidate/id fx))))))))
 
 (deftest sci-sandbox-gate-allows-safe-candidate-to-promote
-  (let [fx (promotion-fixture {:genome-body "(defn f [x] (+ x 1))"})
+  (let [fx (promotion-fixture {:genome-body (safe-route)})
         result (promote/promote! (promotion-system fx) (promote-request fx))]
     (testing "the safe candidate promotes normally; the gate does not interrupt"
       (is (= :promoted (:status result)))
       (is (= (:generation/id fx) (:from result)))
       (is (string? (:to result))))))
+
+(deftest the-gate-reads-the-bundle-not-the-cas-index-body
+  (let [fx (promotion-fixture {:genome-body (dangerous-route)})
+        cas-bytes (String. ^bytes (byte-array
+                                   (cas/get-bytes (:cas fx)
+                                                  (:candidate/genome-id fx)))
+                           StandardCharsets/UTF_8)]
+    (testing "the CAS body is the Genome INDEX: no Clojure forms at all"
+      (is (re-find #"\u0000" cas-bytes)
+          "CAS content is path NUL digest LF lines")
+      (is (not (re-find #"\(ns agent\.route\)" cas-bytes))
+          "the program source is NOT in the CAS body — scanning it could
+           never detect a red light, which is why the gate reads the bundle"))
+    (testing "the same bytes that would make the gate vacuous are not what
+              the gate sees: promote! rejects the very genome whose CAS
+              body is clean"
+      (is (some? (:error/type (ex-data (tx-error
+                                         #(promote/promote!
+                                            (promotion-system fx)
+                                            (promote-request fx))))))))))
 
 ;; ============================================================================
 ;; Evidence basis: every promotion decision carries passed-E-under-P evidence

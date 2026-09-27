@@ -208,7 +208,7 @@
         stored (:artifact/id (cas/put-bytes! cas-store genome-body {}))]
     (when-not (= stored genome-id)
       (throw (ex-info "compiled genome id does not match canonical CAS body"
-                      {:compiled/genome-id genome-id
+                      {:genome/id genome-id
                        :stored-artifact-id stored})))
     (artifact/ensure-artifact! db genome-id "application/octet-stream"
                                 (alength genome-body))

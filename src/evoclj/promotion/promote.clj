@@ -188,17 +188,19 @@
   activation must verify the candidate Genome's integrity (Database
   Invariant 7); :resolution/id is the compiled ResolutionId of the
   candidate Genome (compilation is the host's job); :event/session-id
-  anchors the :promotion/* event; optional :candidate/root supplies the
-  verified bundle so the SCI recheck scans real program sources rather
-  than the canonical Genome index body; :failpoint is the optional test
-  seam."
+  anchors the :promotion/* event; :candidate/root is the verified
+  candidate bundle and is REQUIRED because it is the only source of
+  program bytes — the CAS holds the Genome INDEX body (path NUL digest
+  LF per line, genome/hash.clj index-body), which contains no Clojure
+  forms at all, so scanning it can never match and the red-light gate
+  would be vacuous; :failpoint is the optional test seam."
   [:map {:closed true}
    [:store [:map {:closed true}
             [:sqlite any?]
             [:cas any?]]]
    [:resolution/id [:fn types/resolution-id?]]
    [:event/session-id [:fn types/session-id?]]
-   [:candidate/root {:optional true} string?]
+   [:candidate/root string?]
    [:activation-handle {:optional true} [:fn activation/activation-handle?]]
    [:failpoint {:optional true} fn?]])
 
@@ -472,20 +474,22 @@
                            StandardCharsets/UTF_8)))))))
 
 (defn- verify-genome-integrity!
-  "Database Invariant 7: the new generation's Genome must exist in the
-  CAS and pass an integrity check at activation time. The canonical
-  Genome index remains the CAS identity proof; when `candidate-root` is
-  supplied, the bundle is loaded and its actual program source files
-  are passed to the SCI recheck gate."
+  "Database Invariant 7 plus the SCI red-light gate.
+
+  The verifying CAS read of the candidate Genome's canonical body is
+  what proves the artifact exists and re-hashes to its content
+  address (Database Invariant 7); its bytes are deliberately NOT the
+  gate input — the CAS body is the Genome INDEX (path NUL digest LF
+  lines), so scanning it could only ever match a filename. The gate
+  therefore scans the actual program sources read from
+  `candidate-root`, which is why that key is required."
   [cas-config genome-id candidate-root]
-  (let [root (if (map? cas-config) (:root cas-config) cas-config)
-        bytes (cas/get-bytes (cas/->cas root {:verify true}) genome-id)]
-    (if candidate-root
-      (program-sources-from-bundle candidate-root genome-id)
-      ;; Backward-compatible standalone promotion contract: callers that
-      ;; provision a source body directly under the Genome id keep the
-      ;; existing source-string behavior.
-      (String. ^bytes bytes StandardCharsets/UTF_8))))
+  (let [root (if (map? cas-config) (:root cas-config) cas-config)]
+    ;; Invariant 7: exist + digest check. Result unused by design —
+    ;; this call is the verification, and a missing or corrupt body
+    ;; throws :store/cas-missing / :store/cas-corrupt.
+    (cas/get-bytes (cas/->cas root {:verify true}) genome-id)
+    (program-sources-from-bundle candidate-root genome-id)))
 
 (defn- read-event-anchor!
   "Validate the :promotion/* event anchor INSIDE the transaction (so a
@@ -818,9 +822,9 @@
                           :evidence-basis basis}
                   promotion-id (str (UUID/randomUUID))]
               ;; Database Invariant 7: the Genome identity is verified
-              ;; against CAS; when the host supplies the candidate bundle,
-              ;; the SCI gate scans its actual program source files rather
-              ;; than the canonical Genome index.
+              ;; against CAS. The SCI gate then scans the candidate
+              ;; bundle's actual program source files — never the CAS
+              ;; index body, which carries no Clojure forms.
               (let [source (verify-genome-integrity!
                             cas-config
                             (:genome_id candidate)

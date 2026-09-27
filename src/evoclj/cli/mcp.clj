@@ -122,7 +122,7 @@
           {:mcp/ping (:mcp/ping result)
            :mcp/ping-roundtrip-ms (:mcp/ping-roundtrip-ms result)
            :mcp/ping-at (:mcp/ping-at result)
-           :transport-config (err/sanitize tc)})
+           :transport-config (err/sanitize (manager/redact-transport tc))})
         (catch Throwable ex
           ;; A failed outbound ping operation is ALWAYS reported as
           ;; :mcp/ping-failed (fail-closed + typed), with the underlying
@@ -138,7 +138,7 @@
                 ;; cause-type fallback.
                 cause-type (or (:mcp/ping-cause-type data)
                                (:error/type data))
-                base {:transport-config (err/sanitize tc)
+                base {:transport-config (err/sanitize (manager/redact-transport tc))
                       :mcp/ping-cause-type cause-type}
                 enriched (cond-> base
                            (:mcp/ping-cause-type data)

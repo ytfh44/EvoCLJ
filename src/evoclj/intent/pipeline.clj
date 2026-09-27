@@ -341,7 +341,18 @@
 
 (defn- budget-attempt
   "Reserve the finite amount for one provider attempt. Legacy leases or
-  contexts without a budget store return nil and retain the old behavior."
+  contexts without a budget store return nil and retain the old behavior.
+
+  `opted?` IS CURRENTLY FALSE FOR EVERY PRODUCTION LEASE, and that is
+  correct today rather than a defect: capability.mint only attaches
+  :budget when its caller passes one, and no production minting site
+  does (evolution_tools.clj, cli/session, mount/filesystem and
+  subagent_capability all omit the key). The two guards below are
+  therefore pre-wired, fail-closed protection for a future host that
+  DOES supply budgets — they are exercised directly by
+  budget-guards-fail-closed, so they are covered rather than merely
+  present. Supplying a real ceiling is a product decision and is
+  deliberately out of scope."
   [broker-context intent decision attempt]
   (let [db (:budget-store broker-context)
         lease-id (:lease-id decision)

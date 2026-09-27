@@ -213,11 +213,13 @@
                             {:error/type :store/session-not-found
                              :session/id parent-id})))
           (check-delivery-terminal! db child-id terminal-event-id :session/completed)
-          (let [bound (:work/payload-ref child-work)]
+          ;; the OUTPUT ref lives in :work/result-ref; :work/payload-ref
+          ;; keeps the spawn-time input binding (026-work-result-ref.sql)
+          (let [bound (:work/result-ref child-work)]
             (when (and (string? bound) (not= bound cas-ref))
-              (throw (err/error :store/cas-mismatch "supplied cas-ref differs from the child Work payload_ref"
+              (throw (err/error :store/cas-mismatch "supplied cas-ref differs from the child Work result_ref"
                                 {:work/id child-work-id
-                                 :work/payload-ref bound
+                                 :work/result-ref bound
                                  :result/cas-ref cas-ref}))))
           (let [delivery (->Delivery terminal-event-id parent-work-id
                                     {:from terminal-event-id :type :subagent/result}
@@ -420,11 +422,13 @@
             {:delivered false :reason :no-terminal-event}
             (case (:work/state child-work)
               :succeeded
-              (if-let [cas (:work/payload-ref child-work)]
+              ;; the OUTPUT ref (026-work-result-ref.sql): the spawn-time
+              ;; input binding in :work/payload-ref is not the artifact
+              (if-let [cas (:work/result-ref child-work)]
                 {:delivered true
                  :event/id (:event/id (deliver-result-for-works! db parent-id (:work/parent-work-id child-work)
                                                                  child-work-id terminal-id cas))}
-                {:delivered false :reason :no-payload-ref :work/id child-work-id})
+                {:delivered false :reason :no-result-ref :work/id child-work-id})
               :failed
               {:delivered true
                :event/id (:event/id (deliver-failure-for-works! db parent-id (:work/parent-work-id child-work)

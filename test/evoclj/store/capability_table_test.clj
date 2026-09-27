@@ -9,6 +9,7 @@
   Plus FK / CHECK membership / index coverage."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.java.jdbc :as jdbc]
+            [evoclj.capability.schema :as schema]
             [evoclj.store.capability-store :as cap-store]
             [evoclj.store.migrate :as migrate]
             [evoclj.store.sqlite :as sqlite]))
@@ -225,3 +226,73 @@
     (is (contains? cols "expires_at"))
     (is (contains? cols "revoked"))
     (is (contains? cols "created_at"))))
+
+;; ===========================================================================
+;; I2 principal round-trips — every arm of PrincipalSchema survives the store
+;; ===========================================================================
+
+(defn- principal-lease [id principal]
+  {:cap/id id
+   :principal principal
+   :resource {:kind :tool :id "fixture/echo"}
+   :actions #{:invoke}
+   :constraints {}
+   ;; ISO-8601 strings, like valid-cap: capability->row formats timestamps
+   ;; and the read side parses them back with Instant/parse
+   :issued-at now
+   :expires-at later})
+
+(defn- drop-lease-edn!
+  "Clear the row's lease_edn blob. insert-capability! always writes one,
+  and hydrate-registry! short-circuits on (:lease row) — so without this
+  the reconstruction path under test never runs. A NULL lease_edn is
+  exactly the P1 restart shape (019-p1-authority backfilled every
+  pre-019 row to NULL), and it is the only path that rebuilds a
+  principal from principal_type/principal_id."
+  [db cap-id]
+  (sqlite/exec! db ["UPDATE capabilities SET lease_edn = NULL WHERE id = ?"
+                    (str cap-id)]))
+
+(deftest eval-principal-round-trips
+  (testing "an :eval lease keeps its principal id through the store"
+    (let [db (fresh-db)
+          eval-id (str (java.util.UUID/randomUUID))
+          lease (principal-lease (str (java.util.UUID/randomUUID))
+                                 {:principal/type :eval :eval/id eval-id})]
+      (cap-store/insert-capability! db lease)
+      (testing "the row carries a real principal_id, not an empty string"
+        (let [row (cap-store/fetch-capability db (:cap/id lease))]
+          (is (= "eval" (:principal-type row)))
+          (is (= eval-id (:principal-id row))
+              "the :eval arm used to fall through to (str nil) = \"\" and
+               became permanently unfindable")
+          (is (not= "" (:principal-id row)))))
+      (testing "and the reconstruction path rebuilds a VALID principal"
+        (drop-lease-edn! db (:cap/id lease))
+        (let [reg (atom {})
+              _ (cap-store/hydrate-registry! db reg)
+              ;; entries are {:lease l :revoked? false} wrappers keyed by cap/id
+              entry (:lease (first (vals @reg)))]
+          (is (some? entry) "the registry holds the hydrated lease")
+          (is (= :eval (:principal/type (:principal entry))))
+          (is (= eval-id (str (:eval/id (:principal entry))))
+              "the id lives under :eval/id, resolved from the shared table;
+               the reader UUID-coerces it, as it always has")
+          (is (identical? entry (schema/validate-lease entry))
+              "and the whole lease satisfies CapabilityLeaseSchema"))))))
+
+(deftest operator-principal-round-trips-idless
+  (testing "the operator singleton reads back EXACTLY {:principal/type :operator}"
+    (let [db (fresh-db)
+          lease (principal-lease (str (java.util.UUID/randomUUID))
+                                 {:principal/type :operator})]
+      (cap-store/insert-capability! db lease)
+      (drop-lease-edn! db (:cap/id lease))
+      (let [reg (atom {})
+            _ (cap-store/hydrate-registry! db reg)
+            entry (:lease (first (vals @reg)))]
+        (is (some? entry))
+        (is (= {:principal/type :operator} (:principal entry))
+            "no invented :operator/id — OperatorPrincipalSchema is closed
+             and carries no id")
+        (is (identical? entry (schema/validate-lease entry)))))))

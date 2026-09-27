@@ -519,8 +519,8 @@
           pl (parent-lease parent-id (:code/id identity) #{:invoke})
           {:keys [child/session-id child/work-id]} (subagent/spawn-subagent! db parent-id {:task "child-task"} [pl])
           _ (subagent/run-subagent! stores parent-id session-id {:text "hello-echo"})
-          ;; the supplied CAS must equal the child Work's payload_ref
-          cas-ref (:work/payload-ref (work-store/fetch-work db work-id))
+          ;; the supplied CAS must equal the child Work's result_ref
+          cas-ref (:work/result-ref (work-store/fetch-work db work-id))
           _ (is (string? cas-ref) "child work carries the output CAS ref")
           reg (registry/create-registry)
           ctx (dispatch/make-broker-context {:registry reg :leases [] :db db})

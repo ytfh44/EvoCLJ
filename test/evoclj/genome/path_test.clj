@@ -123,11 +123,20 @@
     true
     (catch Exception _ false)))
 
+(def ^:private nofollow
+  (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+
 (defn- delete-recursively! [^Path dir]
-  (when (Files/exists dir (make-array LinkOption 0))
+  ;; NOFOLLOW matters here. The default (link-following) existence and
+  ;; directory checks make a symlink whose target was already deleted
+  ;; report as non-existent, so the LINK itself is never removed and the
+  ;; parent directory is left non-empty — a DirectoryNotEmptyException on
+  ;; Linux that Windows silently tolerates. A link is a leaf, never a
+  ;; directory to descend into.
+  (when (Files/exists dir nofollow)
     (let [f (.toFile dir)]
-      (when (.isDirectory f)
-        (doseq [c (.listFiles f)]
+      (when (Files/isDirectory dir nofollow)
+        (doseq [c (sort-by #(.getName ^java.io.File %) (.listFiles f))]
           (delete-recursively! (.toPath c))))
       (Files/deleteIfExists dir))))
 

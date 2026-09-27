@@ -251,10 +251,15 @@
   {:genome/id :resolution/id :code/id}. Tolerant of the historical
   :compiled/* key shape (compiled genomes persisted or hand-built before
   the I1 key rename carry :compiled/genome-id / :compiled/resolution-id /
-  :compiled/code-id instead of the :code/* keys), so this is the ONE
-  place that resolves program identity from either shape — session pins,
-  identity registration, and eval side records all go through it and
-  never name one key shape themselves."
+  :compiled/code-id instead of the :code/* keys).
+
+  It is a TOLERANT resolver, not a single choke point: several call
+  sites read both shapes themselves rather than delegating here —
+  runtime/phenotype.clj (:compiled/code-id), runtime/scheduler.clj
+  (:compiled/genome-id, :compiled/resolution-id) and runtime/hydrate
+  paths. That redundancy is why the `or` fallback here must stay: it
+  is what keeps a pre-I1 compiled value usable at every boundary, not
+  a claim that callers no longer name either shape."
   [compiled]
   {:genome/id (or (:code/genome-id compiled) (:compiled/genome-id compiled))
    :resolution/id (or (:code/resolution-id compiled) (:compiled/resolution-id compiled))

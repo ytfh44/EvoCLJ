@@ -124,7 +124,7 @@
                                 (let [res (reg/refresh! registry sid)]
                                   (assoc res :source/id sid))
                                 (catch clojure.lang.ExceptionInfo e
-                                  {:source/id sid :status :error :error (ex-data e) :message (.getMessage e)})
+                                  {:source/id sid :status :error :error (err/sanitize (ex-data e)) :message (.getMessage e)})
                                 (catch Exception e
                                   {:source/id sid :status :error :message (.getMessage e)})))
                             ids)]

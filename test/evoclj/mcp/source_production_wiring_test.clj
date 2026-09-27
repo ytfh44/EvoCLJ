@@ -148,6 +148,7 @@
      {:store {:sqlite (ig/ref :store/sqlite)
               :cas (ig/ref :store/cas)}
       :resolution/id sha256-id
+      :candidate/root seed
       :event/session-id (str (random-uuid))}}))
 
 (defn- source-on-config

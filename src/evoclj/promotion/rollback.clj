@@ -146,14 +146,20 @@
   points). :cas is required because the rollback target's Genome must
   pass the Step 3 integrity check; :resolution/id is part of the
   shared contract but is NOT consumed by rollback (no generation is
-  created); :event/session-id anchors the :promotion/rollback event;
-  :failpoint is the optional test seam."
+  created); :candidate/root is likewise NOT consumed by rollback, but it
+  IS part of the shared contract — promote! requires it (it is the only
+  source of program bytes for the SCI red-light gate), so it is
+  accepted-and-ignored here to keep the documented invariant true: ONE
+  system object validates for both entry points. :event/session-id
+  anchors the :promotion/rollback event; :failpoint is the optional test
+  seam."
   [:map {:closed true}
    [:store [:map {:closed true}
             [:sqlite any?]
             [:cas any?]]]
    [:resolution/id [:fn types/resolution-id?]]
    [:event/session-id [:fn types/session-id?]]
+   [:candidate/root {:optional true} string?]
    [:activation-handle {:optional true} [:fn activation/activation-handle?]]
    [:failpoint {:optional true} fn?]])
 
