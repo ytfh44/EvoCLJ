@@ -10,5 +10,6 @@ target/
 .DS_Store
 evoclj-state/
 demo-state/
+catalog/
 node_modules/
 docs/codebase/
